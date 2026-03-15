@@ -57,9 +57,7 @@ describe("CdcEngine", () => {
     expect(event!.table).toBe("users");
     expect(event!.before).toBeNull();
     expect(event!.after).not.toBeNull();
-    expect(event!.after!.length).toBe(1);
-    expect(event!.after![0]!.type).toBe("int");
-    expect(event!.after![0]!.value).toBe(42);
+    expect(event!.after!["0"]).toBe(42);
     expect(event!.timestamp).toBe(1000);
   });
 
@@ -77,9 +75,9 @@ describe("CdcEngine", () => {
     expect(event).not.toBeNull();
     expect(event!.type).toBe("UPDATE");
     expect(event!.before).not.toBeNull();
-    expect(event!.before![0]!.value).toBe(10);
+    expect(event!.before!["0"]).toBe(10);
     expect(event!.after).not.toBeNull();
-    expect(event!.after![0]!.value).toBe(20);
+    expect(event!.after!["0"]).toBe(20);
   });
 
   it("should parse DELETE event", async () => {
@@ -96,7 +94,7 @@ describe("CdcEngine", () => {
     expect(event).not.toBeNull();
     expect(event!.type).toBe("DELETE");
     expect(event!.before).not.toBeNull();
-    expect(event!.before![0]!.value).toBe(99);
+    expect(event!.before!["0"]).toBe(99);
     expect(event!.after).toBeNull();
   });
 
@@ -158,8 +156,8 @@ describe("CdcEngine", () => {
     const e2 = engine.nextEvent();
     expect(e1).not.toBeNull();
     expect(e2).not.toBeNull();
-    expect(e1!.after![0]!.value).toBe(10);
-    expect(e2!.after![0]!.value).toBe(20);
+    expect(e1!.after!["0"]).toBe(10);
+    expect(e2!.after!["0"]).toBe(20);
     expect(engine.nextEvent()).toBeNull();
   });
 });

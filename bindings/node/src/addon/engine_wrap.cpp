@@ -18,6 +18,9 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&EngineWrap::GetPosition>("getPosition"),
           InstanceMethod<&EngineWrap::Reset>("reset"),
           InstanceMethod<&EngineWrap::Destroy>("destroy"),
+#ifdef MES_HAS_MYSQL
+          InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
+#endif
       });
 
   exports.Set("CdcEngine", func);
@@ -213,69 +216,132 @@ void EngineWrap::Destroy(const Napi::CallbackInfo& info) {
   }
 }
 
+#ifdef MES_HAS_MYSQL
+Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (info.Length() < 1 || !info[0].IsObject()) {
+    Napi::TypeError::New(env, "Expected config object")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  Napi::Object config = info[0].As<Napi::Object>();
+
+  mes_client_config_t cfg{};
+  std::string host = "127.0.0.1";
+  std::string user;
+  std::string password;
+
+  if (config.Has("host") && config.Get("host").IsString()) {
+    host = config.Get("host").As<Napi::String>().Utf8Value();
+  }
+  cfg.host = host.c_str();
+
+  if (config.Has("port") && config.Get("port").IsNumber()) {
+    cfg.port = static_cast<uint16_t>(
+        config.Get("port").As<Napi::Number>().Uint32Value());
+  } else {
+    cfg.port = 3306;
+  }
+
+  if (config.Has("user") && config.Get("user").IsString()) {
+    user = config.Get("user").As<Napi::String>().Utf8Value();
+  }
+  cfg.user = user.c_str();
+
+  if (config.Has("password") && config.Get("password").IsString()) {
+    password = config.Get("password").As<Napi::String>().Utf8Value();
+  }
+  cfg.password = password.c_str();
+
+  if (config.Has("connectTimeoutS") &&
+      config.Get("connectTimeoutS").IsNumber()) {
+    cfg.connect_timeout_s =
+        config.Get("connectTimeoutS").As<Napi::Number>().Uint32Value();
+  } else {
+    cfg.connect_timeout_s = 10;
+  }
+
+  mes_error_t rc = mes_engine_set_metadata_conn(engine_, &cfg);
+  if (rc != MES_OK) {
+    Napi::Error::New(env, "Failed to connect metadata (error " +
+                              std::to_string(rc) + ")")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  return env.Undefined();
+}
+#endif
+
 Napi::Value EngineWrap::ReadColumns(Napi::Env env,
                                     const mes_column_t* cols,
                                     uint32_t count) {
-  Napi::Array arr = Napi::Array::New(env, count);
+  Napi::Object record = Napi::Object::New(env);
 
   for (uint32_t i = 0; i < count; i++) {
     const mes_column_t& col = cols[i];
-    Napi::Object obj = Napi::Object::New(env);
 
+    // Key: column name if available, otherwise string index
+    std::string key;
+    if (col.col_name != nullptr && col.col_name[0] != '\0') {
+      key = col.col_name;
+    } else {
+      key = std::to_string(i);
+    }
+
+    Napi::Value val;
     switch (col.type) {
       case MES_COL_NULL:
-        obj.Set("type", Napi::String::New(env, "null"));
-        obj.Set("value", env.Null());
+        val = env.Null();
         break;
 
       case MES_COL_INT: {
-        obj.Set("type", Napi::String::New(env, "int"));
-        int64_t val = col.int_val;
-        // Use BigInt for values outside Number.MAX_SAFE_INTEGER range
-        if (val > 9007199254740991LL || val < -9007199254740991LL) {
-          obj.Set("value", Napi::BigInt::New(env, val));
+        int64_t v = col.int_val;
+        if (v > 9007199254740991LL || v < -9007199254740991LL) {
+          val = Napi::BigInt::New(env, v);
         } else {
-          obj.Set("value", Napi::Number::New(env, static_cast<double>(val)));
+          val = Napi::Number::New(env, static_cast<double>(v));
         }
         break;
       }
 
       case MES_COL_DOUBLE:
-        obj.Set("type", Napi::String::New(env, "double"));
-        obj.Set("value", Napi::Number::New(env, col.double_val));
+        val = Napi::Number::New(env, col.double_val);
         break;
 
       case MES_COL_STRING:
-        obj.Set("type", Napi::String::New(env, "string"));
         if (col.str_data) {
-          obj.Set("value",
-                  Napi::String::New(env, col.str_data, col.str_len));
+          val = Napi::String::New(env, col.str_data, col.str_len);
         } else {
-          obj.Set("value", Napi::String::New(env, ""));
+          val = Napi::String::New(env, "");
         }
         break;
 
       case MES_COL_BYTES:
-        obj.Set("type", Napi::String::New(env, "bytes"));
         if (col.str_data && col.str_len > 0) {
-          obj.Set("value",
-                  Napi::Buffer<uint8_t>::Copy(
-                      env,
-                      reinterpret_cast<const uint8_t*>(col.str_data),
-                      col.str_len));
+          val = Napi::Buffer<uint8_t>::Copy(
+              env, reinterpret_cast<const uint8_t*>(col.str_data),
+              col.str_len);
         } else {
-          obj.Set("value", Napi::Buffer<uint8_t>::New(env, 0));
+          val = Napi::Buffer<uint8_t>::New(env, 0);
         }
         break;
 
       default:
-        obj.Set("type", Napi::String::New(env, "null"));
-        obj.Set("value", env.Null());
+        val = env.Null();
         break;
     }
 
-    arr.Set(i, obj);
+    record.Set(key, val);
   }
 
-  return arr;
+  return record;
 }

@@ -82,6 +82,45 @@ while (mes_next_event(engine, &event) == MES_OK) {
 mes_destroy(engine);
 ```
 
+### Example Output
+
+Each `ChangeEvent` contains the event type, database/table name, binlog position, and row data as a plain dictionary keyed by column name:
+
+```
+-- INSERT INTO items (name, value) VALUES ('Widget', 42)
+{
+  "type": "INSERT",
+  "database": "mes_test",
+  "table": "items",
+  "before": null,
+  "after": { "id": 8, "name": "Widget", "value": 42 },
+  "timestamp": 1773584163,
+  "position": { "file": "mysql-bin.000003", "offset": 3265 }
+}
+
+-- UPDATE items SET value = 100 WHERE name = 'Widget'
+{
+  "type": "UPDATE",
+  "database": "mes_test",
+  "table": "items",
+  "before": { "id": 8, "name": "Widget", "value": 42 },
+  "after": { "id": 8, "name": "Widget", "value": 100 },
+  "timestamp": 1773584164,
+  "position": { "file": "mysql-bin.000003", "offset": 3611 }
+}
+
+-- DELETE FROM items WHERE name = 'Widget'
+{
+  "type": "DELETE",
+  "database": "mes_test",
+  "table": "items",
+  "before": { "id": 8, "name": "Widget", "value": 100 },
+  "after": null,
+  "timestamp": 1773584164,
+  "position": { "file": "mysql-bin.000003", "offset": 3922 }
+}
+```
+
 ## Features
 
 - **Lightweight** - Minimal dependencies, small binary size
@@ -90,7 +129,8 @@ mes_destroy(engine);
 - **MySQL 8.4** - Built for the latest MySQL LTS release
 - **GTID support** - Native BinlogClient with GTID-based replication
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
-- **Type-safe** - Typed column values (int, double, string, bytes, null)
+- **Column Names** - Automatic column name resolution via metadata queries
+- **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 
 ## Building
 

@@ -15,11 +15,30 @@
  *
  *   # Watch specific table
  *   npx tsx examples/cdc-watcher.ts --table items
+ *
+ * Example output:
+ *   mysql-event-stream CDC Watcher
+ *     MySQL:  127.0.0.1:13307
+ *
+ *   Waiting for changes... (Ctrl+C to stop)
+ *
+ *   [INSERT] mes_test.items
+ *     binlog: mysql-bin.000003:3265  ts: 1773584163
+ *     after:  [id=8, name='DocTest_Widget', value=42]
+ *
+ *   [UPDATE] mes_test.items
+ *     binlog: mysql-bin.000003:3611  ts: 1773584164
+ *     before: [id=8, name='DocTest_Widget', value=42]
+ *     after:  [id=8, name='DocTest_Widget', value=100]
+ *
+ *   [DELETE] mes_test.items
+ *     binlog: mysql-bin.000003:3922  ts: 1773584164
+ *     before: [id=8, name='DocTest_Widget', value=100]
  */
 
 import { parseArgs } from "node:util";
 import { CdcStream } from "../src/stream.js";
-import type { ChangeEvent, ColumnValue } from "../src/types.js";
+import type { ChangeEvent } from "../src/types.js";
 
 // --- Display ---
 
@@ -31,15 +50,18 @@ const COLORS = {
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 
-function formatColumnValue(col: ColumnValue): string {
-  if (col.type === "null") return "NULL";
-  if (col.type === "bytes") {
-    const bytes = col.value as Uint8Array;
-    const hex = [...bytes.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    return bytes.length > 16 ? `0x${hex}...` : `0x${hex}`;
-  }
-  if (col.type === "string") return `'${col.value}'`;
-  return String(col.value);
+function formatRow(row: Record<string, unknown>): string {
+  return Object.entries(row)
+    .map(([key, val]) => {
+      if (val === null) return `${key}=NULL`;
+      if (val instanceof Uint8Array) {
+        const hex = [...val.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("");
+        return val.length > 16 ? `${key}=0x${hex}...` : `${key}=0x${hex}`;
+      }
+      if (typeof val === "string") return `${key}='${val}'`;
+      return `${key}=${val}`;
+    })
+    .join(", ");
 }
 
 function printEvent(event: ChangeEvent): void {
@@ -51,12 +73,10 @@ function printEvent(event: ChangeEvent): void {
   );
 
   if (event.before !== null) {
-    const vals = event.before.map(formatColumnValue).join(", ");
-    console.log(`  before: [${vals}]`);
+    console.log(`  before: [${formatRow(event.before)}]`);
   }
   if (event.after !== null) {
-    const vals = event.after.map(formatColumnValue).join(", ");
-    console.log(`  after:  [${vals}]`);
+    console.log(`  after:  [${formatRow(event.after)}]`);
   }
 }
 

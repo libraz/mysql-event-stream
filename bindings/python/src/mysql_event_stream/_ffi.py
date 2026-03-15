@@ -17,6 +17,7 @@ class MESColumn(ctypes.Structure):
         ("double_val", ctypes.c_double),
         ("str_data", ctypes.c_char_p),
         ("str_len", ctypes.c_uint32),
+        ("col_name", ctypes.c_char_p),
     ]
 
 
@@ -214,6 +215,12 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
 
         lib.mes_client_current_gtid.restype = ctypes.c_char_p
         lib.mes_client_current_gtid.argtypes = [ctypes.c_void_p]
+
+        lib.mes_engine_set_metadata_conn.restype = ctypes.c_int32
+        lib.mes_engine_set_metadata_conn.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(MESClientConfig),
+        ]
 
         return True
     except AttributeError:

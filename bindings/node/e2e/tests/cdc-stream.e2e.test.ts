@@ -15,7 +15,7 @@ const CLIENT_CONFIG: ClientConfig = {
   serverId: 110,
   startGtid: "",
   connectTimeoutS: 10,
-  readTimeoutS: 30,
+  readTimeoutS: 1,
 };
 
 describe("CdcStream", () => {
@@ -30,9 +30,12 @@ describe("CdcStream", () => {
     });
   });
 
+  let currentGtid: string;
+
   beforeEach(async () => {
     await mysql.truncate("items");
     await mysql.truncate("users");
+    currentGtid = await mysql.getCurrentGtid();
   });
 
   afterAll(async () => {
@@ -40,7 +43,7 @@ describe("CdcStream", () => {
   });
 
   it("receives events via for-await", async () => {
-    const stream = new CdcStream(CLIENT_CONFIG);
+    const stream = new CdcStream({ ...CLIENT_CONFIG, startGtid: currentGtid });
     const collected: ChangeEvent[] = [];
 
     // Insert in background after a short delay
@@ -65,7 +68,7 @@ describe("CdcStream", () => {
   });
 
   it("cleans up on break", async () => {
-    const stream = new CdcStream(CLIENT_CONFIG);
+    const stream = new CdcStream({ ...CLIENT_CONFIG, startGtid: currentGtid });
     let count = 0;
 
     setTimeout(async () => {
@@ -85,7 +88,7 @@ describe("CdcStream", () => {
   });
 
   it("close() terminates iteration", async () => {
-    const stream = new CdcStream(CLIENT_CONFIG);
+    const stream = new CdcStream({ ...CLIENT_CONFIG, startGtid: currentGtid });
     const collected: ChangeEvent[] = [];
 
     setTimeout(async () => {
@@ -110,7 +113,7 @@ describe("CdcStream", () => {
   });
 
   it("exposes currentGtid", async () => {
-    const stream = new CdcStream(CLIENT_CONFIG);
+    const stream = new CdcStream({ ...CLIENT_CONFIG, startGtid: currentGtid });
 
     setTimeout(async () => {
       await mysql.insert("items", { name: "gtid_test", value: 1 });

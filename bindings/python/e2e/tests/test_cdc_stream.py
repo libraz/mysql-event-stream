@@ -40,6 +40,11 @@ class TestCdcStream:
         ):
             if event.table == "items":
                 collected.append((event.type.name, event.table))
+                # Column name assertions (items: id, name, value)
+                assert event.after is not None
+                assert "id" in event.after
+                assert "name" in event.after
+                assert "value" in event.after
                 break
 
         await task
@@ -68,6 +73,11 @@ class TestCdcStream:
             async for event in stream:
                 if event.table == "items":
                     collected.append(event.table)
+                    # Column name assertions (items: id, name, value)
+                    assert event.after is not None
+                    assert "id" in event.after
+                    assert "name" in event.after
+                    assert "value" in event.after
                     break
 
         await task
@@ -95,6 +105,11 @@ class TestCdcStream:
             async for event in stream:
                 if event.table == "items":
                     gtid = stream.current_gtid
+                    # Column name assertions (items: id, name, value)
+                    assert event.after is not None
+                    assert "id" in event.after
+                    assert "name" in event.after
+                    assert "value" in event.after
                     break
 
         await task

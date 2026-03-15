@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class EventType(Enum):
@@ -30,6 +31,7 @@ class ColumnValue:
 
     type: ColumnType
     value: None | int | float | str | bytes
+    name: str = ""
 
     @staticmethod
     def null() -> ColumnValue:
@@ -67,13 +69,20 @@ class BinlogPosition:
 
 @dataclass(frozen=True, slots=True)
 class ChangeEvent:
-    """A CDC change event."""
+    """A CDC change event.
+
+    Column values are represented as plain dicts keyed by column name.
+    When column names are unavailable (standalone mode without metadata),
+    string indices ("0", "1", ...) are used as keys.
+
+    Values are typed as: None, int, float, str, or bytes.
+    """
 
     type: EventType
     database: str
     table: str
-    before: list[ColumnValue] | None
-    after: list[ColumnValue] | None
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
     timestamp: int
     position: BinlogPosition
 

@@ -6,7 +6,7 @@ import pytest
 from lib.mysql_client import MysqlClient
 from lib.streaming_collector import StreamingCollector
 
-from mysql_event_stream import ColumnType, EventType
+from mysql_event_stream import EventType
 
 
 @pytest.mark.types
@@ -21,8 +21,12 @@ class TestColumnTypes:
 
         ev = events[0]
         assert ev.after is not None
-        null_cols = [c for c in ev.after if c.type == ColumnType.NULL]
-        assert len(null_cols) > 0
+        null_vals = [v for v in ev.after.values() if v is None]
+        assert len(null_vals) > 0
+
+        # Column name assertions (users table)
+        assert "id" in ev.after
+        assert "name" in ev.after
 
     def test_integer_types(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """INT and BIGINT columns are decoded as integer values."""
@@ -32,8 +36,13 @@ class TestColumnTypes:
 
         ev = events[0]
         assert ev.after is not None
-        int_cols = [c for c in ev.after if c.type == ColumnType.INT]
-        assert len(int_cols) > 0
+        int_vals = [v for v in ev.after.values() if isinstance(v, int)]
+        assert len(int_vals) > 0
+
+        # Column name assertions (items: id, name, value)
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "value" in ev.after
 
     def test_utf8_string(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """UTF-8 strings including CJK characters are correctly decoded."""
@@ -43,9 +52,14 @@ class TestColumnTypes:
 
         ev = events[0]
         assert ev.after is not None
-        string_cols = [c for c in ev.after if c.type == ColumnType.STRING and c.value]
-        has_japanese = any("日本語" in str(c.value) for c in string_cols)
+        string_vals = [v for v in ev.after.values() if isinstance(v, str) and v]
+        has_japanese = any("日本語" in v for v in string_vals)
         assert has_japanese
+
+        # Column name assertions (items: id, name, value)
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "value" in ev.after
 
     def test_double_value(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """DOUBLE column values are decoded correctly."""
@@ -55,5 +69,10 @@ class TestColumnTypes:
 
         ev = events[0]
         assert ev.after is not None
-        double_cols = [c for c in ev.after if c.type == ColumnType.DOUBLE]
-        assert len(double_cols) > 0
+        double_vals = [v for v in ev.after.values() if isinstance(v, float)]
+        assert len(double_vals) > 0
+
+        # Column name assertions (users table)
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "score" in ev.after

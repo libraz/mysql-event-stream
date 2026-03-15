@@ -22,6 +22,25 @@ Usage:
 
     # Filter by table
     MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_streaming.py --table items
+
+Example output:
+    mysql-event-stream CDC Streaming (CdcStream)
+      MySQL: 127.0.0.1:13307
+
+    Waiting for changes... (Ctrl+C to stop)
+
+    [INSERT] mes_test.items
+      binlog: mysql-bin.000003:3265  ts: 1773584163
+      after:  [id=8, name='DocTest_Widget', value=42]
+
+    [UPDATE] mes_test.items
+      binlog: mysql-bin.000003:3611  ts: 1773584164
+      before: [id=8, name='DocTest_Widget', value=42]
+      after:  [id=8, name='DocTest_Widget', value=100]
+
+    [DELETE] mes_test.items
+      binlog: mysql-bin.000003:3922  ts: 1773584164
+      before: [id=8, name='DocTest_Widget', value=100]
 """
 
 from __future__ import annotations
@@ -36,7 +55,7 @@ from pathlib import Path
 # Add the parent src to path for mysql_event_stream import
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from mysql_event_stream import ChangeEvent, ColumnType, ColumnValue, EventType
+from mysql_event_stream import ChangeEvent, EventType
 from mysql_event_stream.stream import CdcStream
 
 # --- Configuration ---
@@ -57,14 +76,18 @@ RESET = "\033[0m"
 DIM = "\033[2m"
 
 
-def format_column_value(col: ColumnValue) -> str:
-    """Format a column value for display."""
-    if col.type == ColumnType.NULL:
-        return "NULL"
-    if col.type == ColumnType.BYTES:
-        assert isinstance(col.value, bytes)
-        return f"0x{col.value.hex()}" if len(col.value) <= 16 else f"0x{col.value[:16].hex()}..."
-    return repr(col.value)
+def format_row(row: dict[str, object]) -> str:
+    """Format a row dict for display."""
+    parts = []
+    for key, val in row.items():
+        if val is None:
+            parts.append(f"{key}=NULL")
+        elif isinstance(val, bytes):
+            hex_str = val.hex()
+            parts.append(f"{key}=0x{hex_str}" if len(val) <= 16 else f"{key}=0x{val[:16].hex()}...")
+        else:
+            parts.append(f"{key}={val!r}")
+    return ", ".join(parts)
 
 
 def print_event(event: ChangeEvent) -> None:
@@ -79,11 +102,9 @@ def print_event(event: ChangeEvent) -> None:
     )
 
     if event.before is not None:
-        vals = ", ".join(format_column_value(c) for c in event.before)
-        print(f"  before: [{vals}]")
+        print(f"  before: [{format_row(event.before)}]")
     if event.after is not None:
-        vals = ", ".join(format_column_value(c) for c in event.after)
-        print(f"  after:  [{vals}]")
+        print(f"  after:  [{format_row(event.after)}]")
 
 
 # --- Main loop ---

@@ -12,29 +12,44 @@
  * Usage:
  *   npx tsx examples/cdc-streaming.ts
  *   npx tsx examples/cdc-streaming.ts --gtid ""
+ *
+ * Example output:
+ *   mysql-event-stream CDC Streaming Example
+ *     Using CdcStream (AsyncIterator)
+ *
+ *   Streaming events:
+ *
+ *     + mes_test.items [id=8, name='DocTest_Widget', value=42]
+ *     ~ mes_test.items [id=8, name='DocTest_Widget', value=100]
+ *     - mes_test.items [id=8, name='DocTest_Widget', value=100]
+ *
+ *   Done. 3 event(s) captured.
  */
 
 import { parseArgs } from "node:util";
 import { CdcStream } from "../src/stream.js";
-import type { ChangeEvent, ColumnValue } from "../src/types.js";
+import type { ChangeEvent } from "../src/types.js";
 
-/** Format a column value for display. */
-function formatValue(col: ColumnValue): string {
-  if (col.type === "null") return "NULL";
-  if (col.type === "bytes") {
-    const bytes = col.value as Uint8Array;
-    const hex = [...bytes.slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    return bytes.length > 8 ? `0x${hex}...` : `0x${hex}`;
-  }
-  if (col.type === "string") return `'${col.value}'`;
-  return String(col.value);
+/** Format a row record for display. */
+function formatRow(row: Record<string, unknown>): string {
+  return Object.entries(row)
+    .map(([key, val]) => {
+      if (val === null) return `${key}=NULL`;
+      if (val instanceof Uint8Array) {
+        const hex = [...val.slice(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+        return val.length > 8 ? `${key}=0x${hex}...` : `${key}=0x${hex}`;
+      }
+      if (typeof val === "string") return `${key}='${val}'`;
+      return `${key}=${val}`;
+    })
+    .join(", ");
 }
 
 /** Print a change event to stdout. */
 function printEvent(event: ChangeEvent): void {
   const label = { INSERT: "+", UPDATE: "~", DELETE: "-" }[event.type];
-  const cols = (event.after ?? event.before ?? []).map(formatValue).join(", ");
-  console.log(`  ${label} ${event.database}.${event.table} [${cols}]`);
+  const row = event.after ?? event.before ?? {};
+  console.log(`  ${label} ${event.database}.${event.table} [${formatRow(row)}]`);
 }
 
 async function main(): Promise<void> {

@@ -77,6 +77,12 @@ export class MysqlClient {
     return rows[0] as unknown as BinlogStatus;
   }
 
+  /** Get current GTID executed position. */
+  async getCurrentGtid(): Promise<string> {
+    const [rows] = await this.pool.query("SELECT @@GLOBAL.gtid_executed AS gtid");
+    return (rows as any)[0].gtid;
+  }
+
   /** Check if MySQL is reachable. */
   async ping(): Promise<boolean> {
     try {

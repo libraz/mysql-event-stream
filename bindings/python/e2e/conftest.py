@@ -95,13 +95,14 @@ def clean_tables(mysql: MysqlClient) -> None:
 
 
 @pytest.fixture
-def collector(lib_path: str) -> Generator[StreamingCollector, None, None]:
+def collector(lib_path: str, mysql: MysqlClient) -> Generator[StreamingCollector, None, None]:
     """Per-test streaming collector.
 
     Starts a BinlogClient stream in a background thread.
     Use collector.wait_for_events() to collect events after DML operations.
     """
-    c = StreamingCollector(lib_path, server_id=_next_server_id())
+    gtid = mysql.get_current_gtid()
+    c = StreamingCollector(lib_path, server_id=_next_server_id(), start_gtid=gtid)
     c.start()
     yield c
     c.stop()

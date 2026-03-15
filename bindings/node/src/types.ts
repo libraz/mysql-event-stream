@@ -4,15 +4,15 @@
 /** CDC change event types. */
 export type EventType = "INSERT" | "UPDATE" | "DELETE";
 
-/** A column value in a change event. */
-export interface ColumnValue {
-  /** Column value type. */
-  type: "null" | "int" | "double" | "string" | "bytes";
-  /** The value. null for NULL columns, number for int/double, string for string, Uint8Array for bytes. */
-  value: null | number | bigint | string | Uint8Array;
-}
-
-/** A CDC change event. */
+/**
+ * A CDC change event.
+ *
+ * Column values are represented as plain records keyed by column name.
+ * When column names are unavailable (standalone mode without metadata),
+ * string indices ("0", "1", ...) are used as keys.
+ *
+ * Values are typed as: null, number, bigint, string, or Uint8Array.
+ */
 export interface ChangeEvent {
   /** Event type. */
   type: EventType;
@@ -21,9 +21,9 @@ export interface ChangeEvent {
   /** Table name. */
   table: string;
   /** Before image (populated for UPDATE and DELETE). */
-  before: ColumnValue[] | null;
+  before: Record<string, unknown> | null;
   /** After image (populated for INSERT and UPDATE). */
-  after: ColumnValue[] | null;
+  after: Record<string, unknown> | null;
   /** Unix timestamp of the event. */
   timestamp: number;
   /** Binlog position. */

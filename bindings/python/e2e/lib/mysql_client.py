@@ -90,6 +90,16 @@ class MysqlClient:
             raise RuntimeError("SHOW BINARY LOG STATUS returned no rows")
         return rows[0]
 
+    def get_current_gtid(self) -> str:
+        """Get current GTID executed position."""
+        conn = self._connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT @@GLOBAL.gtid_executed AS gtid")
+            row = cur.fetchone()
+            if not row:
+                return ""
+            return row.get("gtid", "") or ""
+
     def ping(self) -> bool:
         """Check if MySQL is reachable."""
         try:

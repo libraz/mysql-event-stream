@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from .client import BinlogClient
 from .engine import CdcEngine
@@ -74,6 +75,43 @@ class CdcStream:
     def __aiter__(self) -> CdcStream:
         return self
 
+    def configure(self, **kwargs: object) -> None:
+        """Override config properties before streaming starts.
+
+        Args:
+            host: MySQL host.
+            port: MySQL port.
+            user: MySQL user.
+            password: MySQL password.
+            server_id: Unique replica server ID.
+            start_gtid: GTID to start from.
+            connect_timeout_s: Connection timeout in seconds.
+            read_timeout_s: Read timeout in seconds.
+            lib_path: Explicit path to libmes shared library.
+
+        Raises:
+            RuntimeError: If streaming has already started.
+        """
+        if self._started:
+            raise RuntimeError("Cannot configure after streaming has started")
+
+        field_map = {
+            "host": "_host",
+            "port": "_port",
+            "user": "_user",
+            "password": "_password",
+            "server_id": "_server_id",
+            "start_gtid": "_start_gtid",
+            "connect_timeout_s": "_connect_timeout_s",
+            "read_timeout_s": "_read_timeout_s",
+            "lib_path": "_lib_path",
+        }
+        for key, value in kwargs.items():
+            attr = field_map.get(key)
+            if attr is None:
+                raise TypeError(f"Unknown config key: {key!r}")
+            setattr(self, attr, value)
+
     async def __anext__(self) -> ChangeEvent:
         if self._closed:
             raise StopAsyncIteration
@@ -132,6 +170,14 @@ class CdcStream:
             lib_path=self._lib_path,
         )
         self._engine = CdcEngine(lib_path=self._lib_path)
+        with contextlib.suppress(RuntimeError):
+            self._engine.enable_metadata(
+                host=self._host,
+                port=self._port,
+                user=self._user,
+                password=self._password,
+                connect_timeout_s=self._connect_timeout_s,
+            )
         self._client.connect()
         self._client.start()
         self._started = True

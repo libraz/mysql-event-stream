@@ -28,6 +28,14 @@ class TestUpdate:
         assert ev.before is not None
         assert ev.after is not None
 
+        # Column name assertions (items: id, name, value)
+        assert "id" in ev.before
+        assert "name" in ev.before
+        assert "value" in ev.before
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "value" in ev.after
+
     def test_update_multiple_columns(
         self, mysql: MysqlClient, collector: StreamingCollector
     ) -> None:
@@ -53,3 +61,11 @@ class TestUpdate:
         assert ev.before is not None
         assert ev.after is not None
         assert len(ev.before) == len(ev.after)
+
+        # Column name assertions (users table)
+        assert "id" in ev.before
+        assert "name" in ev.before
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "email" in ev.after
+        assert "age" in ev.after

@@ -91,6 +91,7 @@ if(MYSQL_FOUND)
     ${MES_ROOT}/core/src/client/connection_validator.cpp
     ${MES_ROOT}/core/src/client/binlog_client.cpp
     ${MES_ROOT}/core/src/client/capi_client.cpp
+    ${MES_ROOT}/core/src/client/metadata_fetcher.cpp
   )
   list(APPEND ADDON_SOURCES
     src/addon/client_wrap.cpp

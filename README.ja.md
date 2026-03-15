@@ -82,6 +82,45 @@ while (mes_next_event(engine, &event) == MES_OK) {
 mes_destroy(engine);
 ```
 
+### 出力例
+
+`ChangeEvent` にはイベント種別、データベース/テーブル名、binlog 位置、カラム名をキーとした辞書形式の行データが含まれます:
+
+```
+-- INSERT INTO items (name, value) VALUES ('Widget', 42)
+{
+  "type": "INSERT",
+  "database": "mes_test",
+  "table": "items",
+  "before": null,
+  "after": { "id": 8, "name": "Widget", "value": 42 },
+  "timestamp": 1773584163,
+  "position": { "file": "mysql-bin.000003", "offset": 3265 }
+}
+
+-- UPDATE items SET value = 100 WHERE name = 'Widget'
+{
+  "type": "UPDATE",
+  "database": "mes_test",
+  "table": "items",
+  "before": { "id": 8, "name": "Widget", "value": 42 },
+  "after": { "id": 8, "name": "Widget", "value": 100 },
+  "timestamp": 1773584164,
+  "position": { "file": "mysql-bin.000003", "offset": 3611 }
+}
+
+-- DELETE FROM items WHERE name = 'Widget'
+{
+  "type": "DELETE",
+  "database": "mes_test",
+  "table": "items",
+  "before": { "id": 8, "name": "Widget", "value": 100 },
+  "after": null,
+  "timestamp": 1773584164,
+  "position": { "file": "mysql-bin.000003", "offset": 3922 }
+}
+```
+
 ## 特徴
 
 - **軽量** - 最小限の依存関係、小さなバイナリサイズ
@@ -90,7 +129,8 @@ mes_destroy(engine);
 - **MySQL 8.4** - 最新の MySQL LTS リリースに対応
 - **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
-- **型安全** - 型付きカラム値 (int, double, string, bytes, null)
+- **カラム名解決** - メタデータクエリによる自動カラム名解決
+- **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 
 ## ビルド
 

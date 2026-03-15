@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createRequire } from "node:module";
-import type { ChangeEvent } from "./types.js";
+import type { ChangeEvent, ClientConfig } from "./types.js";
 
 const require = createRequire(import.meta.url);
 
@@ -18,6 +18,7 @@ interface NativeEngine {
   getPosition(): { file: string; offset: number };
   reset(): void;
   destroy(): void;
+  enableMetadata?(config: ClientConfig): void;
 }
 
 const addon: NativeAddon = require("../build/Release/mes-node.node");
@@ -64,6 +65,15 @@ export class CdcEngine {
   reset(): void {
     this.ensureNotDestroyed();
     this.engine!.reset();
+  }
+
+  /** Enable metadata queries for column name resolution.
+   *  Requires MySQL client support (MES_HAS_MYSQL). */
+  enableMetadata(config: ClientConfig): void {
+    this.ensureNotDestroyed();
+    if (typeof this.engine!.enableMetadata === "function") {
+      this.engine!.enableMetadata(config);
+    }
   }
 
   /** Destroy the engine and free native resources. */

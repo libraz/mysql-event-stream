@@ -15,7 +15,7 @@ const CLIENT_CONFIG: ClientConfig = {
   serverId: 102,
   startGtid: "",
   connectTimeoutS: 10,
-  readTimeoutS: 30,
+  readTimeoutS: 1,
 };
 
 describe("UPDATE events", () => {
@@ -34,7 +34,8 @@ describe("UPDATE events", () => {
   beforeEach(async () => {
     await mysql.truncate("items");
     await mysql.truncate("users");
-    collector = new StreamingCollector(CLIENT_CONFIG);
+    const gtid = await mysql.getCurrentGtid();
+    collector = new StreamingCollector({ ...CLIENT_CONFIG, startGtid: gtid });
     await collector.start();
   });
 
@@ -72,6 +73,14 @@ describe("UPDATE events", () => {
     expect(ev.type).toBe("UPDATE");
     expect(ev.before).not.toBeNull();
     expect(ev.after).not.toBeNull();
+
+    // Column key assertions (items: id, name, value)
+    expect(ev.before!.id).toBeDefined();
+    expect(ev.before!.name).toBeDefined();
+    expect(ev.before!.value).toBeDefined();
+    expect(ev.after!.id).toBeDefined();
+    expect(ev.after!.name).toBeDefined();
+    expect(ev.after!.value).toBeDefined();
   });
 
   it("UPDATE multiple columns in users table", async () => {
@@ -99,6 +108,14 @@ describe("UPDATE events", () => {
     const ev = events[0]!;
     expect(ev.before).not.toBeNull();
     expect(ev.after).not.toBeNull();
-    expect(ev.before!.length).toBe(ev.after!.length);
+    expect(Object.keys(ev.before!).length).toBe(Object.keys(ev.after!).length);
+
+    // Column key assertions (users table)
+    expect(ev.before!.id).toBeDefined();
+    expect(ev.before!.name).toBeDefined();
+    expect(ev.after!.id).toBeDefined();
+    expect(ev.after!.name).toBeDefined();
+    expect(ev.after!.email).toBeDefined();
+    expect(ev.after!.age).toBeDefined();
   });
 });

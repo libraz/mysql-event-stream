@@ -66,7 +66,7 @@ class TestInsertEvent:
             assert event.before is None
             assert event.after is not None
             assert len(event.after) == 1
-            assert event.after[0].value == 42
+            assert event.after["0"] == 42
             assert event.timestamp == 1000
 
             assert engine.next_event() is None
@@ -84,9 +84,9 @@ class TestUpdateEvent:
             assert event is not None
             assert event.type == EventType.UPDATE
             assert event.before is not None
-            assert event.before[0].value == 10
+            assert event.before["0"] == 10
             assert event.after is not None
-            assert event.after[0].value == 20
+            assert event.after["0"] == 20
 
 
 class TestDeleteEvent:
@@ -101,7 +101,7 @@ class TestDeleteEvent:
             assert event is not None
             assert event.type == EventType.DELETE
             assert event.before is not None
-            assert event.before[0].value == 99
+            assert event.before["0"] == 99
             assert event.after is None
 
 
@@ -143,7 +143,7 @@ class TestMultipleEvents:
             assert e1 is not None
             assert e2 is not None
             assert e1.after is not None
-            assert e1.after[0].value == 10
+            assert e1.after["0"] == 10
             assert e2.after is not None
-            assert e2.after[0].value == 20
+            assert e2.after["0"] == 20
             assert engine.next_event() is None

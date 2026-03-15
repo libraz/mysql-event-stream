@@ -28,6 +28,11 @@ class TestInsert:
         assert ev.after is not None
         assert len(ev.after) >= 2
 
+        # Column name assertions (items: id, name, value)
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "value" in ev.after
+
     def test_insert_multiple_rows(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """Multiple INSERTs produce multiple INSERT ChangeEvents."""
         mysql.insert("items", name="item_a", value=1)
@@ -57,3 +62,13 @@ class TestInsert:
         ev = events[0]
         assert ev.after is not None
         assert len(ev.after) > 0
+
+        # Column name assertions (users table)
+        assert "id" in ev.after
+        assert "name" in ev.after
+        assert "email" in ev.after
+        assert "age" in ev.after
+        assert "balance" in ev.after
+        assert "score" in ev.after
+        assert "is_active" in ev.after
+        assert "bio" in ev.after

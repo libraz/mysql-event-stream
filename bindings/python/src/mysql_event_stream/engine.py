@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+from typing import Any
 
 from ._ffi import (
     MES_COL_BYTES,
@@ -12,11 +13,13 @@ from ._ffi import (
     MES_COL_STRING,
     MES_ERR_NO_EVENT,
     MES_OK,
+    MESClientConfig,
     MESColumn,
     MESEvent,
+    load_client_library,
     load_library,
 )
-from .types import BinlogPosition, ChangeEvent, ColumnValue, EventType
+from .types import BinlogPosition, ChangeEvent, EventType
 
 
 class CdcEngine:
@@ -152,42 +155,92 @@ class CdcEngine:
         if rc != MES_OK:
             raise RuntimeError(f"mes_reset failed with error code {rc}")
 
+    def enable_metadata(
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 3306,
+        user: str = "root",
+        password: str = "",
+        connect_timeout_s: int = 10,
+    ) -> None:
+        """Enable metadata queries for column name resolution.
 
-def _convert_column(col: MESColumn) -> ColumnValue:
-    """Convert C mes_column_t to Python ColumnValue."""
-    col_type = col.type
-    if col_type == MES_COL_NULL:
-        return ColumnValue.null()
-    if col_type == MES_COL_INT:
-        return ColumnValue.int_val(col.int_val)
-    if col_type == MES_COL_DOUBLE:
-        return ColumnValue.double_val(col.double_val)
-    if col_type == MES_COL_STRING:
-        if col.str_data and col.str_len > 0:
-            val = ctypes.string_at(col.str_data, col.str_len).decode("utf-8")
+        Uses a separate MySQL connection to fetch column names via
+        SHOW COLUMNS FROM. Requires the library to be built with
+        MySQL client support.
+
+        Args:
+            host: MySQL host.
+            port: MySQL port.
+            user: MySQL user.
+            password: MySQL password.
+            connect_timeout_s: Connection timeout in seconds.
+
+        Raises:
+            RuntimeError: If the engine is closed, client API is unavailable,
+                or the metadata connection fails.
+        """
+        self._check_open()
+        if not load_client_library(self._lib):
+            raise RuntimeError("Client API not available (built without MySQL support)")
+
+        cfg = MESClientConfig()
+        cfg.host = host.encode("utf-8")
+        cfg.port = port
+        cfg.user = user.encode("utf-8")
+        cfg.password = password.encode("utf-8")
+        cfg.connect_timeout_s = connect_timeout_s
+
+        rc = self._lib.mes_engine_set_metadata_conn(self._handle, ctypes.byref(cfg))
+        if rc != MES_OK:
+            raise RuntimeError(f"Failed to connect metadata (error code {rc})")
+
+
+def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any]:
+    """Convert C mes_column_t array to a Python dict."""
+    result: dict[str, Any] = {}
+    for i in range(count):
+        col = cols[i]
+
+        # Key: column name if available, otherwise string index
+        name = col.col_name.decode("utf-8") if col.col_name else ""
+        key = name if name else str(i)
+
+        col_type = col.type
+        if col_type == MES_COL_NULL:
+            result[key] = None
+        elif col_type == MES_COL_INT:
+            result[key] = col.int_val
+        elif col_type == MES_COL_DOUBLE:
+            result[key] = col.double_val
+        elif col_type == MES_COL_STRING:
+            if col.str_data and col.str_len > 0:
+                result[key] = ctypes.string_at(col.str_data, col.str_len).decode("utf-8")
+            else:
+                result[key] = ""
+        elif col_type == MES_COL_BYTES:
+            if col.str_data and col.str_len > 0:
+                result[key] = ctypes.string_at(col.str_data, col.str_len)
+            else:
+                result[key] = b""
         else:
-            val = ""
-        return ColumnValue.string_val(val)
-    if col_type == MES_COL_BYTES:
-        if col.str_data and col.str_len > 0:
-            raw = ctypes.string_at(col.str_data, col.str_len)
-        else:
-            raw = b""
-        return ColumnValue.bytes_val(raw)
-    return ColumnValue.null()
+            result[key] = None
+
+    return result
 
 
 def _convert_event(raw: MESEvent) -> ChangeEvent:
     """Convert C mes_event_t to Python ChangeEvent."""
     event_type = EventType(raw.type)
 
-    before: list[ColumnValue] | None = None
+    before: dict[str, Any] | None = None
     if raw.before_count > 0 and raw.before_columns:
-        before = [_convert_column(raw.before_columns[i]) for i in range(raw.before_count)]
+        before = _convert_columns(raw.before_columns, raw.before_count)
 
-    after: list[ColumnValue] | None = None
+    after: dict[str, Any] | None = None
     if raw.after_count > 0 and raw.after_columns:
-        after = [_convert_column(raw.after_columns[i]) for i in range(raw.after_count)]
+        after = _convert_columns(raw.after_columns, raw.after_count)
 
     db = raw.database.decode("utf-8") if raw.database else ""
     table = raw.table.decode("utf-8") if raw.table else ""

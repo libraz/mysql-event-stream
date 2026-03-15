@@ -17,6 +17,14 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     this.config = config;
   }
 
+  /** Override config properties before streaming starts. */
+  configure(overrides: Partial<ClientConfig>): void {
+    if (this.iterator) {
+      throw new Error("Cannot configure after streaming has started");
+    }
+    this.config = { ...this.config, ...overrides };
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<ChangeEvent> {
     if (!this.iterator) {
       this.iterator = this.generate();
@@ -45,6 +53,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
   private async *generate(): AsyncGenerator<ChangeEvent> {
     this.engine = new CdcEngine();
+    try {
+      this.engine.enableMetadata(this.config);
+    } catch {
+      // Metadata connection is optional -- column names will be empty
+    }
     this.client = new BinlogClient(this.config);
     try {
       this.client.start();

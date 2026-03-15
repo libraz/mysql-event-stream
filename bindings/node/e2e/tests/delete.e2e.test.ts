@@ -15,7 +15,7 @@ const CLIENT_CONFIG: ClientConfig = {
   serverId: 103,
   startGtid: "",
   connectTimeoutS: 10,
-  readTimeoutS: 30,
+  readTimeoutS: 1,
 };
 
 describe("DELETE events", () => {
@@ -34,7 +34,8 @@ describe("DELETE events", () => {
   beforeEach(async () => {
     await mysql.truncate("items");
     await mysql.truncate("users");
-    collector = new StreamingCollector(CLIENT_CONFIG);
+    const gtid = await mysql.getCurrentGtid();
+    collector = new StreamingCollector({ ...CLIENT_CONFIG, startGtid: gtid });
     await collector.start();
   });
 
@@ -69,6 +70,11 @@ describe("DELETE events", () => {
     expect(ev.type).toBe("DELETE");
     expect(ev.before).not.toBeNull();
     expect(ev.after).toBeNull();
+
+    // Column key assertions (items: id, name, value)
+    expect(ev.before!.id).toBeDefined();
+    expect(ev.before!.name).toBeDefined();
+    expect(ev.before!.value).toBeDefined();
   });
 
   it("DELETE multiple rows produces one ChangeEvent per row", async () => {
@@ -90,6 +96,11 @@ describe("DELETE events", () => {
     for (const ev of events) {
       expect(ev.before).not.toBeNull();
       expect(ev.after).toBeNull();
+
+      // Column key assertions (items: id, name, value)
+      expect(ev.before!.id).toBeDefined();
+      expect(ev.before!.name).toBeDefined();
+      expect(ev.before!.value).toBeDefined();
     }
   });
 });

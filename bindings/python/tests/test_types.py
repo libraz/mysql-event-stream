@@ -39,6 +39,16 @@ class TestColumnValue:
             raise AssertionError("Should have raised AttributeError")
 
 
+class TestColumnValueName:
+    def test_default_name_empty(self) -> None:
+        cv = ColumnValue.null()
+        assert cv.name == ""
+
+    def test_name_preserved(self) -> None:
+        cv = ColumnValue(type=ColumnType.INT, value=42, name="id")
+        assert cv.name == "id"
+
+
 class TestChangeEvent:
     def test_insert_event(self) -> None:
         event = ChangeEvent(
@@ -46,7 +56,7 @@ class TestChangeEvent:
             database="testdb",
             table="users",
             before=None,
-            after=[ColumnValue.int_val(1)],
+            after={"id": 1},
             timestamp=1000,
             position=BinlogPosition(file="binlog.000001", offset=4),
         )
@@ -54,6 +64,7 @@ class TestChangeEvent:
         assert event.database == "testdb"
         assert event.after is not None
         assert len(event.after) == 1
+        assert event.after["id"] == 1
 
 
 class TestBinlogPosition:

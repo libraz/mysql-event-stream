@@ -38,6 +38,7 @@ class StreamingCollector:
         user: str = "root",
         password: str = "test_root_password",
         server_id: int = 100,
+        start_gtid: str = "",
     ) -> None:
         self._lib_path = lib_path
         self._host = host
@@ -45,6 +46,7 @@ class StreamingCollector:
         self._user = user
         self._password = password
         self._server_id = server_id
+        self._start_gtid = start_gtid
         self._events: list[ChangeEvent] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -140,6 +142,7 @@ class StreamingCollector:
                 user=self._user,
                 password=self._password,
                 server_id=self._server_id,
+                start_gtid=self._start_gtid,
                 lib_path=self._lib_path,
             ) as client:
                 client.connect()
@@ -147,6 +150,12 @@ class StreamingCollector:
                 self._started.set()
 
                 with CdcEngine(lib_path=self._lib_path) as engine:
+                    engine.enable_metadata(
+                        host=self._host,
+                        port=self._port,
+                        user=self._user,
+                        password=self._password,
+                    )
                     while not self._stop.is_set():
                         result = client.poll()
                         if result.is_heartbeat or not result.data:

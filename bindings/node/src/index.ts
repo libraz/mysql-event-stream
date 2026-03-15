@@ -4,7 +4,6 @@
 export type {
   ChangeEvent,
   ClientConfig,
-  ColumnValue,
   EventType,
   PollResult,
 } from "./types.js";

@@ -15,7 +15,7 @@ const CLIENT_CONFIG: ClientConfig = {
   serverId: 101,
   startGtid: "",
   connectTimeoutS: 10,
-  readTimeoutS: 30,
+  readTimeoutS: 1,
 };
 
 describe("INSERT events", () => {
@@ -34,7 +34,8 @@ describe("INSERT events", () => {
   beforeEach(async () => {
     await mysql.truncate("items");
     await mysql.truncate("users");
-    collector = new StreamingCollector(CLIENT_CONFIG);
+    const gtid = await mysql.getCurrentGtid();
+    collector = new StreamingCollector({ ...CLIENT_CONFIG, startGtid: gtid });
     await collector.start();
   });
 
@@ -64,7 +65,10 @@ describe("INSERT events", () => {
     expect(ev.type).toBe("INSERT");
     expect(ev.before).toBeNull();
     expect(ev.after).not.toBeNull();
-    expect(ev.after!.length).toBeGreaterThanOrEqual(2);
+    // Column key assertions (items: id, name, value)
+    expect(ev.after!.id).toBeDefined();
+    expect(ev.after!.name).toBeDefined();
+    expect(ev.after!.value).toBeDefined();
   });
 
   it("multiple INSERTs produce multiple INSERT ChangeEvents", async () => {
@@ -103,6 +107,14 @@ describe("INSERT events", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     const ev = events[0]!;
     expect(ev.after).not.toBeNull();
-    expect(ev.after!.length).toBeGreaterThan(0);
+    // Column key assertions (users table)
+    expect(ev.after!.id).toBeDefined();
+    expect(ev.after!.name).toBeDefined();
+    expect(ev.after!.email).toBeDefined();
+    expect(ev.after!.age).toBeDefined();
+    expect(ev.after!.balance).toBeDefined();
+    expect(ev.after!.score).toBeDefined();
+    expect(ev.after!.is_active).toBeDefined();
+    expect(ev.after!.bio).toBeDefined();
   });
 });

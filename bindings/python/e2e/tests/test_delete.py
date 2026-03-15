@@ -28,6 +28,11 @@ class TestDelete:
         assert ev.before is not None
         assert ev.after is None
 
+        # Column name assertions (items: id, name, value)
+        assert "id" in ev.before
+        assert "name" in ev.before
+        assert "value" in ev.before
+
     def test_delete_multiple_rows(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """DELETE of multiple rows produces one ChangeEvent per row."""
         mysql.insert("items", name="del_a", value=1)
@@ -42,3 +47,8 @@ class TestDelete:
         for ev in events:
             assert ev.before is not None
             assert ev.after is None
+
+            # Column name assertions (items: id, name, value)
+            assert "id" in ev.before
+            assert "name" in ev.before
+            assert "value" in ev.before

@@ -15,7 +15,7 @@ const CLIENT_CONFIG: ClientConfig = {
   serverId: 100,
   startGtid: "",
   connectTimeoutS: 10,
-  readTimeoutS: 30,
+  readTimeoutS: 1,
 };
 
 describe("BinlogClient streaming", () => {
@@ -34,7 +34,8 @@ describe("BinlogClient streaming", () => {
   beforeEach(async () => {
     await mysql.truncate("items");
     await mysql.truncate("users");
-    collector = new StreamingCollector(CLIENT_CONFIG);
+    const gtid = await mysql.getCurrentGtid();
+    collector = new StreamingCollector({ ...CLIENT_CONFIG, startGtid: gtid });
     await collector.start();
   });
 
