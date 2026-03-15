@@ -100,12 +100,18 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure --parallel $(nproc)
 
+      - name: Generate coverage report
+        run: |
+          sudo apt-get install -y lcov
+          lcov --capture --directory build --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/_deps/*' --output-file coverage.info
+          lcov --list coverage.info
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          gcov: true
-          gcov_include: core/src/*
+          files: coverage.info
           flags: unittests
           name: codecov-mes
           fail_ci_if_error: false
