@@ -19,7 +19,26 @@
     "test:e2e": "vitest run --config e2e/vitest.config.ts",
     "test:watch": "vitest"
   },
+  "keywords": [
+    "mysql",
+    "cdc",
+    "binlog",
+    "change-data-capture",
+    "replication",
+    "streaming",
+    "native-addon"
+  ],
+  "author": "libraz <libraz@libraz.net>",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/libraz/mysql-event-stream.git",
+    "directory": "bindings/node"
+  },
+  "bugs": {
+    "url": "https://github.com/libraz/mysql-event-stream/issues"
+  },
+  "homepage": "https://github.com/libraz/mysql-event-stream#readme",
   "engines": {
     "node": ">=22"
   },
