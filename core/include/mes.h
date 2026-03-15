@@ -1,0 +1,212 @@
+// Copyright 2024 mysql-event-stream Authors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * @file mes.h
+ * @brief Public C ABI header for the mysql-event-stream CDC engine
+ *
+ * This header provides the C-compatible interface for creating and using
+ * a mysql-event-stream CDC engine instance. It is safe to include from both C and C++.
+ */
+
+#ifndef MES_H_
+#define MES_H_
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- Visibility ---- */
+#if defined(MES_BUILDING)
+#if defined(_WIN32)
+#define MES_API __declspec(dllexport)
+#else
+#define MES_API __attribute__((visibility("default")))
+#endif
+#else
+#define MES_API
+#endif
+
+/* ---- Opaque handle ---- */
+typedef struct mes_engine mes_engine_t;
+
+/* ---- Error codes ---- */
+typedef enum {
+  MES_OK = 0,
+  MES_ERR_NULL_ARG = 1,
+  MES_ERR_INVALID_ARG = 2,
+  MES_ERR_INTERNAL = 99,
+  MES_ERR_PARSE = 100,
+  MES_ERR_NO_EVENT = 300,
+  MES_ERR_CONNECT = 400,
+  MES_ERR_AUTH = 401,
+  MES_ERR_VALIDATION = 402,
+  MES_ERR_STREAM = 403,
+  MES_ERR_DISCONNECTED = 404,
+} mes_error_t;
+
+/* ---- Event types ---- */
+typedef enum {
+  MES_EVENT_INSERT = 0,
+  MES_EVENT_UPDATE = 1,
+  MES_EVENT_DELETE = 2,
+} mes_event_type_t;
+
+/* ---- Column value types (simplified for C ABI) ---- */
+typedef enum {
+  MES_COL_NULL = 0,
+  MES_COL_INT = 1,
+  MES_COL_DOUBLE = 2,
+  MES_COL_STRING = 3,
+  MES_COL_BYTES = 4,
+} mes_col_type_t;
+
+/* ---- Column value ---- */
+typedef struct {
+  mes_col_type_t type;
+  int64_t int_val;      /**< Valid when type == MES_COL_INT */
+  double double_val;    /**< Valid when type == MES_COL_DOUBLE */
+  const char* str_data; /**< Valid when type == MES_COL_STRING or MES_COL_BYTES */
+  uint32_t str_len;     /**< Length of str_data */
+  const char* col_name; /**< Column name ("" if unknown, never NULL) */
+} mes_column_t;
+
+/* ---- Change event (read-only view into engine internals) ---- */
+typedef struct {
+  mes_event_type_t type;
+  const char* database;
+  const char* table;
+  const mes_column_t* before_columns;
+  uint32_t before_count;
+  const mes_column_t* after_columns;
+  uint32_t after_count;
+  uint32_t timestamp;
+  const char* binlog_file;
+  uint64_t binlog_offset;
+} mes_event_t;
+
+/* ---- Engine lifecycle ---- */
+
+/** @brief Create a new CDC engine instance. Returns NULL on allocation failure. */
+MES_API mes_engine_t* mes_create(void);
+
+/** @brief Destroy an engine instance and free all resources. */
+MES_API void mes_destroy(mes_engine_t* engine);
+
+/* ---- Data processing ---- */
+
+/**
+ * @brief Feed raw binlog bytes into the engine.
+ *
+ * @param engine  Engine handle.
+ * @param data    Pointer to binlog byte stream.
+ * @param len     Number of bytes available.
+ * @param consumed Output: number of bytes consumed.
+ * @return MES_OK on success, error code otherwise.
+ */
+MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t len,
+                             size_t* consumed);
+
+/**
+ * @brief Get the next change event.
+ *
+ * Pointers in the returned event are valid until the next call to
+ * mes_feed() or mes_next_event().
+ *
+ * @param engine Engine handle.
+ * @param event  Output: pointer to the event.
+ * @return MES_OK if event available, MES_ERR_NO_EVENT if empty.
+ */
+MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** event);
+
+/**
+ * @brief Check if there are pending events.
+ *
+ * @param engine Engine handle.
+ * @return 1 if events available, 0 otherwise, -1 on error (null engine).
+ */
+MES_API int mes_has_events(mes_engine_t* engine);
+
+/**
+ * @brief Get current binlog position.
+ *
+ * @param engine Engine handle.
+ * @param file   Output: binlog filename (points to internal memory).
+ * @param offset Output: binlog offset.
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* offset);
+
+/**
+ * @brief Reset the engine, clearing all state.
+ *
+ * @param engine Engine handle.
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_reset(mes_engine_t* engine);
+
+/* ---- BinlogClient API (native only) ---- */
+#if defined(MES_HAS_MYSQL)
+
+typedef struct mes_client mes_client_t;
+
+typedef struct {
+  const char* host;
+  uint16_t port;
+  const char* user;
+  const char* password;
+  uint32_t server_id;
+  const char* start_gtid;
+  uint32_t connect_timeout_s;
+  uint32_t read_timeout_s;
+} mes_client_config_t;
+
+typedef struct {
+  mes_error_t error;
+  const uint8_t* data;
+  size_t size;
+  int is_heartbeat;
+} mes_poll_result_t;
+
+/** @brief Create a new BinlogClient instance. */
+MES_API mes_client_t* mes_client_create(void);
+
+/** @brief Destroy a BinlogClient instance. */
+MES_API void mes_client_destroy(mes_client_t* client);
+
+/** @brief Connect to MySQL server with given configuration. */
+MES_API mes_error_t mes_client_connect(mes_client_t* client, const mes_client_config_t* config);
+
+/** @brief Start binlog streaming. */
+MES_API mes_error_t mes_client_start(mes_client_t* client);
+
+/** @brief Poll for next binlog event (blocking). */
+MES_API mes_poll_result_t mes_client_poll(mes_client_t* client);
+
+/** @brief Disconnect from MySQL server. */
+MES_API void mes_client_disconnect(mes_client_t* client);
+
+/** @brief Check if client is connected. Returns 1 if connected, 0 otherwise. */
+MES_API int mes_client_is_connected(mes_client_t* client);
+
+/** @brief Get last error message. Returns empty string if no error. */
+MES_API const char* mes_client_last_error(mes_client_t* client);
+
+/** @brief Get current GTID position. Returns empty string if unknown. */
+MES_API const char* mes_client_current_gtid(mes_client_t* client);
+
+/** @brief Enable metadata queries for column name resolution.
+ *  Uses a separate MySQL connection with the same credentials. */
+MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
+                                                 const mes_client_config_t* config);
+
+#endif /* MES_HAS_MYSQL */
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* MES_H_ */

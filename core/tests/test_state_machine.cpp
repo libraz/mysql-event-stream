@@ -1,0 +1,246 @@
+// Copyright 2024 mysql-event-stream Authors
+// SPDX-License-Identifier: Apache-2.0
+
+#include "state_machine.h"
+
+#include <cstring>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+namespace mes {
+namespace {
+
+// Build a complete binlog event: 19-byte header + body + 4-byte checksum.
+std::vector<uint8_t> BuildEvent(uint8_t type_code, const std::vector<uint8_t>& body) {
+  uint32_t event_length =
+      static_cast<uint32_t>(kEventHeaderSize + body.size() + kChecksumSize);
+  std::vector<uint8_t> buf(event_length, 0);
+
+  // timestamp = 1000 (arbitrary)
+  buf[0] = 0xE8;
+  buf[1] = 0x03;
+  buf[2] = 0x00;
+  buf[3] = 0x00;
+  // type_code
+  buf[4] = type_code;
+  // server_id = 1
+  buf[5] = 0x01;
+  buf[6] = 0x00;
+  buf[7] = 0x00;
+  buf[8] = 0x00;
+  // event_length (LE)
+  buf[9] = static_cast<uint8_t>(event_length);
+  buf[10] = static_cast<uint8_t>(event_length >> 8);
+  buf[11] = static_cast<uint8_t>(event_length >> 16);
+  buf[12] = static_cast<uint8_t>(event_length >> 24);
+  // next_position = 0
+  buf[13] = 0;
+  buf[14] = 0;
+  buf[15] = 0;
+  buf[16] = 0;
+  // flags = 0
+  buf[17] = 0;
+  buf[18] = 0;
+
+  // body
+  std::memcpy(buf.data() + kEventHeaderSize, body.data(), body.size());
+
+  // checksum (dummy, 4 zero bytes already in place)
+
+  return buf;
+}
+
+TEST(StateMachineTest, InitialState) {
+  EventStreamParser parser;
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+  EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, FeedCompleteEventAtOnce) {
+  std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04, 0x05};
+  auto event = BuildEvent(30, body);
+
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
+
+  EXPECT_EQ(parser.CurrentHeader().type_code, 30);
+  EXPECT_EQ(parser.CurrentHeader().timestamp, 1000u);
+  EXPECT_EQ(parser.CurrentHeader().server_id, 1u);
+
+  const uint8_t* body_data = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_data, &body_len);
+  ASSERT_NE(body_data, nullptr);
+  EXPECT_EQ(body_len, 5u);
+  EXPECT_EQ(body_data[0], 0x01);
+  EXPECT_EQ(body_data[4], 0x05);
+
+  EXPECT_EQ(parser.RawSize(), event.size());
+}
+
+TEST(StateMachineTest, FeedByteByByte) {
+  std::vector<uint8_t> body = {0xAA, 0xBB};
+  auto event = BuildEvent(19, body);
+
+  EventStreamParser parser;
+
+  // Feed one byte at a time
+  for (size_t i = 0; i < event.size() - 1; i++) {
+    size_t consumed = parser.Feed(&event[i], 1);
+    EXPECT_EQ(consumed, 1u);
+    EXPECT_FALSE(parser.HasEvent()) << "Should not have event at byte " << i;
+  }
+
+  // Feed the last byte
+  size_t consumed = parser.Feed(&event[event.size() - 1], 1);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_EQ(parser.CurrentHeader().type_code, 19);
+}
+
+TEST(StateMachineTest, FeedPartialHeader) {
+  std::vector<uint8_t> body = {0x01};
+  auto event = BuildEvent(30, body);
+
+  EventStreamParser parser;
+
+  // Feed 10 bytes (partial header)
+  size_t consumed = parser.Feed(event.data(), 10);
+  EXPECT_EQ(consumed, 10u);
+  EXPECT_FALSE(parser.HasEvent());
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+
+  // Feed the rest
+  consumed = parser.Feed(event.data() + 10, event.size() - 10);
+  EXPECT_EQ(consumed, event.size() - 10);
+  EXPECT_TRUE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, FeedMultipleEventsSequentially) {
+  std::vector<uint8_t> body1 = {0x01, 0x02};
+  std::vector<uint8_t> body2 = {0x03, 0x04, 0x05};
+  auto event1 = BuildEvent(30, body1);
+  auto event2 = BuildEvent(31, body2);
+
+  EventStreamParser parser;
+
+  // Feed first event
+  size_t consumed = parser.Feed(event1.data(), event1.size());
+  EXPECT_EQ(consumed, event1.size());
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_EQ(parser.CurrentHeader().type_code, 30);
+
+  // Cannot feed more while event is ready
+  consumed = parser.Feed(event2.data(), event2.size());
+  EXPECT_EQ(consumed, 0u);
+
+  // Advance
+  parser.Advance();
+  EXPECT_FALSE(parser.HasEvent());
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+
+  // Feed second event
+  consumed = parser.Feed(event2.data(), event2.size());
+  EXPECT_EQ(consumed, event2.size());
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_EQ(parser.CurrentHeader().type_code, 31);
+}
+
+TEST(StateMachineTest, ErrorOnTinyEventLength) {
+  // Build a header where event_length is too small (< 23)
+  std::vector<uint8_t> header(kEventHeaderSize, 0);
+  header[4] = 30;  // type_code
+  // event_length = 10 (too small: must be >= 23)
+  header[9] = 10;
+
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(header.data(), header.size());
+  EXPECT_EQ(consumed, header.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_FALSE(parser.HasEvent());
+
+  // Feed returns 0 in error state
+  consumed = parser.Feed(header.data(), header.size());
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(StateMachineTest, ResetFromError) {
+  // Trigger error
+  std::vector<uint8_t> header(kEventHeaderSize, 0);
+  header[4] = 30;
+  header[9] = 5;  // event_length too small
+
+  EventStreamParser parser;
+  parser.Feed(header.data(), header.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+
+  // Reset
+  parser.Reset();
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+  EXPECT_FALSE(parser.HasEvent());
+
+  // Can feed again after reset
+  std::vector<uint8_t> body = {0x01};
+  auto event = BuildEvent(19, body);
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_TRUE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, AdvanceResetsForNextEvent) {
+  std::vector<uint8_t> body = {0x01};
+  auto event = BuildEvent(30, body);
+
+  EventStreamParser parser;
+  parser.Feed(event.data(), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+
+  parser.Advance();
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+  EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, FeedNullData) {
+  EventStreamParser parser;
+  EXPECT_EQ(parser.Feed(nullptr, 10), 0u);
+}
+
+TEST(StateMachineTest, FeedZeroLength) {
+  uint8_t buf[1] = {0};
+  EventStreamParser parser;
+  EXPECT_EQ(parser.Feed(buf, 0), 0u);
+}
+
+TEST(StateMachineTest, MinimalEventNoBody) {
+  // Event with zero body bytes: length = 19 (header) + 4 (checksum) = 23
+  auto event = BuildEvent(16, {});  // XID event with no body
+
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_TRUE(parser.HasEvent());
+
+  const uint8_t* body_data = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_data, &body_len);
+  EXPECT_EQ(body_len, 0u);
+}
+
+TEST(StateMachineTest, RawDataMatchesInput) {
+  std::vector<uint8_t> body = {0xDE, 0xAD, 0xBE, 0xEF};
+  auto event = BuildEvent(30, body);
+
+  EventStreamParser parser;
+  parser.Feed(event.data(), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+
+  EXPECT_EQ(parser.RawSize(), event.size());
+  EXPECT_EQ(std::memcmp(parser.RawData(), event.data(), event.size()), 0);
+}
+
+}  // namespace
+}  // namespace mes

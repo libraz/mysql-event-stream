@@ -1,0 +1,300 @@
+// Copyright 2024 mysql-event-stream Authors
+// SPDX-License-Identifier: Apache-2.0
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <vector>
+
+#include "event_header.h"
+#include "mes.h"
+#include "test_helpers.h"
+
+namespace {
+
+using mes::BinlogEventType;
+using mes::test::BuildDeleteRowsBody;
+using mes::test::BuildEvent;
+using mes::test::BuildRotateBody;
+using mes::test::BuildTableMapBody;
+using mes::test::BuildUpdateRowsBody;
+using mes::test::BuildWriteRowsBody;
+
+// ---- Engine lifecycle ----
+
+TEST(CApi, CreateAndDestroy) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  mes_destroy(engine);
+}
+
+TEST(CApi, DestroyNull) {
+  mes_destroy(nullptr);  // Should not crash
+}
+
+// ---- Null argument handling ----
+
+TEST(CApi, FeedNullEngine) {
+  uint8_t data[] = {0};
+  size_t consumed;
+  EXPECT_EQ(mes_feed(nullptr, data, 1, &consumed), MES_ERR_NULL_ARG);
+}
+
+TEST(CApi, FeedNullConsumed) {
+  auto* engine = mes_create();
+  uint8_t data[] = {0};
+  EXPECT_EQ(mes_feed(engine, data, 1, nullptr), MES_ERR_NULL_ARG);
+  mes_destroy(engine);
+}
+
+TEST(CApi, FeedNullDataWithLen) {
+  auto* engine = mes_create();
+  size_t consumed;
+  EXPECT_EQ(mes_feed(engine, nullptr, 10, &consumed), MES_ERR_NULL_ARG);
+  mes_destroy(engine);
+}
+
+TEST(CApi, FeedNullDataZeroLen) {
+  auto* engine = mes_create();
+  size_t consumed;
+  EXPECT_EQ(mes_feed(engine, nullptr, 0, &consumed), MES_OK);
+  EXPECT_EQ(consumed, 0u);
+  mes_destroy(engine);
+}
+
+TEST(CApi, NextEventNullEngine) {
+  const mes_event_t* event;
+  EXPECT_EQ(mes_next_event(nullptr, &event), MES_ERR_NULL_ARG);
+}
+
+TEST(CApi, NextEventNullOutput) {
+  auto* engine = mes_create();
+  EXPECT_EQ(mes_next_event(engine, nullptr), MES_ERR_NULL_ARG);
+  mes_destroy(engine);
+}
+
+TEST(CApi, NextEventNoEvent) {
+  auto* engine = mes_create();
+  const mes_event_t* event;
+  EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+  mes_destroy(engine);
+}
+
+TEST(CApi, HasEventsNull) { EXPECT_EQ(mes_has_events(nullptr), -1); }
+
+TEST(CApi, HasEventsEmpty) {
+  auto* engine = mes_create();
+  EXPECT_EQ(mes_has_events(engine), 0);
+  mes_destroy(engine);
+}
+
+TEST(CApi, GetPositionNullEngine) {
+  const char* file;
+  uint64_t offset;
+  EXPECT_EQ(mes_get_position(nullptr, &file, &offset), MES_ERR_NULL_ARG);
+}
+
+TEST(CApi, GetPositionNullOutputs) {
+  auto* engine = mes_create();
+  // Both file and offset are null -- should still succeed
+  EXPECT_EQ(mes_get_position(engine, nullptr, nullptr), MES_OK);
+  mes_destroy(engine);
+}
+
+TEST(CApi, ResetNullEngine) { EXPECT_EQ(mes_reset(nullptr), MES_ERR_NULL_ARG); }
+
+// ---- INSERT flow ----
+
+TEST(CApi, InsertEvent) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(1, "testdb", "users");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto wr_body = BuildWriteRowsBody(1, 42);
+  auto wr_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200, wr_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+
+  EXPECT_EQ(mes_has_events(engine), 1);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_STREQ(event->database, "testdb");
+  EXPECT_STREQ(event->table, "users");
+  EXPECT_EQ(event->before_count, 0u);
+  EXPECT_EQ(event->before_columns, nullptr);
+  ASSERT_EQ(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].type, MES_COL_INT);
+  EXPECT_EQ(event->after_columns[0].int_val, 42);
+  EXPECT_STREQ(event->after_columns[0].col_name, "");
+  EXPECT_EQ(event->timestamp, 1000u);
+
+  // No more events
+  EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+  mes_destroy(engine);
+}
+
+// ---- UPDATE flow ----
+
+TEST(CApi, UpdateEvent) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(10, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto upd_body = BuildUpdateRowsBody(10, 100, 200);
+  auto upd_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent), 1002, 200, upd_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), upd_event.begin(), upd_event.end());
+
+  size_t consumed;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+
+  EXPECT_EQ(event->type, MES_EVENT_UPDATE);
+  EXPECT_STREQ(event->database, "db");
+  EXPECT_STREQ(event->table, "t");
+  ASSERT_EQ(event->before_count, 1u);
+  EXPECT_EQ(event->before_columns[0].type, MES_COL_INT);
+  EXPECT_EQ(event->before_columns[0].int_val, 100);
+  ASSERT_EQ(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].type, MES_COL_INT);
+  EXPECT_EQ(event->after_columns[0].int_val, 200);
+  EXPECT_STREQ(event->before_columns[0].col_name, "");
+  EXPECT_STREQ(event->after_columns[0].col_name, "");
+
+  mes_destroy(engine);
+}
+
+// ---- DELETE flow ----
+
+TEST(CApi, DeleteEvent) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(10, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto del_body = BuildDeleteRowsBody(10, 999);
+  auto del_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent), 1003, 200, del_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), del_event.begin(), del_event.end());
+
+  size_t consumed;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+
+  EXPECT_EQ(event->type, MES_EVENT_DELETE);
+  ASSERT_EQ(event->before_count, 1u);
+  EXPECT_EQ(event->before_columns[0].type, MES_COL_INT);
+  EXPECT_EQ(event->before_columns[0].int_val, 999);
+  EXPECT_STREQ(event->before_columns[0].col_name, "");
+  EXPECT_EQ(event->after_count, 0u);
+  EXPECT_EQ(event->after_columns, nullptr);
+
+  mes_destroy(engine);
+}
+
+// ---- ROTATE event ----
+
+TEST(CApi, RotateEvent) {
+  auto* engine = mes_create();
+
+  auto rot_body = BuildRotateBody(4, "binlog.000002");
+  auto rot_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, rot_body);
+
+  size_t consumed;
+  mes_feed(engine, rot_event.data(), rot_event.size(), &consumed);
+
+  const char* file;
+  uint64_t offset;
+  ASSERT_EQ(mes_get_position(engine, &file, &offset), MES_OK);
+  EXPECT_STREQ(file, "binlog.000002");
+  EXPECT_EQ(offset, 4u);
+
+  mes_destroy(engine);
+}
+
+// ---- Reset ----
+
+TEST(CApi, Reset) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+  auto wr_body = BuildWriteRowsBody(1, 42);
+  auto wr_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+
+  size_t consumed;
+  mes_feed(engine, tm_event.data(), tm_event.size(), &consumed);
+  mes_feed(engine, wr_event.data(), wr_event.size(), &consumed);
+  EXPECT_EQ(mes_has_events(engine), 1);
+
+  EXPECT_EQ(mes_reset(engine), MES_OK);
+  EXPECT_EQ(mes_has_events(engine), 0);
+
+  mes_destroy(engine);
+}
+
+// ---- Multiple events ----
+
+TEST(CApi, MultipleEvents) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                        BuildWriteRowsBody(1, 20));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr1.begin(), wr1.end());
+  stream.insert(stream.end(), wr2.begin(), wr2.end());
+
+  size_t consumed;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+
+  const mes_event_t* event;
+
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 10);
+
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 20);
+
+  EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+
+  mes_destroy(engine);
+}
+
+}  // namespace
