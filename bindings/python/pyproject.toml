@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mysql-event-stream"
+version = "0.1.0"
+description = "MySQL 8.4 CDC engine - Python binding (native ctypes)"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
+
+[tool.rye]
+managed = true
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.2",
+    "pymysql>=1.1",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.rye.scripts]
+lint = "ruff check --fix ."
+format = "ruff format ."
+typecheck = "mypy src"
+e2e = "pytest e2e/tests -v --timeout=120"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mysql_event_stream"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "insert: INSERT event tests",
+    "update: UPDATE event tests",
+    "delete: DELETE event tests",
+    "types: Column type tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"

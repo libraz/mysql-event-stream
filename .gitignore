@@ -1,0 +1,100 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.bak
+.DS_Store
+
+# Claude Code configuration
+.claude/
+CLAUDE.md
+
+# Serena
+.serena/
+
+# act (GitHub Actions local runner)
+.secrets
+.act/
+
+# Cache
+.cache/
+
+# Generated files
+*.log
+*.out
+core
+core.*
+
+# Test outputs (CMake CTest output directory)
+/Testing/
+*.gcov
+*.gcda
+*.gcno
+
+# Binaries
+*.exe
+*.wasm
+
+# Dependencies
+third_party/*
+!third_party/CMakeLists.txt
+
+# Docker
+.env
+.env.prod
+.env.local
+docker-compose.override.yml
+logs/
+
+# Coverage reports
+coverage/
+*.info
+
+# Node.js
+node_modules/
+bindings/node/build/
+bindings/node/dist/
+bindings/node/.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+.venv/
+.python-version
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# E2E test results
+e2e/results/
+e2e/.venv/
+e2e/__pycache__/
+e2e/**/__pycache__/
+e2e/*.egg-info/
+e2e/.mypy_cache/
+e2e/.ruff_cache/
+e2e/.pytest_cache/
+
+# Backup directory
+backup/
