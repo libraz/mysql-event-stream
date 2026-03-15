@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "binary_util.h"
+#include "test_helpers.h"
 
 namespace mes {
 namespace {
@@ -351,6 +352,146 @@ TEST(TableMapRegistryTest, ProcessMalformedData) {
   uint8_t buf[5] = {0};
   EXPECT_FALSE(registry.ProcessTableMapEvent(buf, sizeof(buf)));
   EXPECT_EQ(registry.Size(), 0u);
+}
+
+// --- Additional column type parsing tests ---
+
+TEST(ParseTableMapTest, VarcharColumn) {
+  test::EventBuilder b;
+  b.WriteU48Le(42);   // table_id
+  b.WriteU16Le(0);    // flags
+  b.WriteU8(4);       // db name len
+  b.WriteString("test");
+  b.WriteU8(0);       // null term
+  b.WriteU8(1);       // table name len
+  b.WriteString("t");
+  b.WriteU8(0);       // null term
+  b.WriteU8(1);       // column count
+  b.WriteU8(0x0F);    // VARCHAR
+  b.WriteU8(2);       // metadata length
+  b.WriteU16Le(200);  // varchar max_length
+  b.WriteU8(0x01);    // null bitmap
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kVarchar);
+  EXPECT_EQ(metadata.columns[0].metadata, 200);
+}
+
+TEST(ParseTableMapTest, BlobColumn) {
+  test::EventBuilder b;
+  b.WriteU48Le(42);
+  b.WriteU16Le(0);
+  b.WriteU8(4);
+  b.WriteString("test");
+  b.WriteU8(0);
+  b.WriteU8(1);
+  b.WriteString("t");
+  b.WriteU8(0);
+  b.WriteU8(1);      // column count
+  b.WriteU8(0xFC);   // BLOB
+  b.WriteU8(1);      // metadata length
+  b.WriteU8(2);      // pack_length = 2
+  b.WriteU8(0x01);   // null bitmap
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kBlob);
+  EXPECT_EQ(metadata.columns[0].metadata, 2);
+}
+
+TEST(ParseTableMapTest, Datetime2Column) {
+  test::EventBuilder b;
+  b.WriteU48Le(42);
+  b.WriteU16Le(0);
+  b.WriteU8(4);
+  b.WriteString("test");
+  b.WriteU8(0);
+  b.WriteU8(1);
+  b.WriteString("t");
+  b.WriteU8(0);
+  b.WriteU8(1);      // column count
+  b.WriteU8(0x12);   // DATETIME2
+  b.WriteU8(1);      // metadata length
+  b.WriteU8(6);      // fsp = 6
+  b.WriteU8(0x01);   // null bitmap
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kDatetime2);
+  EXPECT_EQ(metadata.columns[0].metadata, 6);
+}
+
+TEST(ParseTableMapTest, NewDecimalColumn) {
+  test::EventBuilder b;
+  b.WriteU48Le(42);
+  b.WriteU16Le(0);
+  b.WriteU8(4);
+  b.WriteString("test");
+  b.WriteU8(0);
+  b.WriteU8(1);
+  b.WriteString("t");
+  b.WriteU8(0);
+  b.WriteU8(1);
+  b.WriteU8(0xF6);   // NEWDECIMAL
+  b.WriteU8(2);      // metadata length
+  b.WriteU8(10);     // precision
+  b.WriteU8(2);      // scale
+  b.WriteU8(0x01);
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kNewDecimal);
+  EXPECT_EQ(metadata.columns[0].metadata, (10 << 8) | 2);
+}
+
+TEST(ParseTableMapTest, MultipleColumnTypes) {
+  test::EventBuilder b;
+  b.WriteU48Le(42);
+  b.WriteU16Le(0);
+  b.WriteU8(2);
+  b.WriteString("db");
+  b.WriteU8(0);
+  b.WriteU8(1);
+  b.WriteString("t");
+  b.WriteU8(0);
+  b.WriteU8(3);           // 3 columns
+  b.WriteU8(0x03);        // INT
+  b.WriteU8(0x0F);        // VARCHAR
+  b.WriteU8(0x12);        // DATETIME2
+  b.WriteU8(3);           // metadata length: 0 + 2 + 1
+  b.WriteU16Le(500);      // VARCHAR metadata
+  b.WriteU8(3);           // DATETIME2 fsp
+  b.WriteU8(0x07);        // null bitmap: all nullable
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 3u);
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kLong);
+  EXPECT_EQ(metadata.columns[1].type, ColumnType::kVarchar);
+  EXPECT_EQ(metadata.columns[1].metadata, 500);
+  EXPECT_EQ(metadata.columns[2].type, ColumnType::kDatetime2);
+  EXPECT_EQ(metadata.columns[2].metadata, 3);
+}
+
+TEST(TableMapRegistryTest, ReplaceExisting) {
+  TableMapRegistry registry;
+  auto body1 = test::BuildTableMapBody(42, "db", "table1");
+  auto body2 = test::BuildTableMapBody(42, "db", "table2");
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body1.data(), body1.size()));
+  EXPECT_EQ(registry.Lookup(42)->table_name, "table1");
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body2.data(), body2.size()));
+  EXPECT_EQ(registry.Lookup(42)->table_name, "table2");
+  EXPECT_EQ(registry.Size(), 1u);
+}
+
+TEST(TableMapRegistryTest, MutableLookupNotFound) {
+  TableMapRegistry registry;
+  EXPECT_EQ(registry.MutableLookup(999), nullptr);
+}
+
+TEST(TableMapRegistryTest, MutableLookupFound) {
+  TableMapRegistry registry;
+  auto body = test::BuildTableMapBody(42, "db", "tbl");
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size()));
+  auto* meta = registry.MutableLookup(42);
+  ASSERT_NE(meta, nullptr);
+  EXPECT_EQ(meta->table_name, "tbl");
 }
 
 }  // namespace

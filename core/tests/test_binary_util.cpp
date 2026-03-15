@@ -383,5 +383,136 @@ TEST(CalcFieldSizeTest, UnsupportedType) {
   EXPECT_EQ(CalcFieldSize(0x06, dummy, 0), 0u);  // MYSQL_TYPE_NULL
 }
 
+// --- CalcFieldSize for JSON with various pack_length values ---
+
+TEST(CalcFieldSizeTest, JsonPack1) {
+  uint8_t data[] = {0x05, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xF5, data, 1), 6u);  // 1 + 5
+}
+
+TEST(CalcFieldSizeTest, JsonPack2) {
+  uint8_t data[] = {0x05, 0x00, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xF5, data, 2), 7u);  // 2 + 5
+}
+
+TEST(CalcFieldSizeTest, JsonPack3) {
+  uint8_t data[] = {0x05, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xF5, data, 3), 8u);  // 3 + 5
+}
+
+TEST(CalcFieldSizeTest, JsonDefaultPack) {
+  // metadata=0 defaults to pack_length=4, uses U32Le
+  uint8_t data[] = {0x05, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xF5, data, 0), 9u);  // 4 + 5
+}
+
+// --- CalcFieldSize for BLOB with pack_length 3, 4 ---
+
+TEST(CalcFieldSizeTest, BlobPack3) {
+  uint8_t data[] = {0x05, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xFC, data, 3), 8u);  // 3 + 5
+}
+
+TEST(CalcFieldSizeTest, BlobPack4) {
+  uint8_t data[] = {0x05, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
+  EXPECT_EQ(CalcFieldSize(0xFC, data, 4), 9u);  // 4 + 5
+}
+
+TEST(CalcFieldSizeTest, BlobUnsupportedPack) {
+  uint8_t data[8] = {};
+  EXPECT_EQ(CalcFieldSize(0xFC, data, 5), 0u);
+}
+
+// --- CalcFieldSize for GEOMETRY with various pack lengths ---
+
+TEST(CalcFieldSizeTest, GeometryPack1) {
+  uint8_t data[] = {0x05, 1, 2, 3, 4, 5};
+  EXPECT_EQ(CalcFieldSize(0xFF, data, 1), 6u);  // 1 + 5
+}
+
+TEST(CalcFieldSizeTest, GeometryPack2) {
+  uint8_t data[] = {0x05, 0x00, 1, 2, 3, 4, 5};
+  EXPECT_EQ(CalcFieldSize(0xFF, data, 2), 7u);  // 2 + 5
+}
+
+TEST(CalcFieldSizeTest, GeometryPack3) {
+  uint8_t data[] = {0x05, 0x00, 0x00, 1, 2, 3, 4, 5};
+  EXPECT_EQ(CalcFieldSize(0xFF, data, 3), 8u);  // 3 + 5
+}
+
+TEST(CalcFieldSizeTest, GeometryUnsupportedPack) {
+  uint8_t data[8] = {};
+  EXPECT_EQ(CalcFieldSize(0xFF, data, 5), 0u);
+}
+
+// --- DecodeDecimal with full 9-digit groups ---
+
+TEST(DecodeDecimalTest, LargeWithFullGroups) {
+  // DECIMAL(18,0): intg=18, intg0=2, intg_rem=0
+  // total = 0 + 2*4 = 8 bytes
+  uint8_t data[8];
+  // First 4-byte group: 123456789
+  uint32_t g1 = 123456789;
+  data[0] = (g1 >> 24) & 0xFF;
+  data[1] = (g1 >> 16) & 0xFF;
+  data[2] = (g1 >> 8) & 0xFF;
+  data[3] = g1 & 0xFF;
+  // Second 4-byte group: 12345678
+  uint32_t g2 = 12345678;
+  data[4] = (g2 >> 24) & 0xFF;
+  data[5] = (g2 >> 16) & 0xFF;
+  data[6] = (g2 >> 8) & 0xFF;
+  data[7] = g2 & 0xFF;
+  // Positive: XOR first byte with 0x80
+  data[0] ^= 0x80;
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, 18, 0, consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_EQ(result, "123456789012345678");
+}
+
+TEST(DecodeDecimalTest, WithFullFracGroup) {
+  // DECIMAL(11,9): intg=2, intg_rem=2, intg0=0
+  // frac0=1, frac_rem=0
+  // total = dig2bytes[2] + 0 + 1*4 + 0 = 1 + 4 = 5
+  uint8_t data[5];
+  data[0] = 12;  // intg_rem: value 12
+  // frac0 group: 123456789
+  uint32_t f1 = 123456789;
+  data[1] = (f1 >> 24) & 0xFF;
+  data[2] = (f1 >> 16) & 0xFF;
+  data[3] = (f1 >> 8) & 0xFF;
+  data[4] = f1 & 0xFF;
+  data[0] ^= 0x80;  // positive
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, 11, 9, consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result, "12.123456789");
+}
+
+TEST(DecodeDecimalTest, NegativeWithFraction) {
+  // DECIMAL(5,2) = "-1.50"
+  // intg=3, intg_rem=3, intg0=0, frac0=0, frac_rem=2
+  // dig2bytes[3]=2, dig2bytes[2]=1 => total 3
+  // Positive: XOR first byte with 0x80 => 0x80, 0x01, 0x32
+  // Negative: XOR all with 0xFF => 0x7F, 0xFE, 0xCD
+  uint8_t data[] = {0x7F, 0xFE, 0xCD};
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, 5, 2, consumed);
+  EXPECT_EQ(result, "-1.50");
+  EXPECT_EQ(consumed, 3u);
+}
+
+TEST(DecodeDecimalTest, ScaleOnly) {
+  // DECIMAL(2,2) = "0.99"
+  // intg=0, frac_rem=2
+  // total = dig2bytes[2] = 1
+  uint8_t data[] = {0x80 | 99};  // positive, value 99
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, 2, 2, consumed);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_EQ(result, "0.99");
+}
+
 }  // namespace
 }  // namespace mes::binary

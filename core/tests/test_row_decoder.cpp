@@ -810,5 +810,515 @@ TEST(DecodeWriteRowsTest, NullPointers) {
   EXPECT_FALSE(DecodeWriteRows(data, 10, metadata, true, nullptr));
 }
 
+// --- Insufficient data tests ---
+
+TEST(DecodeColumnValueTest, TinyInsufficientData) {
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kTiny, 0, false, nullptr, 0, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, ShortInsufficientData) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kShort, 0, false, data, 1, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, LongInsufficientData) {
+  uint8_t data[] = {0, 0, 0};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kLong, 0, false, data, 3, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, LongLongInsufficientData) {
+  uint8_t data[7] = {};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, false, data, 7, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, Int24InsufficientData) {
+  uint8_t data[] = {0, 0};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kInt24, 0, false, data, 2, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, FloatInsufficientData) {
+  uint8_t data[] = {0, 0, 0};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kFloat, 0, false, data, 3, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, DoubleInsufficientData) {
+  uint8_t data[7] = {};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, data, 7, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, YearInsufficientData) {
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kYear, 0, false, nullptr, 0, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, DateInsufficientData) {
+  uint8_t data[] = {0, 0};
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kDate, 0, false, data, 2, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+TEST(DecodeColumnValueTest, TimestampInsufficientData) {
+  uint8_t data[] = {0, 0, 0};
+  size_t consumed = 0;
+  auto val =
+      DecodeColumnValue(ColumnType::kTimestamp, 0, false, data, 3, &consumed);
+  EXPECT_TRUE(val.is_null);
+}
+
+// --- Timestamp test ---
+
+TEST(DecodeColumnValueTest, Timestamp) {
+  BinaryWriter w;
+  w.WriteU32Le(1710502245);
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, w.Data(),
+                               w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(val.int_val, 1710502245);
+}
+
+// --- Time test ---
+
+TEST(DecodeColumnValueTest, Time) {
+  // 10:30:45 = 103045
+  uint32_t val = 103045;
+  BinaryWriter w;
+  w.WriteU24Le(val);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.string_val, "10:30:45");
+}
+
+// --- Datetime test ---
+
+TEST(DecodeColumnValueTest, Datetime) {
+  // 20240315103045 = 2024-03-15 10:30:45
+  BinaryWriter w;
+  w.WriteU64Le(20240315103045ULL);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45");
+}
+
+// --- BLOB edge cases ---
+
+TEST(DecodeColumnValueTest, BlobPack3) {
+  BinaryWriter w;
+  w.WriteU24Le(3);
+  w.WriteString("abc");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kBlob, 3, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, BlobPackZeroDefaultsTo1) {
+  BinaryWriter w;
+  w.WriteU8(2);
+  w.WriteString("ab");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kBlob, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, BlobInvalidPackLength) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kBlob, 5, false, data, 1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- JSON edge cases ---
+
+TEST(DecodeColumnValueTest, JsonPack1) {
+  BinaryWriter w;
+  w.WriteU8(2);
+  w.WriteString("{}");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kJson, 1, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, JsonPack2) {
+  BinaryWriter w;
+  w.WriteU16Le(2);
+  w.WriteString("{}");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kJson, 2, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, JsonPack3) {
+  BinaryWriter w;
+  w.WriteU24Le(2);
+  w.WriteString("{}");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kJson, 3, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, JsonPackZeroDefaultsTo4) {
+  BinaryWriter w;
+  w.WriteU32Le(2);
+  w.WriteString("{}");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kJson, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, JsonInvalidPackLength) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kJson, 5, false, data, 1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- ENUM standalone tests ---
+
+TEST(DecodeColumnValueTest, Enum1Byte) {
+  uint8_t data[] = {3};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kEnum, 1, false, data, 1, &consumed);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_EQ(result.int_val, 3);
+}
+
+TEST(DecodeColumnValueTest, Enum2Byte) {
+  BinaryWriter w;
+  w.WriteU16Le(300);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kEnum, 2, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 2u);
+  EXPECT_EQ(result.int_val, 300);
+}
+
+TEST(DecodeColumnValueTest, EnumInvalidSize) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kEnum, 3, false, data, 1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- SET standalone tests ---
+
+TEST(DecodeColumnValueTest, Set1Byte) {
+  uint8_t data[] = {0x05};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kSet, 1, false, data, 1, &consumed);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_EQ(result.int_val, 5);
+}
+
+TEST(DecodeColumnValueTest, Set4Bytes) {
+  BinaryWriter w;
+  w.WriteU32Le(0x12345678);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kSet, 4, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.int_val, 0x12345678);
+}
+
+TEST(DecodeColumnValueTest, SetInvalidSize) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kSet, 0, false, data, 1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+TEST(DecodeColumnValueTest, SetSizeTooLarge) {
+  uint8_t data[9] = {};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kSet, 9, false, data, 9, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- GEOMETRY tests ---
+
+TEST(DecodeColumnValueTest, GeometryPack4) {
+  BinaryWriter w;
+  w.WriteU32Le(5);
+  uint8_t geo_data[] = {1, 2, 3, 4, 5};
+  w.WriteBytes(geo_data, 5);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 4, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 9u);
+  EXPECT_EQ(result.bytes_val.size(), 5u);
+}
+
+TEST(DecodeColumnValueTest, GeometryPack1) {
+  BinaryWriter w;
+  w.WriteU8(3);
+  uint8_t geo_data[] = {1, 2, 3};
+  w.WriteBytes(geo_data, 3);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 1, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, GeometryPack2) {
+  BinaryWriter w;
+  w.WriteU16Le(3);
+  uint8_t geo_data[] = {1, 2, 3};
+  w.WriteBytes(geo_data, 3);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 2, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, GeometryPack3) {
+  BinaryWriter w;
+  w.WriteU24Le(3);
+  uint8_t geo_data[] = {1, 2, 3};
+  w.WriteBytes(geo_data, 3);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 3, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, GeometryPackZeroDefaultsTo4) {
+  BinaryWriter w;
+  w.WriteU32Le(3);
+  uint8_t geo_data[] = {1, 2, 3};
+  w.WriteBytes(geo_data, 3);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 7u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, GeometryInvalidPackLength) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kGeometry, 5, false, data, 1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- Default case test ---
+
+TEST(DecodeColumnValueTest, UnknownType) {
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(static_cast<ColumnType>(0xFF), 0, false, data,
+                                  1, &consumed);
+  EXPECT_TRUE(result.is_null);
+}
+
+// --- VarString test ---
+
+TEST(DecodeColumnValueTest, VarStringShort) {
+  BinaryWriter w;
+  w.WriteU8(3);
+  w.WriteString("abc");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kVarString, 100, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.string_val, "abc");
+}
+
+// --- Datetime2 with fsp=1 and fsp=2 ---
+
+TEST(DecodeColumnValueTest, Datetime2WithFrac1) {
+  int64_t ym = 2024 * 13 + 3;
+  int64_t ymd = (ym << 5) | 15;
+  int64_t hms = (10LL << 12) | (30 << 6) | 45;
+  int64_t intpart = (ymd << 17) | hms;
+  int64_t packed = intpart + 0x8000000000LL;
+  BinaryWriter w;
+  w.WriteU8(static_cast<uint8_t>(packed >> 32));
+  w.WriteU8(static_cast<uint8_t>(packed >> 24));
+  w.WriteU8(static_cast<uint8_t>(packed >> 16));
+  w.WriteU8(static_cast<uint8_t>(packed >> 8));
+  w.WriteU8(static_cast<uint8_t>(packed));
+  // fsp=1: frac_bytes = 1, stored=50
+  // usec = (50/10)*100000 = 500000
+  w.WriteU8(50);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.500000");
+}
+
+TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
+  int64_t ym = 2024 * 13 + 3;
+  int64_t ymd = (ym << 5) | 15;
+  int64_t hms = (10LL << 12) | (30 << 6) | 45;
+  int64_t intpart = (ymd << 17) | hms;
+  int64_t packed = intpart + 0x8000000000LL;
+  BinaryWriter w;
+  w.WriteU8(static_cast<uint8_t>(packed >> 32));
+  w.WriteU8(static_cast<uint8_t>(packed >> 24));
+  w.WriteU8(static_cast<uint8_t>(packed >> 16));
+  w.WriteU8(static_cast<uint8_t>(packed >> 8));
+  w.WriteU8(static_cast<uint8_t>(packed));
+  // fsp=2: frac_bytes = 1, stored=12
+  // usec = 12 * 10000 = 120000
+  w.WriteU8(12);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.120000");
+}
+
+// --- Timestamp2 with fsp=1 and fsp=4 ---
+
+TEST(DecodeColumnValueTest, Timestamp2WithFrac1) {
+  BinaryWriter w;
+  w.WriteU32Be(1710502245);
+  w.WriteU8(50);  // fsp=1: (50/10)*100000 = 500000
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 1, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result.string_val, "1710502245.500000");
+}
+
+TEST(DecodeColumnValueTest, Timestamp2WithFrac4) {
+  BinaryWriter w;
+  w.WriteU32Be(1710502245);
+  w.WriteU16Be(1234);  // fsp=4: 1234 * 100 = 123400
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 4, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.string_val, "1710502245.123400");
+}
+
+// --- DecodeWriteRows V1 test ---
+
+TEST(DecodeWriteRowsTest, V1Format) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(1);
+  metadata.columns[0].type = ColumnType::kLong;
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  // V1: no var_header
+  w.WriteU8(1);
+  w.WriteU8(0x01);
+  w.WriteU8(0x00);
+  w.WriteU32Le(42);
+  std::vector<RowData> rows;
+  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, false, &rows));
+  ASSERT_EQ(rows.size(), 1u);
+  EXPECT_EQ(rows[0].columns[0].int_val, 42);
+}
+
+// --- DecodeWriteRows error - too short ---
+
+TEST(DecodeWriteRowsTest, TooShort) {
+  TableMetadata metadata;
+  uint8_t data[4] = {};
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(data, 4, metadata, true, &rows));
+}
+
+// --- DecodeUpdateRows null pointers and V1 ---
+
+TEST(DecodeUpdateRowsTest, NullPointers) {
+  TableMetadata metadata;
+  std::vector<UpdatePair> pairs;
+  EXPECT_FALSE(DecodeUpdateRows(nullptr, 10, metadata, true, &pairs));
+  uint8_t data[10] = {};
+  EXPECT_FALSE(DecodeUpdateRows(data, 10, metadata, true, nullptr));
+}
+
+// --- DecodeDeleteRows null pointers ---
+
+TEST(DecodeDeleteRowsTest, NullPointers) {
+  TableMetadata metadata;
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeDeleteRows(nullptr, 10, metadata, true, &rows));
+  uint8_t data[10] = {};
+  EXPECT_FALSE(DecodeDeleteRows(data, 10, metadata, true, nullptr));
+}
+
+// --- TinyBlob, MediumBlob, LongBlob tests ---
+
+TEST(DecodeColumnValueTest, TinyBlobPack1) {
+  BinaryWriter w;
+  w.WriteU8(2);
+  w.WriteString("ab");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTinyBlob, 1, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.bytes_val.size(), 2u);
+}
+
+TEST(DecodeColumnValueTest, MediumBlobPack3) {
+  BinaryWriter w;
+  w.WriteU24Le(3);
+  w.WriteString("abc");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kMediumBlob, 3, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_EQ(result.bytes_val.size(), 3u);
+}
+
+TEST(DecodeColumnValueTest, LongBlobPack4) {
+  BinaryWriter w;
+  w.WriteU32Le(4);
+  w.WriteString("abcd");
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kLongBlob, 4, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_EQ(result.bytes_val.size(), 4u);
+}
+
 }  // namespace
 }  // namespace mes

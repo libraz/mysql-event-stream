@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "event_header.h"
@@ -293,6 +294,111 @@ TEST(CApi, MultipleEvents) {
   EXPECT_EQ(event->after_columns[0].int_val, 20);
 
   EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+
+  mes_destroy(engine);
+}
+
+// --- ConvertColumn coverage tests ---
+
+TEST(CapiTest, FloatColumn) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  // Build TABLE_MAP with FLOAT column
+  mes::test::EventBuilder tb;
+  tb.WriteU48Le(42);
+  tb.WriteU16Le(0);
+  tb.WriteU8(2);
+  tb.WriteString("db");
+  tb.WriteU8(0);
+  tb.WriteU8(1);
+  tb.WriteString("t");
+  tb.WriteU8(0);
+  tb.WriteU8(1);      // 1 column
+  tb.WriteU8(0x04);   // FLOAT
+  tb.WriteU8(1);      // metadata length
+  tb.WriteU8(4);      // float size
+  tb.WriteU8(0x01);   // null bitmap
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent),
+                             1000, 100, tb.Data());
+
+  // Build WRITE_ROWS with float value
+  mes::test::EventBuilder rb;
+  rb.WriteU48Le(42);
+  rb.WriteU16Le(0);
+  rb.WriteU16Le(2);
+  rb.WriteU8(1);
+  rb.WriteU8(0x01);
+  rb.WriteU8(0x00);
+  float fval = 3.14f;
+  uint8_t fbytes[4];
+  memcpy(fbytes, &fval, 4);
+  rb.WriteBytes(std::vector<uint8_t>(fbytes, fbytes + 4));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent),
+                             1000, 200, rb.Data());
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed = 0;
+  mes_feed(engine, stream.data(), stream.size(), &consumed);
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event, nullptr);
+  ASSERT_GE(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].type, MES_COL_DOUBLE);
+  EXPECT_NEAR(event->after_columns[0].double_val, 3.14, 0.01);
+
+  mes_destroy(engine);
+}
+
+TEST(CapiTest, BlobColumn) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  mes::test::EventBuilder tb;
+  tb.WriteU48Le(42);
+  tb.WriteU16Le(0);
+  tb.WriteU8(2);
+  tb.WriteString("db");
+  tb.WriteU8(0);
+  tb.WriteU8(1);
+  tb.WriteString("t");
+  tb.WriteU8(0);
+  tb.WriteU8(1);
+  tb.WriteU8(0xFC);   // BLOB
+  tb.WriteU8(1);      // metadata length
+  tb.WriteU8(1);      // pack_length = 1
+  tb.WriteU8(0x01);
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent),
+                             1000, 100, tb.Data());
+
+  mes::test::EventBuilder rb;
+  rb.WriteU48Le(42);
+  rb.WriteU16Le(0);
+  rb.WriteU16Le(2);
+  rb.WriteU8(1);
+  rb.WriteU8(0x01);
+  rb.WriteU8(0x00);
+  rb.WriteU8(3);  // blob length
+  rb.WriteBytes(std::vector<uint8_t>({0xDE, 0xAD, 0xBE}));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent),
+                             1000, 200, rb.Data());
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed = 0;
+  mes_feed(engine, stream.data(), stream.size(), &consumed);
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_GE(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].type, MES_COL_BYTES);
+  EXPECT_EQ(event->after_columns[0].str_len, 3u);
 
   mes_destroy(engine);
 }

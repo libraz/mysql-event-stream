@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include "test_helpers.h"
+
 namespace mes {
 namespace {
 
@@ -240,6 +242,63 @@ TEST(StateMachineTest, RawDataMatchesInput) {
 
   EXPECT_EQ(parser.RawSize(), event.size());
   EXPECT_EQ(std::memcmp(parser.RawData(), event.data(), event.size()), 0);
+}
+
+TEST(StateMachineTest, HeaderParseFailure) {
+  EventStreamParser parser;
+  // Feed garbage that looks like a header but has impossible values
+  // Event length of 0 (less than header + checksum = 23)
+  uint8_t bad_header[19];
+  memset(bad_header, 0, sizeof(bad_header));
+  // Set event_length to a too-small value (e.g., 10)
+  bad_header[9] = 10;   // event_length LE byte 0
+  bad_header[10] = 0;
+  bad_header[11] = 0;
+  bad_header[12] = 0;
+  size_t consumed = parser.Feed(bad_header, 19);
+  EXPECT_EQ(consumed, 19u);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+}
+
+TEST(StateMachineTest, FeedWhileReady) {
+  EventStreamParser parser;
+  // Build a valid tiny event
+  auto event = test::BuildEvent(0x04, 1000, 100, {});
+  parser.Feed(event.data(), event.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
+  // Feed again while ready should return 0
+  uint8_t more[] = {1, 2, 3};
+  EXPECT_EQ(parser.Feed(more, 3), 0u);
+}
+
+TEST(StateMachineTest, FeedWhileError) {
+  EventStreamParser parser;
+  // Cause error
+  uint8_t bad_header[19] = {};
+  bad_header[9] = 10;
+  parser.Feed(bad_header, 19);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  // Feed again while error should return 0
+  uint8_t more[] = {1, 2, 3};
+  EXPECT_EQ(parser.Feed(more, 3), 0u);
+}
+
+TEST(StateMachineTest, CurrentBodyAndRawData) {
+  EventStreamParser parser;
+  std::vector<uint8_t> body = {0xAA, 0xBB, 0xCC};
+  auto event = test::BuildEvent(0x04, 1000, 100, body);
+  parser.Feed(event.data(), event.size());
+  EXPECT_TRUE(parser.HasEvent());
+
+  const uint8_t* body_data = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_data, &body_len);
+  EXPECT_NE(body_data, nullptr);
+  EXPECT_EQ(body_len, 3u);
+  EXPECT_EQ(body_data[0], 0xAA);
+
+  EXPECT_EQ(parser.RawSize(), event.size());
+  EXPECT_NE(parser.RawData(), nullptr);
 }
 
 }  // namespace
