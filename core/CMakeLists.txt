@@ -165,6 +165,14 @@ else()
     "Install: brew install mysql-client@8.4 (macOS) or apt install libmysqlclient-dev (Linux)")
 endif()
 
+# Install
+include(GNUInstallDirs)
+install(TARGETS mes-shared
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES include/mes.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
 # Tests
 enable_testing()
 add_subdirectory(tests)

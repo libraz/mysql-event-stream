@@ -2,7 +2,6 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
 [![codecov](https://codecov.io/gh/libraz/mysql-event-stream/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mysql-event-stream)
-[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 
@@ -134,24 +133,40 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Column Names** - Automatic column name resolution via metadata queries
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 
-## Building
+## Installation
 
 ### Prerequisites
 
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
-- Node.js 22+ and Yarn (for Node.js binding)
-- Python 3.11+ (for Python binding)
+- MySQL client library (`libmysqlclient`)
+
+```bash
+# macOS
+brew install cmake mysql-client@8.4
+
+# Ubuntu / Debian
+sudo apt install cmake build-essential libmysqlclient-dev pkg-config
+
+# Clone
+git clone https://github.com/libraz/mysql-event-stream.git
+cd mysql-event-stream
+```
 
 ### C++ Core
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-cd build && ctest --output-on-failure
+make build
+make test
+
+# Optional: install libmes and mes.h for C/C++ projects
+sudo make install
+sudo make uninstall
 ```
 
 ### Node.js Binding
+
+Requires Node.js 22+ and Yarn.
 
 ```bash
 cd bindings/node
@@ -162,8 +177,16 @@ yarn test
 
 ### Python Binding
 
+Requires Python 3.11+.
+
 ```bash
 cd bindings/python
+
+# With Rye
+rye sync
+rye run pytest
+
+# With pip
 pip install -e ".[dev]"
 pytest
 ```

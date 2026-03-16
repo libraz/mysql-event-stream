@@ -2,7 +2,6 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
 [![codecov](https://codecov.io/gh/libraz/mysql-event-stream/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mysql-event-stream)
-[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 
@@ -134,24 +133,40 @@ mes_destroy(engine);
 - **カラム名解決** - メタデータクエリによる自動カラム名解決
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 
-## ビルド
+## インストール
 
 ### 前提条件
 
 - CMake 3.20+
 - C++17 コンパイラ (GCC 9+ または Clang 10+)
-- Node.js 22+ および Yarn (Node.js バインディング用)
-- Python 3.11+ (Python バインディング用)
+- MySQL クライアントライブラリ (`libmysqlclient`)
+
+```bash
+# macOS
+brew install cmake mysql-client@8.4
+
+# Ubuntu / Debian
+sudo apt install cmake build-essential libmysqlclient-dev pkg-config
+
+# クローン
+git clone https://github.com/libraz/mysql-event-stream.git
+cd mysql-event-stream
+```
 
 ### C++ コア
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-cd build && ctest --output-on-failure
+make build
+make test
+
+# オプション: C/C++ プロジェクトから利用する場合
+sudo make install
+sudo make uninstall
 ```
 
 ### Node.js バインディング
+
+Node.js 22+ および Yarn が必要です。
 
 ```bash
 cd bindings/node
@@ -162,8 +177,16 @@ yarn test
 
 ### Python バインディング
 
+Python 3.11+ が必要です。
+
 ```bash
 cd bindings/python
+
+# Rye の場合
+rye sync
+rye run pytest
+
+# pip の場合
 pip install -e ".[dev]"
 pytest
 ```

@@ -1,8 +1,6 @@
-# @libraz/mysql-event-stream
+# mysql-event-stream — Node.js Binding
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
-[![codecov](https://codecov.io/gh/libraz/mysql-event-stream/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mysql-event-stream)
-[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 
 A lightweight MySQL 8.4 CDC (Change Data Capture) engine for Node.js. Parses binlog replication streams and emits structured row-level change events (INSERT / UPDATE / DELETE).
@@ -12,17 +10,26 @@ Built as a native N-API addon on a C++ core for high throughput and low latency.
 ## Install
 
 ```bash
-npm install @libraz/mysql-event-stream
-```
+# Prerequisites
+# macOS
+brew install cmake mysql-client@8.4
 
-> Requires Node.js 22+, CMake 3.20+, and a C++17 compiler. The native addon is compiled on install.
+# Ubuntu / Debian
+sudo apt install cmake build-essential libmysqlclient-dev pkg-config
+
+# Clone and build
+git clone https://github.com/libraz/mysql-event-stream.git
+cd mysql-event-stream/bindings/node
+yarn install
+yarn build
+```
 
 ## Usage
 
 ```typescript
-import { MesEngine } from "@libraz/mysql-event-stream";
+import { CdcEngine } from "@libraz/mysql-event-stream";
 
-const engine = new MesEngine();
+const engine = new CdcEngine();
 
 // Feed raw binlog bytes from your replication stream
 engine.feed(binlogChunk);
@@ -53,13 +60,12 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 
 ## Features
 
-- **Native performance** - C++ core with N-API binding, >100k events/sec
-- **Streaming** - Process events incrementally as bytes arrive
-- **MySQL 8.4** - Built for the latest MySQL LTS release
-- **GTID support** - Native BinlogClient with GTID-based replication
-- **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
-- **Column names** - Automatic column name resolution via metadata queries
-- **Dict-based** - Row data as `Record<string, unknown>` for intuitive access
+- **Native performance** — C++ core with N-API binding, >100k events/sec
+- **Streaming** — Process events incrementally as bytes arrive
+- **MySQL 8.4** — Built for the latest MySQL LTS release
+- **GTID support** — Native BinlogClient with GTID-based replication
+- **Row-level events** — Full before/after column values for INSERT, UPDATE, DELETE
+- **Column names** — Automatic column name resolution via metadata queries
 
 ## MySQL Requirements
 
