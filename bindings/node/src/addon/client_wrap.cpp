@@ -72,6 +72,7 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&ClientWrap::Connect>("connect"),
           InstanceMethod<&ClientWrap::Start>("start"),
           InstanceMethod<&ClientWrap::Poll>("poll"),
+          InstanceMethod<&ClientWrap::Stop>("stop"),
           InstanceMethod<&ClientWrap::Disconnect>("disconnect"),
           InstanceMethod<&ClientWrap::Destroy>("destroy"),
           InstanceAccessor<&ClientWrap::GetIsConnected>("isConnected"),
@@ -154,6 +155,24 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
         config.Get("readTimeoutS").As<Napi::Number>().Uint32Value();
   }
 
+  uint32_t ssl_mode = 0;
+  std::string ssl_ca;
+  std::string ssl_cert;
+  std::string ssl_key;
+
+  if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
+    ssl_mode = config.Get("sslMode").As<Napi::Number>().Uint32Value();
+  }
+  if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
+    ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();
+  }
+  if (config.Has("sslCert") && config.Get("sslCert").IsString()) {
+    ssl_cert = config.Get("sslCert").As<Napi::String>().Utf8Value();
+  }
+  if (config.Has("sslKey") && config.Get("sslKey").IsString()) {
+    ssl_key = config.Get("sslKey").As<Napi::String>().Utf8Value();
+  }
+
   mes_client_config_t c_config{};
   c_config.host = host.c_str();
   c_config.port = port;
@@ -163,6 +182,10 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   c_config.start_gtid = start_gtid.c_str();
   c_config.connect_timeout_s = connect_timeout_s;
   c_config.read_timeout_s = read_timeout_s;
+  c_config.ssl_mode = ssl_mode;
+  c_config.ssl_ca = ssl_ca.empty() ? nullptr : ssl_ca.c_str();
+  c_config.ssl_cert = ssl_cert.empty() ? nullptr : ssl_cert.c_str();
+  c_config.ssl_key = ssl_key.empty() ? nullptr : ssl_key.c_str();
 
   mes_error_t err = mes_client_connect(client_, &c_config);
   if (err != MES_OK) {
@@ -205,6 +228,12 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   auto* worker = new PollWorker(env, client_, deferred);
   worker->Queue();
   return deferred.Promise();
+}
+
+void ClientWrap::Stop(const Napi::CallbackInfo& info) {
+  if (client_) {
+    mes_client_stop(client_);
+  }
 }
 
 void ClientWrap::Disconnect(const Napi::CallbackInfo& info) {

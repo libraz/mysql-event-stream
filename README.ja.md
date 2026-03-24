@@ -132,6 +132,83 @@ mes_destroy(engine);
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
 - **カラム名解決** - メタデータクエリによる自動カラム名解決
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
+- **SSL/TLS** - MySQL 接続の SSL/TLS 暗号化をフルサポート
+- **自動再接続** - 接続断時のリニアバックオフ付き自動再接続
+- **バックプレッシャー** - メモリ枯渇を防ぐイベントキューサイズ制御
+- **テーブルフィルタリング** - データベース/テーブル単位のインクルード/エクスクルードフィルタ
+- **構造化ログ** - コールバックベースの構造化ログ (event=name key=value 形式)
+- **グレースフルシャットダウン** - `stop()` によるスレッドセーフなストリーム停止
+
+## 設定
+
+### SSL/TLS
+
+```typescript
+// Node.js
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  sslMode: 2,  // 0=無効, 1=優先, 2=必須, 3=CA検証, 4=サーバー検証
+  sslCa: "/path/to/ca.pem",
+});
+```
+
+```python
+# Python
+stream = CdcStream(
+    host="mysql.example.com",
+    user="replicator",
+    password="secret",
+    ssl_mode=2,
+    ssl_ca="/path/to/ca.pem",
+)
+```
+
+### テーブルフィルタリング
+
+```typescript
+// Node.js - 特定のテーブルのイベントのみ処理
+const engine = new CdcEngine();
+engine.setIncludeDatabases(["mydb"]);
+engine.setExcludeTables(["mydb.audit_log"]);
+```
+
+```python
+# Python
+engine = CdcEngine()
+engine.set_include_databases(["mydb"])
+engine.set_exclude_tables(["mydb.audit_log"])
+```
+
+### バックプレッシャー制御
+
+```typescript
+// メモリ枯渇を防ぐためイベントキューサイズを制限
+engine.setMaxQueueSize(10000);
+```
+
+### ログ
+
+```c
+// C API - 構造化ログコールバック
+void my_log(mes_log_level_t level, const char* message, void* userdata) {
+    fprintf(stderr, "[%d] %s\n", level, message);
+    // 出力: [2] event=mysql_connected host=127.0.0.1 port=3306
+}
+mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
+```
+
+### 自動再接続
+
+```typescript
+// Node.js - リニアバックオフ付き自動再接続 (1秒, 2秒, ... 最大10秒)
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  maxReconnectAttempts: 10,  // デフォルト: 10, 0 = 無効
+});
+```
 
 ## インストール
 

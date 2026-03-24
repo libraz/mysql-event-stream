@@ -9,6 +9,14 @@
  * a mysql-event-stream CDC engine instance. It is safe to include from both C and C++.
  */
 
+/**
+ * @note Thread safety: CdcEngine (mes_engine_t) instances are NOT thread-safe.
+ * All calls to a single engine instance must be serialized by the caller.
+ * Different engine instances may be used concurrently from different threads.
+ * BinlogClient (mes_client_t) is NOT thread-safe except for mes_client_stop(),
+ * which may be called from any thread to interrupt a blocking mes_client_poll().
+ */
+
 #ifndef MES_H_
 #define MES_H_
 
@@ -36,17 +44,45 @@ typedef struct mes_engine mes_engine_t;
 /* ---- Error codes ---- */
 typedef enum {
   MES_OK = 0,
+  /* General errors (1-99) */
   MES_ERR_NULL_ARG = 1,
   MES_ERR_INVALID_ARG = 2,
   MES_ERR_INTERNAL = 99,
+  /* Parse errors (100-199) */
   MES_ERR_PARSE = 100,
+  /* Decode errors (200-299) */
+  MES_ERR_DECODE = 200,         /**< General decode error */
+  MES_ERR_DECODE_COLUMN = 201,  /**< Column value decode error */
+  MES_ERR_DECODE_ROW = 202,     /**< Row data decode error */
+  /* State errors (300-399) */
   MES_ERR_NO_EVENT = 300,
+  MES_ERR_QUEUE_FULL = 301,
+  /* Connection errors (400-499) */
   MES_ERR_CONNECT = 400,
   MES_ERR_AUTH = 401,
   MES_ERR_VALIDATION = 402,
   MES_ERR_STREAM = 403,
   MES_ERR_DISCONNECTED = 404,
 } mes_error_t;
+
+/* ---- Log levels ---- */
+typedef enum {
+  MES_LOG_ERROR = 0,
+  MES_LOG_WARN = 1,
+  MES_LOG_INFO = 2,
+  MES_LOG_DEBUG = 3,
+} mes_log_level_t;
+
+/** @brief Log callback function type.
+ *  @param level Log level.
+ *  @param message Log message (null-terminated).
+ *  @param userdata User-provided context pointer.
+ */
+typedef void (*mes_log_callback_t)(mes_log_level_t level, const char* message, void* userdata);
+
+/** @brief Set log callback and minimum log level. Pass NULL to disable logging. */
+MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
+                                  void* userdata);
 
 /* ---- Event types ---- */
 typedef enum {
@@ -141,12 +177,62 @@ MES_API int mes_has_events(mes_engine_t* engine);
 MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* offset);
 
 /**
+ * @brief Set maximum event queue size for backpressure control.
+ *
+ * When the queue reaches this limit, mes_feed() will stop consuming
+ * bytes early. The caller should drain events via mes_next_event()
+ * then re-feed the remaining data.
+ *
+ * @param engine Engine handle.
+ * @param max_size Maximum queue size. 0 means unlimited (default).
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size);
+
+/**
  * @brief Reset the engine, clearing all state.
  *
  * @param engine Engine handle.
  * @return MES_OK on success.
  */
 MES_API mes_error_t mes_reset(mes_engine_t* engine);
+
+/* ---- Table filtering ---- */
+
+/**
+ * @brief Set database include filter. Only events from these databases are processed.
+ *
+ * @param engine    Engine handle.
+ * @param databases Array of database name strings.
+ * @param count     Number of entries in the array. 0 clears the filter (all databases).
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,
+                                              size_t count);
+
+/**
+ * @brief Set table include filter. Only events from these tables are processed.
+ *
+ * Each entry is "database.table" or just "table" (matches any database).
+ *
+ * @param engine Engine handle.
+ * @param tables Array of table name strings.
+ * @param count  Number of entries. 0 clears the filter (all tables).
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables, size_t count);
+
+/**
+ * @brief Set table exclude filter. Events from these tables are skipped.
+ *
+ * Each entry is "database.table" or just "table" (matches any database).
+ *
+ * @param engine Engine handle.
+ * @param tables Array of table name strings.
+ * @param count  Number of entries. 0 clears the filter.
+ * @return MES_OK on success.
+ */
+MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count);
 
 /* ---- BinlogClient API (native only) ---- */
 #if defined(MES_HAS_MYSQL)
@@ -162,6 +248,12 @@ typedef struct {
   const char* start_gtid;
   uint32_t connect_timeout_s;
   uint32_t read_timeout_s;
+  /* SSL/TLS options */
+  uint32_t ssl_mode;  /**< 0=disabled, 1=preferred, 2=required, 3=verify_ca,
+                           4=verify_identity */
+  const char* ssl_ca;   /**< Path to CA certificate file (NULL to skip) */
+  const char* ssl_cert; /**< Path to client certificate file (NULL to skip) */
+  const char* ssl_key;  /**< Path to client private key file (NULL to skip) */
 } mes_client_config_t;
 
 typedef struct {
@@ -185,6 +277,9 @@ MES_API mes_error_t mes_client_start(mes_client_t* client);
 
 /** @brief Poll for next binlog event (blocking). */
 MES_API mes_poll_result_t mes_client_poll(mes_client_t* client);
+
+/** @brief Request stop of a streaming client. Thread-safe. */
+MES_API void mes_client_stop(mes_client_t* client);
 
 /** @brief Disconnect from MySQL server. */
 MES_API void mes_client_disconnect(mes_client_t* client);

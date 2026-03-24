@@ -13,6 +13,7 @@
 
 #include <mysql.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -33,6 +34,11 @@ struct BinlogClientConfig {
   std::string start_gtid;  // Empty = start from current position
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
+  uint32_t ssl_mode = 0;  // 0=disabled, 1=preferred, 2=required, 3=verify_ca,
+                           // 4=verify_identity
+  std::string ssl_ca;      // Path to CA certificate file
+  std::string ssl_cert;    // Path to client certificate file
+  std::string ssl_key;     // Path to client private key file
 };
 
 /**
@@ -95,6 +101,9 @@ class BinlogClient {
    */
   PollResult Poll();
 
+  /** @brief Request stream stop from any thread. Unblocks a pending Poll(). */
+  void Stop();
+
   /** @brief Disconnect from MySQL server */
   void Disconnect();
 
@@ -115,6 +124,7 @@ class BinlogClient {
   std::string current_gtid_;
   std::string last_error_;
   bool streaming_ = false;
+  std::atomic<bool> stop_requested_{false};
 
   /** @brief MYSQL_RPL callback to copy GTID data */
   static void FixGtidSetCallback(MYSQL_RPL* rpl,

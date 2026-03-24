@@ -4,6 +4,7 @@
 #include "cdc_engine.h"
 
 #include "binary_util.h"
+#include "logger.h"
 #include "rotate_event.h"
 
 #ifdef MES_HAS_MYSQL
@@ -22,6 +23,11 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
   size_t total_consumed = 0;
 
   while (total_consumed < len) {
+    // Stop feeding if queue is full (backpressure)
+    if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
+      break;
+    }
+
     size_t consumed = stream_parser_.Feed(data + total_consumed, len - total_consumed);
     if (consumed == 0 && !stream_parser_.HasEvent()) {
       break;
@@ -41,6 +47,8 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
   return total_consumed;
 }
 
+void CdcEngine::SetMaxQueueSize(size_t max_size) { max_queue_size_ = max_size; }
+
 bool CdcEngine::NextEvent(ChangeEvent* event) {
   if (event_queue_.empty() || event == nullptr) {
     return false;
@@ -58,12 +66,57 @@ void CdcEngine::Reset() {
   stream_parser_.Reset();
   table_registry_.Clear();
   position_ = BinlogPosition{};
+  blocked_table_ids_.clear();
   // Clear the queue
   std::queue<ChangeEvent> empty;
   event_queue_.swap(empty);
 }
 
 size_t CdcEngine::PendingEventCount() const { return event_queue_.size(); }
+
+bool CdcEngine::IsError() const {
+  if (stream_parser_.GetState() == ParserState::kError) {
+    StructuredLog().Event("engine_error").Field("state", "parser_error").Error();
+    return true;
+  }
+  return false;
+}
+
+void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
+  include_databases_ = std::set<std::string>(databases.begin(), databases.end());
+}
+
+void CdcEngine::SetIncludeTables(const std::vector<std::string>& tables) {
+  include_tables_ = std::set<std::string>(tables.begin(), tables.end());
+}
+
+void CdcEngine::SetExcludeTables(const std::vector<std::string>& tables) {
+  exclude_tables_ = std::set<std::string>(tables.begin(), tables.end());
+}
+
+bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& table) const {
+  // Check database filter
+  if (!include_databases_.empty() &&
+      include_databases_.find(database) == include_databases_.end()) {
+    return false;
+  }
+
+  std::string qualified = database + "." + table;
+
+  // Check exclude filter
+  if (exclude_tables_.find(qualified) != exclude_tables_.end() ||
+      exclude_tables_.find(table) != exclude_tables_.end()) {
+    return false;
+  }
+
+  // Check include filter
+  if (!include_tables_.empty()) {
+    return include_tables_.find(qualified) != include_tables_.end() ||
+           include_tables_.find(table) != include_tables_.end();
+  }
+
+  return true;
+}
 
 #ifdef MES_HAS_MYSQL
 void CdcEngine::SetMetadataFetcher(MetadataFetcher* fetcher) { metadata_fetcher_ = fetcher; }
@@ -76,12 +129,18 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
   }
 
   switch (header.type_code) {
-    case static_cast<uint8_t>(BinlogEventType::kTableMapEvent):
+    case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
       table_registry_.ProcessTableMapEvent(body, body_len);
+      uint64_t table_id = binary::ReadU48Le(body);
+      auto* meta = table_registry_.MutableLookup(table_id);
+      if (meta) {
+        if (!IsTableAllowed(meta->database_name, meta->table_name)) {
+          blocked_table_ids_.insert(table_id);
+          break;
+        }
+        blocked_table_ids_.erase(table_id);
 #ifdef MES_HAS_MYSQL
-      if (metadata_fetcher_) {
-        auto* meta = table_registry_.MutableLookup(binary::ReadU48Le(body));
-        if (meta && !meta->columns.empty() && meta->columns[0].name.empty()) {
+        if (metadata_fetcher_ && !meta->columns.empty() && meta->columns[0].name.empty()) {
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
@@ -89,9 +148,10 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             meta->columns[i].is_unsigned = infos[i].is_unsigned;
           }
         }
-      }
 #endif
+      }
       break;
+    }
 
     case static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent):
     case static_cast<uint8_t>(BinlogEventType::kWriteRowsEventV1):
@@ -107,6 +167,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       if (ParseRotateEvent(body, body_len, &rot)) {
         position_.binlog_file = std::move(rot.new_log_file);
         position_.offset = rot.position;
+        StructuredLog().Event("binlog_rotate").Field("file", position_.binlog_file).Debug();
       }
       break;
     }
@@ -122,6 +183,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
 
   // Extract table_id from the first 6 bytes of the body
   uint64_t table_id = binary::ReadU48Le(body);
+  if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const TableMetadata* meta = table_registry_.Lookup(table_id);
   if (meta == nullptr) return;
 

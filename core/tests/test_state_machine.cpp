@@ -301,5 +301,69 @@ TEST(StateMachineTest, CurrentBodyAndRawData) {
   EXPECT_NE(parser.RawData(), nullptr);
 }
 
+// --- Error recovery tests ---
+
+TEST(StateMachineTest, ErrorRecoveryViaResetThenFeedValid) {
+  EventStreamParser parser;
+
+  // Feed invalid header to trigger kError
+  uint8_t bad_header[kEventHeaderSize];
+  memset(bad_header, 0, sizeof(bad_header));
+  bad_header[4] = 30;   // type_code
+  bad_header[9] = 5;    // event_length too small (< 23)
+  parser.Feed(bad_header, kEventHeaderSize);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+
+  // Reset should recover
+  parser.Reset();
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+
+  // Feed valid data and verify it processes correctly
+  std::vector<uint8_t> body = {0xAA, 0xBB, 0xCC};
+  auto event = BuildEvent(30, body);
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
+  EXPECT_EQ(parser.CurrentHeader().type_code, 30);
+
+  const uint8_t* body_data = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_data, &body_len);
+  ASSERT_NE(body_data, nullptr);
+  EXPECT_EQ(body_len, 3u);
+  EXPECT_EQ(body_data[0], 0xAA);
+}
+
+TEST(StateMachineTest, PartialHeaderThenInvalidLength) {
+  EventStreamParser parser;
+
+  // Build a header manually where the first 10 bytes are valid-looking
+  // but the full 19 bytes reveal an invalid event_length
+  uint8_t header[kEventHeaderSize];
+  memset(header, 0, sizeof(header));
+  header[0] = 0xE8;  // timestamp byte 0
+  header[1] = 0x03;  // timestamp byte 1
+  header[4] = 30;    // type_code
+  header[5] = 0x01;  // server_id
+  // event_length = 10 (invalid: < 23)
+  header[9] = 10;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+
+  // Feed partial header (10 bytes)
+  size_t consumed = parser.Feed(header, 10);
+  EXPECT_EQ(consumed, 10u);
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+  EXPECT_FALSE(parser.HasEvent());
+
+  // Feed remaining 9 bytes to complete the invalid header
+  consumed = parser.Feed(header + 10, kEventHeaderSize - 10);
+  EXPECT_EQ(consumed, kEventHeaderSize - 10);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_FALSE(parser.HasEvent());
+}
+
 }  // namespace
 }  // namespace mes

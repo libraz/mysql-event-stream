@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <queue>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "event_header.h"
@@ -72,6 +74,23 @@ class CdcEngine {
   /** @brief Get number of pending events in queue. */
   size_t PendingEventCount() const;
 
+  /** @brief Set maximum event queue size. 0 means unlimited. */
+  void SetMaxQueueSize(size_t max_size);
+
+  /** @brief Check if the engine is in an error state (e.g., parse error). */
+  bool IsError() const;
+
+  /** @brief Set database filter. Only events from these databases are processed. Empty = all. */
+  void SetIncludeDatabases(const std::vector<std::string>& databases);
+
+  /** @brief Set table include filter. Only events from these tables are processed. Empty = all.
+   *  Format: "database.table" or just "table" (matches any database). */
+  void SetIncludeTables(const std::vector<std::string>& tables);
+
+  /** @brief Set table exclude filter. Events from these tables are skipped.
+   *  Format: "database.table" or just "table" (matches any database). */
+  void SetExcludeTables(const std::vector<std::string>& tables);
+
 #ifdef MES_HAS_MYSQL
   /** @brief Set metadata fetcher for column name resolution */
   void SetMetadataFetcher(MetadataFetcher* fetcher);
@@ -85,6 +104,14 @@ class CdcEngine {
   TableMapRegistry table_registry_;
   BinlogPosition position_;
   std::queue<ChangeEvent> event_queue_;
+  size_t max_queue_size_ = 0;
+
+  bool IsTableAllowed(const std::string& database, const std::string& table) const;
+
+  std::set<std::string> include_databases_;
+  std::set<std::string> include_tables_;
+  std::set<std::string> exclude_tables_;
+  std::set<uint64_t> blocked_table_ids_;
 
 #ifdef MES_HAS_MYSQL
   MetadataFetcher* metadata_fetcher_ = nullptr;

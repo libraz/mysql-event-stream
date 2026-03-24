@@ -43,6 +43,16 @@ export interface ClientConfig {
   startGtid?: string;
   connectTimeoutS?: number;
   readTimeoutS?: number;
+  /** SSL mode: 0=disabled, 1=preferred, 2=required, 3=verify_ca, 4=verify_identity */
+  sslMode?: number;
+  /** Path to CA certificate file. */
+  sslCa?: string;
+  /** Path to client certificate file. */
+  sslCert?: string;
+  /** Path to client private key file. */
+  sslKey?: string;
+  /** Maximum number of automatic reconnection attempts (default 10, 0 = disabled). */
+  maxReconnectAttempts?: number;
 }
 
 /** Result from a BinlogClient poll() call. */

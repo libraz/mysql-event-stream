@@ -89,7 +89,23 @@ class ChangeEvent:
 
 @dataclass(frozen=True, slots=True)
 class ClientConfig:
-    """Configuration for BinlogClient."""
+    """Configuration for BinlogClient.
+
+    Attributes:
+        host: MySQL host.
+        port: MySQL port.
+        user: MySQL user.
+        password: MySQL password.
+        server_id: Unique replica server ID.
+        start_gtid: GTID to start from (empty = current position).
+        connect_timeout_s: Connection timeout in seconds.
+        read_timeout_s: Read timeout in seconds.
+        ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
+            3=verify_ca, 4=verify_identity).
+        ssl_ca: Path to CA certificate file (empty to skip).
+        ssl_cert: Path to client certificate file (empty to skip).
+        ssl_key: Path to client private key file (empty to skip).
+    """
 
     host: str = "127.0.0.1"
     port: int = 3306
@@ -99,6 +115,10 @@ class ClientConfig:
     start_gtid: str = ""
     connect_timeout_s: int = 10
     read_timeout_s: int = 30
+    ssl_mode: int = 0
+    ssl_ca: str = ""
+    ssl_cert: str = ""
+    ssl_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)

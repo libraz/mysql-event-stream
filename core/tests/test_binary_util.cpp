@@ -77,28 +77,28 @@ TEST(BinaryUtilTest, ReadU32Be) {
 TEST(BinaryUtilTest, ReadPackedInt1Byte) {
   uint8_t data[] = {42};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 42u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 42u);
   EXPECT_EQ(consumed, 1u);
 }
 
 TEST(BinaryUtilTest, ReadPackedInt1ByteZero) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 0u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0u);
   EXPECT_EQ(consumed, 1u);
 }
 
 TEST(BinaryUtilTest, ReadPackedInt1ByteMax) {
   uint8_t data[] = {250};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 250u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 250u);
   EXPECT_EQ(consumed, 1u);
 }
 
 TEST(BinaryUtilTest, ReadPackedIntNull) {
   uint8_t data[] = {251};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 0u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0u);
   EXPECT_EQ(consumed, 1u);
 }
 
@@ -106,7 +106,7 @@ TEST(BinaryUtilTest, ReadPackedInt2Bytes) {
   // 252 marker + 2 bytes little-endian
   uint8_t data[] = {252, 0x00, 0x01};  // 256
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 256u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 256u);
   EXPECT_EQ(consumed, 3u);
 }
 
@@ -114,7 +114,7 @@ TEST(BinaryUtilTest, ReadPackedInt3Bytes) {
   // 253 marker + 3 bytes little-endian
   uint8_t data[] = {253, 0x01, 0x00, 0x01};  // 65537
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 65537u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 65537u);
   EXPECT_EQ(consumed, 4u);
 }
 
@@ -122,15 +122,48 @@ TEST(BinaryUtilTest, ReadPackedInt8Bytes) {
   // 254 marker + 8 bytes little-endian
   uint8_t data[] = {254, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 1u);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 1u);
   EXPECT_EQ(consumed, 9u);
 }
 
 TEST(BinaryUtilTest, ReadPackedInt8BytesLarge) {
   uint8_t data[] = {254, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F};
   size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, consumed), 0x7FFFFFFFFFFFFFFFuLL);
+  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0x7FFFFFFFFFFFFFFFuLL);
   EXPECT_EQ(consumed, 9u);
+}
+
+// --- ReadPackedInt bounds checking ---
+
+TEST(BinaryUtilTest, ReadPackedIntEmptyBuffer) {
+  uint8_t data[] = {0};
+  size_t consumed = 99;
+  EXPECT_EQ(ReadPackedInt(data, 0, consumed), 0u);
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(BinaryUtilTest, ReadPackedInt252InsufficientLen) {
+  // 252 marker requires 3 bytes total, but only 2 available
+  uint8_t data[] = {252, 0x00};
+  size_t consumed = 99;
+  EXPECT_EQ(ReadPackedInt(data, 2, consumed), 0u);
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(BinaryUtilTest, ReadPackedInt253InsufficientLen) {
+  // 253 marker requires 4 bytes total, but only 3 available
+  uint8_t data[] = {253, 0x01, 0x00};
+  size_t consumed = 99;
+  EXPECT_EQ(ReadPackedInt(data, 3, consumed), 0u);
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(BinaryUtilTest, ReadPackedInt254InsufficientLen) {
+  // 254 marker requires 9 bytes total, but only 5 available
+  uint8_t data[] = {254, 0x01, 0x00, 0x00, 0x00};
+  size_t consumed = 99;
+  EXPECT_EQ(ReadPackedInt(data, 5, consumed), 0u);
+  EXPECT_EQ(consumed, 0u);
 }
 
 // --- Bitmap utilities ---

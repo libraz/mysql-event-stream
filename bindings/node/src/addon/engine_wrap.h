@@ -20,6 +20,10 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   Napi::Value HasEvents(const Napi::CallbackInfo& info);
   Napi::Value GetPosition(const Napi::CallbackInfo& info);
   void Reset(const Napi::CallbackInfo& info);
+  void SetMaxQueueSize(const Napi::CallbackInfo& info);
+  void SetIncludeDatabases(const Napi::CallbackInfo& info);
+  void SetIncludeTables(const Napi::CallbackInfo& info);
+  void SetExcludeTables(const Napi::CallbackInfo& info);
   void Destroy(const Napi::CallbackInfo& info);
 
   Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols,

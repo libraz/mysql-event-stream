@@ -403,4 +403,197 @@ TEST(CapiTest, BlobColumn) {
   mes_destroy(engine);
 }
 
+// ---- Parse error propagation ----
+
+TEST(CApi, FeedReturnsParseErrorOnInvalidData) {
+  auto* engine = mes_create();
+
+  // Build a 19-byte header with event_length too small (< 23) to trigger kError
+  mes::test::EventBuilder b;
+  b.WriteU32Le(1000);  // timestamp
+  b.WriteU8(0x21);     // type_code (arbitrary)
+  b.WriteU32Le(1);     // server_id
+  b.WriteU32Le(10);    // event_length = 10 (invalid: less than header + checksum)
+  b.WriteU32Le(0);     // next_position
+  b.WriteU16Le(0);     // flags
+  auto bad_header = b.Data();
+
+  size_t consumed = 0;
+  EXPECT_EQ(mes_feed(engine, bad_header.data(), bad_header.size(), &consumed), MES_ERR_PARSE);
+
+  // After reset, engine should recover
+  EXPECT_EQ(mes_reset(engine), MES_OK);
+
+  // Verify engine works normally after reset
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+  auto wr_body = BuildWriteRowsBody(1, 42);
+  auto wr_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+  EXPECT_EQ(mes_has_events(engine), 1);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 42);
+
+  mes_destroy(engine);
+}
+
+// ---- Reset after error recovers ----
+
+TEST(CApi, ResetAfterErrorRecovers) {
+  auto* engine = mes_create();
+
+  // Feed invalid data to trigger MES_ERR_PARSE
+  mes::test::EventBuilder b;
+  b.WriteU32Le(1000);  // timestamp
+  b.WriteU8(0x21);     // type_code
+  b.WriteU32Le(1);     // server_id
+  b.WriteU32Le(10);    // event_length = 10 (invalid)
+  b.WriteU32Le(0);     // next_position
+  b.WriteU16Le(0);     // flags
+  auto bad_header = b.Data();
+
+  size_t consumed = 0;
+  EXPECT_EQ(mes_feed(engine, bad_header.data(), bad_header.size(), &consumed),
+            MES_ERR_PARSE);
+
+  // Reset
+  EXPECT_EQ(mes_reset(engine), MES_OK);
+
+  // Feed valid data
+  auto tm_body = BuildTableMapBody(1, "testdb", "users");
+  auto tm_event = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 2000, 100, tm_body);
+
+  auto wr_body = BuildWriteRowsBody(1, 99);
+  auto wr_event = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 2001, 200, wr_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  consumed = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+
+  EXPECT_EQ(mes_has_events(engine), 1);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_STREQ(event->database, "testdb");
+  EXPECT_STREQ(event->table, "users");
+  ASSERT_EQ(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].int_val, 99);
+
+  mes_destroy(engine);
+}
+
+// ---- mes_set_max_queue_size backpressure ----
+
+TEST(CApi, SetMaxQueueSizeBackpressure) {
+  auto* engine = mes_create();
+
+  // Set max queue size to 1
+  EXPECT_EQ(mes_set_max_queue_size(engine, 1), MES_OK);
+
+  // Build TABLE_MAP + 2 WRITE_ROWS events
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto wr1 = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+      BuildWriteRowsBody(1, 10));
+  auto wr2 = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+      BuildWriteRowsBody(1, 20));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr1.begin(), wr1.end());
+  stream.insert(stream.end(), wr2.begin(), wr2.end());
+
+  // Feed the entire stream; with max_queue_size=1, the engine should stop
+  // after producing the first event (backpressure)
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  // Should have consumed TABLE_MAP + first WRITE_ROWS but not the second
+  EXPECT_LT(consumed, stream.size());
+  EXPECT_EQ(mes_has_events(engine), 1);
+
+  // Drain the first event
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 10);
+
+  // Feed the remaining data
+  size_t remaining = stream.size() - consumed;
+  size_t consumed2 = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data() + consumed, remaining, &consumed2),
+            MES_OK);
+  EXPECT_GT(consumed2, 0u);
+
+  // Should now have the second event
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 20);
+
+  mes_destroy(engine);
+}
+
+TEST(CApi, SetMaxQueueSizeNullEngine) {
+  EXPECT_EQ(mes_set_max_queue_size(nullptr, 10), MES_ERR_NULL_ARG);
+}
+
+TEST(CApi, SetMaxQueueSizeZeroUnlimited) {
+  auto* engine = mes_create();
+
+  // Setting max_queue_size to 0 means unlimited
+  EXPECT_EQ(mes_set_max_queue_size(engine, 0), MES_OK);
+
+  // Build TABLE_MAP + 2 WRITE_ROWS events
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto wr1 = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+      BuildWriteRowsBody(1, 10));
+  auto wr2 = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+      BuildWriteRowsBody(1, 20));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr1.begin(), wr1.end());
+  stream.insert(stream.end(), wr2.begin(), wr2.end());
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  // With unlimited queue, all data should be consumed
+  EXPECT_EQ(consumed, stream.size());
+
+  // Both events should be available
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->after_columns[0].int_val, 10);
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->after_columns[0].int_val, 20);
+
+  mes_destroy(engine);
+}
+
 }  // namespace

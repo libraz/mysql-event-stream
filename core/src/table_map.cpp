@@ -132,7 +132,8 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // column_count: packed integer
   if (offset >= len) return false;
   size_t packed_bytes = 0;
-  uint64_t column_count = binary::ReadPackedInt(data + offset, packed_bytes);
+  uint64_t column_count = binary::ReadPackedInt(data + offset, len - offset, packed_bytes);
+  if (packed_bytes == 0) return false;
   offset += packed_bytes;
 
   if (column_count == 0 || column_count > kMaxColumns) {
@@ -147,7 +148,8 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // metadata_length: packed integer
   if (offset >= len) return false;
   size_t meta_packed_bytes = 0;
-  uint64_t metadata_length = binary::ReadPackedInt(data + offset, meta_packed_bytes);
+  uint64_t metadata_length = binary::ReadPackedInt(data + offset, len - offset, meta_packed_bytes);
+  if (meta_packed_bytes == 0) return false;
   offset += meta_packed_bytes;
 
   // column metadata block

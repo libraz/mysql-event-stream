@@ -16,7 +16,9 @@ MetadataFetcher::~MetadataFetcher() { Disconnect(); }
 
 mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
                                      const std::string& user, const std::string& password,
-                                     uint32_t connect_timeout_s) {
+                                     uint32_t connect_timeout_s, uint32_t ssl_mode,
+                                     const std::string& ssl_ca, const std::string& ssl_cert,
+                                     const std::string& ssl_key) {
   if (conn_ != nullptr) {
     Disconnect();
   }
@@ -27,6 +29,42 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
   }
 
   mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_s);
+
+  // Apply SSL/TLS options
+  if (ssl_mode > 0) {
+    unsigned int ssl_mode_val;
+    switch (ssl_mode) {
+      case 1:
+        ssl_mode_val = SSL_MODE_PREFERRED;
+        break;
+      case 2:
+        ssl_mode_val = SSL_MODE_REQUIRED;
+        break;
+      case 3:
+        ssl_mode_val = SSL_MODE_VERIFY_CA;
+        break;
+      case 4:
+        ssl_mode_val = SSL_MODE_VERIFY_IDENTITY;
+        break;
+      default:
+        ssl_mode_val = SSL_MODE_PREFERRED;
+        break;
+    }
+    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
+  } else {
+    // Explicitly disable SSL to avoid MySQL's default SSL_MODE_PREFERRED
+    unsigned int ssl_mode_val = SSL_MODE_DISABLED;
+    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
+  }
+  if (!ssl_ca.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_CA, ssl_ca.c_str());
+  }
+  if (!ssl_cert.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_CERT, ssl_cert.c_str());
+  }
+  if (!ssl_key.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_KEY, ssl_key.c_str());
+  }
 
   if (mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(), nullptr, port,
                          nullptr, 0) == nullptr) {

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "logger.h"
+
 namespace mes {
 
 size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
@@ -40,12 +42,14 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
       // Parse the header
       if (!ParseEventHeader(buffer_.data(), buffer_.size(), &current_header_)) {
         state_ = ParserState::kError;
+        StructuredLog().Event("parse_error").Field("reason", "invalid_header").Error();
         break;
       }
 
       // Validate event_length
       if (current_header_.event_length < kEventHeaderSize + kChecksumSize) {
         state_ = ParserState::kError;
+        StructuredLog().Event("parse_error").Field("reason", "invalid_event_length").Error();
         break;
       }
 

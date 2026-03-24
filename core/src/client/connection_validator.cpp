@@ -73,7 +73,8 @@ bool ConnectionValidator::CheckVariable(MYSQL* conn, const char* var_name,
                                         const char* expected,
                                         ValidationResult* result) {
   char query[256];
-  std::snprintf(query, sizeof(query), "SHOW VARIABLES LIKE '%s'", var_name);
+  std::snprintf(query, sizeof(query),
+                "SHOW VARIABLES WHERE Variable_name = '%s'", var_name);
 
   if (mysql_query(conn, query) != 0) {
     result->error = MES_ERR_VALIDATION;
@@ -114,7 +115,8 @@ bool ConnectionValidator::CheckVariableNot(MYSQL* conn, const char* var_name,
                                            const char* rejected,
                                            ValidationResult* result) {
   char query[256];
-  std::snprintf(query, sizeof(query), "SHOW VARIABLES LIKE '%s'", var_name);
+  std::snprintf(query, sizeof(query),
+                "SHOW VARIABLES WHERE Variable_name = '%s'", var_name);
 
   if (mysql_query(conn, query) != 0) {
     // Variable may not exist on this MySQL version; that is acceptable

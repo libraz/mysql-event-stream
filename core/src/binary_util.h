@@ -86,10 +86,11 @@ inline uint32_t ReadU32Be(const uint8_t* data) {
  * - 254: next 8 bytes (little-endian)
  *
  * @param data Pointer to the packed integer data
- * @param bytes_consumed Set to the number of bytes consumed
- * @return The decoded integer value
+ * @param len Available bytes in data buffer
+ * @param bytes_consumed Set to the number of bytes consumed (0 on error)
+ * @return The decoded integer value (0 on error, check bytes_consumed)
  */
-uint64_t ReadPackedInt(const uint8_t* data, size_t& bytes_consumed);
+uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
 
 // --- Bitmap utilities ---
 

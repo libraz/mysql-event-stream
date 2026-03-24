@@ -8,7 +8,10 @@
 
 namespace mes::binary {
 
-uint64_t ReadPackedInt(const uint8_t* data, size_t& bytes_consumed) {
+uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
+  bytes_consumed = 0;
+  if (len < 1) return 0;
+
   uint8_t first = data[0];
 
   if (first < 251) {
@@ -23,16 +26,19 @@ uint64_t ReadPackedInt(const uint8_t* data, size_t& bytes_consumed) {
   }
 
   if (first == 252) {
+    if (len < 3) return 0;
     bytes_consumed = 3;
     return static_cast<uint64_t>(ReadU16Le(data + 1));
   }
 
   if (first == 253) {
+    if (len < 4) return 0;
     bytes_consumed = 4;
     return static_cast<uint64_t>(ReadU24Le(data + 1));
   }
 
   // first == 254
+  if (len < 9) return 0;
   bytes_consumed = 9;
   return ReadU64Le(data + 1);
 }

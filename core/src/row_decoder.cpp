@@ -53,7 +53,8 @@ const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2,
   // column_count (packed int)
   if (left < 1) return nullptr;
   size_t consumed = 0;
-  uint64_t col_count = binary::ReadPackedInt(ptr, consumed);
+  uint64_t col_count = binary::ReadPackedInt(ptr, left, consumed);
+  if (consumed == 0) return nullptr;
   ptr += consumed;
   left -= consumed;
 

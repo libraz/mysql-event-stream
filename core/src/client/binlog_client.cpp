@@ -10,8 +10,11 @@
 
 #include <mysql.h>
 
+#include "binary_util.h"
 #include "client/connection_validator.h"
 #include "client/gtid_encoder.h"
+#include "event_header.h"
+#include "logger.h"
 
 namespace mes {
 
@@ -20,6 +23,8 @@ BinlogClient::BinlogClient() { std::memset(&rpl_, 0, sizeof(rpl_)); }
 BinlogClient::~BinlogClient() { Disconnect(); }
 
 mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
+  stop_requested_.store(false, std::memory_order_release);
+
   if (conn_ != nullptr) {
     Disconnect();
   }
@@ -27,16 +32,54 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   conn_ = mysql_init(nullptr);
   if (conn_ == nullptr) {
     last_error_ = "mysql_init failed";
+    StructuredLog().Event("mysql_connection_error").Field("error", "mysql_init failed").Error();
     return MES_ERR_CONNECT;
   }
 
   mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &config.connect_timeout_s);
   mysql_options(conn_, MYSQL_OPT_READ_TIMEOUT, &config.read_timeout_s);
 
+  // Apply SSL/TLS options
+  if (config.ssl_mode > 0) {
+    unsigned int ssl_mode_val;
+    switch (config.ssl_mode) {
+      case 1:
+        ssl_mode_val = SSL_MODE_PREFERRED;
+        break;
+      case 2:
+        ssl_mode_val = SSL_MODE_REQUIRED;
+        break;
+      case 3:
+        ssl_mode_val = SSL_MODE_VERIFY_CA;
+        break;
+      case 4:
+        ssl_mode_val = SSL_MODE_VERIFY_IDENTITY;
+        break;
+      default:
+        ssl_mode_val = SSL_MODE_PREFERRED;
+        break;
+    }
+    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
+  } else {
+    // Explicitly disable SSL to avoid MySQL's default SSL_MODE_PREFERRED
+    unsigned int ssl_mode_val = SSL_MODE_DISABLED;
+    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
+  }
+  if (!config.ssl_ca.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_CA, config.ssl_ca.c_str());
+  }
+  if (!config.ssl_cert.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_CERT, config.ssl_cert.c_str());
+  }
+  if (!config.ssl_key.empty()) {
+    mysql_options(conn_, MYSQL_OPT_SSL_KEY, config.ssl_key.c_str());
+  }
+
   if (mysql_real_connect(conn_, config.host.c_str(), config.user.c_str(),
                          config.password.c_str(), nullptr, config.port,
                          nullptr, 0) == nullptr) {
     last_error_ = mysql_error(conn_);
+    LogMySQLConnectionError(config.host, config.port, last_error_);
     mysql_close(conn_);
     conn_ = nullptr;
     return MES_ERR_CONNECT;
@@ -51,6 +94,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
     return MES_ERR_VALIDATION;
   }
 
+  StructuredLog().Event("mysql_connected").Field("host", config.host).Field("port", static_cast<int>(config.port)).Info();
   config_ = config;
   return MES_OK;
 }
@@ -112,13 +156,26 @@ mes_error_t BinlogClient::StartStream() {
 }
 
 PollResult BinlogClient::Poll() {
+  if (stop_requested_.load(std::memory_order_acquire)) {
+    streaming_ = false;
+    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
+  }
+
   if (!streaming_) {
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
   int result = mysql_binlog_fetch(conn_, &rpl_);
+
+  // Check stop flag after blocking call returns
+  if (stop_requested_.load(std::memory_order_acquire)) {
+    streaming_ = false;
+    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
+  }
+
   if (result != 0) {
     last_error_ = mysql_error(conn_);
+    LogBinlogError("poll_error", current_gtid_, last_error_);
     streaming_ = false;
     return {MES_ERR_STREAM, nullptr, 0, false};
   }
@@ -145,6 +202,10 @@ PollResult BinlogClient::Poll() {
   return {MES_OK, event_data, event_size, false};
 }
 
+void BinlogClient::Stop() {
+  stop_requested_.store(true, std::memory_order_release);
+}
+
 void BinlogClient::Disconnect() {
   if (streaming_ && conn_ != nullptr) {
     mysql_binlog_close(conn_, &rpl_);
@@ -153,6 +214,7 @@ void BinlogClient::Disconnect() {
   if (conn_ != nullptr) {
     mysql_close(conn_);
     conn_ = nullptr;
+    StructuredLog().Event("mysql_disconnected").Info();
   }
 }
 
@@ -179,8 +241,7 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
   // Event type is at offset 4 in the header
   uint8_t event_type = data[4];
 
-  // GTID_LOG_EVENT = 33
-  if (event_type != 33) {
+  if (event_type != static_cast<uint8_t>(BinlogEventType::kGtidLogEvent)) {
     return;
   }
 
@@ -194,10 +255,7 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
   const uint8_t* uuid = body + 1;  // Skip commit_flag
 
   // Read GNO (little-endian int64 at body+17)
-  int64_t gno = 0;
-  for (int i = 7; i >= 0; --i) {
-    gno = (gno << 8) | body[17 + i];
-  }
+  int64_t gno = static_cast<int64_t>(binary::ReadU64Le(body + 17));
 
   // Format UUID
   char uuid_str[37];

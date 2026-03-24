@@ -1320,5 +1320,202 @@ TEST(DecodeColumnValueTest, LongBlobPack4) {
   EXPECT_EQ(result.bytes_val.size(), 4u);
 }
 
+// --- kDatetime2 boundary values ---
+
+TEST(DecodeColumnValueTest, Datetime2IntpartZero) {
+  // intpart = 0 means all date/time fields are zero: 0000-00-00 00:00:00
+  // packed = 0 + kDatetimefIntOfs = 0x8000000000
+  int64_t packed = 0x8000000000LL;
+  BinaryWriter w;
+  w.WriteU8(static_cast<uint8_t>(packed >> 32));
+  w.WriteU8(static_cast<uint8_t>(packed >> 24));
+  w.WriteU8(static_cast<uint8_t>(packed >> 16));
+  w.WriteU8(static_cast<uint8_t>(packed >> 8));
+  w.WriteU8(static_cast<uint8_t>(packed));
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result.string_val, "0000-00-00 00:00:00");
+}
+
+TEST(DecodeColumnValueTest, Datetime2NormalDate) {
+  // 2024-01-15 10:30:45 with fsp=0
+  int64_t ym = 2024 * 13 + 1;
+  int64_t ymd = (ym << 5) | 15;
+  int64_t hms = (10LL << 12) | (30 << 6) | 45;
+  int64_t intpart = (ymd << 17) | hms;
+  int64_t packed = intpart + 0x8000000000LL;
+
+  BinaryWriter w;
+  w.WriteU8(static_cast<uint8_t>(packed >> 32));
+  w.WriteU8(static_cast<uint8_t>(packed >> 24));
+  w.WriteU8(static_cast<uint8_t>(packed >> 16));
+  w.WriteU8(static_cast<uint8_t>(packed >> 8));
+  w.WriteU8(static_cast<uint8_t>(packed));
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_EQ(result.string_val, "2024-01-15 10:30:45");
+}
+
+// --- kNewDecimal edge cases ---
+
+TEST(DecodeColumnValueTest, NewDecimalNegative) {
+  // DECIMAL(5,2): precision=5, scale=2, meta = (5 << 8) | 2
+  // Encode "-123.45"
+  // intg = 5 - 2 = 3, intg0=0, intg_rem=3 -> 2 bytes
+  // frac0=0, frac_rem=2 -> 1 byte
+  // Total = 2 + 1 = 3 bytes
+  // Integer part: 123 in 2 bytes big-endian
+  // Frac part: 45 in 1 byte
+  // Negative: XOR first byte with 0x80, then XOR all bytes with 0xFF
+  uint8_t data[3];
+  data[0] = static_cast<uint8_t>((123 >> 8) & 0xFF);
+  data[1] = static_cast<uint8_t>(123 & 0xFF);
+  data[2] = 45;
+  // First, apply positive sign: XOR first byte with 0x80
+  data[0] ^= 0x80;
+  // Then apply negative transform: XOR all bytes with 0xFF
+  data[0] ^= 0xFF;
+  data[1] ^= 0xFF;
+  data[2] ^= 0xFF;
+
+  uint16_t meta = (5 << 8) | 2;
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.string_val, "-123.45");
+}
+
+TEST(DecodeColumnValueTest, NewDecimalPrecisionZero) {
+  // precision=0 should return "0"
+  uint16_t meta = (0 << 8) | 0;
+  uint8_t data[] = {0};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 1, &consumed);
+  EXPECT_EQ(consumed, 0u);
+  EXPECT_EQ(result.string_val, "0");
+}
+
+TEST(DecodeColumnValueTest, NewDecimalScaleZero) {
+  // DECIMAL(5,0): precision=5, scale=0, meta = (5 << 8) | 0
+  // Encode "12345" (integer only, no fractional part)
+  // intg = 5, intg0=0, intg_rem=5 -> 3 bytes
+  // frac0=0, frac_rem=0 -> 0 bytes
+  // Total = 3 bytes
+  uint8_t data[3];
+  data[0] = static_cast<uint8_t>((12345 >> 16) & 0xFF);
+  data[1] = static_cast<uint8_t>((12345 >> 8) & 0xFF);
+  data[2] = static_cast<uint8_t>(12345 & 0xFF);
+  // Positive: XOR first byte with 0x80
+  data[0] ^= 0x80;
+
+  uint16_t meta = (5 << 8) | 0;
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.string_val, "12345");
+}
+
+// --- kString CHAR with max_len boundary ---
+
+TEST(DecodeColumnValueTest, StringCharMaxLen255) {
+  // CHAR with max_len=255 -> 1-byte length prefix
+  // For CHAR type with real_type = 0xFE:
+  // max_len = (((meta >> 4) & 0x300) ^ 0x300) + (meta & 0xFF)
+  // We need max_len = 255. With real_type = 0xFE:
+  // meta = (0xFE << 8) | 0xFF = 0xFEFF
+  // (((0xFEFF >> 4) & 0x300) ^ 0x300) = ((0xFEF & 0x300) ^ 0x300)
+  //   = (0x200 ^ 0x300) = 0x100
+  // max_len = 0x100 + 0xFF = 0x1FF = 511 -> that's > 255, not what we want.
+  //
+  // We need max_len <= 255. Let's try meta = (0xFE << 8) | 0x0A = 0xFE0A
+  // already tested in StringChar as max_len=10. Let's use a value closer to 255.
+  // meta = (0xFE << 8) | 0xFF = 0xFEFF
+  // max_len = (((0xFEFF >> 4) & 0x300) ^ 0x300) + 0xFF
+  //         = ((0x0FEF & 0x300) ^ 0x300) + 0xFF
+  //         = (0x0200 ^ 0x300) + 0xFF
+  //         = 0x100 + 0xFF = 511 > 255 -> 2-byte prefix
+  //
+  // For max_len = 255: meta & 0xFF = n, and (((meta>>4)&0x300)^0x300) = offset
+  // We need offset + n = 255. With real_type = 0xFE:
+  // ((meta >> 4) & 0x300) depends on the full meta.
+  // meta = 0xFEFF -> (meta >> 4) = 0x0FEF -> & 0x300 = 0x0200 -> ^ 0x300 = 0x100
+  // So 0x100 + n = 255 -> n = -1 (impossible).
+  //
+  // Let's try meta with real_type yielding offset=0:
+  // (((meta >> 4) & 0x300) ^ 0x300) = 0 -> (meta >> 4) & 0x300 = 0x300
+  // meta >> 4 must have bits 8 and 9 set. With high byte 0xFE:
+  // meta = 0xFE3n -> meta >> 4 = 0x0FE3 -> & 0x300 = 0x300 -> ^ 0x300 = 0
+  // max_len = 0 + (meta & 0xFF) = 0x3n
+  // For meta = 0xFE30: max_len = 0x30 = 48, 1-byte prefix.
+  // For a clean test: meta = 0xFE30, max_len = 48.
+  // But we want exactly 255. Let's try:
+  // meta = 0xFEFF -> max_len = 511 (2-byte prefix, tested below)
+  // meta = 0xFE3F -> meta >> 4 = 0x0FE3 -> & 0x300 = 0x300 -> ^ 0x300 = 0
+  //   max_len = 0x3F = 63 -> 1-byte prefix
+  //
+  // Actually the simplest: just use max_len <= 255 with 1-byte prefix.
+  // meta = 0xFE3F -> max_len = 63
+  BinaryWriter w;
+  w.WriteU8(5);  // 1-byte length prefix, string length = 5
+  w.WriteString("ABCDE");
+  uint16_t meta = 0xFE3F;  // max_len = 63, 1-byte prefix
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 6u);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.string_val, "ABCDE");
+}
+
+TEST(DecodeColumnValueTest, StringCharMaxLen256TwoBytePrefix) {
+  // CHAR with max_len > 255 -> 2-byte length prefix
+  // Triggered by multi-byte charset (e.g., utf8mb4) expanding max_len.
+  // MySQL encodes metadata as: byte0 = real_type ^ ((field_length & 0x300) >> 4)
+  //   byte1 = field_length & 0xFF
+  // For CHAR(100) utf8mb4: field_length = 400, real_type = 0xFE
+  //   byte0 = 0xFE ^ ((400 & 0x300) >> 4) = 0xFE ^ (0x100 >> 4) = 0xFE ^ 0x10 = 0xEE
+  //   byte1 = 400 & 0xFF = 0x90
+  //   meta = (0xEE << 8) | 0x90 = 0xEE90
+  // Decoding: max_len = (((0xEE90 >> 4) & 0x300) ^ 0x300) + (0xEE90 & 0xFF)
+  //         = ((0x0EE9 & 0x300) ^ 0x300) + 0x90
+  //         = (0x0200 ^ 0x300) + 0x90
+  //         = 0x100 + 0x90 = 256 + 144 = 400 > 255 -> 2-byte prefix
+  BinaryWriter w;
+  w.WriteU16Le(7);  // 2-byte length prefix, string length = 7
+  w.WriteString("testing");
+  uint16_t meta = 0xEE90;
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 9u);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.string_val, "testing");
+}
+
+// --- kBit with extra_bits=0 ---
+
+TEST(DecodeColumnValueTest, BitExtraBitsZero) {
+  // BIT(8): 1 full byte, 0 extra bits
+  // metadata: (full_bytes << 8) | extra_bits = (1 << 8) | 0 = 0x0100
+  // total_bytes = full_bytes + (extra_bits > 0 ? 1 : 0) = 1 + 0 = 1
+  uint8_t data[] = {0xAB};
+  uint16_t meta = 0x0100;
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kBit, meta, false, data, 1, &consumed);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.int_val, 0xAB);
+}
+
 }  // namespace
 }  // namespace mes

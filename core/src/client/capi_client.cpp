@@ -40,6 +40,10 @@ MES_API mes_error_t mes_client_connect(
   cfg.start_gtid = config->start_gtid != nullptr ? config->start_gtid : "";
   cfg.connect_timeout_s = config->connect_timeout_s;
   cfg.read_timeout_s = config->read_timeout_s;
+  cfg.ssl_mode = config->ssl_mode;
+  cfg.ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
+  cfg.ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
+  cfg.ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
 
   return c->client.Connect(cfg);
 }
@@ -64,6 +68,12 @@ MES_API mes_poll_result_t mes_client_poll(mes_client_t* c) {
   out.size = result.size;
   out.is_heartbeat = result.is_heartbeat ? 1 : 0;
   return out;
+}
+
+MES_API void mes_client_stop(mes_client_t* c) {
+  if (c != nullptr) {
+    c->client.Stop();
+  }
 }
 
 MES_API void mes_client_disconnect(mes_client_t* c) {

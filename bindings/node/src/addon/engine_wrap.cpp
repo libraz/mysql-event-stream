@@ -17,6 +17,10 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&EngineWrap::HasEvents>("hasEvents"),
           InstanceMethod<&EngineWrap::GetPosition>("getPosition"),
           InstanceMethod<&EngineWrap::Reset>("reset"),
+          InstanceMethod<&EngineWrap::SetMaxQueueSize>("setMaxQueueSize"),
+          InstanceMethod<&EngineWrap::SetIncludeDatabases>("setIncludeDatabases"),
+          InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
+          InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
           InstanceMethod<&EngineWrap::Destroy>("destroy"),
 #ifdef MES_HAS_MYSQL
           InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
@@ -148,8 +152,13 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   Napi::Object pos = Napi::Object::New(env);
   pos.Set("file",
           Napi::String::New(env, event->binlog_file ? event->binlog_file : ""));
-  pos.Set("offset",
-          Napi::Number::New(env, static_cast<double>(event->binlog_offset)));
+  uint64_t evt_offset = event->binlog_offset;
+  if (evt_offset > 9007199254740991ULL) {
+    pos.Set("offset", Napi::BigInt::New(env, evt_offset));
+  } else {
+    pos.Set("offset",
+            Napi::Number::New(env, static_cast<double>(evt_offset)));
+  }
   obj.Set("position", pos);
 
   return obj;
@@ -188,7 +197,11 @@ Napi::Value EngineWrap::GetPosition(const Napi::CallbackInfo& info) {
 
   Napi::Object pos = Napi::Object::New(env);
   pos.Set("file", Napi::String::New(env, file ? file : ""));
-  pos.Set("offset", Napi::Number::New(env, static_cast<double>(offset)));
+  if (offset > 9007199254740991ULL) {
+    pos.Set("offset", Napi::BigInt::New(env, offset));
+  } else {
+    pos.Set("offset", Napi::Number::New(env, static_cast<double>(offset)));
+  }
   return pos;
 }
 
@@ -204,6 +217,118 @@ void EngineWrap::Reset(const Napi::CallbackInfo& info) {
   mes_error_t err = mes_reset(engine_);
   if (err != MES_OK) {
     Napi::Error::New(env, "mes_reset failed with error code " +
+                              std::to_string(err))
+        .ThrowAsJavaScriptException();
+  }
+}
+
+void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "Expected number argument")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  size_t max_size =
+      static_cast<size_t>(info[0].As<Napi::Number>().Uint32Value());
+  mes_error_t err = mes_set_max_queue_size(engine_, max_size);
+  if (err != MES_OK) {
+    Napi::Error::New(env, "mes_set_max_queue_size failed with error code " +
+                              std::to_string(err))
+        .ThrowAsJavaScriptException();
+  }
+}
+
+// Helper to extract a string array from a JS Array argument.
+static std::vector<std::string> ExtractStringArray(Napi::Env env,
+                                                   const Napi::Value& val) {
+  std::vector<std::string> result;
+  if (!val.IsArray()) return result;
+  auto arr = val.As<Napi::Array>();
+  for (uint32_t i = 0; i < arr.Length(); i++) {
+    Napi::Value item = arr[i];
+    if (item.IsString()) {
+      result.push_back(item.As<Napi::String>().Utf8Value());
+    }
+  }
+  return result;
+}
+
+void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Expected array of strings")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  auto dbs = ExtractStringArray(env, info[0]);
+  std::vector<const char*> ptrs;
+  for (const auto& s : dbs) ptrs.push_back(s.c_str());
+  mes_error_t err = mes_set_include_databases(engine_, const_cast<const char**>(ptrs.data()),
+                                              ptrs.size());
+  if (err != MES_OK) {
+    Napi::Error::New(env, "mes_set_include_databases failed with error code " +
+                              std::to_string(err))
+        .ThrowAsJavaScriptException();
+  }
+}
+
+void EngineWrap::SetIncludeTables(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Expected array of strings")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  auto tables = ExtractStringArray(env, info[0]);
+  std::vector<const char*> ptrs;
+  for (const auto& s : tables) ptrs.push_back(s.c_str());
+  mes_error_t err = mes_set_include_tables(engine_, const_cast<const char**>(ptrs.data()),
+                                           ptrs.size());
+  if (err != MES_OK) {
+    Napi::Error::New(env, "mes_set_include_tables failed with error code " +
+                              std::to_string(err))
+        .ThrowAsJavaScriptException();
+  }
+}
+
+void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Expected array of strings")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  auto tables = ExtractStringArray(env, info[0]);
+  std::vector<const char*> ptrs;
+  for (const auto& s : tables) ptrs.push_back(s.c_str());
+  mes_error_t err = mes_set_exclude_tables(engine_, const_cast<const char**>(ptrs.data()),
+                                           ptrs.size());
+  if (err != MES_OK) {
+    Napi::Error::New(env, "mes_set_exclude_tables failed with error code " +
                               std::to_string(err))
         .ThrowAsJavaScriptException();
   }
@@ -267,6 +392,26 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
         config.Get("connectTimeoutS").As<Napi::Number>().Uint32Value();
   } else {
     cfg.connect_timeout_s = 10;
+  }
+
+  std::string ssl_ca;
+  std::string ssl_cert;
+  std::string ssl_key;
+
+  if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
+    cfg.ssl_mode = config.Get("sslMode").As<Napi::Number>().Uint32Value();
+  }
+  if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
+    ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();
+    cfg.ssl_ca = ssl_ca.c_str();
+  }
+  if (config.Has("sslCert") && config.Get("sslCert").IsString()) {
+    ssl_cert = config.Get("sslCert").As<Napi::String>().Utf8Value();
+    cfg.ssl_cert = ssl_cert.c_str();
+  }
+  if (config.Has("sslKey") && config.Get("sslKey").IsString()) {
+    ssl_key = config.Get("sslKey").As<Napi::String>().Utf8Value();
+    cfg.ssl_key = ssl_key.c_str();
   }
 
   mes_error_t rc = mes_engine_set_metadata_conn(engine_, &cfg);

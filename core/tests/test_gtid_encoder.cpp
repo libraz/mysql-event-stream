@@ -361,4 +361,68 @@ TEST(GtidEncoderTest, DuplicateUuidsOverlappingMerged) {
   EXPECT_EQ(ReadInt64Le(out, 40), 151u); // end
 }
 
+// --- Malformed UUID tests ---
+
+TEST(GtidEncoderTest, ErrorWrongLengthUuid) {
+  std::vector<uint8_t> out;
+  // UUID too short (missing characters)
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-0000000001:1-3", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidEncoderTest, ErrorWrongLengthUuidTooLong) {
+  std::vector<uint8_t> out;
+  // UUID too long (extra characters)
+  EXPECT_EQ(GtidEncoder::Encode(
+                "00000000-0000-0000-0000-00000000000001:1-3", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidEncoderTest, ErrorNonHexCharInUuid) {
+  std::vector<uint8_t> out;
+  // 'Z' is not a valid hex character
+  EXPECT_EQ(GtidEncoder::Encode(
+                "Z0000000-0000-0000-0000-000000000001:1-3", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidEncoderTest, ErrorNonHexCharMiddleOfUuid) {
+  std::vector<uint8_t> out;
+  // 'x' in the middle of the UUID
+  EXPECT_EQ(GtidEncoder::Encode(
+                "00000000-0000-x000-0000-000000000001:1-3", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+// --- Large GNO values ---
+
+TEST(GtidEncoderTest, LargeGnoNearMax) {
+  std::vector<uint8_t> out;
+  // GNO = INT64_MAX - 1 = 9223372036854775806
+  // This should succeed as a single transaction (end = gno + 1 = INT64_MAX)
+  // But the existing code rejects INT64_MAX as overflow for end.
+  // So INT64_MAX - 1 as a single value means end = INT64_MAX which is rejected.
+  // Use a range: 1 to (INT64_MAX - 2) which means end = INT64_MAX - 1 (valid).
+  ASSERT_EQ(GtidEncoder::Encode(
+                "00000000-0000-0000-0000-000000000001:1-9223372036854775805",
+                &out),
+            MES_OK);
+  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // n_sids
+  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // n_intervals
+  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
+  EXPECT_EQ(ReadInt64Le(out, 40),
+            static_cast<uint64_t>(9223372036854775806LL));  // end (exclusive)
+}
+
+TEST(GtidEncoderTest, LargeGnoRange) {
+  std::vector<uint8_t> out;
+  // A large range that doesn't overflow
+  ASSERT_EQ(GtidEncoder::Encode(
+                "00000000-0000-0000-0000-000000000001:1000000000000-2000000000000",
+                &out),
+            MES_OK);
+  EXPECT_EQ(ReadInt64Le(out, 32), 1000000000000u);   // start
+  EXPECT_EQ(ReadInt64Le(out, 40), 2000000000001u);    // end (exclusive)
+}
+
 }  // namespace

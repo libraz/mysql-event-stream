@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cdc_engine.h"
+#include "logger.h"
 #include "mes.h"
 #include "types.h"
 
@@ -115,6 +116,9 @@ mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t len, size
     return MES_ERR_NULL_ARG;
   }
   *consumed = engine->engine.Feed(data, len);
+  if (engine->engine.IsError()) {
+    return MES_ERR_PARSE;
+  }
   return MES_OK;
 }
 
@@ -176,12 +180,53 @@ mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* 
   return MES_OK;
 }
 
+mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  engine->engine.SetMaxQueueSize(max_size);
+  return MES_OK;
+}
+
 mes_error_t mes_reset(mes_engine_t* engine) {
   if (engine == nullptr) {
     return MES_ERR_NULL_ARG;
   }
   engine->engine.Reset();
   return MES_OK;
+}
+
+mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases, size_t count) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  std::vector<std::string> dbs;
+  for (size_t i = 0; i < count; i++) {
+    if (databases[i]) dbs.emplace_back(databases[i]);
+  }
+  engine->engine.SetIncludeDatabases(dbs);
+  return MES_OK;
+}
+
+mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables, size_t count) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  std::vector<std::string> tbs;
+  for (size_t i = 0; i < count; i++) {
+    if (tables[i]) tbs.emplace_back(tables[i]);
+  }
+  engine->engine.SetIncludeTables(tbs);
+  return MES_OK;
+}
+
+mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  std::vector<std::string> tbs;
+  for (size_t i = 0; i < count; i++) {
+    if (tables[i]) tbs.emplace_back(tables[i]);
+  }
+  engine->engine.SetExcludeTables(tbs);
+  return MES_OK;
+}
+
+void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
+                          void* userdata) {
+  mes::LogConfig::SetCallback(callback, min_level, userdata);
 }
 
 #ifdef MES_HAS_MYSQL
@@ -193,7 +238,11 @@ mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine, const mes_client_
   std::string host = config->host != nullptr ? config->host : "127.0.0.1";
   std::string user = config->user != nullptr ? config->user : "";
   std::string password = config->password != nullptr ? config->password : "";
-  auto rc = fetcher->Connect(host, config->port, user, password, config->connect_timeout_s);
+  std::string ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
+  std::string ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
+  std::string ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
+  auto rc = fetcher->Connect(host, config->port, user, password, config->connect_timeout_s,
+                             config->ssl_mode, ssl_ca, ssl_cert, ssl_key);
   if (rc != MES_OK) {
     return rc;
   }

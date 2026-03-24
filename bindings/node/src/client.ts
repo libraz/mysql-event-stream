@@ -15,6 +15,7 @@ interface NativeClient {
   connect(config: ClientConfig): void;
   start(): void;
   poll(): Promise<PollResult>;
+  stop(): void;
   disconnect(): void;
   destroy(): void;
   readonly isConnected: boolean;
@@ -46,6 +47,13 @@ export class BinlogClient {
   poll(): Promise<PollResult> {
     this.ensureNotDestroyed();
     return this.client!.poll();
+  }
+
+  /** Request stream stop. Thread-safe; unblocks a pending poll(). */
+  stop(): void {
+    if (this.client) {
+      this.client.stop();
+    }
   }
 
   /** Disconnect from MySQL server. */

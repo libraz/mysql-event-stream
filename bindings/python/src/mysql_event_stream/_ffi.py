@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import platform
 from pathlib import Path
 
 
@@ -41,11 +42,28 @@ class MESEvent(ctypes.Structure):
 # Error codes
 MES_OK = 0
 MES_ERR_NULL_ARG = 1
+MES_ERR_INVALID_ARG = 2
+MES_ERR_INTERNAL = 99
+MES_ERR_PARSE = 100
+MES_ERR_DECODE = 200
+MES_ERR_DECODE_COLUMN = 201
+MES_ERR_DECODE_ROW = 202
 MES_ERR_NO_EVENT = 300
+MES_ERR_QUEUE_FULL = 301
 MES_ERR_CONNECT = 400
+MES_ERR_AUTH = 401
 MES_ERR_VALIDATION = 402
 MES_ERR_STREAM = 403
 MES_ERR_DISCONNECTED = 404
+
+# Log levels
+MES_LOG_ERROR = 0
+MES_LOG_WARN = 1
+MES_LOG_INFO = 2
+MES_LOG_DEBUG = 3
+
+# Log callback function type: void (*)(int level, const char* message, void* userdata)
+MES_LOG_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_int32, ctypes.c_char_p, ctypes.c_void_p)
 
 # Column types
 MES_COL_NULL = 0
@@ -67,6 +85,10 @@ class MESClientConfig(ctypes.Structure):
         ("start_gtid", ctypes.c_char_p),
         ("connect_timeout_s", ctypes.c_uint32),
         ("read_timeout_s", ctypes.c_uint32),
+        ("ssl_mode", ctypes.c_uint32),
+        ("ssl_ca", ctypes.c_char_p),
+        ("ssl_cert", ctypes.c_char_p),
+        ("ssl_key", ctypes.c_char_p),
     ]
 
 
@@ -102,7 +124,7 @@ def _find_library() -> str:
 
     # Dev build dir: src/mysql_event_stream/ -> bindings/python -> bindings -> project root
     project_root = pkg_dir.parent.parent.parent.parent
-    lib_name = "libmes.dylib" if os.uname().sysname == "Darwin" else "libmes.so"
+    lib_name = "libmes.dylib" if platform.system() == "Darwin" else "libmes.so"
     build_path = project_root / "build" / "core" / lib_name
     if build_path.exists():
         return str(build_path)
@@ -173,6 +195,38 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.mes_reset.restype = ctypes.c_int32
     lib.mes_reset.argtypes = [ctypes.c_void_p]
 
+    # mes_set_max_queue_size
+    lib.mes_set_max_queue_size.restype = ctypes.c_int32
+    lib.mes_set_max_queue_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+
+    # mes_set_log_callback
+    lib.mes_set_log_callback.restype = None
+    lib.mes_set_log_callback.argtypes = [MES_LOG_CALLBACK, ctypes.c_int32, ctypes.c_void_p]
+
+    # mes_set_include_databases
+    lib.mes_set_include_databases.restype = ctypes.c_int32
+    lib.mes_set_include_databases.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_size_t,
+    ]
+
+    # mes_set_include_tables
+    lib.mes_set_include_tables.restype = ctypes.c_int32
+    lib.mes_set_include_tables.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_size_t,
+    ]
+
+    # mes_set_exclude_tables
+    lib.mes_set_exclude_tables.restype = ctypes.c_int32
+    lib.mes_set_exclude_tables.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_size_t,
+    ]
+
     return lib
 
 
@@ -203,6 +257,9 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
 
         lib.mes_client_poll.restype = MESPollResult
         lib.mes_client_poll.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_stop.restype = None
+        lib.mes_client_stop.argtypes = [ctypes.c_void_p]
 
         lib.mes_client_disconnect.restype = None
         lib.mes_client_disconnect.argtypes = [ctypes.c_void_p]

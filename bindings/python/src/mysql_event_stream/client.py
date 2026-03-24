@@ -54,6 +54,10 @@ class BinlogClient:
         start_gtid: str = "",
         connect_timeout_s: int = 10,
         read_timeout_s: int = 30,
+        ssl_mode: int = 0,
+        ssl_ca: str = "",
+        ssl_cert: str = "",
+        ssl_key: str = "",
         lib_path: str | None = None,
     ) -> None:
         """Create a new BinlogClient.
@@ -67,6 +71,11 @@ class BinlogClient:
             start_gtid: GTID to start from (empty = current position).
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
+            ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
+                3=verify_ca, 4=verify_identity).
+            ssl_ca: Path to CA certificate file (empty to skip).
+            ssl_cert: Path to client certificate file (empty to skip).
+            ssl_key: Path to client private key file (empty to skip).
             lib_path: Explicit path to libmes shared library.
 
         Raises:
@@ -88,6 +97,10 @@ class BinlogClient:
             start_gtid=start_gtid,
             connect_timeout_s=connect_timeout_s,
             read_timeout_s=read_timeout_s,
+            ssl_mode=ssl_mode,
+            ssl_ca=ssl_ca,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
         )
         self._handle: int | None = self._lib.mes_client_create()
         if not self._handle:
@@ -102,6 +115,10 @@ class BinlogClient:
         """
         self._check_open()
 
+        ssl_ca = self._config.ssl_ca.encode("utf-8") if self._config.ssl_ca else None
+        ssl_cert = self._config.ssl_cert.encode("utf-8") if self._config.ssl_cert else None
+        ssl_key = self._config.ssl_key.encode("utf-8") if self._config.ssl_key else None
+
         config = MESClientConfig(
             host=self._config.host.encode("utf-8"),
             port=self._config.port,
@@ -111,6 +128,10 @@ class BinlogClient:
             start_gtid=self._config.start_gtid.encode("utf-8"),
             connect_timeout_s=self._config.connect_timeout_s,
             read_timeout_s=self._config.read_timeout_s,
+            ssl_mode=self._config.ssl_mode,
+            ssl_ca=ssl_ca,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
         )
 
         rc = self._lib.mes_client_connect(self._handle, ctypes.byref(config))
@@ -154,6 +175,11 @@ class BinlogClient:
         # Copy data from C buffer to Python bytes
         data = ctypes.string_at(result.data, result.size)
         return PollResult(data=data, is_heartbeat=False)
+
+    def stop(self) -> None:
+        """Request stream stop. Thread-safe; unblocks a pending poll()."""
+        if self._handle:
+            self._lib.mes_client_stop(self._handle)
 
     def disconnect(self) -> None:
         """Disconnect from MySQL server."""

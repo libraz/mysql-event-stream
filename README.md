@@ -132,6 +132,83 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
 - **Column Names** - Automatic column name resolution via metadata queries
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
+- **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
+- **Auto-reconnection** - Automatic reconnection with linear backoff on connection loss
+- **Backpressure** - Configurable event queue size to prevent memory exhaustion
+- **Table filtering** - Include/exclude databases and tables to reduce processing overhead
+- **Structured logging** - Callback-based structured logging (event=name key=value format)
+- **Graceful shutdown** - Thread-safe stream cancellation via `stop()`
+
+## Configuration
+
+### SSL/TLS
+
+```typescript
+// Node.js
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  sslMode: 2,  // 0=disabled, 1=preferred, 2=required, 3=verify_ca, 4=verify_identity
+  sslCa: "/path/to/ca.pem",
+});
+```
+
+```python
+# Python
+stream = CdcStream(
+    host="mysql.example.com",
+    user="replicator",
+    password="secret",
+    ssl_mode=2,
+    ssl_ca="/path/to/ca.pem",
+)
+```
+
+### Table Filtering
+
+```typescript
+// Node.js - only process events from specific tables
+const engine = new CdcEngine();
+engine.setIncludeDatabases(["mydb"]);
+engine.setExcludeTables(["mydb.audit_log"]);
+```
+
+```python
+# Python
+engine = CdcEngine()
+engine.set_include_databases(["mydb"])
+engine.set_exclude_tables(["mydb.audit_log"])
+```
+
+### Backpressure Control
+
+```typescript
+// Limit event queue to prevent memory exhaustion
+engine.setMaxQueueSize(10000);
+```
+
+### Logging
+
+```c
+// C API - structured log callback
+void my_log(mes_log_level_t level, const char* message, void* userdata) {
+    fprintf(stderr, "[%d] %s\n", level, message);
+    // Output: [2] event=mysql_connected host=127.0.0.1 port=3306
+}
+mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
+```
+
+### Auto-Reconnection
+
+```typescript
+// Node.js - automatic reconnection with linear backoff (1s, 2s, ... 10s cap)
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  maxReconnectAttempts: 10,  // default: 10, 0 = disabled
+});
+```
 
 ## Installation
 

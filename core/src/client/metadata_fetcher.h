@@ -53,7 +53,9 @@ class MetadataFetcher {
    * @return MES_OK on success, MES_ERR_CONNECT on failure
    */
   mes_error_t Connect(const std::string& host, uint16_t port, const std::string& user,
-                      const std::string& password, uint32_t connect_timeout_s);
+                      const std::string& password, uint32_t connect_timeout_s,
+                      uint32_t ssl_mode = 0, const std::string& ssl_ca = "",
+                      const std::string& ssl_cert = "", const std::string& ssl_key = "");
 
   /** @brief Disconnect and close the MySQL connection */
   void Disconnect();

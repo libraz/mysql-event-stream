@@ -144,6 +144,23 @@ class CdcEngine:
         file_str = file_ptr.value.decode("utf-8") if file_ptr.value else ""
         return BinlogPosition(file=file_str, offset=offset.value)
 
+    def set_max_queue_size(self, max_size: int) -> None:
+        """Set maximum event queue size for backpressure control.
+
+        When the queue reaches this limit, feed() will stop consuming
+        bytes early. Drain events via next_event() then re-feed.
+
+        Args:
+            max_size: Maximum queue size. 0 means unlimited (default).
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
+        if rc != MES_OK:
+            raise RuntimeError(f"mes_set_max_queue_size failed with error code {rc}")
+
     def reset(self) -> None:
         """Reset the engine, clearing all state.
 
@@ -155,6 +172,69 @@ class CdcEngine:
         if rc != MES_OK:
             raise RuntimeError(f"mes_reset failed with error code {rc}")
 
+    def set_include_databases(self, databases: list[str]) -> None:
+        """Set database include filter.
+
+        Only events from these databases are processed. An empty list
+        clears the filter (all databases are allowed).
+
+        Args:
+            databases: List of database names.
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        arr = (ctypes.c_char_p * len(databases))(
+            *(db.encode("utf-8") for db in databases)
+        )
+        rc = self._lib.mes_set_include_databases(self._handle, arr, len(databases))
+        if rc != MES_OK:
+            raise RuntimeError(f"mes_set_include_databases failed with error code {rc}")
+
+    def set_include_tables(self, tables: list[str]) -> None:
+        """Set table include filter.
+
+        Only events from these tables are processed. An empty list
+        clears the filter (all tables are allowed).
+
+        Each entry is "database.table" or just "table" (matches any database).
+
+        Args:
+            tables: List of table names.
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        arr = (ctypes.c_char_p * len(tables))(
+            *(t.encode("utf-8") for t in tables)
+        )
+        rc = self._lib.mes_set_include_tables(self._handle, arr, len(tables))
+        if rc != MES_OK:
+            raise RuntimeError(f"mes_set_include_tables failed with error code {rc}")
+
+    def set_exclude_tables(self, tables: list[str]) -> None:
+        """Set table exclude filter.
+
+        Events from these tables are skipped.
+
+        Each entry is "database.table" or just "table" (matches any database).
+
+        Args:
+            tables: List of table names.
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        arr = (ctypes.c_char_p * len(tables))(
+            *(t.encode("utf-8") for t in tables)
+        )
+        rc = self._lib.mes_set_exclude_tables(self._handle, arr, len(tables))
+        if rc != MES_OK:
+            raise RuntimeError(f"mes_set_exclude_tables failed with error code {rc}")
+
     def enable_metadata(
         self,
         *,
@@ -163,6 +243,10 @@ class CdcEngine:
         user: str = "root",
         password: str = "",
         connect_timeout_s: int = 10,
+        ssl_mode: int = 0,
+        ssl_ca: str = "",
+        ssl_cert: str = "",
+        ssl_key: str = "",
     ) -> None:
         """Enable metadata queries for column name resolution.
 
@@ -176,6 +260,11 @@ class CdcEngine:
             user: MySQL user.
             password: MySQL password.
             connect_timeout_s: Connection timeout in seconds.
+            ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
+                3=verify_ca, 4=verify_identity).
+            ssl_ca: Path to CA certificate file (empty to skip).
+            ssl_cert: Path to client certificate file (empty to skip).
+            ssl_key: Path to client private key file (empty to skip).
 
         Raises:
             RuntimeError: If the engine is closed, client API is unavailable,
@@ -191,6 +280,10 @@ class CdcEngine:
         cfg.user = user.encode("utf-8")
         cfg.password = password.encode("utf-8")
         cfg.connect_timeout_s = connect_timeout_s
+        cfg.ssl_mode = ssl_mode
+        cfg.ssl_ca = ssl_ca.encode("utf-8") if ssl_ca else None
+        cfg.ssl_cert = ssl_cert.encode("utf-8") if ssl_cert else None
+        cfg.ssl_key = ssl_key.encode("utf-8") if ssl_key else None
 
         rc = self._lib.mes_engine_set_metadata_conn(self._handle, ctypes.byref(cfg))
         if rc != MES_OK:

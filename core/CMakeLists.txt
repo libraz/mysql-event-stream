@@ -15,6 +15,7 @@ add_library(mes-core STATIC
   src/row_decoder.cpp
   src/cdc_engine.cpp
   src/capi.cpp
+  src/logger.cpp
   src/client/gtid_encoder.cpp
 )
 
@@ -41,6 +42,7 @@ add_library(mes-shared SHARED
   src/row_decoder.cpp
   src/cdc_engine.cpp
   src/capi.cpp
+  src/logger.cpp
   src/client/gtid_encoder.cpp
 )
 

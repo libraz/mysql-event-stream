@@ -18,6 +18,7 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   void Connect(const Napi::CallbackInfo& info);
   void Start(const Napi::CallbackInfo& info);
   Napi::Value Poll(const Napi::CallbackInfo& info);
+  void Stop(const Napi::CallbackInfo& info);
   void Disconnect(const Napi::CallbackInfo& info);
   void Destroy(const Napi::CallbackInfo& info);
   Napi::Value GetIsConnected(const Napi::CallbackInfo& info);

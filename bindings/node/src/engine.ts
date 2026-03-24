@@ -17,6 +17,10 @@ interface NativeEngine {
   hasEvents(): boolean;
   getPosition(): { file: string; offset: number };
   reset(): void;
+  setMaxQueueSize(maxSize: number): void;
+  setIncludeDatabases(databases: string[]): void;
+  setIncludeTables(tables: string[]): void;
+  setExcludeTables(tables: string[]): void;
   destroy(): void;
   enableMetadata?(config: ClientConfig): void;
 }
@@ -65,6 +69,32 @@ export class CdcEngine {
   reset(): void {
     this.ensureNotDestroyed();
     this.engine!.reset();
+  }
+
+  /** Set maximum event queue size for backpressure control. 0 = unlimited. */
+  setMaxQueueSize(maxSize: number): void {
+    this.ensureNotDestroyed();
+    this.engine!.setMaxQueueSize(maxSize);
+  }
+
+  /** Set database include filter. Only events from these databases are processed. Empty array = all. */
+  setIncludeDatabases(databases: string[]): void {
+    this.ensureNotDestroyed();
+    this.engine!.setIncludeDatabases(databases);
+  }
+
+  /** Set table include filter. Only events from these tables are processed. Empty array = all.
+   *  Format: "database.table" or just "table" (matches any database). */
+  setIncludeTables(tables: string[]): void {
+    this.ensureNotDestroyed();
+    this.engine!.setIncludeTables(tables);
+  }
+
+  /** Set table exclude filter. Events from these tables are skipped.
+   *  Format: "database.table" or just "table" (matches any database). */
+  setExcludeTables(tables: string[]): void {
+    this.ensureNotDestroyed();
+    this.engine!.setExcludeTables(tables);
   }
 
   /** Enable metadata queries for column name resolution.

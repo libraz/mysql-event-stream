@@ -235,5 +235,226 @@ TEST(CdcEngineTest, RowEventWithoutTableMap) {
   EXPECT_FALSE(engine.HasEvents());
 }
 
+TEST(CdcEngineTest, BackpressureStopsFeedingWhenQueueFull) {
+  CdcEngine engine;
+  engine.SetMaxQueueSize(2);
+
+  // Register table map
+  auto table_map_body = BuildTableMapBody(1, "db", "t");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+
+  // Build 3 write events
+  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                           BuildWriteRowsBody(1, 10));
+  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                           BuildWriteRowsBody(1, 20));
+  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                           BuildWriteRowsBody(1, 30));
+
+  // Combine all events into one buffer
+  std::vector<uint8_t> combined;
+  combined.insert(combined.end(), table_map_event.begin(), table_map_event.end());
+  combined.insert(combined.end(), write1.begin(), write1.end());
+  combined.insert(combined.end(), write2.begin(), write2.end());
+  combined.insert(combined.end(), write3.begin(), write3.end());
+
+  // Feed should stop after queue reaches 2
+  size_t consumed = engine.Feed(combined.data(), combined.size());
+  EXPECT_LT(consumed, combined.size());
+  EXPECT_EQ(engine.PendingEventCount(), 2u);
+
+  // Drain one event
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.after.columns[0].int_val, 10);
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  // Re-feed the remaining bytes
+  size_t consumed2 = engine.Feed(combined.data() + consumed, combined.size() - consumed);
+  EXPECT_GT(consumed2, 0u);
+
+  // Should now have the second event still queued plus at least one more
+  EXPECT_GE(engine.PendingEventCount(), 2u);
+
+  // Drain all remaining events
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.after.columns[0].int_val, 20);
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.after.columns[0].int_val, 30);
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, BackpressureUnlimitedByDefault) {
+  CdcEngine engine;
+
+  auto table_map_body = BuildTableMapBody(1, "db", "t");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+
+  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                           BuildWriteRowsBody(1, 10));
+  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                           BuildWriteRowsBody(1, 20));
+  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                           BuildWriteRowsBody(1, 30));
+
+  std::vector<uint8_t> combined;
+  combined.insert(combined.end(), table_map_event.begin(), table_map_event.end());
+  combined.insert(combined.end(), write1.begin(), write1.end());
+  combined.insert(combined.end(), write2.begin(), write2.end());
+  combined.insert(combined.end(), write3.begin(), write3.end());
+
+  // With default max_queue_size_ = 0 (unlimited), all events should be consumed
+  size_t consumed = engine.Feed(combined.data(), combined.size());
+  EXPECT_EQ(consumed, combined.size());
+  EXPECT_EQ(engine.PendingEventCount(), 3u);
+}
+
+TEST(CdcEngineTest, IncludeDatabasesFilter) {
+  CdcEngine engine;
+  engine.SetIncludeDatabases({"mydb"});
+
+  // Register table in allowed database
+  auto tm1 = BuildTableMapBody(1, "mydb", "users");
+  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  engine.Feed(ev1.data(), ev1.size());
+
+  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  engine.Feed(w1.data(), w1.size());
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  // Register table in blocked database
+  auto tm2 = BuildTableMapBody(2, "otherdb", "logs");
+  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  engine.Feed(ev2.data(), ev2.size());
+
+  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                        BuildWriteRowsBody(2, 20));
+  engine.Feed(w2.data(), w2.size());
+
+  // Should still have only 1 event (from mydb.users)
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.database, "mydb");
+  EXPECT_EQ(event.table, "users");
+  EXPECT_EQ(event.after.columns[0].int_val, 10);
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, ExcludeTablesFilter) {
+  CdcEngine engine;
+  engine.SetExcludeTables({"mydb.logs"});
+
+  // Register allowed table
+  auto tm1 = BuildTableMapBody(1, "mydb", "users");
+  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  engine.Feed(ev1.data(), ev1.size());
+
+  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  engine.Feed(w1.data(), w1.size());
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  // Register excluded table
+  auto tm2 = BuildTableMapBody(2, "mydb", "logs");
+  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  engine.Feed(ev2.data(), ev2.size());
+
+  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                        BuildWriteRowsBody(2, 20));
+  engine.Feed(w2.data(), w2.size());
+
+  // Should still have only 1 event
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.database, "mydb");
+  EXPECT_EQ(event.table, "users");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, IncludeTablesFilter) {
+  CdcEngine engine;
+  engine.SetIncludeTables({"mydb.users"});
+
+  // Register included table
+  auto tm1 = BuildTableMapBody(1, "mydb", "users");
+  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  engine.Feed(ev1.data(), ev1.size());
+
+  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  engine.Feed(w1.data(), w1.size());
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  // Register non-included table
+  auto tm2 = BuildTableMapBody(2, "mydb", "logs");
+  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  engine.Feed(ev2.data(), ev2.size());
+
+  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                        BuildWriteRowsBody(2, 20));
+  engine.Feed(w2.data(), w2.size());
+
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "users");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, ExcludeTableUnqualifiedName) {
+  CdcEngine engine;
+  // Exclude by unqualified name - should match any database
+  engine.SetExcludeTables({"logs"});
+
+  auto tm1 = BuildTableMapBody(1, "db1", "logs");
+  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  engine.Feed(ev1.data(), ev1.size());
+
+  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  engine.Feed(w1.data(), w1.size());
+
+  auto tm2 = BuildTableMapBody(2, "db2", "logs");
+  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  engine.Feed(ev2.data(), ev2.size());
+
+  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                        BuildWriteRowsBody(2, 20));
+  engine.Feed(w2.data(), w2.size());
+
+  // Both should be blocked
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, FilterResetClearsBlockedIds) {
+  CdcEngine engine;
+  engine.SetIncludeDatabases({"mydb"});
+
+  // Block a table
+  auto tm1 = BuildTableMapBody(1, "otherdb", "t");
+  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  engine.Feed(ev1.data(), ev1.size());
+
+  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  engine.Feed(w1.data(), w1.size());
+  EXPECT_FALSE(engine.HasEvents());
+
+  // Reset clears blocked set and filters remain
+  engine.Reset();
+
+  // After reset, the table map is also cleared, so row event without table map is skipped
+  engine.Feed(w1.data(), w1.size());
+  EXPECT_FALSE(engine.HasEvents());
+}
+
 }  // namespace
 }  // namespace mes
