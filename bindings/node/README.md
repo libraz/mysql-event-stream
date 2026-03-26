@@ -1,23 +1,22 @@
 # mysql-event-stream — Node.js Binding
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
+[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 
-A lightweight MySQL 8.4 CDC (Change Data Capture) engine for Node.js. Parses binlog replication streams and emits structured row-level change events (INSERT / UPDATE / DELETE).
+Native N-API binding for the mysql-event-stream CDC engine. Wraps the C++ core as a Node.js addon using cmake-js.
 
-Built as a native N-API addon on a self-contained C++ core for high throughput and low latency. No external MySQL client library (libmysqlclient) required -- the MySQL wire protocol is implemented directly using OpenSSL.
+> **npm users**: See the [npm README](README.npm.md) for installation and usage.
 
-## Install
+## Development
 
 ### Prerequisites
 
-- **Node.js** 22+
-- **Yarn**
-- **CMake** 3.20+
-- **C++17 compiler** (GCC 9+ or Clang 10+)
-- **OpenSSL** development libraries (the only native dependency)
-
-No MySQL client library (libmysqlclient) is needed.
+- Node.js 22+
+- Yarn 4.9.1
+- CMake 3.20+
+- C++17 compiler (GCC 9+ or Clang 10+)
+- OpenSSL development libraries
 
 ```bash
 # macOS
@@ -25,68 +24,64 @@ brew install cmake openssl
 
 # Ubuntu / Debian
 sudo apt install cmake build-essential libssl-dev pkg-config
+```
 
-# Clone and build
-git clone https://github.com/libraz/mysql-event-stream.git
-cd mysql-event-stream/bindings/node
+### Build
+
+```bash
 yarn install
-yarn build
+yarn build          # Native addon + TypeScript
+yarn build:native   # Native addon only
 ```
 
-## Usage
+### Test
 
-```typescript
-import { CdcEngine } from "@libraz/mysql-event-stream";
-
-const engine = new CdcEngine();
-
-// Feed raw binlog bytes from your replication stream
-engine.feed(binlogChunk);
-
-while (engine.hasEvents()) {
-  const event = engine.nextEvent();
-  console.log(event.type, event.database, event.table);
-  console.log("before:", event.before);
-  console.log("after:", event.after);
-}
+```bash
+yarn test           # Unit tests (Vitest)
+yarn test:e2e       # E2E tests (requires Docker MySQL)
 ```
 
-## Event Format
+### Lint
 
-Each `ChangeEvent` contains the event type, database/table name, binlog position, and row data as a plain object keyed by column name:
-
-```json
-{
-  "type": "UPDATE",
-  "database": "mydb",
-  "table": "users",
-  "before": { "id": 1, "name": "Alice", "score": 42 },
-  "after": { "id": 1, "name": "Alice", "score": 100 },
-  "timestamp": 1773584164,
-  "position": { "file": "mysql-bin.000003", "offset": 3611 }
-}
+```bash
+yarn check          # Biome check
+yarn check:fix      # Auto-fix
 ```
 
-## Features
+## Architecture
 
-- **Native performance** — C++ core with N-API binding, >100k events/sec
-- **Zero native dependencies** — No libmysqlclient required; only OpenSSL
-- **Streaming** — Process events incrementally as bytes arrive
-- **MySQL 8.4** — Built for the latest MySQL LTS release
-- **GTID support** — Native BinlogClient with GTID-based replication
-- **Row-level events** — Full before/after column values for INSERT, UPDATE, DELETE
-- **Column names** — Automatic column name resolution via metadata queries
-- **SSL/TLS** — Full SSL/TLS support for secure MySQL connections
-- **Backpressure** — Internal reader thread with bounded event queue (default 10,000)
-- **Auto-reconnection** — Automatic reconnection with linear backoff on connection loss
+```
+src/
+  addon/              # C++ N-API addon
+    engine_wrap.cpp   #   CdcEngine wrapper
+    client_wrap.cpp   #   BinlogClient wrapper
+    addon.cpp         #   Module registration
+  index.ts            # Package entry point
+  engine.ts           # CdcEngine TypeScript wrapper
+  client.ts           # BinlogClient TypeScript wrapper
+  stream.ts           # CdcStream async iterator
+  types.ts            # Public type definitions
+```
 
-## MySQL Requirements
+The native addon statically links the C++ core (protocol layer, CDC engine, BinlogClient) and OpenSSL. The TypeScript layer provides typed wrappers and the `CdcStream` async iterator.
 
-- Version: 8.4
-- Binary log format: ROW (`binlog_format=ROW`)
-- GTID mode enabled (for BinlogClient)
-- Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+## Publishing
 
-## License
+Publishing is automated via GitHub Actions on `v*.*.*` tags. The workflow:
 
-[Apache-2.0](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
+1. Builds and tests the C++ core
+2. Builds and tests the Node.js binding
+3. Creates a GitHub Release
+4. Publishes to npm with `--provenance`
+
+The `prepack` script swaps `README.md` with `README.npm.md` so npm shows user-facing documentation.
+
+## Exports
+
+| Export | Description |
+|--------|-------------|
+| `CdcEngine` | Low-level binlog byte parser |
+| `BinlogClient` | MySQL binlog replication client |
+| `CdcStream` | High-level async iterator (recommended) |
+| `ChangeEvent` | Event type definition |
+| `ClientConfig` | Connection config type |

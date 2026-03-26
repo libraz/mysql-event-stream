@@ -6,25 +6,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PYTHON_PKG="$SCRIPT_DIR/src/mysql_event_stream"
 
+BUILD_DIR="$PROJECT_ROOT/build-wheel"
+
 echo "=== Building libmes shared library (Release, OpenSSL static) ==="
-cmake -B "$PROJECT_ROOT/build" -DCMAKE_BUILD_TYPE=Release -DMES_OPENSSL_STATIC=ON "$PROJECT_ROOT"
-cmake --build "$PROJECT_ROOT/build" --config Release -j
+cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DMES_OPENSSL_STATIC=ON -DBUILD_TESTING=OFF "$PROJECT_ROOT"
+cmake --build "$BUILD_DIR" --config Release -j
 
 echo "=== Copying shared library to Python package ==="
 if [[ "$(uname)" == "Darwin" ]]; then
-    cp "$PROJECT_ROOT/build/core/libmes.dylib" "$PYTHON_PKG/"
+    cp "$BUILD_DIR/core/libmes.dylib" "$PYTHON_PKG/"
     # Fix install name for relocatable dylib
     install_name_tool -id @loader_path/libmes.dylib "$PYTHON_PKG/libmes.dylib" 2>/dev/null || true
     echo "Copied libmes.dylib"
 elif [[ "$(uname)" == "Linux" ]]; then
-    cp "$PROJECT_ROOT/build/core/libmes.so" "$PYTHON_PKG/"
+    cp "$BUILD_DIR/core/libmes.so" "$PYTHON_PKG/"
     echo "Copied libmes.so"
 fi
 
 echo "=== Building Python wheel ==="
 cd "$SCRIPT_DIR"
 rm -rf dist/
-python3 -m pip wheel . --no-deps -w dist/
+python3 -m hatchling build -t wheel
 
 echo "=== Re-tagging wheel with platform tag ==="
 if [[ "$(uname)" == "Darwin" ]]; then

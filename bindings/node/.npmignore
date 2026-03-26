@@ -17,6 +17,10 @@ build/Release/obj/
 build/Release/obj.target/
 build/Debug/
 
+# README swap artifacts
+README.npm.md
+.readme-backup
+
 # Misc
 *.log
 *.tgz

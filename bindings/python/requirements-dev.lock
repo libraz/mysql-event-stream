@@ -10,6 +10,7 @@
 #   universal: false
 
 -e file:.
+hatchling==1.29.0
 iniconfig==2.3.0
     # via pytest
 librt==0.8.1
@@ -18,17 +19,27 @@ mypy==1.19.1
 mypy-extensions==1.1.0
     # via mypy
 packaging==26.0
+    # via hatchling
     # via pytest
+    # via wheel
 pathspec==1.0.4
+    # via hatchling
     # via mypy
 pluggy==1.6.0
+    # via hatchling
     # via pytest
 pygments==2.19.2
     # via pytest
 pymysql==1.1.2
 pytest==9.0.2
+    # via pytest-asyncio
     # via pytest-timeout
+pytest-asyncio==1.3.0
 pytest-timeout==2.4.0
 ruff==0.15.6
+trove-classifiers==2026.1.14.14
+    # via hatchling
 typing-extensions==4.15.0
     # via mypy
+    # via pytest-asyncio
+wheel==0.46.3

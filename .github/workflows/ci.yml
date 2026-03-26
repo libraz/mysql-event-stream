@@ -97,8 +97,8 @@ jobs:
       - name: Show ccache statistics
         run: ccache --show-stats
 
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure --parallel $(nproc)
+      - name: Run tests (unit only, E2E requires Docker MySQL)
+        run: ctest --test-dir build --output-on-failure --parallel $(nproc) -E "E2E"
 
       - name: Generate coverage report
         run: |
