@@ -1,0 +1,24 @@
+# C++ addon source (compiled into .node binary)
+src/addon/
+CMakeLists.txt
+
+# Tests
+tests/
+e2e/
+vitest.config.ts
+
+# Config
+biome.json
+tsconfig.json
+.yarnrc.yml
+
+# Build intermediates
+build/Release/obj/
+build/Release/obj.target/
+build/Debug/
+
+# Misc
+*.log
+*.tgz
+*.tsbuildinfo
+coverage/

@@ -40,6 +40,7 @@ class CdcStream:
         ssl_ca: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
+        max_queue_size: int = 0,
         lib_path: str | None = None,
         max_reconnect_attempts: int = 10,
     ) -> None:
@@ -59,6 +60,7 @@ class CdcStream:
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
+            max_queue_size: Maximum event queue size (0 = unlimited).
             lib_path: Explicit path to libmes shared library.
             max_reconnect_attempts: Maximum reconnection attempts
                 (default 10, 0 = disabled).
@@ -75,6 +77,7 @@ class CdcStream:
         self._ssl_ca = ssl_ca
         self._ssl_cert = ssl_cert
         self._ssl_key = ssl_key
+        self._max_queue_size = max_queue_size
         self._lib_path = lib_path
         self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_attempts = 0
@@ -126,6 +129,7 @@ class CdcStream:
             "ssl_ca": "_ssl_ca",
             "ssl_cert": "_ssl_cert",
             "ssl_key": "_ssl_key",
+            "max_queue_size": "_max_queue_size",
             "lib_path": "_lib_path",
             "max_reconnect_attempts": "_max_reconnect_attempts",
         }
@@ -218,6 +222,7 @@ class CdcStream:
             ssl_ca=self._ssl_ca,
             ssl_cert=self._ssl_cert,
             ssl_key=self._ssl_key,
+            max_queue_size=self._max_queue_size,
             lib_path=self._lib_path,
         )
         self._client.connect()
@@ -238,6 +243,7 @@ class CdcStream:
             ssl_ca=self._ssl_ca,
             ssl_cert=self._ssl_cert,
             ssl_key=self._ssl_key,
+            max_queue_size=self._max_queue_size,
             lib_path=self._lib_path,
         )
         self._engine = CdcEngine(lib_path=self._lib_path)

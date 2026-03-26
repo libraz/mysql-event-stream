@@ -105,6 +105,7 @@ class ClientConfig:
         ssl_ca: Path to CA certificate file (empty to skip).
         ssl_cert: Path to client certificate file (empty to skip).
         ssl_key: Path to client private key file (empty to skip).
+        max_queue_size: Maximum event queue size (0 = unlimited).
     """
 
     host: str = "127.0.0.1"
@@ -119,6 +120,7 @@ class ClientConfig:
     ssl_ca: str = ""
     ssl_cert: str = ""
     ssl_key: str = ""
+    max_queue_size: int = 0
 
 
 @dataclass(frozen=True, slots=True)

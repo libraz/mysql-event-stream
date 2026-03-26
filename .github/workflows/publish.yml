@@ -1,0 +1,151 @@
+name: Publish and Create Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm install -g npm@latest
+      - run: corepack enable
+      - run: corepack prepare yarn@4.9.1 --activate
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            bindings/node/.yarn/cache
+            bindings/node/node_modules
+          key: ${{ runner.os }}-yarn-${{ hashFiles('bindings/node/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev pkg-config
+
+      - name: Build and test C++ core
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+
+      - name: Build and test Node.js binding
+        working-directory: bindings/node
+        run: |
+          yarn install --immutable
+          yarn build
+          yarn check
+          yarn test
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to npm
+        working-directory: bindings/node
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  python-wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            plat_tag: manylinux_2_17_x86_64
+            lib_name: libmes.so
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            plat_tag: manylinux_2_17_aarch64
+            lib_name: libmes.so
+          - os: macos-latest
+            arch: arm64
+            plat_tag: macosx_11_0_arm64
+            lib_name: libmes.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config cmake build-essential
+
+      - name: Install OpenSSL (macOS)
+        if: runner.os == 'macOS'
+        run: brew install openssl cmake
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build shared library (OpenSSL static)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DMES_OPENSSL_STATIC=ON
+          cmake --build build --config Release -j
+
+      - name: Copy shared library
+        run: cp build/core/${{ matrix.lib_name }} bindings/python/src/mysql_event_stream/
+
+      - name: Fix dylib install name (macOS)
+        if: runner.os == 'macOS'
+        run: install_name_tool -id @loader_path/libmes.dylib bindings/python/src/mysql_event_stream/libmes.dylib
+
+      - name: Build wheel
+        run: |
+          cd bindings/python
+          pip install wheel hatchling
+          pip wheel . --no-deps -w dist/
+          python3 -m wheel tags --platform-tag ${{ matrix.plat_tag }} --remove dist/*.whl
+
+      - name: Test wheel
+        run: |
+          pip install bindings/python/dist/*.whl pytest
+          python3 -c "import mysql_event_stream; print('OK')"
+          cd bindings/python && python3 -m pytest tests/ -x -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/python/dist/*.whl
+
+  publish-pypi:
+    needs: [python-wheels]
+    if: always() && needs.python-wheels.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mysql-event-stream
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

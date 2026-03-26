@@ -58,6 +58,7 @@ class BinlogClient:
         ssl_ca: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
+        max_queue_size: int = 0,
         lib_path: str | None = None,
     ) -> None:
         """Create a new BinlogClient.
@@ -76,6 +77,7 @@ class BinlogClient:
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
+            max_queue_size: Maximum event queue size (0 = unlimited).
             lib_path: Explicit path to libmes shared library.
 
         Raises:
@@ -85,7 +87,7 @@ class BinlogClient:
         self._lib = load_library(lib_path)
         if not load_client_library(self._lib):
             raise RuntimeError(
-                "BinlogClient is not available. Rebuild libmes with libmysqlclient installed"
+                "BinlogClient is not available. Rebuild libmes with OpenSSL installed"
             )
 
         self._config = ClientConfig(
@@ -101,6 +103,7 @@ class BinlogClient:
             ssl_ca=ssl_ca,
             ssl_cert=ssl_cert,
             ssl_key=ssl_key,
+            max_queue_size=max_queue_size,
         )
         self._handle: int | None = self._lib.mes_client_create()
         if not self._handle:
@@ -132,6 +135,7 @@ class BinlogClient:
             ssl_ca=ssl_ca,
             ssl_cert=ssl_cert,
             ssl_key=ssl_key,
+            max_queue_size=self._config.max_queue_size,
         )
 
         rc = self._lib.mes_client_connect(self._handle, ctypes.byref(config))

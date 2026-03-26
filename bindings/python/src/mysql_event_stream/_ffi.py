@@ -89,6 +89,7 @@ class MESClientConfig(ctypes.Structure):
         ("ssl_ca", ctypes.c_char_p),
         ("ssl_cert", ctypes.c_char_p),
         ("ssl_key", ctypes.c_char_p),
+        ("max_queue_size", ctypes.c_size_t),
     ]
 
 

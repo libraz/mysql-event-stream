@@ -55,7 +55,7 @@ def _find_lib_path() -> str:
     if build_path.exists():
         return str(build_path)
 
-    pytest.skip("libmes not found; install libmysqlclient and rebuild first")
+    pytest.skip("libmes not found; install OpenSSL and rebuild first")
     return ""  # unreachable, but keeps mypy happy
 
 

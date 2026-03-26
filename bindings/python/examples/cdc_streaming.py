@@ -4,7 +4,7 @@
 Connects directly to MySQL using the replication protocol and streams
 events as an async iterator.
 
-Requires libmysqlclient (auto-detected at build time).
+Requires OpenSSL (linked at build time).
 
 Prerequisites:
     1. Docker MySQL running: cd e2e/docker && docker compose up -d
@@ -146,7 +146,7 @@ def find_lib_path() -> str:
     print("Error: libmes not found.", file=sys.stderr)
     print(f"  Checked: {client_path}", file=sys.stderr)
     print(f"  Checked: {build_path}", file=sys.stderr)
-    print("Set MES_LIB_PATH or install libmysqlclient and rebuild.", file=sys.stderr)
+    print("Set MES_LIB_PATH or install OpenSSL and rebuild.", file=sys.stderr)
     sys.exit(1)
 
 

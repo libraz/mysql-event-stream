@@ -9,6 +9,27 @@ description = "MySQL 8.4 CDC engine - Python binding (native ctypes)"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = []
+authors = [{ name = "libraz" }]
+readme = "README.md"
+keywords = ["mysql", "cdc", "binlog", "replication", "change-data-capture"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/libraz/mysql-event-stream"
+Repository = "https://github.com/libraz/mysql-event-stream"
+Issues = "https://github.com/libraz/mysql-event-stream/issues"
 
 [tool.rye]
 managed = true
@@ -29,6 +50,10 @@ e2e = "pytest e2e/tests -v --timeout=120"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mysql_event_stream"]
+artifacts = ["src/mysql_event_stream/*.dylib", "src/mysql_event_stream/*.so", "src/mysql_event_stream/*.so.*"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "README.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

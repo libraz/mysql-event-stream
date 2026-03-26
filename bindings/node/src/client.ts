@@ -31,7 +31,7 @@ export class BinlogClient {
 
   constructor(config: ClientConfig) {
     if (!addon.hasClient || !addon.BinlogClient) {
-      throw new Error("BinlogClient is not available: libmysqlclient was not found during build");
+      throw new Error("BinlogClient native addon not loaded");
     }
     this.client = new addon.BinlogClient();
     this.client.connect(config);

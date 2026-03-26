@@ -97,8 +97,7 @@ export class CdcEngine {
     this.engine!.setExcludeTables(tables);
   }
 
-  /** Enable metadata queries for column name resolution.
-   *  Requires MySQL client support (MES_HAS_MYSQL). */
+  /** Enable metadata queries for column name resolution. */
   enableMetadata(config: ClientConfig): void {
     this.ensureNotDestroyed();
     if (typeof this.engine!.enableMetadata === "function") {

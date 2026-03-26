@@ -16,8 +16,17 @@
     "check:fix": "biome check --write src/ tests/",
     "test": "vitest run",
     "test:e2e": "vitest run --config e2e/vitest.config.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build && npm run check && npm run test"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/libraz/mysql-event-stream.git",
+    "directory": "bindings/node"
+  },
+  "homepage": "https://github.com/libraz/mysql-event-stream",
+  "bugs": "https://github.com/libraz/mysql-event-stream/issues",
+  "keywords": ["mysql", "cdc", "binlog", "replication", "change-data-capture", "napi"],
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22"

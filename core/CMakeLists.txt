@@ -91,10 +91,15 @@ if(MES_ENABLE_COVERAGE)
 endif()
 
 # OpenSSL (required for protocol layer)
+# Static linking for self-contained wheel/binary distribution
+option(MES_OPENSSL_STATIC "Link OpenSSL statically" OFF)
+if(MES_OPENSSL_STATIC)
+  set(OPENSSL_USE_STATIC_LIBS TRUE)
+endif()
 find_package(OpenSSL REQUIRED)
-message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+message(STATUS "OpenSSL found: ${OPENSSL_VERSION} (static=${MES_OPENSSL_STATIC})")
 
-# Protocol layer (replaces libmysqlclient)
+# Protocol layer (MySQL wire protocol implementation)
 set(PROTOCOL_SOURCES
   src/protocol/mysql_socket.cpp
   src/protocol/mysql_packet.cpp

@@ -1,4 +1,4 @@
-.PHONY: build test install uninstall clean
+.PHONY: build test install uninstall clean build-wheel build-node
 
 BUILD_TYPE ?= Release
 BUILD_DIR  := build
@@ -24,3 +24,9 @@ uninstall:
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+build-wheel: build
+	cd bindings/python && bash build_wheel.sh
+
+build-node:
+	cd bindings/node && yarn install && yarn build

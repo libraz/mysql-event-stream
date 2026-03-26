@@ -17,10 +17,10 @@ mysql-event-stream parses MySQL 8.4 binary log events and emits structured row-l
 
 ```mermaid
 graph TD
-    MySQL[MySQL 8.4 Primary] -->|binlog stream / GTID| Core
+    MySQL[MySQL 8.4 Primary] -->|binlog stream / GTID| Proto
 
     subgraph mysql-event-stream
-        Core[C++ Core Library\nC ABI: libmes]
+        Proto[Protocol Layer\nTCP + TLS + MySQL Wire Protocol] --> Core[CDC Engine\nC ABI: libmes]
         Core -->|N-API| Node[Node.js Binding]
         Core -->|ctypes| Python[Python Binding]
     end
@@ -124,7 +124,8 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 
 ## Features
 
-- **Lightweight** - Minimal dependencies, small binary size
+- **Lightweight** - No external MySQL client library dependency, small binary size
+- **Zero native dependencies** - Ships as a self-contained binary; no libmysqlclient required (only OpenSSL)
 - **Streaming** - Process events incrementally as bytes arrive
 - **Multi-language** - C/C++, Node.js (N-API), and Python (ctypes) bindings
 - **MySQL 8.4** - Built for the latest MySQL LTS release
@@ -134,10 +135,10 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 - **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
 - **Auto-reconnection** - Automatic reconnection with linear backoff on connection loss
-- **Backpressure** - Configurable event queue size to prevent memory exhaustion
+- **Backpressure** - Internal reader thread with bounded event queue (default 10,000) prevents stream disconnection during consumer slowdowns
 - **Table filtering** - Include/exclude databases and tables to reduce processing overhead
 - **Structured logging** - Callback-based structured logging (event=name key=value format)
-- **Graceful shutdown** - Thread-safe stream cancellation via `stop()`
+- **Graceful shutdown** - Thread-safe stream cancellation via `stop()` -- immediately unblocks consumer and reader threads
 
 ## Configuration
 
@@ -184,8 +185,15 @@ engine.set_exclude_tables(["mydb.audit_log"])
 ### Backpressure Control
 
 ```typescript
-// Limit event queue to prevent memory exhaustion
-engine.setMaxQueueSize(10000);
+// BinlogClient uses an internal reader thread with a bounded event queue.
+// Default queue size: 10,000 events.
+// When the queue is full, TCP backpressure naturally throttles the server.
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  maxQueueSize: 5000,  // Configure queue size (default: 10000)
+});
 ```
 
 ### Logging
@@ -216,14 +224,14 @@ const stream = new CdcStream({
 
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
-- MySQL client library (`libmysqlclient`)
+- OpenSSL development libraries
 
 ```bash
 # macOS
-brew install cmake mysql-client@8.4
+brew install cmake openssl
 
 # Ubuntu / Debian
-sudo apt install cmake build-essential libmysqlclient-dev pkg-config
+sudo apt install cmake build-essential libssl-dev pkg-config
 
 # Clone
 git clone https://github.com/libraz/mysql-event-stream.git
@@ -274,11 +282,16 @@ pytest
 mysql-event-stream/
   core/                        # C++ core library
     include/mes.h              #   Public C ABI header
-    src/                       #   Implementation
+    src/
+      protocol/                #   MySQL wire protocol (TCP, TLS, auth, query, binlog)
+      client/                  #   BinlogClient, EventQueue, ConnectionValidator
+    tests/                     #   Unit tests (Google Test)
+      e2e/                     #   E2E tests (Docker MySQL 8.4)
   bindings/
     node/                      # Node.js binding (N-API addon)
     python/                    # Python binding (ctypes)
-  e2e/                         # E2E tests (pytest + Docker MySQL 8.4)
+  e2e/
+    docker/                    # Docker Compose + MySQL init + SSL certs
 ```
 
 ## Origin
