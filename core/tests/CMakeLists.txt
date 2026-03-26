@@ -92,8 +92,4 @@ target_link_libraries(test_mysql_binlog_stream PRIVATE mes-core GTest::gtest_mai
 target_compile_options(test_mysql_binlog_stream PRIVATE -fno-exceptions -fno-rtti)
 gtest_discover_tests(test_mysql_binlog_stream)
 
-# test_e2e_protocol (requires running MySQL 8.4 at localhost:13307)
-add_executable(test_e2e_protocol test_e2e_protocol.cpp)
-target_link_libraries(test_e2e_protocol PRIVATE mes-core GTest::gtest_main)
-target_compile_options(test_e2e_protocol PRIVATE -fno-exceptions -fno-rtti)
-gtest_discover_tests(test_e2e_protocol)
+add_subdirectory(e2e)

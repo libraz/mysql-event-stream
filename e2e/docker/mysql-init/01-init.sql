@@ -11,6 +11,25 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 GRANT SELECT ON mes_test.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 
+-- caching_sha2_password user (MySQL 8.4 default plugin)
+CREATE USER IF NOT EXISTS 'sha2_user'@'%' IDENTIFIED WITH caching_sha2_password BY 'sha2_test_pwd';
+GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'sha2_user'@'%';
+GRANT SELECT ON mes_test.* TO 'sha2_user'@'%';
+
+-- User with empty password
+CREATE USER IF NOT EXISTS 'empty_pass_user'@'%' IDENTIFIED WITH mysql_native_password BY '';
+GRANT SELECT ON mes_test.* TO 'empty_pass_user'@'%';
+
+-- User with no replication privileges
+CREATE USER IF NOT EXISTS 'no_repl_user'@'%' IDENTIFIED WITH mysql_native_password BY 'no_repl_pass';
+GRANT SELECT ON mes_test.* TO 'no_repl_user'@'%';
+
+-- User with special characters in password
+CREATE USER IF NOT EXISTS 'special_user'@'%' IDENTIFIED WITH mysql_native_password BY 'p@ss''w\\ord"!';
+GRANT SELECT ON mes_test.* TO 'special_user'@'%';
+
+FLUSH PRIVILEGES;
+
 -- Test table with various column types
 CREATE TABLE IF NOT EXISTS users (
     id BIGINT NOT NULL AUTO_INCREMENT,
@@ -34,4 +53,17 @@ CREATE TABLE IF NOT EXISTS items (
     name VARCHAR(100) NOT NULL,
     value INT NOT NULL DEFAULT 0,
     PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table for DDL tests
+CREATE TABLE IF NOT EXISTS ddl_test (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    val VARCHAR(100)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Table for large data tests
+CREATE TABLE IF NOT EXISTS large_data (
+    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    big_text LONGTEXT,
+    big_blob LONGBLOB
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
