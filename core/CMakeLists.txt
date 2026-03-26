@@ -106,18 +106,18 @@ target_include_directories(mes-core PUBLIC
 
 target_link_libraries(mes-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
-# Propagate sanitizer/coverage link flags to final targets
+# Propagate sanitizer/coverage link flags to consumers (PUBLIC required for static lib)
 if(MES_ENABLE_ASAN)
-  target_link_options(mes-core PRIVATE -fsanitize=address)
+  target_link_options(mes-core PUBLIC -fsanitize=address)
 endif()
 if(MES_ENABLE_TSAN)
-  target_link_options(mes-core PRIVATE -fsanitize=thread)
+  target_link_options(mes-core PUBLIC -fsanitize=thread)
 endif()
 if(MES_ENABLE_UBSAN)
-  target_link_options(mes-core PRIVATE -fsanitize=undefined)
+  target_link_options(mes-core PUBLIC -fsanitize=undefined)
 endif()
 if(MES_ENABLE_COVERAGE)
-  target_link_options(mes-core PRIVATE --coverage)
+  target_link_options(mes-core PUBLIC --coverage)
 endif()
 
 # Shared library for C ABI
