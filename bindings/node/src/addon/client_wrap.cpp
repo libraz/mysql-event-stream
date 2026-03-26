@@ -10,10 +10,11 @@
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
 class PollWorker : public Napi::AsyncWorker {
  public:
-  PollWorker(Napi::Env env, mes_client_t* client,
+  PollWorker(Napi::Env env, mes_client_t* client, ClientWrap* wrap,
              Napi::Promise::Deferred deferred)
       : Napi::AsyncWorker(env),
         client_(client),
+        wrap_(wrap),
         deferred_(deferred),
         error_(MES_OK),
         is_heartbeat_(false) {}
@@ -37,28 +38,32 @@ class PollWorker : public Napi::AsyncWorker {
       deferred_.Reject(
           Napi::Error::New(env, "mes_client_poll failed: " + err_msg)
               .Value());
-      return;
-    }
-
-    Napi::Object result = Napi::Object::New(env);
-
-    if (!data_.empty()) {
-      result.Set("data",
-                 Napi::Buffer<uint8_t>::Copy(env, data_.data(), data_.size()));
     } else {
-      result.Set("data", env.Null());
+      Napi::Object result = Napi::Object::New(env);
+
+      if (!data_.empty()) {
+        result.Set(
+            "data",
+            Napi::Buffer<uint8_t>::Copy(env, data_.data(), data_.size()));
+      } else {
+        result.Set("data", env.Null());
+      }
+
+      result.Set("isHeartbeat", Napi::Boolean::New(env, is_heartbeat_));
+      deferred_.Resolve(result);
     }
 
-    result.Set("isHeartbeat", Napi::Boolean::New(env, is_heartbeat_));
-    deferred_.Resolve(result);
+    wrap_->OnPollWorkerComplete();
   }
 
   void OnError(const Napi::Error& error) override {
     deferred_.Reject(error.Value());
+    wrap_->OnPollWorkerComplete();
   }
 
  private:
   mes_client_t* client_;
+  ClientWrap* wrap_;
   Napi::Promise::Deferred deferred_;
   mes_error_t error_;
   bool is_heartbeat_;
@@ -182,7 +187,7 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   c_config.start_gtid = start_gtid.c_str();
   c_config.connect_timeout_s = connect_timeout_s;
   c_config.read_timeout_s = read_timeout_s;
-  c_config.ssl_mode = ssl_mode;
+  c_config.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode);
   c_config.ssl_ca = ssl_ca.empty() ? nullptr : ssl_ca.c_str();
   c_config.ssl_cert = ssl_cert.empty() ? nullptr : ssl_cert.c_str();
   c_config.ssl_key = ssl_key.empty() ? nullptr : ssl_key.c_str();
@@ -217,7 +222,7 @@ void ClientWrap::Start(const Napi::CallbackInfo& info) {
 Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (!client_) {
+  if (!client_ || destroy_pending_) {
     auto deferred = Napi::Promise::Deferred::New(env);
     deferred.Reject(
         Napi::Error::New(env, "Client has been destroyed").Value());
@@ -225,7 +230,8 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   }
 
   auto deferred = Napi::Promise::Deferred::New(env);
-  auto* worker = new PollWorker(env, client_, deferred);
+  pending_workers_.fetch_add(1, std::memory_order_relaxed);
+  auto* worker = new PollWorker(env, client_, this, deferred);
   worker->Queue();
   return deferred.Promise();
 }
@@ -243,9 +249,31 @@ void ClientWrap::Disconnect(const Napi::CallbackInfo& info) {
 }
 
 void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
-  if (client_) {
+  if (!client_) return;
+
+  if (pending_workers_.load(std::memory_order_acquire) > 0) {
+    // Workers are in flight on the thread pool. Stop the client to unblock
+    // any blocking mes_client_poll() call, but defer the actual destroy
+    // until the last worker completes on the main thread.
+    mes_client_stop(client_);
+    destroy_pending_ = true;
+  } else {
     mes_client_destroy(client_);
     client_ = nullptr;
+  }
+}
+
+void ClientWrap::OnPollWorkerComplete() {
+  pending_workers_.fetch_sub(1, std::memory_order_release);
+  MaybeFinalizeDeferredDestroy();
+}
+
+void ClientWrap::MaybeFinalizeDeferredDestroy() {
+  if (destroy_pending_ && client_ &&
+      pending_workers_.load(std::memory_order_acquire) == 0) {
+    mes_client_destroy(client_);
+    client_ = nullptr;
+    destroy_pending_ = false;
   }
 }
 

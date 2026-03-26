@@ -4,6 +4,8 @@
 #ifndef MES_NODE_CLIENT_WRAP_H_
 #define MES_NODE_CLIENT_WRAP_H_
 
+#include <atomic>
+
 #include <napi.h>
 
 #include "mes.h"
@@ -13,6 +15,9 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   static Napi::Object Init(Napi::Env env, Napi::Object exports);
   explicit ClientWrap(const Napi::CallbackInfo& info);
   ~ClientWrap();
+
+  /** @brief Called by PollWorker on the main thread when work completes. */
+  void OnPollWorkerComplete();
 
  private:
   void Connect(const Napi::CallbackInfo& info);
@@ -25,7 +30,12 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   Napi::Value GetLastError(const Napi::CallbackInfo& info);
   Napi::Value GetCurrentGtid(const Napi::CallbackInfo& info);
 
+  /** @brief Finalize deferred destroy if no workers remain in flight. */
+  void MaybeFinalizeDeferredDestroy();
+
   mes_client_t* client_;
+  std::atomic<int> pending_workers_{0};
+  bool destroy_pending_{false};
 };
 
 #endif  // MES_NODE_CLIENT_WRAP_H_

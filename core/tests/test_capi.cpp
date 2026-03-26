@@ -81,7 +81,7 @@ TEST(CApi, NextEventNoEvent) {
   mes_destroy(engine);
 }
 
-TEST(CApi, HasEventsNull) { EXPECT_EQ(mes_has_events(nullptr), -1); }
+TEST(CApi, HasEventsNull) { EXPECT_EQ(mes_has_events(nullptr), 0); }
 
 TEST(CApi, HasEventsEmpty) {
   auto* engine = mes_create();
@@ -399,6 +399,67 @@ TEST(CapiTest, BlobColumn) {
   ASSERT_GE(event->after_count, 1u);
   EXPECT_EQ(event->after_columns[0].type, MES_COL_BYTES);
   EXPECT_EQ(event->after_columns[0].str_len, 3u);
+
+  mes_destroy(engine);
+}
+
+// ---- JSON column (bytes, not string) ----
+
+TEST(CapiTest, JsonColumnReturnsBytesNotString) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  // Build TABLE_MAP with a JSON column (type 0xF5, metadata byte = 4)
+  mes::test::EventBuilder tb;
+  tb.WriteU48Le(42);     // table_id
+  tb.WriteU16Le(0);      // flags
+  tb.WriteU8(2);         // db name length
+  tb.WriteString("db");
+  tb.WriteU8(0);         // null terminator
+  tb.WriteU8(1);         // table name length
+  tb.WriteString("t");
+  tb.WriteU8(0);         // null terminator
+  tb.WriteU8(1);         // 1 column
+  tb.WriteU8(0xF5);      // JSON
+  tb.WriteU8(1);         // metadata length
+  tb.WriteU8(4);         // pack_length = 4
+  tb.WriteU8(0x01);      // null bitmap
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent),
+                             1000, 100, tb.Data());
+
+  // Build WRITE_ROWS with a JSON value: 4-byte length prefix + payload
+  mes::test::EventBuilder rb;
+  rb.WriteU48Le(42);     // table_id
+  rb.WriteU16Le(0);      // flags
+  rb.WriteU16Le(2);      // var_header_len
+  rb.WriteU8(1);         // column_count
+  rb.WriteU8(0x01);      // columns_present
+  rb.WriteU8(0x00);      // null_bitmap (not null)
+  // JSON data: 4-byte LE length prefix followed by payload bytes
+  std::vector<uint8_t> json_payload = {0x00, 0x01, 0x00, 0x0C, 0x00, 0x0B, 0x00, 0x01};
+  rb.WriteU32Le(static_cast<uint32_t>(json_payload.size()));
+  rb.WriteBytes(json_payload);
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent),
+                             1000, 200, rb.Data());
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event, nullptr);
+  ASSERT_GE(event->after_count, 1u);
+  EXPECT_EQ(event->after_columns[0].type, MES_COL_BYTES);
+  EXPECT_EQ(event->after_columns[0].str_len, json_payload.size());
+  EXPECT_NE(event->after_columns[0].str_data, nullptr);
+  // Verify the actual bytes match
+  EXPECT_EQ(memcmp(event->after_columns[0].str_data, json_payload.data(),
+                   json_payload.size()), 0);
 
   mes_destroy(engine);
 }

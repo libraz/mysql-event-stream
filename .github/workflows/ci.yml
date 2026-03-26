@@ -27,6 +27,8 @@ jobs:
     outputs:
       core: ${{ steps.filter.outputs.core }}
       tests: ${{ steps.filter.outputs.tests }}
+      node: ${{ steps.filter.outputs.node }}
+      python: ${{ steps.filter.outputs.python }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -40,6 +42,10 @@ jobs:
               - 'CMakeLists.txt'
             tests:
               - 'core/tests/**'
+            node:
+              - 'bindings/node/**'
+            python:
+              - 'bindings/python/**'
 
   build-and-test:
     name: Build, Test and Coverage
@@ -124,3 +130,63 @@ jobs:
           path: |
             build/CMakeFiles/*.log
             build/Testing/Temporary/
+
+  node-test:
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.node == 'true' || needs.changes.outputs.core == 'true'
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable && corepack prepare yarn@4.9.1 --activate
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: yarn install --immutable
+      - name: Build native addon
+        working-directory: bindings/node
+        run: yarn build
+      - name: Run tests
+        working-directory: bindings/node
+        run: yarn test
+
+  python-test:
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true'
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build shared library
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+      - name: Install Python package
+        working-directory: bindings/python
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        working-directory: bindings/python
+        run: pytest tests/ -v
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.tests == 'true'
+    needs: changes
+    strategy:
+      matrix:
+        sanitizer:
+          - { name: asan, cmake_flag: MES_ENABLE_ASAN }
+          - { name: ubsan, cmake_flag: MES_ENABLE_UBSAN }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - name: Build with ${{ matrix.sanitizer.name }}
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -D${{ matrix.sanitizer.cmake_flag }}=ON
+          cmake --build build --parallel
+      - name: Run tests
+        run: cd build && ctest --output-on-failure --parallel $(nproc) -E "E2E"

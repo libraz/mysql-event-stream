@@ -34,6 +34,7 @@ set(CORE_SOURCES
   ${MES_ROOT}/core/src/client/binlog_client.cpp
   ${MES_ROOT}/core/src/client/capi_client.cpp
   ${MES_ROOT}/core/src/client/metadata_fetcher.cpp
+  ${MES_ROOT}/core/src/client/event_queue.cpp
   ${MES_ROOT}/core/src/protocol/mysql_socket.cpp
   ${MES_ROOT}/core/src/protocol/mysql_packet.cpp
   ${MES_ROOT}/core/src/protocol/mysql_auth.cpp

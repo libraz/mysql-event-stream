@@ -179,7 +179,7 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
   config.start_gtid = gtid_before.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 2;
+  config.ssl_mode = MES_SSL_REQUIRED;
   config.ssl_ca = ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

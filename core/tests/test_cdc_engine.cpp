@@ -456,5 +456,19 @@ TEST(CdcEngineTest, FilterResetClearsBlockedIds) {
   EXPECT_FALSE(engine.HasEvents());
 }
 
+TEST(CdcEngineTest, TableMapTooShortBodyNoEvent) {
+  CdcEngine engine;
+
+  // Build a TABLE_MAP event with a body that is too short (< 8 bytes)
+  std::vector<uint8_t> short_body = {0x01, 0x02, 0x03};
+  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                           short_body);
+
+  size_t consumed = engine.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+}
+
 }  // namespace
 }  // namespace mes

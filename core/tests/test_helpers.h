@@ -13,6 +13,7 @@
 #define MES_CORE_TESTS_TEST_HELPERS_H_
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -48,14 +49,44 @@ class EventBuilder {
     WriteU32Le(static_cast<uint32_t>(v));
     WriteU32Le(static_cast<uint32_t>(v >> 32));
   }
+  void WriteU16Be(uint16_t v) {
+    buf_.push_back(static_cast<uint8_t>(v >> 8));
+    buf_.push_back(static_cast<uint8_t>(v));
+  }
+  void WriteU24Be(uint32_t v) {
+    buf_.push_back(static_cast<uint8_t>(v >> 16));
+    buf_.push_back(static_cast<uint8_t>(v >> 8));
+    buf_.push_back(static_cast<uint8_t>(v));
+  }
+  void WriteU32Be(uint32_t v) {
+    buf_.push_back(static_cast<uint8_t>(v >> 24));
+    buf_.push_back(static_cast<uint8_t>(v >> 16));
+    buf_.push_back(static_cast<uint8_t>(v >> 8));
+    buf_.push_back(static_cast<uint8_t>(v));
+  }
+  void WriteFloat(float v) {
+    uint8_t tmp[4];
+    std::memcpy(tmp, &v, 4);
+    buf_.insert(buf_.end(), tmp, tmp + 4);
+  }
+  void WriteDouble(double v) {
+    uint8_t tmp[8];
+    std::memcpy(tmp, &v, 8);
+    buf_.insert(buf_.end(), tmp, tmp + 8);
+  }
   void WriteString(const std::string& s) {
     buf_.insert(buf_.end(), s.begin(), s.end());
   }
   void WriteBytes(const std::vector<uint8_t>& b) {
     buf_.insert(buf_.end(), b.begin(), b.end());
   }
+  void WriteBytes(const uint8_t* d, size_t n) {
+    buf_.insert(buf_.end(), d, d + n);
+  }
 
   const std::vector<uint8_t>& Data() const { return buf_; }
+  const uint8_t* DataPtr() const { return buf_.data(); }
+  std::vector<uint8_t>& Buffer() { return buf_; }
   size_t Size() const { return buf_.size(); }
   void Clear() { buf_.clear(); }
 

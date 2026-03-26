@@ -38,15 +38,13 @@
     "node": "22.16.0",
     "yarn": "4.9.1"
   },
-  "dependencies": {
-    "cmake-js": "^7.3.0",
-    "node-addon-api": "^8.0.0"
-  },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "2",
+    "cmake-js": "^7.3.0",
     "mysql2": "^3.19.1",
+    "node-addon-api": "^8.0.0",
     "typescript": "^5.5.0",
     "vitest": "^2.0.0"
   }

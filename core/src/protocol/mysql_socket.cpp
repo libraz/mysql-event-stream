@@ -272,7 +272,8 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port,
 
 mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
                                        const char* ssl_cert,
-                                       const char* ssl_key) {
+                                       const char* ssl_key,
+                                       const char* hostname) {
   // Mode 0 = disabled: nothing to do.
   if (ssl_mode == 0) return MES_OK;
 
@@ -360,18 +361,27 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
   SSL_set_fd(ssl_, fd_);
 
   // For verify_identity mode, enable hostname checking.
-  if (ssl_mode >= 4) {
+  if (ssl_mode >= 4 && hostname != nullptr && hostname[0] != '\0') {
     SSL_set_hostflags(ssl_, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-    // SSL_set1_host returns 1 on success.
-    // Note: the hostname to verify is set from the connect host. The caller
-    // is responsible for ensuring the host passed to Connect() matches the
-    // expected certificate CN/SAN.  We rely on the SNI extension set below
-    // and the X509 hostname verification built into OpenSSL.
+    if (SSL_set1_host(ssl_, hostname) != 1) {
+      StructuredLog()
+          .Event("ssl_set1_host_failed")
+          .Field("hostname", hostname)
+          .Field("error", GetOpenSSLError())
+          .Error();
+      SSL_free(ssl_);
+      ssl_ = nullptr;
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
   }
 
-  // Set SNI (Server Name Indication) extension.
-  // This is needed for servers that host multiple certificates.
-  // SSL_set_tlsext_host_name is a macro that returns 1 on success.
+  // Set SNI (Server Name Indication) extension so the server can select
+  // the correct certificate when hosting multiple virtual hosts.
+  if (hostname != nullptr && hostname[0] != '\0') {
+    SSL_set_tlsext_host_name(ssl_, hostname);
+  }
 
   // Perform TLS handshake.
   int ret = SSL_connect(ssl_);

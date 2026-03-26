@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import warnings
 
 from .client import BinlogClient
 from .engine import CdcEngine
@@ -225,6 +225,8 @@ class CdcStream:
             max_queue_size=self._max_queue_size,
             lib_path=self._lib_path,
         )
+        assert self._engine is not None
+        self._engine.reset()
         self._client.connect()
         self._client.start()
 
@@ -247,7 +249,7 @@ class CdcStream:
             lib_path=self._lib_path,
         )
         self._engine = CdcEngine(lib_path=self._lib_path)
-        with contextlib.suppress(RuntimeError):
+        try:
             self._engine.enable_metadata(
                 host=self._host,
                 port=self._port,
@@ -258,6 +260,12 @@ class CdcStream:
                 ssl_ca=self._ssl_ca,
                 ssl_cert=self._ssl_cert,
                 ssl_key=self._ssl_key,
+            )
+        except RuntimeError as exc:
+            warnings.warn(
+                f"Failed to enable column name metadata: {exc}. "
+                "Column names will use numeric indices.",
+                stacklevel=2,
             )
         self._client.connect()
         self._client.start()

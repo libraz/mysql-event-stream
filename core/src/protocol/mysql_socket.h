@@ -71,10 +71,13 @@ class SocketHandle {
    * @param ssl_ca    Path to CA certificate file (NULL to skip).
    * @param ssl_cert  Path to client certificate file (NULL to skip).
    * @param ssl_key   Path to client private key file (NULL to skip).
+   * @param hostname  Server hostname for SNI and verify_identity checks
+   *                  (NULL to skip).
    * @return MES_OK on success, MES_ERR_CONNECT on TLS handshake failure.
    */
   mes_error_t UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
-                           const char* ssl_cert, const char* ssl_key);
+                           const char* ssl_cert, const char* ssl_key,
+                           const char* hostname);
 
   /**
    * @brief Set the read timeout on the underlying socket.

@@ -285,60 +285,36 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
     case ColumnType::kTinyBlob:
     case ColumnType::kMediumBlob:
     case ColumnType::kLongBlob: {
-      uint32_t pack_length = meta;
+      uint8_t pack_length = static_cast<uint8_t>(meta);
       if (pack_length == 0) pack_length = 1;
-      if (len < pack_length) return ColumnValue::Null(type);
-      uint32_t blob_len = 0;
-      switch (pack_length) {
-        case 1:
-          blob_len = binary::ReadU8(data);
-          break;
-        case 2:
-          blob_len = binary::ReadU16Le(data);
-          break;
-        case 3:
-          blob_len = binary::ReadU24Le(data);
-          break;
-        case 4:
-          blob_len = binary::ReadU32Le(data);
-          break;
-        default:
-          return ColumnValue::Null(type);
-      }
-      if (len < pack_length + blob_len) return ColumnValue::Null(type);
-      *bytes_consumed = pack_length + blob_len;
+      if (pack_length > 4) return ColumnValue::Null(type);
+      size_t prefix_consumed = 0;
+      uint32_t blob_len =
+          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      if (prefix_consumed == 0) return ColumnValue::Null(type);
+      if (len < prefix_consumed + blob_len) return ColumnValue::Null(type);
+      *bytes_consumed = prefix_consumed + blob_len;
       return ColumnValue::Bytes(
           type,
-          std::vector<uint8_t>(data + pack_length, data + pack_length + blob_len));
+          std::vector<uint8_t>(data + prefix_consumed,
+                               data + prefix_consumed + blob_len));
     }
 
     case ColumnType::kJson: {
-      uint32_t pack_length = meta;
+      uint8_t pack_length = static_cast<uint8_t>(meta);
       if (pack_length == 0) pack_length = 4;
-      if (len < pack_length) return ColumnValue::Null(type);
-      uint32_t json_len = 0;
-      switch (pack_length) {
-        case 1:
-          json_len = binary::ReadU8(data);
-          break;
-        case 2:
-          json_len = binary::ReadU16Le(data);
-          break;
-        case 3:
-          json_len = binary::ReadU24Le(data);
-          break;
-        case 4:
-          json_len = binary::ReadU32Le(data);
-          break;
-        default:
-          return ColumnValue::Null(type);
-      }
-      if (len < pack_length + json_len) return ColumnValue::Null(type);
-      *bytes_consumed = pack_length + json_len;
+      if (pack_length > 4) return ColumnValue::Null(type);
+      size_t prefix_consumed = 0;
+      uint32_t json_len =
+          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      if (prefix_consumed == 0) return ColumnValue::Null(type);
+      if (len < prefix_consumed + json_len) return ColumnValue::Null(type);
+      *bytes_consumed = prefix_consumed + json_len;
       // Store JSON as bytes (binary JSON format, not text)
       return ColumnValue::Bytes(
           type,
-          std::vector<uint8_t>(data + pack_length, data + pack_length + json_len));
+          std::vector<uint8_t>(data + prefix_consumed,
+                               data + prefix_consumed + json_len));
     }
 
     case ColumnType::kString: {
@@ -559,31 +535,19 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
     }
 
     case ColumnType::kGeometry: {
-      uint32_t pack_length = meta;
+      uint8_t pack_length = static_cast<uint8_t>(meta);
       if (pack_length == 0) pack_length = 4;
-      if (len < pack_length) return ColumnValue::Null(type);
-      uint32_t geo_len = 0;
-      switch (pack_length) {
-        case 1:
-          geo_len = binary::ReadU8(data);
-          break;
-        case 2:
-          geo_len = binary::ReadU16Le(data);
-          break;
-        case 3:
-          geo_len = binary::ReadU24Le(data);
-          break;
-        case 4:
-          geo_len = binary::ReadU32Le(data);
-          break;
-        default:
-          return ColumnValue::Null(type);
-      }
-      if (len < pack_length + geo_len) return ColumnValue::Null(type);
-      *bytes_consumed = pack_length + geo_len;
+      if (pack_length > 4) return ColumnValue::Null(type);
+      size_t prefix_consumed = 0;
+      uint32_t geo_len =
+          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      if (prefix_consumed == 0) return ColumnValue::Null(type);
+      if (len < prefix_consumed + geo_len) return ColumnValue::Null(type);
+      *bytes_consumed = prefix_consumed + geo_len;
       return ColumnValue::Bytes(
           type,
-          std::vector<uint8_t>(data + pack_length, data + pack_length + geo_len));
+          std::vector<uint8_t>(data + prefix_consumed,
+                               data + prefix_consumed + geo_len));
     }
 
     case ColumnType::kEnum: {

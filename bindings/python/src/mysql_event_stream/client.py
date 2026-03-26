@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 
 from ._ffi import (
+    MES_ERR_AUTH,
     MES_ERR_CONNECT,
     MES_ERR_DISCONNECTED,
     MES_ERR_STREAM,
@@ -17,6 +18,7 @@ from ._ffi import (
 from .types import ClientConfig, PollResult
 
 _ERROR_MESSAGES = {
+    MES_ERR_AUTH: "Authentication failed",
     MES_ERR_CONNECT: "Connection failed",
     MES_ERR_VALIDATION: "Server validation failed",
     MES_ERR_STREAM: "Streaming error",
@@ -106,7 +108,7 @@ class BinlogClient:
             max_queue_size=max_queue_size,
         )
         self._handle: int | None = self._lib.mes_client_create()
-        if not self._handle:
+        if self._handle is None:
             raise RuntimeError("Failed to create BinlogClient")
 
     def connect(self) -> None:
@@ -182,31 +184,31 @@ class BinlogClient:
 
     def stop(self) -> None:
         """Request stream stop. Thread-safe; unblocks a pending poll()."""
-        if self._handle:
+        if self._handle is not None:
             self._lib.mes_client_stop(self._handle)
 
     def disconnect(self) -> None:
         """Disconnect from MySQL server."""
-        if self._handle:
+        if self._handle is not None:
             self._lib.mes_client_disconnect(self._handle)
 
     def close(self) -> None:
         """Destroy the client and free resources."""
-        if self._handle:
+        if self._handle is not None:
             self._lib.mes_client_destroy(self._handle)
             self._handle = None
 
     @property
     def is_connected(self) -> bool:
         """Check if client is connected."""
-        if not self._handle:
+        if self._handle is None:
             return False
         return bool(self._lib.mes_client_is_connected(self._handle) == 1)
 
     @property
     def current_gtid(self) -> str:
         """Get current GTID position."""
-        if not self._handle:
+        if self._handle is None:
             return ""
         raw = self._lib.mes_client_current_gtid(self._handle)
         return raw.decode("utf-8") if raw else ""
@@ -221,11 +223,11 @@ class BinlogClient:
         self.close()
 
     def _check_open(self) -> None:
-        if not self._handle:
+        if self._handle is None:
             raise RuntimeError("BinlogClient has been closed")
 
     def _get_last_error(self) -> str:
-        if not self._handle:
+        if self._handle is None:
             return ""
         raw = self._lib.mes_client_last_error(self._handle)
         return raw.decode("utf-8") if raw else ""

@@ -15,7 +15,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <ctime>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -148,9 +147,6 @@ class BinlogClient {
   std::string current_gtid_;
   mutable std::mutex gtid_mutex_;
   mutable std::string gtid_snapshot_;  // For safe c_str() return
-
-  // Heartbeat tracking
-  std::atomic<int64_t> last_heartbeat_time_{0};
 
   /** @brief Reader thread main loop */
   void ReaderLoop();

@@ -46,12 +46,12 @@ class CdcEngine:
         """
         self._lib = load_library(lib_path)
         self._handle: int | None = self._lib.mes_create()
-        if not self._handle:
+        if self._handle is None:
             raise RuntimeError("Failed to create CDC engine")
 
     def close(self) -> None:
         """Destroy the engine and free resources."""
-        if self._handle:
+        if self._handle is not None:
             self._lib.mes_destroy(self._handle)
             self._handle = None
 
@@ -66,7 +66,7 @@ class CdcEngine:
 
     def _check_open(self) -> None:
         """Raise RuntimeError if the engine has been closed."""
-        if not self._handle:
+        if self._handle is None:
             raise RuntimeError("Engine has been closed")
 
     def feed(self, data: bytes | bytearray) -> int:

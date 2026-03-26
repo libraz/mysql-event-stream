@@ -59,6 +59,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       c.type = MES_COL_DOUBLE;
       c.double_val = col.float_val;
       break;
+    case mes::ColumnType::kJson:
     case mes::ColumnType::kBlob:
     case mes::ColumnType::kTinyBlob:
     case mes::ColumnType::kMediumBlob:
@@ -71,7 +72,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     default:
       // All remaining types use string representation:
       // kVarchar, kVarString, kString, kDate, kTime, kDatetime,
-      // kDatetime2, kTimestamp2, kTime2, kNewDecimal, kJson
+      // kDatetime2, kTimestamp2, kTime2, kNewDecimal
       c.type = MES_COL_STRING;
       c.str_data = col.string_val.c_str();
       c.str_len = static_cast<uint32_t>(col.string_val.size());
@@ -155,7 +156,7 @@ mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** event) {
 
 int mes_has_events(mes_engine_t* engine) {
   if (engine == nullptr) {
-    return -1;
+    return 0;
   }
   return engine->engine.HasEvents() ? 1 : 0;
 }

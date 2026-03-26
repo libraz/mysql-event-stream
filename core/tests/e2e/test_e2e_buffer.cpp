@@ -56,7 +56,7 @@ TEST(E2EBuffer, SlowConsumerDoesNotKillStream) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 10;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
 
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
@@ -113,7 +113,7 @@ TEST(E2EBuffer, SlowConsumerExceedsReadTimeout) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;  // Very short — 3 seconds
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
 
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
@@ -159,7 +159,7 @@ TEST(E2EBuffer, EventsBufferedDuringConsumerSleep) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
 
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
@@ -227,7 +227,7 @@ TEST(E2EBuffer, StopUnblocksPoll) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 30;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
 
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
@@ -317,7 +317,7 @@ TEST(E2EBuffer, QueueSizeConfigurable) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 5;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.max_queue_size = 5;
 
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
@@ -374,7 +374,7 @@ TEST(E2EBuffer, GracefulShutdownNoLeak) {
     config.start_gtid = gtid.c_str();
     config.connect_timeout_s = kTimeout;
     config.read_timeout_s = 3;
-    config.ssl_mode = 0;
+    config.ssl_mode = MES_SSL_DISABLED;
 
     ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
         << "Round " << round;

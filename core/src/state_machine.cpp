@@ -53,6 +53,17 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
         break;
       }
 
+      constexpr uint32_t kMaxEventSize = 64 * 1024 * 1024;  // 64 MB
+      if (current_header_.event_length > kMaxEventSize) {
+        state_ = ParserState::kError;
+        StructuredLog()
+            .Event("parse_error")
+            .Field("reason", "event_too_large")
+            .Field("size", static_cast<uint64_t>(current_header_.event_length))
+            .Error();
+        break;
+      }
+
       bytes_needed_ = current_header_.event_length;
 
       if (buffer_.size() >= bytes_needed_) {

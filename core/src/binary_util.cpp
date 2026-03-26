@@ -145,6 +145,28 @@ std::string DecodeDecimal(const uint8_t* data, uint8_t precision, uint8_t scale,
   return result;
 }
 
+uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
+                          size_t* bytes_consumed) {
+  if (len < pack_length) {
+    *bytes_consumed = 0;
+    return 0;
+  }
+  *bytes_consumed = pack_length;
+  switch (pack_length) {
+    case 1:
+      return ReadU8(data);
+    case 2:
+      return ReadU16Le(data);
+    case 3:
+      return ReadU24Le(data);
+    case 4:
+      return ReadU32Le(data);
+    default:
+      *bytes_consumed = 0;
+      return 0;
+  }
+}
+
 uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata) {
   // Bytes needed for 1-9 remaining digits (used for NEWDECIMAL)
   static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
@@ -216,48 +238,22 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata)
 
     // JSON (stored like BLOB)
     case 0xF5: {  // MYSQL_TYPE_JSON
-      uint32_t json_len = 0;
-      switch (metadata) {
-        case 1:
-          json_len = data[0];
-          break;
-        case 2:
-          json_len = ReadU16Le(data);
-          break;
-        case 3:
-          json_len = ReadU24Le(data);
-          break;
-        case 4:
-          json_len = ReadU32Le(data);
-          break;
-        default:
-          json_len = ReadU32Le(data);
-          metadata = 4;
-          break;
-      }
-      return metadata + json_len;
+      uint8_t pack_len = static_cast<uint8_t>(metadata);
+      if (pack_len == 0 || pack_len > 4) pack_len = 4;
+      size_t consumed = 0;
+      uint32_t json_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      if (consumed == 0) return 0;
+      return static_cast<uint32_t>(consumed) + json_len;
     }
 
     // BLOB (includes TEXT)
     case 0xFC: {  // MYSQL_TYPE_BLOB
-      uint32_t blob_len = 0;
-      switch (metadata) {
-        case 1:
-          blob_len = data[0];
-          break;
-        case 2:
-          blob_len = ReadU16Le(data);
-          break;
-        case 3:
-          blob_len = ReadU24Le(data);
-          break;
-        case 4:
-          blob_len = ReadU32Le(data);
-          break;
-        default:
-          return 0;
-      }
-      return metadata + blob_len;
+      uint8_t pack_len = static_cast<uint8_t>(metadata);
+      if (pack_len == 0 || pack_len > 4) return 0;
+      size_t consumed = 0;
+      uint32_t blob_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      if (consumed == 0) return 0;
+      return static_cast<uint32_t>(consumed) + blob_len;
     }
 
     // STRING (CHAR) - also handles ENUM and SET via metadata encoding
@@ -278,24 +274,12 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata)
 
     // GEOMETRY (stored like BLOB)
     case 0xFF: {  // MYSQL_TYPE_GEOMETRY
-      uint32_t geo_len = 0;
-      switch (metadata) {
-        case 1:
-          geo_len = data[0];
-          break;
-        case 2:
-          geo_len = ReadU16Le(data);
-          break;
-        case 3:
-          geo_len = ReadU24Le(data);
-          break;
-        case 4:
-          geo_len = ReadU32Le(data);
-          break;
-        default:
-          return 0;
-      }
-      return metadata + geo_len;
+      uint8_t pack_len = static_cast<uint8_t>(metadata);
+      if (pack_len == 0 || pack_len > 4) return 0;
+      size_t consumed = 0;
+      uint32_t geo_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      if (consumed == 0) return 0;
+      return static_cast<uint32_t>(consumed) + geo_len;
     }
 
     default:

@@ -72,11 +72,7 @@ void CdcEngine::Reset() {
 size_t CdcEngine::PendingEventCount() const { return event_queue_.size(); }
 
 bool CdcEngine::IsError() const {
-  if (stream_parser_.GetState() == ParserState::kError) {
-    StructuredLog().Event("engine_error").Field("state", "parser_error").Error();
-    return true;
-  }
-  return false;
+  return stream_parser_.GetState() == ParserState::kError;
 }
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
@@ -125,7 +121,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
 
   switch (header.type_code) {
     case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
-      table_registry_.ProcessTableMapEvent(body, body_len);
+      if (!table_registry_.ProcessTableMapEvent(body, body_len)) {
+        break;
+      }
       uint64_t table_id = binary::ReadU48Le(body);
       auto* meta = table_registry_.MutableLookup(table_id);
       if (meta) {

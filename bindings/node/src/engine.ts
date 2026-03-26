@@ -15,7 +15,7 @@ interface NativeEngine {
   feed(data: Uint8Array | Buffer): number;
   nextEvent(): ChangeEvent | null;
   hasEvents(): boolean;
-  getPosition(): { file: string; offset: number };
+  getPosition(): { file: string; offset: number | bigint };
   reset(): void;
   setMaxQueueSize(maxSize: number): void;
   setIncludeDatabases(databases: string[]): void;
@@ -60,7 +60,7 @@ export class CdcEngine {
   }
 
   /** Get current binlog position. */
-  getPosition(): { file: string; offset: number } {
+  getPosition(): { file: string; offset: number | bigint } {
     this.ensureNotDestroyed();
     return this.engine!.getPosition();
   }

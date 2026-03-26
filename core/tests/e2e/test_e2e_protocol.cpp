@@ -226,7 +226,7 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
   config.start_gtid = "";
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = kTimeout;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -283,7 +283,7 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -356,7 +356,7 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
   meta_config.start_gtid = nullptr;
   meta_config.connect_timeout_s = kTimeout;
   meta_config.read_timeout_s = kTimeout;
-  meta_config.ssl_mode = 0;
+  meta_config.ssl_mode = MES_SSL_DISABLED;
   meta_config.ssl_ca = nullptr;
   meta_config.ssl_cert = nullptr;
   meta_config.ssl_key = nullptr;
@@ -400,7 +400,7 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -476,7 +476,7 @@ TEST(E2EProtocol, StopInterruptsPoll) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 30;  // long timeout
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

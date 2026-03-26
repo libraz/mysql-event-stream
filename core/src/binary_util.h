@@ -109,6 +109,23 @@ inline std::string_view ReadStringView(const uint8_t* data, size_t len) {
   return {reinterpret_cast<const char*>(data), len};
 }
 
+// --- Variable-length prefix reads ---
+
+/**
+ * @brief Read a variable-length prefix (1-4 bytes) based on pack_length
+ *
+ * Used by BLOB, JSON, and GEOMETRY types where the length of the data
+ * is stored in a prefix of 1-4 bytes depending on the column metadata.
+ *
+ * @param pack_length Number of prefix bytes (1-4)
+ * @param data Pointer to the prefix data
+ * @param len Available bytes in data buffer
+ * @param bytes_consumed Set to the number of bytes read (0 on error)
+ * @return The decoded length value, or 0 if data is too short
+ */
+uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
+                          size_t* bytes_consumed);
+
 // --- Complex decode functions ---
 
 /**

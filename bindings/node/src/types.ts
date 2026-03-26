@@ -29,7 +29,7 @@ export interface ChangeEvent {
   /** Binlog position. */
   position: {
     file: string;
-    offset: number;
+    offset: number | bigint;
   };
 }
 

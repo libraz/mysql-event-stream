@@ -66,6 +66,7 @@ class GtidEncoder {
   static mes_error_t ParseUuid(const char* str, uint8_t* out);
   static mes_error_t ParseInterval(const char* str, Interval* out);
   static void StoreInt64Le(std::vector<uint8_t>& buf, uint64_t val);
+  static void MergeIntervals(std::vector<Interval>& intervals);
 };
 
 }  // namespace mes

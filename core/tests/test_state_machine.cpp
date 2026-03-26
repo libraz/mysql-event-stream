@@ -13,44 +13,10 @@
 namespace mes {
 namespace {
 
-// Build a complete binlog event: 19-byte header + body + 4-byte checksum.
-std::vector<uint8_t> BuildEvent(uint8_t type_code, const std::vector<uint8_t>& body) {
-  uint32_t event_length =
-      static_cast<uint32_t>(kEventHeaderSize + body.size() + kChecksumSize);
-  std::vector<uint8_t> buf(event_length, 0);
-
-  // timestamp = 1000 (arbitrary)
-  buf[0] = 0xE8;
-  buf[1] = 0x03;
-  buf[2] = 0x00;
-  buf[3] = 0x00;
-  // type_code
-  buf[4] = type_code;
-  // server_id = 1
-  buf[5] = 0x01;
-  buf[6] = 0x00;
-  buf[7] = 0x00;
-  buf[8] = 0x00;
-  // event_length (LE)
-  buf[9] = static_cast<uint8_t>(event_length);
-  buf[10] = static_cast<uint8_t>(event_length >> 8);
-  buf[11] = static_cast<uint8_t>(event_length >> 16);
-  buf[12] = static_cast<uint8_t>(event_length >> 24);
-  // next_position = 0
-  buf[13] = 0;
-  buf[14] = 0;
-  buf[15] = 0;
-  buf[16] = 0;
-  // flags = 0
-  buf[17] = 0;
-  buf[18] = 0;
-
-  // body
-  std::memcpy(buf.data() + kEventHeaderSize, body.data(), body.size());
-
-  // checksum (dummy, 4 zero bytes already in place)
-
-  return buf;
+// Convenience wrapper matching the old local signature (server_id=1, next_position=0)
+std::vector<uint8_t> BuildEvent(uint8_t type_code,
+                                const std::vector<uint8_t>& body) {
+  return test::BuildEvent(type_code, 1000, 0, body);
 }
 
 TEST(StateMachineTest, InitialState) {
@@ -361,6 +327,42 @@ TEST(StateMachineTest, PartialHeaderThenInvalidLength) {
   // Feed remaining 9 bytes to complete the invalid header
   consumed = parser.Feed(header + 10, kEventHeaderSize - 10);
   EXPECT_EQ(consumed, kEventHeaderSize - 10);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, ErrorOnEventTooLargeMax) {
+  // Build a header where event_length = 0xFFFFFFFF (way over 64 MB limit)
+  uint8_t header[kEventHeaderSize];
+  memset(header, 0, sizeof(header));
+  header[4] = 30;  // type_code
+  // event_length = 0xFFFFFFFF (LE)
+  header[9] = 0xFF;
+  header[10] = 0xFF;
+  header[11] = 0xFF;
+  header[12] = 0xFF;
+
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(header, kEventHeaderSize);
+  EXPECT_EQ(consumed, kEventHeaderSize);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, ErrorOnEventTooLargeBoundary) {
+  // Build a header where event_length = 64*1024*1024 + 1 (just over 64 MB limit)
+  uint32_t too_large = 64 * 1024 * 1024 + 1;
+  uint8_t header[kEventHeaderSize];
+  memset(header, 0, sizeof(header));
+  header[4] = 30;  // type_code
+  header[9] = static_cast<uint8_t>(too_large);
+  header[10] = static_cast<uint8_t>(too_large >> 8);
+  header[11] = static_cast<uint8_t>(too_large >> 16);
+  header[12] = static_cast<uint8_t>(too_large >> 24);
+
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(header, kEventHeaderSize);
+  EXPECT_EQ(consumed, kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
   EXPECT_FALSE(parser.HasEvent());
 }

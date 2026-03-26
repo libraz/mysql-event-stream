@@ -215,7 +215,7 @@ TEST(E2EEngine, StreamConnectAndPoll) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -406,7 +406,7 @@ TEST(E2EEngine, BackpressureMaxQueueSize) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -479,7 +479,7 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
   config.start_gtid = gtid1.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
@@ -588,7 +588,7 @@ TEST(E2EEngine, GtidTracking) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

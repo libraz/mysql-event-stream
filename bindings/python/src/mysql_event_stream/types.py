@@ -16,7 +16,12 @@ class EventType(Enum):
 
 
 class ColumnType(Enum):
-    """Column value types."""
+    """Column value types.
+
+    .. deprecated::
+        Events return plain Python values in dict format.
+        This enum is provided for manual construction only.
+    """
 
     NULL = "null"
     INT = "int"
@@ -27,7 +32,12 @@ class ColumnType(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ColumnValue:
-    """A column value in a change event."""
+    """A column value in a change event.
+
+    .. deprecated::
+        Events return plain Python values in dict format.
+        This class is provided for manual construction only.
+    """
 
     type: ColumnType
     value: None | int | float | str | bytes

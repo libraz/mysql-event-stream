@@ -5,7 +5,6 @@
 
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 
 #include "binary_util.h"
 #include "client/connection_validator.h"
@@ -139,10 +138,8 @@ void BinlogClient::ReaderLoop() {
       return;
     }
 
-    // Heartbeat: consume silently, update timestamp
+    // Heartbeat: consume silently
     if (event_pkt.is_heartbeat) {
-      last_heartbeat_time_.store(static_cast<int64_t>(std::time(nullptr)),
-                                 std::memory_order_release);
       continue;
     }
 
@@ -190,23 +187,7 @@ PollResult BinlogClient::Poll() {
 
 void BinlogClient::Stop() {
   std::lock_guard<std::mutex> lock(stop_mutex_);
-
-  stop_requested_.store(true, std::memory_order_release);
-
-  // Close queue to unblock Poll() waiting on Pop()
-  if (event_queue_) {
-    event_queue_->Close();
-  }
-
-  // Interrupt blocking FetchEvent in reader thread
-  if (conn_.IsConnected()) {
-    conn_.Socket()->Shutdown();
-  }
-
-  // Join reader thread
-  if (reader_thread_.joinable()) {
-    reader_thread_.join();
-  }
+  StopReaderThread();
 }
 
 void BinlogClient::StopReaderThread() {

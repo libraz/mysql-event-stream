@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "logger.h"
 #include "protocol/mysql_auth.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
@@ -91,7 +92,7 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
   // Step 4: Send handshake response (with optional TLS upgrade)
   rc = SendHandshakeResponse(user, password, server_info_.auth_plugin_name,
                              server_info_.auth_data, ssl_mode, ssl_ca,
-                             ssl_cert, ssl_key);
+                             ssl_cert, ssl_key, host);
   if (rc != MES_OK) {
     socket_ = SocketHandle();
     return rc;
@@ -313,7 +314,8 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     const std::string& user, const std::string& password,
     const std::string& auth_plugin, const std::vector<uint8_t>& auth_data,
     uint32_t ssl_mode, const std::string& ssl_ca,
-    const std::string& ssl_cert, const std::string& ssl_key) {
+    const std::string& ssl_cert, const std::string& ssl_key,
+    const std::string& host) {
   // Build client capabilities
   uint32_t client_caps = kClientProtocol41 | kClientSecureConnection |
                          kClientPluginAuth | kClientPluginAuthLenencData |
@@ -327,6 +329,16 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
 
   bool do_tls = (ssl_mode > 0) &&
                 (server_info_.server_capabilities & kClientSSL);
+
+  // ssl_mode >= 2 (required, verify_ca, verify_identity) demands TLS.
+  // Fail early if the server does not advertise SSL support.
+  if (ssl_mode >= 2 && !do_tls) {
+    StructuredLog().Event("ssl_required_not_available").Error();
+    last_error_ = "SSL is required (ssl_mode=" + std::to_string(ssl_mode) +
+                  ") but the server does not support SSL";
+    return MES_ERR_CONNECT;
+  }
+
   if (do_tls) {
     client_caps |= kClientSSL;
   }
@@ -355,7 +367,8 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     const char* ca = ssl_ca.empty() ? nullptr : ssl_ca.c_str();
     const char* cert = ssl_cert.empty() ? nullptr : ssl_cert.c_str();
     const char* key = ssl_key.empty() ? nullptr : ssl_key.c_str();
-    rc = socket_.UpgradeToTLS(ssl_mode, ca, cert, key);
+    const char* hn = host.empty() ? nullptr : host.c_str();
+    rc = socket_.UpgradeToTLS(ssl_mode, ca, cert, key, hn);
     if (rc != MES_OK) {
       last_error_ = "TLS handshake failed";
       return rc;

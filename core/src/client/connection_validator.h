@@ -20,18 +20,17 @@ namespace mes {
 struct ValidationResult {
   mes_error_t error = MES_OK;
   char message[256] = {};
-  char server_uuid[37] = {};  // UUID string (36 chars + null)
 };
 
 /**
  * @brief Validates MySQL server configuration for binlog streaming
  *
  * Checks:
- * 1. gtid_mode = ON
- * 2. binlog_format = ROW
- * 3. binlog_row_image = FULL
- * 4. binlog_transaction_compression = OFF
- * 5. Retrieves server_uuid
+ * 1. log_bin = ON
+ * 2. gtid_mode = ON
+ * 3. binlog_format = ROW
+ * 4. binlog_row_image = FULL
+ * 5. binlog_transaction_compression = OFF
  */
 class ConnectionValidator {
  public:
@@ -49,8 +48,6 @@ class ConnectionValidator {
   static bool CheckVariableNot(protocol::MysqlConnection* conn,
                                 const char* var_name, const char* rejected,
                                 ValidationResult* result);
-  static bool FetchServerUuid(protocol::MysqlConnection* conn,
-                               ValidationResult* result);
 };
 
 }  // namespace mes

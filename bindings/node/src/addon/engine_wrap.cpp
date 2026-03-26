@@ -63,14 +63,20 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   const uint8_t* data = nullptr;
   size_t len = 0;
 
-  if (info[0].IsBuffer()) {
-    auto buf = info[0].As<Napi::Buffer<uint8_t>>();
-    data = buf.Data();
-    len = buf.Length();
-  } else if (info[0].IsTypedArray()) {
+  if (info[0].IsTypedArray()) {
+    auto typed = info[0].As<Napi::TypedArray>();
+    if (typed.TypedArrayType() != napi_uint8_array) {
+      Napi::TypeError::New(env, "Expected Buffer or Uint8Array")
+          .ThrowAsJavaScriptException();
+      return Napi::Number::New(env, 0);
+    }
     auto arr = info[0].As<Napi::Uint8Array>();
     data = arr.Data();
     len = arr.ByteLength();
+  } else if (info[0].IsBuffer()) {
+    auto buf = info[0].As<Napi::Buffer<uint8_t>>();
+    data = buf.Data();
+    len = buf.Length();
   } else {
     Napi::TypeError::New(env, "Expected Buffer or Uint8Array argument")
         .ThrowAsJavaScriptException();
@@ -120,7 +126,11 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
 
   // type
   int type_idx = static_cast<int>(event->type);
-  if (type_idx < 0 || type_idx > 2) type_idx = 0;
+  if (type_idx < 0 || type_idx > 2) {
+    Napi::Error::New(env, "Unknown event type: " + std::to_string(type_idx))
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
   obj.Set("type", Napi::String::New(env, kEventTypeNames[type_idx]));
 
   // database, table
@@ -275,8 +285,7 @@ void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
   auto dbs = ExtractStringArray(env, info[0]);
   std::vector<const char*> ptrs;
   for (const auto& s : dbs) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_include_databases(engine_, const_cast<const char**>(ptrs.data()),
-                                              ptrs.size());
+  mes_error_t err = mes_set_include_databases(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
     Napi::Error::New(env, "mes_set_include_databases failed with error code " +
                               std::to_string(err))
@@ -299,8 +308,7 @@ void EngineWrap::SetIncludeTables(const Napi::CallbackInfo& info) {
   auto tables = ExtractStringArray(env, info[0]);
   std::vector<const char*> ptrs;
   for (const auto& s : tables) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_include_tables(engine_, const_cast<const char**>(ptrs.data()),
-                                           ptrs.size());
+  mes_error_t err = mes_set_include_tables(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
     Napi::Error::New(env, "mes_set_include_tables failed with error code " +
                               std::to_string(err))
@@ -323,8 +331,7 @@ void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
   auto tables = ExtractStringArray(env, info[0]);
   std::vector<const char*> ptrs;
   for (const auto& s : tables) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_exclude_tables(engine_, const_cast<const char**>(ptrs.data()),
-                                           ptrs.size());
+  mes_error_t err = mes_set_exclude_tables(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
     Napi::Error::New(env, "mes_set_exclude_tables failed with error code " +
                               std::to_string(err))
@@ -358,7 +365,7 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
 
   mes_client_config_t cfg{};
   std::string host = "127.0.0.1";
-  std::string user;
+  std::string user = "root";
   std::string password;
 
   if (config.Has("host") && config.Get("host").IsString()) {
@@ -396,7 +403,7 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   std::string ssl_key;
 
   if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
-    cfg.ssl_mode = config.Get("sslMode").As<Napi::Number>().Uint32Value();
+    cfg.ssl_mode = static_cast<mes_ssl_mode_t>(config.Get("sslMode").As<Napi::Number>().Uint32Value());
   }
   if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
     ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();

@@ -100,27 +100,7 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set,
       return MES_ERR_INVALID_ARG;
     }
 
-    // Sort intervals by start position
-    std::sort(sid.intervals.begin(), sid.intervals.end(),
-              [](const Interval& a, const Interval& b) {
-                return a.start < b.start;
-              });
-
-    // Merge overlapping or adjacent intervals
-    if (sid.intervals.size() > 1) {
-      std::vector<Interval> merged;
-      merged.push_back(sid.intervals[0]);
-      for (size_t i = 1; i < sid.intervals.size(); ++i) {
-        if (sid.intervals[i].start <= merged.back().end) {
-          merged.back().end =
-              std::max(merged.back().end, sid.intervals[i].end);
-        } else {
-          merged.push_back(sid.intervals[i]);
-        }
-      }
-      sid.intervals = std::move(merged);
-    }
-
+    MergeIntervals(sid.intervals);
     sids.push_back(std::move(sid));
   }
 
@@ -137,24 +117,8 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set,
     for (auto& entry : merged_map) {
       Sid merged_sid;
       merged_sid.uuid = entry.first;
-      auto& intervals = entry.second;
-
-      // Sort and merge intervals
-      std::sort(intervals.begin(), intervals.end(),
-                [](const Interval& a, const Interval& b) {
-                  return a.start < b.start;
-                });
-      std::vector<Interval> merged_intervals;
-      merged_intervals.push_back(intervals[0]);
-      for (size_t i = 1; i < intervals.size(); ++i) {
-        if (intervals[i].start <= merged_intervals.back().end) {
-          merged_intervals.back().end =
-              std::max(merged_intervals.back().end, intervals[i].end);
-        } else {
-          merged_intervals.push_back(intervals[i]);
-        }
-      }
-      merged_sid.intervals = std::move(merged_intervals);
+      merged_sid.intervals = std::move(entry.second);
+      MergeIntervals(merged_sid.intervals);
       sids.push_back(std::move(merged_sid));
     }
   }
@@ -327,6 +291,24 @@ mes_error_t GtidEncoder::ParseInterval(const char* str, Interval* out) {
   }
 
   return MES_OK;
+}
+
+void GtidEncoder::MergeIntervals(std::vector<Interval>& intervals) {
+  if (intervals.size() <= 1) return;
+  std::sort(intervals.begin(), intervals.end(),
+            [](const Interval& a, const Interval& b) {
+              return a.start < b.start;
+            });
+  std::vector<Interval> merged;
+  merged.push_back(intervals[0]);
+  for (size_t i = 1; i < intervals.size(); ++i) {
+    if (intervals[i].start <= merged.back().end) {
+      merged.back().end = std::max(merged.back().end, intervals[i].end);
+    } else {
+      merged.push_back(intervals[i]);
+    }
+  }
+  intervals = std::move(merged);
 }
 
 void GtidEncoder::StoreInt64Le(std::vector<uint8_t>& buf, uint64_t val) {

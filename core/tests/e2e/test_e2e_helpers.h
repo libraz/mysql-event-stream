@@ -139,7 +139,7 @@ inline std::vector<CapturedEvent> CaptureEvents(
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = 0;
+  config.ssl_mode = MES_SSL_DISABLED;
   config.ssl_ca = nullptr;
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

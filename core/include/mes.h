@@ -162,7 +162,7 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
  * @brief Check if there are pending events.
  *
  * @param engine Engine handle.
- * @return 1 if events available, 0 otherwise, -1 on error (null engine).
+ * @return 1 if events available, 0 otherwise (including null engine).
  */
 MES_API int mes_has_events(mes_engine_t* engine);
 
@@ -234,6 +234,15 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
  */
 MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count);
 
+/* ---- SSL mode ---- */
+typedef enum {
+  MES_SSL_DISABLED = 0,
+  MES_SSL_PREFERRED = 1,
+  MES_SSL_REQUIRED = 2,
+  MES_SSL_VERIFY_CA = 3,
+  MES_SSL_VERIFY_IDENTITY = 4,
+} mes_ssl_mode_t;
+
 /* ---- BinlogClient API ---- */
 
 typedef struct mes_client mes_client_t;
@@ -248,11 +257,10 @@ typedef struct {
   uint32_t connect_timeout_s;
   uint32_t read_timeout_s;
   /* SSL/TLS options */
-  uint32_t ssl_mode;  /**< 0=disabled, 1=preferred, 2=required, 3=verify_ca,
-                           4=verify_identity */
-  const char* ssl_ca;   /**< Path to CA certificate file (NULL to skip) */
-  const char* ssl_cert; /**< Path to client certificate file (NULL to skip) */
-  const char* ssl_key;  /**< Path to client private key file (NULL to skip) */
+  mes_ssl_mode_t ssl_mode; /**< SSL connection mode */
+  const char* ssl_ca;      /**< Path to CA certificate file (NULL to skip) */
+  const char* ssl_cert;    /**< Path to client certificate file (NULL to skip) */
+  const char* ssl_key;     /**< Path to client private key file (NULL to skip) */
   /* Buffering */
   size_t max_queue_size; /**< Max internal event queue size (0 = default 10000) */
 } mes_client_config_t;
@@ -291,7 +299,11 @@ MES_API int mes_client_is_connected(mes_client_t* client);
 /** @brief Get last error message. Returns empty string if no error. */
 MES_API const char* mes_client_last_error(mes_client_t* client);
 
-/** @brief Get current GTID position. Returns empty string if unknown. */
+/** @brief Get current GTID position. Returns empty string if unknown.
+ *
+ * @note The returned string is valid until the next call to this function.
+ *       If called from multiple threads, the caller must copy the result.
+ */
 MES_API const char* mes_client_current_gtid(mes_client_t* client);
 
 /** @brief Enable metadata queries for column name resolution.

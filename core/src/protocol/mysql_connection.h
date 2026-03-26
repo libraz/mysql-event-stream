@@ -126,6 +126,7 @@ class MysqlConnection {
    * @param ssl_ca      Path to CA certificate file
    * @param ssl_cert    Path to client certificate file
    * @param ssl_key     Path to client private key file
+   * @param host        Server hostname for TLS SNI and hostname verification
    * @return MES_OK on success
    */
   mes_error_t SendHandshakeResponse(const std::string& user,
@@ -135,7 +136,8 @@ class MysqlConnection {
                                     uint32_t ssl_mode,
                                     const std::string& ssl_ca,
                                     const std::string& ssl_cert,
-                                    const std::string& ssl_key);
+                                    const std::string& ssl_key,
+                                    const std::string& host);
 
   /**
    * @brief Handle server's auth response (OK, ERR, AuthSwitch, AuthMoreData)

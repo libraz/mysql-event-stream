@@ -129,7 +129,7 @@ jobs:
 
   publish-pypi:
     needs: [python-wheels]
-    if: always() && needs.python-wheels.result == 'success'
+    if: needs.python-wheels.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: pypi
