@@ -62,7 +62,14 @@ jobs:
 
       - name: Publish to npm
         working-directory: bindings/node
-        run: npm publish --access public --provenance
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          NAME=$(node -p "require('./package.json').name")
+          if npm view "${NAME}@${VERSION}" version > /dev/null 2>&1; then
+            echo "::notice::${NAME}@${VERSION} already published, skipping"
+          else
+            npm publish --access public --provenance
+          fi
 
   python-wheels:
     strategy:
@@ -77,7 +84,7 @@ jobs:
             arch: aarch64
             plat_tag: manylinux_2_17_aarch64
             lib_name: libmes.so
-          - os: macos-13-large
+          - os: macos-15-intel
             arch: x86_64
             plat_tag: macosx_10_15_x86_64
             lib_name: libmes.dylib
