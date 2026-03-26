@@ -77,7 +77,7 @@ jobs:
             arch: aarch64
             plat_tag: manylinux_2_17_aarch64
             lib_name: libmes.so
-          - os: macos-13
+          - os: macos-13-large
             arch: x86_64
             plat_tag: macosx_10_15_x86_64
             lib_name: libmes.dylib
@@ -122,7 +122,7 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install bindings/python/dist/*.whl pytest
+          pip install bindings/python/dist/*.whl pytest pytest-asyncio
           python3 -c "import mysql_event_stream; print('OK')"
           MES_LIB_PATH=$(python3 -c "import mysql_event_stream._ffi as f; print(f._find_library())") \
             python3 -m pytest bindings/python/tests/ -x -q
