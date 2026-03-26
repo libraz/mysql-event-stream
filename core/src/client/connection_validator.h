@@ -9,11 +9,8 @@
 #ifndef MES_CLIENT_CONNECTION_VALIDATOR_H_
 #define MES_CLIENT_CONNECTION_VALIDATOR_H_
 
-#ifdef MES_HAS_MYSQL
-
-#include <mysql.h>
-
 #include "mes.h"
+#include "protocol/mysql_connection.h"
 
 namespace mes {
 
@@ -43,17 +40,19 @@ class ConnectionValidator {
    * @param conn Active MySQL connection
    * @return ValidationResult with error/message/uuid
    */
-  static ValidationResult Validate(MYSQL* conn);
+  static ValidationResult Validate(protocol::MysqlConnection* conn);
 
  private:
-  static bool CheckVariable(MYSQL* conn, const char* var_name,
-                            const char* expected, ValidationResult* result);
-  static bool CheckVariableNot(MYSQL* conn, const char* var_name,
-                               const char* rejected, ValidationResult* result);
-  static bool FetchServerUuid(MYSQL* conn, ValidationResult* result);
+  static bool CheckVariable(protocol::MysqlConnection* conn,
+                             const char* var_name, const char* expected,
+                             ValidationResult* result);
+  static bool CheckVariableNot(protocol::MysqlConnection* conn,
+                                const char* var_name, const char* rejected,
+                                ValidationResult* result);
+  static bool FetchServerUuid(protocol::MysqlConnection* conn,
+                               ValidationResult* result);
 };
 
 }  // namespace mes
 
-#endif  // MES_HAS_MYSQL
 #endif  // MES_CLIENT_CONNECTION_VALIDATOR_H_

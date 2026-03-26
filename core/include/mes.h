@@ -234,8 +234,7 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
  */
 MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count);
 
-/* ---- BinlogClient API (native only) ---- */
-#if defined(MES_HAS_MYSQL)
+/* ---- BinlogClient API ---- */
 
 typedef struct mes_client mes_client_t;
 
@@ -297,8 +296,6 @@ MES_API const char* mes_client_current_gtid(mes_client_t* client);
  *  Uses a separate MySQL connection with the same credentials. */
 MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
                                                  const mes_client_config_t* config);
-
-#endif /* MES_HAS_MYSQL */
 
 #ifdef __cplusplus
 } /* extern "C" */

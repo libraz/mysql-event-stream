@@ -67,3 +67,33 @@ add_executable(test_gtid_encoder test_gtid_encoder.cpp)
 target_link_libraries(test_gtid_encoder PRIVATE mes-core GTest::gtest_main)
 target_compile_options(test_gtid_encoder PRIVATE -fno-exceptions -fno-rtti)
 gtest_discover_tests(test_gtid_encoder)
+
+# test_mysql_packet
+add_executable(test_mysql_packet test_mysql_packet.cpp)
+target_link_libraries(test_mysql_packet PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mysql_packet PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mysql_packet)
+
+# test_mysql_auth
+add_executable(test_mysql_auth test_mysql_auth.cpp)
+target_link_libraries(test_mysql_auth PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mysql_auth PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mysql_auth)
+
+# test_mysql_query
+add_executable(test_mysql_query test_mysql_query.cpp)
+target_link_libraries(test_mysql_query PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mysql_query PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mysql_query)
+
+# test_mysql_binlog_stream
+add_executable(test_mysql_binlog_stream test_mysql_binlog_stream.cpp)
+target_link_libraries(test_mysql_binlog_stream PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mysql_binlog_stream PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mysql_binlog_stream)
+
+# test_e2e_protocol (requires running MySQL 8.4 at localhost:13307)
+add_executable(test_e2e_protocol test_e2e_protocol.cpp)
+target_link_libraries(test_e2e_protocol PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_e2e_protocol PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_e2e_protocol)

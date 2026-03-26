@@ -90,81 +90,38 @@ if(MES_ENABLE_COVERAGE)
   target_link_options(mes-shared PUBLIC --coverage)
 endif()
 
-# BinlogClient (auto-detected, requires libmysqlclient)
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-  pkg_check_modules(MYSQL QUIET mysqlclient)
-endif()
+# OpenSSL (required for protocol layer)
+find_package(OpenSSL REQUIRED)
+message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
 
-if(NOT MYSQL_FOUND)
-  # macOS Homebrew fallback
-  execute_process(
-    COMMAND brew --prefix mysql-client@8.4
-    OUTPUT_VARIABLE MYSQL_BREW_PREFIX
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE BREW_RESULT
-  )
+# Protocol layer (replaces libmysqlclient)
+set(PROTOCOL_SOURCES
+  src/protocol/mysql_socket.cpp
+  src/protocol/mysql_packet.cpp
+  src/protocol/mysql_auth.cpp
+  src/protocol/mysql_connection.cpp
+  src/protocol/mysql_query.cpp
+  src/protocol/mysql_binlog_stream.cpp
+)
 
-  if(BREW_RESULT EQUAL 0)
-    set(MYSQL_BREW_INCLUDE "${MYSQL_BREW_PREFIX}/include/mysql")
-    set(MYSQL_BREW_LIB "${MYSQL_BREW_PREFIX}/lib")
-  endif()
+# BinlogClient and related client code
+set(CLIENT_SOURCES
+  src/client/connection_validator.cpp
+  src/client/binlog_client.cpp
+  src/client/capi_client.cpp
+  src/client/metadata_fetcher.cpp
+)
 
-  find_path(MYSQL_INCLUDE_DIRS mysql.h
-    HINTS
-      ${MYSQL_BREW_INCLUDE}
-      /opt/homebrew/opt/mysql-client@8.4/include/mysql
-      /opt/homebrew/opt/mysql-client/include/mysql
-      /usr/local/opt/mysql-client/include/mysql
-      /opt/homebrew/include/mysql
-      /usr/local/include/mysql
-      /usr/include/mysql
-  )
+# Add to both targets unconditionally
+target_sources(mes-core PRIVATE ${PROTOCOL_SOURCES} ${CLIENT_SOURCES})
+target_link_libraries(mes-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
-  find_library(MYSQL_LIBRARY NAMES mysqlclient
-    HINTS
-      ${MYSQL_BREW_LIB}
-      /opt/homebrew/opt/mysql-client@8.4/lib
-      /opt/homebrew/opt/mysql-client/lib
-      /usr/local/opt/mysql-client/lib
-      /opt/homebrew/lib
-      /usr/local/lib
-      /usr/lib
-      /usr/lib64
-      /usr/lib/x86_64-linux-gnu
-  )
+target_sources(mes-shared PRIVATE ${PROTOCOL_SOURCES} ${CLIENT_SOURCES})
+target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 
-  if(MYSQL_INCLUDE_DIRS AND MYSQL_LIBRARY)
-    set(MYSQL_FOUND TRUE)
-    set(MYSQL_LIBRARIES ${MYSQL_LIBRARY})
-  endif()
-endif()
-
-if(MYSQL_FOUND)
-  message(STATUS "MySQL client found: ${MYSQL_INCLUDE_DIRS}")
-  message(STATUS "MySQL client library: ${MYSQL_LIBRARIES}")
-
-  set(CLIENT_SOURCES
-    src/client/connection_validator.cpp
-    src/client/binlog_client.cpp
-    src/client/capi_client.cpp
-    src/client/metadata_fetcher.cpp
-  )
-
-  target_sources(mes-core PRIVATE ${CLIENT_SOURCES})
-  target_compile_definitions(mes-core PUBLIC MES_HAS_MYSQL)
-  target_include_directories(mes-core SYSTEM PRIVATE ${MYSQL_INCLUDE_DIRS})
-  target_link_libraries(mes-core PRIVATE ${MYSQL_LIBRARIES})
-
-  target_sources(mes-shared PRIVATE ${CLIENT_SOURCES})
-  target_compile_definitions(mes-shared PUBLIC MES_HAS_MYSQL)
-  target_include_directories(mes-shared SYSTEM PRIVATE ${MYSQL_INCLUDE_DIRS})
-  target_link_libraries(mes-shared PRIVATE ${MYSQL_LIBRARIES})
-else()
-  message(WARNING
-    "libmysqlclient not found — BinlogClient will not be available.\n"
-    "Install: brew install mysql-client@8.4 (macOS) or apt install libmysqlclient-dev (Linux)")
+if(WIN32)
+  target_link_libraries(mes-core PRIVATE ws2_32)
+  target_link_libraries(mes-shared PRIVATE ws2_32)
 endif()
 
 # Install

@@ -3,27 +3,14 @@
 
 #include <napi.h>
 
-#include "engine_wrap.h"
-
-#ifdef MES_HAS_MYSQL
 #include "client_wrap.h"
-#endif
+#include "engine_wrap.h"
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   EngineWrap::Init(env, exports);
-
-#ifdef MES_HAS_MYSQL
   ClientWrap::Init(env, exports);
-#endif
 
-  exports.Set("hasClient",
-              Napi::Boolean::New(env,
-#ifdef MES_HAS_MYSQL
-                                 true
-#else
-                                 false
-#endif
-                                 ));
+  exports.Set("hasClient", Napi::Boolean::New(env, true));
 
   return exports;
 }

@@ -6,8 +6,6 @@
  * @brief C ABI wrapper for BinlogClient
  */
 
-#ifdef MES_HAS_MYSQL
-
 #include <new>
 
 #include "client/binlog_client.h"
@@ -104,5 +102,3 @@ MES_API const char* mes_client_current_gtid(mes_client_t* c) {
 }
 
 }  // extern "C"
-
-#endif  // MES_HAS_MYSQL

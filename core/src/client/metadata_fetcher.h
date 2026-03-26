@@ -12,16 +12,13 @@
 #ifndef MES_CLIENT_METADATA_FETCHER_H_
 #define MES_CLIENT_METADATA_FETCHER_H_
 
-#ifdef MES_HAS_MYSQL
-
-#include <mysql.h>
-
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "mes.h"
+#include "protocol/mysql_connection.h"
 
 namespace mes {
 
@@ -81,8 +78,19 @@ class MetadataFetcher {
   void InvalidateCache(const std::string& database, const std::string& table);
 
  private:
-  MYSQL* conn_ = nullptr;
+  protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::vector<ColumnInfo>> cache_;
+
+  // Stored connection parameters for reconnection
+  std::string host_;
+  uint16_t port_ = 0;
+  std::string user_;
+  std::string password_;
+  uint32_t connect_timeout_s_ = 0;
+  uint32_t ssl_mode_ = 0;
+  std::string ssl_ca_;
+  std::string ssl_cert_;
+  std::string ssl_key_;
 
   static std::string MakeCacheKey(const std::string& db, const std::string& table);
   std::string EscapeIdentifier(const std::string& id);
@@ -90,5 +98,4 @@ class MetadataFetcher {
 
 }  // namespace mes
 
-#endif  // MES_HAS_MYSQL
 #endif  // MES_CLIENT_METADATA_FETCHER_H_

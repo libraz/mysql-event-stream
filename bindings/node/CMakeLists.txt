@@ -28,79 +28,29 @@ set(CORE_SOURCES
   ${MES_ROOT}/core/src/row_decoder.cpp
   ${MES_ROOT}/core/src/cdc_engine.cpp
   ${MES_ROOT}/core/src/capi.cpp
+  ${MES_ROOT}/core/src/logger.cpp
   ${MES_ROOT}/core/src/client/gtid_encoder.cpp
+  ${MES_ROOT}/core/src/client/connection_validator.cpp
+  ${MES_ROOT}/core/src/client/binlog_client.cpp
+  ${MES_ROOT}/core/src/client/capi_client.cpp
+  ${MES_ROOT}/core/src/client/metadata_fetcher.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_socket.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_packet.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_auth.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_connection.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_query.cpp
+  ${MES_ROOT}/core/src/protocol/mysql_binlog_stream.cpp
 )
 
 # Addon sources
 set(ADDON_SOURCES
   src/addon/addon.cpp
   src/addon/engine_wrap.cpp
+  src/addon/client_wrap.cpp
 )
 
-# Auto-detect MySQL client library for BinlogClient
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-  pkg_check_modules(MYSQL QUIET mysqlclient)
-endif()
-
-if(NOT MYSQL_FOUND)
-  execute_process(
-    COMMAND brew --prefix mysql-client@8.4
-    OUTPUT_VARIABLE MYSQL_BREW_PREFIX
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE BREW_RESULT
-  )
-  if(BREW_RESULT EQUAL 0)
-    set(MYSQL_BREW_INCLUDE "${MYSQL_BREW_PREFIX}/include/mysql")
-    set(MYSQL_BREW_LIB "${MYSQL_BREW_PREFIX}/lib")
-  endif()
-
-  find_path(MYSQL_INCLUDE_DIRS mysql.h
-    HINTS
-      ${MYSQL_BREW_INCLUDE}
-      /opt/homebrew/opt/mysql-client@8.4/include/mysql
-      /opt/homebrew/opt/mysql-client/include/mysql
-      /usr/local/opt/mysql-client/include/mysql
-      /opt/homebrew/include/mysql
-      /usr/local/include/mysql
-      /usr/include/mysql
-  )
-  find_library(MYSQL_LIBRARY NAMES mysqlclient
-    HINTS
-      ${MYSQL_BREW_LIB}
-      /opt/homebrew/opt/mysql-client@8.4/lib
-      /opt/homebrew/opt/mysql-client/lib
-      /usr/local/opt/mysql-client/lib
-      /opt/homebrew/lib
-      /usr/local/lib
-      /usr/lib
-      /usr/lib64
-      /usr/lib/x86_64-linux-gnu
-  )
-  if(MYSQL_INCLUDE_DIRS AND MYSQL_LIBRARY)
-    set(MYSQL_FOUND TRUE)
-    set(MYSQL_LIBRARIES ${MYSQL_LIBRARY})
-  endif()
-endif()
-
-if(MYSQL_FOUND)
-  message(STATUS "MySQL client found: ${MYSQL_INCLUDE_DIRS}")
-
-  list(APPEND CORE_SOURCES
-    ${MES_ROOT}/core/src/client/connection_validator.cpp
-    ${MES_ROOT}/core/src/client/binlog_client.cpp
-    ${MES_ROOT}/core/src/client/capi_client.cpp
-    ${MES_ROOT}/core/src/client/metadata_fetcher.cpp
-  )
-  list(APPEND ADDON_SOURCES
-    src/addon/client_wrap.cpp
-  )
-else()
-  message(WARNING
-    "libmysqlclient not found — BinlogClient will not be available.\n"
-    "Install: brew install mysql-client@8.4 (macOS) or apt install libmysqlclient-dev (Linux)")
-endif()
+# OpenSSL (required for protocol layer)
+find_package(OpenSSL REQUIRED)
 
 # Build the addon
 add_library(${PROJECT_NAME} SHARED
@@ -133,10 +83,8 @@ target_compile_options(${PROJECT_NAME} PRIVATE
   -Wextra
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_JS_LIB})
+target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_JS_LIB} OpenSSL::SSL OpenSSL::Crypto)
 
-if(MYSQL_FOUND)
-  target_compile_definitions(${PROJECT_NAME} PRIVATE MES_HAS_MYSQL)
-  target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${MYSQL_INCLUDE_DIRS})
-  target_link_libraries(${PROJECT_NAME} PRIVATE ${MYSQL_LIBRARIES})
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
 endif()

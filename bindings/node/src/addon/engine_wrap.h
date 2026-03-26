@@ -31,9 +31,7 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
 
   mes_engine_t* engine_;
 
-#ifdef MES_HAS_MYSQL
   Napi::Value EnableMetadata(const Napi::CallbackInfo& info);
-#endif
 };
 
 #endif  // MES_NODE_ENGINE_WRAP_H_

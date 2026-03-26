@@ -3,10 +3,10 @@
 
 #include "client/metadata_fetcher.h"
 
-#ifdef MES_HAS_MYSQL
-
 #include <cstring>
 #include <string>
+
+#include "protocol/mysql_query.h"
 
 namespace mes {
 
@@ -19,75 +19,34 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
                                      uint32_t connect_timeout_s, uint32_t ssl_mode,
                                      const std::string& ssl_ca, const std::string& ssl_cert,
                                      const std::string& ssl_key) {
-  if (conn_ != nullptr) {
+  if (conn_.IsConnected()) {
     Disconnect();
   }
 
-  conn_ = mysql_init(nullptr);
-  if (conn_ == nullptr) {
-    return MES_ERR_CONNECT;
-  }
+  // Store connection parameters for reconnection
+  host_ = host;
+  port_ = port;
+  user_ = user;
+  password_ = password;
+  connect_timeout_s_ = connect_timeout_s;
+  ssl_mode_ = ssl_mode;
+  ssl_ca_ = ssl_ca;
+  ssl_cert_ = ssl_cert;
+  ssl_key_ = ssl_key;
 
-  mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout_s);
-
-  // Apply SSL/TLS options
-  if (ssl_mode > 0) {
-    unsigned int ssl_mode_val;
-    switch (ssl_mode) {
-      case 1:
-        ssl_mode_val = SSL_MODE_PREFERRED;
-        break;
-      case 2:
-        ssl_mode_val = SSL_MODE_REQUIRED;
-        break;
-      case 3:
-        ssl_mode_val = SSL_MODE_VERIFY_CA;
-        break;
-      case 4:
-        ssl_mode_val = SSL_MODE_VERIFY_IDENTITY;
-        break;
-      default:
-        ssl_mode_val = SSL_MODE_PREFERRED;
-        break;
-    }
-    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
-  } else {
-    // Explicitly disable SSL to avoid MySQL's default SSL_MODE_PREFERRED
-    unsigned int ssl_mode_val = SSL_MODE_DISABLED;
-    mysql_options(conn_, MYSQL_OPT_SSL_MODE, &ssl_mode_val);
-  }
-  if (!ssl_ca.empty()) {
-    mysql_options(conn_, MYSQL_OPT_SSL_CA, ssl_ca.c_str());
-  }
-  if (!ssl_cert.empty()) {
-    mysql_options(conn_, MYSQL_OPT_SSL_CERT, ssl_cert.c_str());
-  }
-  if (!ssl_key.empty()) {
-    mysql_options(conn_, MYSQL_OPT_SSL_KEY, ssl_key.c_str());
-  }
-
-  if (mysql_real_connect(conn_, host.c_str(), user.c_str(), password.c_str(), nullptr, port,
-                         nullptr, 0) == nullptr) {
-    mysql_close(conn_);
-    conn_ = nullptr;
-    return MES_ERR_CONNECT;
-  }
-
-  return MES_OK;
+  return conn_.Connect(host, port, user, password, connect_timeout_s,
+                       0 /* read_timeout */, ssl_mode, ssl_ca, ssl_cert, ssl_key);
 }
 
 void MetadataFetcher::Disconnect() {
   cache_.clear();
-  if (conn_ != nullptr) {
-    mysql_close(conn_);
-    conn_ = nullptr;
-  }
+  conn_.Disconnect();
 }
 
 std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& database,
                                                          const std::string& table,
                                                          size_t expected_count) {
-  if (conn_ == nullptr) {
+  if (!conn_.IsConnected()) {
     return {};
   }
 
@@ -99,45 +58,45 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return it->second;
   }
 
-  // Cache miss or count mismatch — query MySQL
+  // Cache miss or count mismatch -- query MySQL
   std::string query =
       "SHOW COLUMNS FROM " + EscapeIdentifier(database) + "." + EscapeIdentifier(table);
 
   // Try query, retry once on connection loss
+  protocol::QueryResult qr;
+  std::string err;
   for (int attempt = 0; attempt < 2; attempt++) {
-    if (mysql_query(conn_, query.c_str()) == 0) {
+    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err) == MES_OK) {
       break;
     }
-    if (attempt == 0 && mysql_ping(conn_) == 0) {
-      continue;  // Reconnected, retry
+    if (attempt == 0) {
+      // Reconnect and retry
+      conn_.Disconnect();
+      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_,
+                        0 /* read_timeout */, ssl_mode_, ssl_ca_, ssl_cert_,
+                        ssl_key_) == MES_OK) {
+        continue;
+      }
     }
     // Query failed
     cache_.erase(key);
     return {};
   }
 
-  MYSQL_RES* result = mysql_store_result(conn_);
-  if (result == nullptr) {
-    cache_.erase(key);
-    return {};
-  }
-
   std::vector<ColumnInfo> infos;
-  MYSQL_ROW row;
-  while ((row = mysql_fetch_row(result)) != nullptr) {
+  for (const auto& row : qr.rows) {
     ColumnInfo info;
-    // row[0] = Field (column name)
-    info.name = row[0] != nullptr ? row[0] : "";
+    // row.values[0] = Field (column name)
+    info.name = (!row.is_null[0]) ? row.values[0] : "";
 
-    // row[1] = Type (e.g. "int unsigned", "varchar(255)")
-    if (row[1] != nullptr) {
-      std::string type_str = row[1];
+    // row.values[1] = Type (e.g. "int unsigned", "varchar(255)")
+    if (!row.is_null[1]) {
+      std::string type_str = row.values[1];
       info.is_unsigned = type_str.find("unsigned") != std::string::npos;
     }
 
     infos.push_back(std::move(info));
   }
-  mysql_free_result(result);
 
   // Verify column count matches expectation
   if (infos.size() != expected_count) {
@@ -172,5 +131,3 @@ std::string MetadataFetcher::EscapeIdentifier(const std::string& id) {
 }
 
 }  // namespace mes
-
-#endif  // MES_HAS_MYSQL

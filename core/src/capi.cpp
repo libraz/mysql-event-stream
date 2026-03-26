@@ -10,19 +10,15 @@
  * between internal C++ types and their C ABI equivalents.
  */
 
+#include <memory>
 #include <new>
 #include <vector>
 
 #include "cdc_engine.h"
+#include "client/metadata_fetcher.h"
 #include "logger.h"
 #include "mes.h"
 #include "types.h"
-
-#ifdef MES_HAS_MYSQL
-#include <memory>
-
-#include "client/metadata_fetcher.h"
-#endif
 
 struct mes_engine {
   mes::CdcEngine engine;
@@ -34,9 +30,7 @@ struct mes_engine {
   std::vector<mes_column_t> before_cols;
   std::vector<mes_column_t> after_cols;
 
-#ifdef MES_HAS_MYSQL
   std::unique_ptr<mes::MetadataFetcher> metadata_fetcher;
-#endif
 };
 
 // Convert a single internal ColumnValue to its C ABI representation.
@@ -229,7 +223,6 @@ void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level
   mes::LogConfig::SetCallback(callback, min_level, userdata);
 }
 
-#ifdef MES_HAS_MYSQL
 mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine, const mes_client_config_t* config) {
   if (engine == nullptr || config == nullptr) {
     return MES_ERR_NULL_ARG;
@@ -250,4 +243,3 @@ mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine, const mes_client_
   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());
   return MES_OK;
 }
-#endif

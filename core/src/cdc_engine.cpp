@@ -4,12 +4,9 @@
 #include "cdc_engine.h"
 
 #include "binary_util.h"
+#include "client/metadata_fetcher.h"
 #include "logger.h"
 #include "rotate_event.h"
-
-#ifdef MES_HAS_MYSQL
-#include "client/metadata_fetcher.h"
-#endif
 
 namespace mes {
 
@@ -118,9 +115,7 @@ bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& t
   return true;
 }
 
-#ifdef MES_HAS_MYSQL
 void CdcEngine::SetMetadataFetcher(MetadataFetcher* fetcher) { metadata_fetcher_ = fetcher; }
-#endif
 
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
   // Update position from next_position
@@ -139,7 +134,6 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
           break;
         }
         blocked_table_ids_.erase(table_id);
-#ifdef MES_HAS_MYSQL
         if (metadata_fetcher_ && !meta->columns.empty() && meta->columns[0].name.empty()) {
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
@@ -148,7 +142,6 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             meta->columns[i].is_unsigned = infos[i].is_unsigned;
           }
         }
-#endif
       }
       break;
     }

@@ -27,9 +27,7 @@
 
 namespace mes {
 
-#ifdef MES_HAS_MYSQL
 class MetadataFetcher;
-#endif
 
 /**
  * @brief Main CDC engine that processes a binlog byte stream and produces
@@ -91,10 +89,8 @@ class CdcEngine {
    *  Format: "database.table" or just "table" (matches any database). */
   void SetExcludeTables(const std::vector<std::string>& tables);
 
-#ifdef MES_HAS_MYSQL
   /** @brief Set metadata fetcher for column name resolution */
   void SetMetadataFetcher(MetadataFetcher* fetcher);
-#endif
 
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
@@ -113,9 +109,7 @@ class CdcEngine {
   std::set<std::string> exclude_tables_;
   std::set<uint64_t> blocked_table_ids_;
 
-#ifdef MES_HAS_MYSQL
   MetadataFetcher* metadata_fetcher_ = nullptr;
-#endif
 };
 
 }  // namespace mes

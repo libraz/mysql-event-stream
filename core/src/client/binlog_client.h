@@ -9,16 +9,14 @@
 #ifndef MES_CLIENT_BINLOG_CLIENT_H_
 #define MES_CLIENT_BINLOG_CLIENT_H_
 
-#ifdef MES_HAS_MYSQL
-
-#include <mysql.h>
-
 #include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #include "mes.h"
+#include "protocol/mysql_binlog_stream.h"
+#include "protocol/mysql_connection.h"
 
 namespace mes {
 
@@ -89,7 +87,7 @@ class BinlogClient {
    * @brief Start binlog streaming
    *
    * Sends SET @source_binlog_checksum, SET @master_heartbeat_period,
-   * encodes GTID set, and calls mysql_binlog_open().
+   * encodes GTID set, and starts the binlog stream.
    *
    * @return MES_OK on success
    */
@@ -117,8 +115,8 @@ class BinlogClient {
   const char* GetCurrentGtid() const;
 
  private:
-  MYSQL* conn_ = nullptr;
-  MYSQL_RPL rpl_{};
+  protocol::MysqlConnection conn_;
+  protocol::BinlogStream binlog_stream_;
   BinlogClientConfig config_;
   std::vector<uint8_t> gtid_encoded_;
   std::string current_gtid_;
@@ -126,15 +124,10 @@ class BinlogClient {
   bool streaming_ = false;
   std::atomic<bool> stop_requested_{false};
 
-  /** @brief MYSQL_RPL callback to copy GTID data */
-  static void FixGtidSetCallback(MYSQL_RPL* rpl,
-                                 unsigned char* packet_gtid_set);
-
   /** @brief Update current_gtid_ from GTID_LOG_EVENT */
   void UpdateGtidFromEvent(const uint8_t* event_data, size_t event_size);
 };
 
 }  // namespace mes
 
-#endif  // MES_HAS_MYSQL
 #endif  // MES_CLIENT_BINLOG_CLIENT_H_

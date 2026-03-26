@@ -22,9 +22,7 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
           InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
           InstanceMethod<&EngineWrap::Destroy>("destroy"),
-#ifdef MES_HAS_MYSQL
           InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
-#endif
       });
 
   exports.Set("CdcEngine", func);
@@ -341,7 +339,6 @@ void EngineWrap::Destroy(const Napi::CallbackInfo& info) {
   }
 }
 
-#ifdef MES_HAS_MYSQL
 Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -424,7 +421,6 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
 
   return env.Undefined();
 }
-#endif
 
 Napi::Value EngineWrap::ReadColumns(Napi::Env env,
                                     const mes_column_t* cols,
