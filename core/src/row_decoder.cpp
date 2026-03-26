@@ -247,7 +247,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
         return ColumnValue::Int(type, static_cast<int64_t>(raw));
       }
       // Sign extension for 24-bit value
-      if (raw & 0x800000) {
+      static constexpr uint32_t kInt24SignBit = 0x800000;
+      if (raw & kInt24SignBit) {
         raw |= 0xFF000000;
       }
       return ColumnValue::Int(type,

@@ -50,7 +50,14 @@ add_library(mes-objects OBJECT
   ${CLIENT_SOURCES}
 )
 
-set_target_properties(mes-objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(mes-objects PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+  C_VISIBILITY_PRESET hidden
+  CXX_VISIBILITY_PRESET hidden
+  VISIBILITY_INLINES_HIDDEN ON
+)
+
+target_compile_definitions(mes-objects PRIVATE MES_BUILDING)
 
 target_include_directories(mes-objects PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -121,13 +128,10 @@ target_include_directories(mes-shared PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_definitions(mes-shared PRIVATE MES_BUILDING)
-
 set_target_properties(mes-shared PROPERTIES
   OUTPUT_NAME mes
-  C_VISIBILITY_PRESET hidden
-  CXX_VISIBILITY_PRESET hidden
-  VISIBILITY_INLINES_HIDDEN ON
+  VERSION 1.0.0
+  SOVERSION 1
 )
 
 target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto)

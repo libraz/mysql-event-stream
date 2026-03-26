@@ -95,15 +95,20 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
   return MES_EVENT_INSERT;
 }
 
+/* ---- Exported C ABI functions ---- */
+
+extern "C" {
+
 /* ---- Engine lifecycle ---- */
 
-mes_engine_t* mes_create(void) { return new (std::nothrow) mes_engine_t(); }
+MES_API mes_engine_t* mes_create(void) { return new (std::nothrow) mes_engine_t(); }
 
-void mes_destroy(mes_engine_t* engine) { delete engine; }
+MES_API void mes_destroy(mes_engine_t* engine) { delete engine; }
 
 /* ---- Data processing ---- */
 
-mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t len, size_t* consumed) {
+MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t len,
+                             size_t* consumed) {
   if (engine == nullptr || consumed == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -117,7 +122,7 @@ mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t len, size
   return MES_OK;
 }
 
-mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** event) {
+MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** event) {
   if (engine == nullptr || event == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -154,14 +159,14 @@ mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** event) {
   return MES_OK;
 }
 
-int mes_has_events(mes_engine_t* engine) {
+MES_API int mes_has_events(mes_engine_t* engine) {
   if (engine == nullptr) {
     return 0;
   }
   return engine->engine.HasEvents() ? 1 : 0;
 }
 
-mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* offset) {
+MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* offset) {
   if (engine == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -175,13 +180,13 @@ mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* 
   return MES_OK;
 }
 
-mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size) {
+MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
   engine->engine.SetMaxQueueSize(max_size);
   return MES_OK;
 }
 
-mes_error_t mes_reset(mes_engine_t* engine) {
+MES_API mes_error_t mes_reset(mes_engine_t* engine) {
   if (engine == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -189,7 +194,8 @@ mes_error_t mes_reset(mes_engine_t* engine) {
   return MES_OK;
 }
 
-mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases, size_t count) {
+MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,
+                                              size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
   std::vector<std::string> dbs;
   for (size_t i = 0; i < count; i++) {
@@ -199,7 +205,8 @@ mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databas
   return MES_OK;
 }
 
-mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables, size_t count) {
+MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables,
+                                           size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
   for (size_t i = 0; i < count; i++) {
@@ -209,7 +216,8 @@ mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables, si
   return MES_OK;
 }
 
-mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count) {
+MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables,
+                                           size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
   for (size_t i = 0; i < count; i++) {
@@ -219,12 +227,13 @@ mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, si
   return MES_OK;
 }
 
-void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
-                          void* userdata) {
+MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
+                                  void* userdata) {
   mes::LogConfig::SetCallback(callback, min_level, userdata);
 }
 
-mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine, const mes_client_config_t* config) {
+MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
+                                                 const mes_client_config_t* config) {
   if (engine == nullptr || config == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -244,3 +253,5 @@ mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine, const mes_client_
   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());
   return MES_OK;
 }
+
+}  // extern "C"

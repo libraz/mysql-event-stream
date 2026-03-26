@@ -87,10 +87,15 @@ inline uint32_t ReadU32Be(const uint8_t* data) {
  *
  * @param data Pointer to the packed integer data
  * @param len Available bytes in data buffer
- * @param bytes_consumed Set to the number of bytes consumed (0 on error)
- * @return The decoded integer value (0 on error, check bytes_consumed)
+ * @param bytes_consumed Set to the number of bytes consumed:
+ *   - 0: error (insufficient data)
+ *   - 1: NULL marker (value 0xFB, returned value is 0)
+ *   - 1-9: valid integer decoded
+ *   Callers MUST check bytes_consumed to distinguish error (0) from NULL (1).
+ * @return The decoded integer value (0 on error or NULL, check bytes_consumed)
  */
-uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
+[[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len,
+                                     size_t& bytes_consumed);
 
 // --- Bitmap utilities ---
 

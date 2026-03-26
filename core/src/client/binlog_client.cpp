@@ -85,9 +85,14 @@ mes_error_t BinlogClient::StartStream() {
   {
     protocol::QueryResult qr;
     std::string err;
-    protocol::ExecuteQuery(conn_.Socket(),
-                           "SET @master_heartbeat_period = 3000000000", &qr,
-                           &err);
+    mes_error_t hb_rc = protocol::ExecuteQuery(
+        conn_.Socket(), "SET @master_heartbeat_period = 3000000000", &qr, &err);
+    if (hb_rc != MES_OK) {
+      StructuredLog()
+          .Event("heartbeat_setup_failed")
+          .Field("error", err)
+          .Warn();
+    }
   }
 
   // Encode GTID set
@@ -229,8 +234,9 @@ const char* BinlogClient::GetLastError() const { return last_error_.c_str(); }
 
 const char* BinlogClient::GetCurrentGtid() const {
   std::lock_guard<std::mutex> lock(gtid_mutex_);
-  gtid_snapshot_ = current_gtid_;
-  return gtid_snapshot_.c_str();
+  thread_local std::string tl_snapshot;
+  tl_snapshot = current_gtid_;
+  return tl_snapshot.c_str();
 }
 
 void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {

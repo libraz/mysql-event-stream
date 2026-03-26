@@ -82,6 +82,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
   -fno-rtti
   -Wall
   -Wextra
+  -Wpedantic
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_JS_LIB} OpenSSL::SSL OpenSSL::Crypto)

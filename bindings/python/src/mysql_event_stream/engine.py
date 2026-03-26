@@ -242,7 +242,9 @@ class CdcEngine:
         port: int = 3306,
         user: str = "root",
         password: str = "",
+        server_id: int = 1,
         connect_timeout_s: int = 10,
+        read_timeout_s: int = 30,
         ssl_mode: int = 0,
         ssl_ca: str = "",
         ssl_cert: str = "",
@@ -259,7 +261,9 @@ class CdcEngine:
             port: MySQL port.
             user: MySQL user.
             password: MySQL password.
+            server_id: MySQL server ID for the metadata connection.
             connect_timeout_s: Connection timeout in seconds.
+            read_timeout_s: Read timeout in seconds.
             ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
                 3=verify_ca, 4=verify_identity).
             ssl_ca: Path to CA certificate file (empty to skip).
@@ -279,7 +283,9 @@ class CdcEngine:
         cfg.port = port
         cfg.user = user.encode("utf-8")
         cfg.password = password.encode("utf-8")
+        cfg.server_id = server_id
         cfg.connect_timeout_s = connect_timeout_s
+        cfg.read_timeout_s = read_timeout_s
         cfg.ssl_mode = ssl_mode
         cfg.ssl_ca = ssl_ca.encode("utf-8") if ssl_ca else None
         cfg.ssl_cert = ssl_cert.encode("utf-8") if ssl_cert else None
