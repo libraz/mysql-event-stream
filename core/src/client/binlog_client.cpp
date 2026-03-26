@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 #include "binary_util.h"
 #include "client/connection_validator.h"
@@ -75,13 +76,13 @@ mes_error_t BinlogClient::StartStream() {
     }
   }
 
-  // Set heartbeat period (30 seconds = 30000000000 nanoseconds)
-  // Non-fatal if this fails
+  // Set heartbeat period (3 seconds = 3000000000 nanoseconds)
+  // Shorter than read_timeout to keep connection alive in the reader thread
   {
     protocol::QueryResult qr;
     std::string err;
     protocol::ExecuteQuery(conn_.Socket(),
-                           "SET @master_heartbeat_period = 30000000000", &qr,
+                           "SET @master_heartbeat_period = 3000000000", &qr,
                            &err);
   }
 
@@ -110,56 +111,127 @@ mes_error_t BinlogClient::StartStream() {
   }
 
   streaming_ = true;
+
+  // Create bounded event queue and launch reader thread
+  size_t queue_size =
+      config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
+  event_queue_ = std::make_unique<EventQueue>(queue_size);
+  reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
+
   return MES_OK;
 }
 
+void BinlogClient::ReaderLoop() {
+  while (!stop_requested_.load(std::memory_order_acquire)) {
+    protocol::BinlogEventPacket event_pkt;
+    mes_error_t rc = binlog_stream_.FetchEvent(conn_.Socket(), &event_pkt);
+
+    // Check stop flag after blocking call returns
+    if (stop_requested_.load(std::memory_order_acquire)) {
+      break;
+    }
+
+    if (rc != MES_OK) {
+      // Push error sentinel so Poll() can surface the error
+      QueuedEvent err_event;
+      err_event.error = MES_ERR_STREAM;
+      event_queue_->Push(std::move(err_event));
+      return;
+    }
+
+    // Heartbeat: consume silently, update timestamp
+    if (event_pkt.is_heartbeat) {
+      last_heartbeat_time_.store(static_cast<int64_t>(std::time(nullptr)),
+                                 std::memory_order_release);
+      continue;
+    }
+
+    // Update GTID tracking (protected by gtid_mutex_)
+    UpdateGtidFromEvent(event_pkt.data, event_pkt.size);
+
+    // Copy event data and push to queue
+    // Push blocks if queue is full (backpressure → TCP flow control)
+    QueuedEvent qe;
+    qe.data.assign(event_pkt.data, event_pkt.data + event_pkt.size);
+    qe.error = MES_OK;
+
+    if (!event_queue_->Push(std::move(qe))) {
+      // Queue was closed (shutdown in progress)
+      return;
+    }
+  }
+}
+
 PollResult BinlogClient::Poll() {
-  if (stop_requested_.load(std::memory_order_acquire)) {
+  if (!streaming_ || !event_queue_) {
+    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
+  }
+
+  QueuedEvent event;
+  if (!event_queue_->Pop(&event)) {
+    // Queue closed (shutdown)
     streaming_ = false;
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
-  if (!streaming_) {
-    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
-  }
-
-  protocol::BinlogEventPacket event_pkt;
-  mes_error_t rc = binlog_stream_.FetchEvent(conn_.Socket(), &event_pkt);
-
-  // Check stop flag after blocking call returns
-  if (stop_requested_.load(std::memory_order_acquire)) {
-    streaming_ = false;
-    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
-  }
-
-  if (rc != MES_OK) {
+  if (event.error != MES_OK) {
+    // Error from reader thread
     last_error_ = "Binlog stream read error";
     LogBinlogError("poll_error", current_gtid_, last_error_);
     streaming_ = false;
-    return {MES_ERR_STREAM, nullptr, 0, false};
+    return {event.error, nullptr, 0, false};
   }
 
-  // Heartbeat
-  if (event_pkt.is_heartbeat) {
-    return {MES_OK, nullptr, 0, true};
-  }
-
-  const uint8_t* event_data = event_pkt.data;
-  size_t event_size = event_pkt.size;
-
-  // Update GTID tracking from GTID_LOG_EVENT
-  UpdateGtidFromEvent(event_data, event_size);
-
-  return {MES_OK, event_data, event_size, false};
+  // Store event data so pointer remains valid until next Poll()
+  current_event_ = std::move(event);
+  return {MES_OK, current_event_.data.data(), current_event_.data.size(),
+          false};
 }
 
 void BinlogClient::Stop() {
+  std::lock_guard<std::mutex> lock(stop_mutex_);
+
   stop_requested_.store(true, std::memory_order_release);
-  // Interrupt a blocking FetchEvent by shutting down the socket
-  conn_.Socket()->Shutdown();
+
+  // Close queue to unblock Poll() waiting on Pop()
+  if (event_queue_) {
+    event_queue_->Close();
+  }
+
+  // Interrupt blocking FetchEvent in reader thread
+  if (conn_.IsConnected()) {
+    conn_.Socket()->Shutdown();
+  }
+
+  // Join reader thread
+  if (reader_thread_.joinable()) {
+    reader_thread_.join();
+  }
+}
+
+void BinlogClient::StopReaderThread() {
+  stop_requested_.store(true, std::memory_order_release);
+
+  if (event_queue_) {
+    event_queue_->Close();
+  }
+
+  if (conn_.IsConnected()) {
+    conn_.Socket()->Shutdown();
+  }
+
+  if (reader_thread_.joinable()) {
+    reader_thread_.join();
+  }
+
+  if (event_queue_) {
+    event_queue_->Clear();
+    event_queue_.reset();
+  }
 }
 
 void BinlogClient::Disconnect() {
+  StopReaderThread();
   streaming_ = false;
   conn_.Disconnect();
   StructuredLog().Event("mysql_disconnected").Info();
@@ -170,7 +242,9 @@ bool BinlogClient::IsConnected() const { return conn_.IsConnected(); }
 const char* BinlogClient::GetLastError() const { return last_error_.c_str(); }
 
 const char* BinlogClient::GetCurrentGtid() const {
-  return current_gtid_.c_str();
+  std::lock_guard<std::mutex> lock(gtid_mutex_);
+  gtid_snapshot_ = current_gtid_;
+  return gtid_snapshot_.c_str();
 }
 
 void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
@@ -211,6 +285,8 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
   char gtid_buf[80];
   std::snprintf(gtid_buf, sizeof(gtid_buf), "%s:%lld", uuid_str,
                 static_cast<long long>(gno));
+
+  std::lock_guard<std::mutex> lock(gtid_mutex_);
   current_gtid_ = gtid_buf;
 }
 

@@ -92,4 +92,10 @@ target_link_libraries(test_mysql_binlog_stream PRIVATE mes-core GTest::gtest_mai
 target_compile_options(test_mysql_binlog_stream PRIVATE -fno-exceptions -fno-rtti)
 gtest_discover_tests(test_mysql_binlog_stream)
 
+# test_event_queue
+add_executable(test_event_queue test_event_queue.cpp)
+target_link_libraries(test_event_queue PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_event_queue PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_event_queue)
+
 add_subdirectory(e2e)

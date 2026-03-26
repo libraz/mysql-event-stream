@@ -253,6 +253,8 @@ typedef struct {
   const char* ssl_ca;   /**< Path to CA certificate file (NULL to skip) */
   const char* ssl_cert; /**< Path to client certificate file (NULL to skip) */
   const char* ssl_key;  /**< Path to client private key file (NULL to skip) */
+  /* Buffering */
+  size_t max_queue_size; /**< Max internal event queue size (0 = default 10000) */
 } mes_client_config_t;
 
 typedef struct {

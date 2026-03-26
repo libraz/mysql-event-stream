@@ -4,6 +4,10 @@
 /**
  * @file binlog_client.h
  * @brief MySQL binlog streaming client using COM_BINLOG_DUMP_GTID
+ *
+ * Internally uses a dedicated reader thread and bounded event queue to
+ * decouple network I/O from consumer processing, preventing stream
+ * disconnection when the consumer is temporarily slow.
  */
 
 #ifndef MES_CLIENT_BINLOG_CLIENT_H_
@@ -11,9 +15,14 @@
 
 #include <atomic>
 #include <cstdint>
+#include <ctime>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "client/event_queue.h"
 #include "mes.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
@@ -37,6 +46,7 @@ struct BinlogClientConfig {
   std::string ssl_ca;      // Path to CA certificate file
   std::string ssl_cert;    // Path to client certificate file
   std::string ssl_key;     // Path to client private key file
+  size_t max_queue_size = 10000;  // 0 = use default (10000)
 };
 
 /**
@@ -44,17 +54,22 @@ struct BinlogClientConfig {
  */
 struct PollResult {
   mes_error_t error = MES_OK;
-  const uint8_t* data = nullptr;  // Points to RPL buffer (valid until next
-                                  // Poll())
+  const uint8_t* data = nullptr;  // Valid until next Poll() call
   size_t size = 0;
   bool is_heartbeat = false;
 };
 
 /**
- * @brief MySQL binlog streaming client
+ * @brief MySQL binlog streaming client with internal buffering
  *
  * Connects to MySQL and receives binlog events via COM_BINLOG_DUMP_GTID.
- * Synchronous polling model - caller controls the loop.
+ * A dedicated reader thread continuously reads from the socket and pushes
+ * events into a bounded queue. Poll() dequeues from this buffer.
+ *
+ * Thread safety:
+ *   - Stop() may be called from any thread to interrupt a blocking Poll().
+ *   - GetCurrentGtid() may be called from any thread.
+ *   - All other methods must be called from a single thread.
  *
  * Usage:
  *   BinlogClient client;
@@ -84,17 +99,17 @@ class BinlogClient {
   mes_error_t Connect(const BinlogClientConfig& config);
 
   /**
-   * @brief Start binlog streaming
-   *
-   * Sends SET @source_binlog_checksum, SET @master_heartbeat_period,
-   * encodes GTID set, and starts the binlog stream.
-   *
+   * @brief Start binlog streaming with a dedicated reader thread
    * @return MES_OK on success
    */
   mes_error_t StartStream();
 
   /**
    * @brief Poll for next binlog event (blocking)
+   *
+   * Blocks until an event is available in the internal queue or the
+   * stream is stopped. Data pointer is valid until the next Poll() call.
+   *
    * @return PollResult with event data or error
    */
   PollResult Poll();
@@ -111,7 +126,7 @@ class BinlogClient {
   /** @brief Get last error message */
   const char* GetLastError() const;
 
-  /** @brief Get current GTID position */
+  /** @brief Get current GTID position (thread-safe) */
   const char* GetCurrentGtid() const;
 
  private:
@@ -119,12 +134,31 @@ class BinlogClient {
   protocol::BinlogStream binlog_stream_;
   BinlogClientConfig config_;
   std::vector<uint8_t> gtid_encoded_;
-  std::string current_gtid_;
   std::string last_error_;
   bool streaming_ = false;
   std::atomic<bool> stop_requested_{false};
 
-  /** @brief Update current_gtid_ from GTID_LOG_EVENT */
+  // Reader thread infrastructure
+  std::unique_ptr<EventQueue> event_queue_;
+  std::thread reader_thread_;
+  QueuedEvent current_event_;  // Holds data for current Poll() result
+  std::mutex stop_mutex_;      // Serializes Stop() calls
+
+  // GTID tracking (reader thread writes, GetCurrentGtid reads)
+  std::string current_gtid_;
+  mutable std::mutex gtid_mutex_;
+  mutable std::string gtid_snapshot_;  // For safe c_str() return
+
+  // Heartbeat tracking
+  std::atomic<int64_t> last_heartbeat_time_{0};
+
+  /** @brief Reader thread main loop */
+  void ReaderLoop();
+
+  /** @brief Stop reader thread, join, clear queue */
+  void StopReaderThread();
+
+  /** @brief Update current_gtid_ from GTID_LOG_EVENT (thread-safe) */
   void UpdateGtidFromEvent(const uint8_t* event_data, size_t event_size);
 };
 

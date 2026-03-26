@@ -110,6 +110,7 @@ set(CLIENT_SOURCES
   src/client/binlog_client.cpp
   src/client/capi_client.cpp
   src/client/metadata_fetcher.cpp
+  src/client/event_queue.cpp
 )
 
 # Add to both targets unconditionally

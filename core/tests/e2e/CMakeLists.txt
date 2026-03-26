@@ -35,3 +35,10 @@ target_link_libraries(test_e2e_engine PRIVATE mes-core GTest::gtest_main)
 target_compile_options(test_e2e_engine PRIVATE -fno-exceptions -fno-rtti)
 target_compile_definitions(test_e2e_engine PRIVATE MES_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
 gtest_discover_tests(test_e2e_engine)
+
+# test_e2e_buffer
+add_executable(test_e2e_buffer test_e2e_buffer.cpp)
+target_link_libraries(test_e2e_buffer PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_e2e_buffer PRIVATE -fno-exceptions -fno-rtti)
+target_compile_definitions(test_e2e_buffer PRIVATE MES_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+gtest_discover_tests(test_e2e_buffer)

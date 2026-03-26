@@ -42,6 +42,7 @@ MES_API mes_error_t mes_client_connect(
   cfg.ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
   cfg.ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
   cfg.ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
+  cfg.max_queue_size = config->max_queue_size;
 
   return c->client.Connect(cfg);
 }
