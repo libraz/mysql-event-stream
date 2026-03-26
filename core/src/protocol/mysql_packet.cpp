@@ -44,13 +44,9 @@ void PacketBuffer::WritePacket(const uint8_t* payload, size_t len,
 
   // If the payload was an exact multiple of kMaxPacketPayload (including 0),
   // send a trailing zero-length packet to signal end of multi-packet sequence.
+  // For len == 0, this sends a single zero-length packet.
+  // For exact multiples > 0, this terminates the multi-packet sequence.
   if (len == 0 || (len % kMaxPacketPayload) == 0) {
-    // For len == 0, this sends a single zero-length packet (the normal case).
-    // For exact multiples, this terminates the multi-packet sequence.
-    if (len != 0) {
-      // Only append the trailing empty packet for exact multiples > 0.
-      // len == 0 already skipped the while loop, so we just write below.
-    }
     buf_.push_back(0x00);
     buf_.push_back(0x00);
     buf_.push_back(0x00);

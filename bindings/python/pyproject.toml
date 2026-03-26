@@ -67,6 +67,7 @@ include = ["src/", "tests/", "README.md", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 markers = [
     "insert: INSERT event tests",
     "update: UPDATE event tests",

@@ -26,6 +26,11 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
     Disconnect();
   }
 
+  if (config.ssl_mode > MES_SSL_VERIFY_IDENTITY) {
+    last_error_ = "Invalid ssl_mode value";
+    return MES_ERR_INVALID_ARG;
+  }
+
   mes_error_t rc = conn_.Connect(config.host, config.port, config.user,
                                  config.password, config.connect_timeout_s,
                                  config.read_timeout_s, config.ssl_mode,
@@ -33,7 +38,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   if (rc != MES_OK) {
     last_error_ = conn_.GetLastError();
     LogMySQLConnectionError(config.host, config.port, last_error_);
-    return MES_ERR_CONNECT;
+    return rc;
   }
 
   // Validate server configuration

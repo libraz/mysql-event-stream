@@ -8,6 +8,9 @@
 
 namespace mes::binary {
 
+// Bytes needed for 1-9 remaining digits (used for NEWDECIMAL)
+static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+
 uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
   bytes_consumed = 0;
   if (len < 1) return 0;
@@ -43,11 +46,8 @@ uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) 
   return ReadU64Le(data + 1);
 }
 
-std::string DecodeDecimal(const uint8_t* data, uint8_t precision, uint8_t scale,
-                          size_t& bytes_consumed) {
-  // Bytes needed for 1-9 remaining digits
-  static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
-
+std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision,
+                          uint8_t scale, size_t& bytes_consumed) {
   if (precision == 0) {
     bytes_consumed = 0;
     return "0";
@@ -64,6 +64,11 @@ std::string DecodeDecimal(const uint8_t* data, uint8_t precision, uint8_t scale,
 
   if (total_size == 0) {
     return "0";
+  }
+
+  if (static_cast<size_t>(total_size) > available) {
+    bytes_consumed = 0;
+    return "";
   }
 
   // Make a mutable copy for sign-based transformation
@@ -167,10 +172,8 @@ uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
   }
 }
 
-uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata) {
-  // Bytes needed for 1-9 remaining digits (used for NEWDECIMAL)
-  static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
-
+uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
+                       uint16_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
     case 0x01:  // MYSQL_TYPE_TINY
@@ -241,7 +244,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata)
       uint8_t pack_len = static_cast<uint8_t>(metadata);
       if (pack_len == 0 || pack_len > 4) pack_len = 4;
       size_t consumed = 0;
-      uint32_t json_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      uint32_t json_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
       if (consumed == 0) return 0;
       return static_cast<uint32_t>(consumed) + json_len;
     }
@@ -251,7 +254,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata)
       uint8_t pack_len = static_cast<uint8_t>(metadata);
       if (pack_len == 0 || pack_len > 4) return 0;
       size_t consumed = 0;
-      uint32_t blob_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      uint32_t blob_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
       if (consumed == 0) return 0;
       return static_cast<uint32_t>(consumed) + blob_len;
     }
@@ -277,7 +280,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, uint16_t metadata)
       uint8_t pack_len = static_cast<uint8_t>(metadata);
       if (pack_len == 0 || pack_len > 4) return 0;
       size_t consumed = 0;
-      uint32_t geo_len = ReadVarLenPrefix(pack_len, data, pack_len, &consumed);
+      uint32_t geo_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
       if (consumed == 0) return 0;
       return static_cast<uint32_t>(consumed) + geo_len;
     }

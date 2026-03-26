@@ -148,10 +148,10 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
     return MES_OK;
   }
 
-  // ERR packet
+  // ERR packet (MySQL server rejected the query)
   if (first_byte == 0xFF) {
     ParseErrPacket(payload, error_msg);
-    return MES_ERR_STREAM;
+    return MES_ERR_VALIDATION;
   }
 
   // Result set: first packet contains column_count as len-enc-int

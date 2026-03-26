@@ -3,22 +3,22 @@
 
 import { BinlogClient } from "./client.js";
 import { CdcEngine } from "./engine.js";
-import type { ChangeEvent, ClientConfig } from "./types.js";
+import type { ChangeEvent, StreamConfig } from "./types.js";
 
 /** High-level CDC stream that implements AsyncIterable for easy consumption. */
 export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
-  private config: ClientConfig;
+  private config: StreamConfig;
   private client: BinlogClient | null = null;
   private engine: CdcEngine | null = null;
   private closed = false;
   private iterator: AsyncGenerator<ChangeEvent> | null = null;
 
-  constructor(config: ClientConfig) {
+  constructor(config: StreamConfig) {
     this.config = config;
   }
 
   /** Override config properties before streaming starts. */
-  configure(overrides: Partial<ClientConfig>): void {
+  configure(overrides: Partial<StreamConfig>): void {
     if (this.iterator) {
       throw new Error("Cannot configure after streaming has started");
     }
@@ -89,6 +89,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         const delay = 1000 * Math.min(reconnectAttempts, 10);
         await new Promise((resolve) => setTimeout(resolve, delay));
 
+        this.engine!.reset();
         if (gtid) {
           this.config = { ...this.config, startGtid: gtid };
         }

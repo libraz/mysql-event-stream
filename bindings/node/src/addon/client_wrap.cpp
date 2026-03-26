@@ -178,19 +178,25 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     ssl_key = config.Get("sslKey").As<Napi::String>().Utf8Value();
   }
 
+  uint32_t max_queue_size = 0;
+  if (config.Has("maxQueueSize") && config.Get("maxQueueSize").IsNumber()) {
+    max_queue_size = config.Get("maxQueueSize").As<Napi::Number>().Uint32Value();
+  }
+
   mes_client_config_t c_config{};
   c_config.host = host.c_str();
   c_config.port = port;
   c_config.user = user.c_str();
   c_config.password = password.c_str();
   c_config.server_id = server_id;
-  c_config.start_gtid = start_gtid.c_str();
+  c_config.start_gtid = start_gtid.empty() ? nullptr : start_gtid.c_str();
   c_config.connect_timeout_s = connect_timeout_s;
   c_config.read_timeout_s = read_timeout_s;
   c_config.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode);
   c_config.ssl_ca = ssl_ca.empty() ? nullptr : ssl_ca.c_str();
   c_config.ssl_cert = ssl_cert.empty() ? nullptr : ssl_cert.c_str();
   c_config.ssl_key = ssl_key.empty() ? nullptr : ssl_key.c_str();
+  c_config.max_queue_size = max_queue_size;
 
   mes_error_t err = mes_client_connect(client_, &c_config);
   if (err != MES_OK) {
@@ -231,6 +237,7 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
 
   auto deferred = Napi::Promise::Deferred::New(env);
   pending_workers_.fetch_add(1, std::memory_order_relaxed);
+  Ref();  // prevent GC while worker is in flight
   auto* worker = new PollWorker(env, client_, this, deferred);
   worker->Queue();
   return deferred.Promise();
@@ -265,6 +272,7 @@ void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
 
 void ClientWrap::OnPollWorkerComplete() {
   pending_workers_.fetch_sub(1, std::memory_order_release);
+  Unref();  // allow GC now that worker is done
   MaybeFinalizeDeferredDestroy();
 }
 

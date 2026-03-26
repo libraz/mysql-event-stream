@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any
 
 
@@ -13,6 +13,16 @@ class EventType(Enum):
     INSERT = 0
     UPDATE = 1
     DELETE = 2
+
+
+class SslMode(IntEnum):
+    """SSL connection mode."""
+
+    DISABLED = 0
+    PREFERRED = 1
+    REQUIRED = 2
+    VERIFY_CA = 3
+    VERIFY_IDENTITY = 4
 
 
 class ColumnType(Enum):
@@ -110,8 +120,8 @@ class ClientConfig:
         start_gtid: GTID to start from (empty = current position).
         connect_timeout_s: Connection timeout in seconds.
         read_timeout_s: Read timeout in seconds.
-        ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
-            3=verify_ca, 4=verify_identity).
+        ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,
+            1=preferred, 2=required, 3=verify_ca, 4=verify_identity).
         ssl_ca: Path to CA certificate file (empty to skip).
         ssl_cert: Path to client certificate file (empty to skip).
         ssl_key: Path to client private key file (empty to skip).

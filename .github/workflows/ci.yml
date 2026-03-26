@@ -160,6 +160,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev cmake build-essential pkg-config
       - name: Build shared library
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -180,6 +182,7 @@ jobs:
         sanitizer:
           - { name: asan, cmake_flag: MES_ENABLE_ASAN }
           - { name: ubsan, cmake_flag: MES_ENABLE_UBSAN }
+          - { name: tsan, cmake_flag: MES_ENABLE_TSAN }
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies

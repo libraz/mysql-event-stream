@@ -16,9 +16,9 @@ class MESColumn(ctypes.Structure):
         ("type", ctypes.c_int32),
         ("int_val", ctypes.c_int64),
         ("double_val", ctypes.c_double),
-        ("str_data", ctypes.c_char_p),
+        ("str_data", ctypes.c_void_p),
         ("str_len", ctypes.c_uint32),
-        ("col_name", ctypes.c_char_p),
+        ("col_name", ctypes.c_void_p),
     ]
 
 

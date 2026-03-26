@@ -45,7 +45,7 @@ const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2,
   if (is_v2) {
     if (left < 2) return nullptr;
     uint16_t var_header_len = binary::ReadU16Le(ptr);
-    if (left < var_header_len) return nullptr;
+    if (var_header_len < 2 || left < var_header_len) return nullptr;
     ptr += var_header_len;
     left -= var_header_len;
   }
@@ -167,6 +167,25 @@ void AppendFractional(std::string& out, int usec) {
   char buf[16];
   std::snprintf(buf, sizeof(buf), ".%06d", usec);
   out += buf;
+}
+
+struct RowsContext {
+  const uint8_t* ptr;
+  size_t remaining;
+  size_t column_count;
+  const uint8_t* columns_present;
+  const uint8_t* columns_present_update;
+};
+
+bool ParseRowsContext(const uint8_t* data, size_t len,
+                      const TableMetadata& metadata, bool is_v2,
+                      bool is_update, RowsContext* ctx) {
+  if (!data || !ctx) return false;
+  ctx->columns_present_update = nullptr;
+  ctx->ptr = ParseRowsPostHeader(data, len, is_v2, is_update,
+                                  &ctx->column_count, &ctx->columns_present,
+                                  &ctx->columns_present_update, &ctx->remaining);
+  return ctx->ptr != nullptr;
 }
 
 }  // namespace
@@ -518,7 +537,13 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       uint8_t precision = static_cast<uint8_t>(meta >> 8);
       uint8_t scale = static_cast<uint8_t>(meta & 0xFF);
       size_t consumed = 0;
-      std::string val = binary::DecodeDecimal(data, precision, scale, consumed);
+      std::string val =
+          binary::DecodeDecimal(data, len, precision, scale, consumed);
+      if (consumed == 0 && !val.empty()) {
+        // precision==0 returns "0" with consumed==0, which is valid
+      } else if (consumed == 0 && val.empty()) {
+        return ColumnValue::Null(type);
+      }
       *bytes_consumed = consumed;
       return ColumnValue::String(type, val);
     }
@@ -550,59 +575,29 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
                                data + prefix_consumed + geo_len));
     }
 
-    case ColumnType::kEnum: {
-      uint32_t size = meta & 0xFF;
-      if (size == 1) {
-        if (len < 1) return ColumnValue::Null(type);
-        *bytes_consumed = 1;
-        return ColumnValue::Int(type, static_cast<int64_t>(binary::ReadU8(data)));
-      }
-      if (size == 2) {
-        if (len < 2) return ColumnValue::Null(type);
-        *bytes_consumed = 2;
-        return ColumnValue::Int(type,
-                                static_cast<int64_t>(binary::ReadU16Le(data)));
-      }
+    // Note: kEnum (0xF7) and kSet (0xF8) are handled within the kString case
+    // above, as MySQL binlog always transmits them as MYSQL_TYPE_STRING.
+    default: {
+      uint32_t field_size = binary::CalcFieldSize(
+          static_cast<uint8_t>(type), data, len, meta);
+      *bytes_consumed = field_size;
       return ColumnValue::Null(type);
     }
-
-    case ColumnType::kSet: {
-      uint32_t size = meta & 0xFF;
-      if (size < 1 || size > 8) return ColumnValue::Null(type);
-      if (len < size) return ColumnValue::Null(type);
-      *bytes_consumed = size;
-      uint64_t val = 0;
-      for (uint32_t i = 0; i < size; i++) {
-        val |= static_cast<uint64_t>(data[i]) << (i * 8);
-      }
-      return ColumnValue::Int(type, static_cast<int64_t>(val));
-    }
-
-    default:
-      return ColumnValue::Null(type);
   }
 }
 
 bool DecodeWriteRows(const uint8_t* data, size_t len,
                      const TableMetadata& metadata, bool is_v2,
                      std::vector<RowData>* rows) {
-  if (data == nullptr || rows == nullptr) return false;
-
-  size_t column_count = 0;
-  const uint8_t* columns_present = nullptr;
-  const uint8_t* columns_present_update = nullptr;
-  size_t remaining = 0;
-
-  const uint8_t* ptr = ParseRowsPostHeader(
-      data, len, is_v2, false, &column_count, &columns_present,
-      &columns_present_update, &remaining);
-  if (ptr == nullptr) return false;
+  if (!rows) return false;
+  RowsContext ctx{};
+  if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
 
   rows->clear();
-  while (remaining > 0) {
+  while (ctx.remaining > 0) {
     RowData row;
-    if (!DecodeOneRow(ptr, remaining, metadata, column_count, columns_present,
-                      &row)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
+                      ctx.columns_present, &row)) {
       return false;
     }
     rows->push_back(std::move(row));
@@ -613,27 +608,19 @@ bool DecodeWriteRows(const uint8_t* data, size_t len,
 bool DecodeUpdateRows(const uint8_t* data, size_t len,
                       const TableMetadata& metadata, bool is_v2,
                       std::vector<UpdatePair>* pairs) {
-  if (data == nullptr || pairs == nullptr) return false;
-
-  size_t column_count = 0;
-  const uint8_t* columns_present = nullptr;
-  const uint8_t* columns_present_update = nullptr;
-  size_t remaining = 0;
-
-  const uint8_t* ptr = ParseRowsPostHeader(
-      data, len, is_v2, true, &column_count, &columns_present,
-      &columns_present_update, &remaining);
-  if (ptr == nullptr) return false;
+  if (!pairs) return false;
+  RowsContext ctx{};
+  if (!ParseRowsContext(data, len, metadata, is_v2, true, &ctx)) return false;
 
   pairs->clear();
-  while (remaining > 0) {
+  while (ctx.remaining > 0) {
     UpdatePair pair;
-    if (!DecodeOneRow(ptr, remaining, metadata, column_count, columns_present,
-                      &pair.before)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
+                      ctx.columns_present, &pair.before)) {
       return false;
     }
-    if (!DecodeOneRow(ptr, remaining, metadata, column_count,
-                      columns_present_update, &pair.after)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
+                      ctx.columns_present_update, &pair.after)) {
       return false;
     }
     pairs->push_back(std::move(pair));
@@ -644,23 +631,15 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len,
 bool DecodeDeleteRows(const uint8_t* data, size_t len,
                       const TableMetadata& metadata, bool is_v2,
                       std::vector<RowData>* rows) {
-  if (data == nullptr || rows == nullptr) return false;
-
-  size_t column_count = 0;
-  const uint8_t* columns_present = nullptr;
-  const uint8_t* columns_present_update = nullptr;
-  size_t remaining = 0;
-
-  const uint8_t* ptr = ParseRowsPostHeader(
-      data, len, is_v2, false, &column_count, &columns_present,
-      &columns_present_update, &remaining);
-  if (ptr == nullptr) return false;
+  if (!rows) return false;
+  RowsContext ctx{};
+  if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
 
   rows->clear();
-  while (remaining > 0) {
+  while (ctx.remaining > 0) {
     RowData row;
-    if (!DecodeOneRow(ptr, remaining, metadata, column_count, columns_present,
-                      &row)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
+                      ctx.columns_present, &row)) {
       return false;
     }
     rows->push_back(std::move(row));

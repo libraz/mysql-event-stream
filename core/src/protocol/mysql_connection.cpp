@@ -77,7 +77,7 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
   if (rc != MES_OK) {
     last_error_ = "Failed to read server handshake";
     socket_ = SocketHandle();
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   // Advance sequence_id so the client response uses the next number
   ++sequence_id_;

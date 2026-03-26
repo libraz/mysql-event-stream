@@ -4,6 +4,7 @@
 #ifndef MES_LOGGER_H_
 #define MES_LOGGER_H_
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -22,9 +23,9 @@ class LogConfig {
   static void* GetUserdata();
 
  private:
-  static mes_log_callback_t callback_;
-  static mes_log_level_t min_level_;
-  static void* userdata_;
+  static std::atomic<mes_log_callback_t> callback_;
+  static std::atomic<mes_log_level_t> min_level_;
+  static std::atomic<void*> userdata_;
 };
 
 /** @brief Structured log entry builder with fluent API.
@@ -44,43 +45,43 @@ class StructuredLog {
 
   /** @brief Add a string field. */
   StructuredLog& Field(const char* key, const std::string& value) {
-    fields_.emplace_back(key, value);
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, value);
     return *this;
   }
 
   /** @brief Add a string literal field. */
   StructuredLog& Field(const char* key, const char* value) {
-    fields_.emplace_back(key, std::string(value));
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::string(value));
     return *this;
   }
 
   /** @brief Add an int64 field. */
   StructuredLog& Field(const char* key, int64_t value) {
-    fields_.emplace_back(key, std::to_string(value));
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a uint64 field. */
   StructuredLog& Field(const char* key, uint64_t value) {
-    fields_.emplace_back(key, std::to_string(value));
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add an int field. */
   StructuredLog& Field(const char* key, int value) {
-    fields_.emplace_back(key, std::to_string(value));
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a double field. */
   StructuredLog& Field(const char* key, double value) {
-    fields_.emplace_back(key, std::to_string(value));
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a bool field. */
   StructuredLog& Field(const char* key, bool value) {
-    fields_.emplace_back(key, value ? "true" : "false");
+    if (LogConfig::GetCallback()) fields_.emplace_back(key, value ? "true" : "false");
     return *this;
   }
 

@@ -1,8 +1,12 @@
 """Tests for CdcEngine - the Python wrapper around libmes."""
 
+import ctypes
+
 import pytest
 
 from mysql_event_stream import CdcEngine, EventType
+from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_STRING, MESColumn
+from mysql_event_stream.engine import _convert_columns
 
 from .helpers import (
     build_delete_rows_body,
@@ -147,3 +151,85 @@ class TestMultipleEvents:
             assert e2.after is not None
             assert e2.after["0"] == 20
             assert engine.next_event() is None
+
+
+def _make_string_column(data: bytes, col_name: bytes | None = None) -> MESColumn:
+    """Build a MESColumn of type STRING with the given raw bytes."""
+    col = MESColumn()
+    col.type = MES_COL_STRING
+    col.int_val = 0
+    col.double_val = 0.0
+    # Allocate a ctypes buffer and store its address in the c_void_p field
+    buf = ctypes.create_string_buffer(data, len(data))
+    col.str_data = ctypes.cast(buf, ctypes.c_void_p).value
+    col.str_len = len(data)
+    if col_name is not None:
+        name_buf = ctypes.create_string_buffer(col_name)
+        col.col_name = ctypes.cast(name_buf, ctypes.c_void_p).value
+    else:
+        col.col_name = None
+    # Keep references alive so buffers are not garbage collected
+    col._keep_alive = (buf, name_buf if col_name is not None else None)  # type: ignore[attr-defined]
+    return col
+
+
+def _make_bytes_column(data: bytes) -> MESColumn:
+    """Build a MESColumn of type BYTES with the given raw bytes."""
+    col = MESColumn()
+    col.type = MES_COL_BYTES
+    col.int_val = 0
+    col.double_val = 0.0
+    buf = ctypes.create_string_buffer(data, len(data))
+    col.str_data = ctypes.cast(buf, ctypes.c_void_p).value
+    col.str_len = len(data)
+    col.col_name = None
+    col._keep_alive = (buf,)  # type: ignore[attr-defined]
+    return col
+
+
+class TestConvertColumns:
+    """Test _convert_columns handles c_void_p str_data correctly."""
+
+    def test_string_column(self) -> None:
+        col = _make_string_column(b"hello world", b"greeting")
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["greeting"] == "hello world"
+
+    def test_bytes_column(self) -> None:
+        col = _make_bytes_column(b"\x00\x01\xff")
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == b"\x00\x01\xff"
+
+    def test_non_utf8_string_uses_surrogateescape(self) -> None:
+        # latin1 encoded e-acute: 0xe9 is not valid UTF-8
+        latin1_bytes = b"caf\xe9"
+        col = _make_string_column(latin1_bytes)
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        # Should not raise, and should use surrogateescape
+        value = result["0"]
+        assert isinstance(value, str)
+        # Round-trip back to bytes via surrogateescape
+        assert value.encode("utf-8", errors="surrogateescape") == latin1_bytes
+
+    def test_empty_string_column(self) -> None:
+        col = MESColumn()
+        col.type = MES_COL_STRING
+        col.str_data = None
+        col.str_len = 0
+        col.col_name = None
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == ""
+
+    def test_empty_bytes_column(self) -> None:
+        col = MESColumn()
+        col.type = MES_COL_BYTES
+        col.str_data = None
+        col.str_len = 0
+        col.col_name = None
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == b""

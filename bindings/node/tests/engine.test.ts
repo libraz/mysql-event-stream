@@ -134,7 +134,9 @@ describe("CdcEngine", () => {
   it("should reject non-Uint8Array typed arrays", async () => {
     const engine = await CdcEngine.create();
     // biome-ignore lint/suspicious/noExplicitAny: testing runtime type guard
-    expect(() => engine.feed(new Float64Array([1.0]) as any)).toThrow("Expected Buffer or Uint8Array");
+    expect(() => engine.feed(new Float64Array([1.0]) as any)).toThrow(
+      "Expected Buffer or Uint8Array",
+    );
     engine.destroy();
   });
 

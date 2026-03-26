@@ -165,7 +165,7 @@ class CdcStream:
                     raise StopAsyncIteration from err
 
                 self._reconnect_attempts += 1
-                if self._reconnect_attempts > self._max_reconnect_attempts:
+                if self._reconnect_attempts >= self._max_reconnect_attempts:
                     await self.close()
                     raise StopAsyncIteration from err
 
@@ -181,6 +181,7 @@ class CdcStream:
             return
         self._closed = True
         if self._client is not None:
+            self._client.stop()
             self._client.disconnect()
             self._client.close()
             self._client = None
@@ -199,6 +200,7 @@ class CdcStream:
         """Reconnect with linear backoff using last known GTID."""
         gtid = self.current_gtid
         if self._client is not None:
+            self._client.stop()
             self._client.disconnect()
             self._client.close()
             self._client = None
@@ -250,23 +252,32 @@ class CdcStream:
         )
         self._engine = CdcEngine(lib_path=self._lib_path)
         try:
-            self._engine.enable_metadata(
-                host=self._host,
-                port=self._port,
-                user=self._user,
-                password=self._password,
-                connect_timeout_s=self._connect_timeout_s,
-                ssl_mode=self._ssl_mode,
-                ssl_ca=self._ssl_ca,
-                ssl_cert=self._ssl_cert,
-                ssl_key=self._ssl_key,
-            )
-        except RuntimeError as exc:
-            warnings.warn(
-                f"Failed to enable column name metadata: {exc}. "
-                "Column names will use numeric indices.",
-                stacklevel=2,
-            )
-        self._client.connect()
-        self._client.start()
-        self._started = True
+            try:
+                self._engine.enable_metadata(
+                    host=self._host,
+                    port=self._port,
+                    user=self._user,
+                    password=self._password,
+                    connect_timeout_s=self._connect_timeout_s,
+                    ssl_mode=self._ssl_mode,
+                    ssl_ca=self._ssl_ca,
+                    ssl_cert=self._ssl_cert,
+                    ssl_key=self._ssl_key,
+                )
+            except RuntimeError as exc:
+                warnings.warn(
+                    f"Failed to enable column name metadata: {exc}. "
+                    "Column names will use numeric indices.",
+                    stacklevel=2,
+                )
+            self._client.connect()
+            self._client.start()
+            self._started = True
+        except Exception:
+            if self._engine is not None:
+                self._engine.close()
+                self._engine = None
+            if self._client is not None:
+                self._client.close()
+                self._client = None
+            raise

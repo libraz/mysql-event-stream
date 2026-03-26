@@ -40,8 +40,7 @@ struct BinlogClientConfig {
   std::string start_gtid;  // Empty = start from current position
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
-  uint32_t ssl_mode = 0;  // 0=disabled, 1=preferred, 2=required, 3=verify_ca,
-                           // 4=verify_identity
+  mes_ssl_mode_t ssl_mode = MES_SSL_DISABLED;
   std::string ssl_ca;      // Path to CA certificate file
   std::string ssl_cert;    // Path to client certificate file
   std::string ssl_key;     // Path to client private key file

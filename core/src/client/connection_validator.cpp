@@ -100,7 +100,7 @@ bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn,
   mes_error_t rc = QueryVariable(conn, var_name, value);
   if (rc != MES_OK) {
     result->error = MES_ERR_VALIDATION;
-    if (value.empty()) {
+    if (rc == MES_ERR_VALIDATION) {
       std::snprintf(result->message, sizeof(result->message),
                     "Variable %s not found", var_name);
     } else {

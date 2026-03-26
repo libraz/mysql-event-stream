@@ -11,6 +11,7 @@ from .types import (
     ColumnValue,
     EventType,
     PollResult,
+    SslMode,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "ColumnValue",
     "EventType",
     "PollResult",
+    "SslMode",
 ]

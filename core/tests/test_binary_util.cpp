@@ -225,7 +225,7 @@ TEST(DecodeDecimalTest, PositiveInteger) {
   // Then XOR first byte with 0x80 => 0x80, 0x30, 0x39
   uint8_t data[] = {0x80, 0x30, 0x39};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 5, 0, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 5, 0, consumed);
   EXPECT_EQ(result, "12345");
   EXPECT_EQ(consumed, 3u);
 }
@@ -236,7 +236,7 @@ TEST(DecodeDecimalTest, NegativeInteger) {
   // Negative: XOR all with 0xFF => 0x7F, 0xCF, 0xC6
   uint8_t data[] = {0x7F, 0xCF, 0xC6};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 5, 0, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 5, 0, consumed);
   EXPECT_EQ(result, "-12345");
   EXPECT_EQ(consumed, 3u);
 }
@@ -248,7 +248,7 @@ TEST(DecodeDecimalTest, Zero) {
   // Zero value: all zeros, then XOR first byte with 0x80
   uint8_t data[] = {0x80, 0x00, 0x00, 0x00, 0x00};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 10, 2, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 10, 2, consumed);
   EXPECT_EQ(result, "0.00");
   EXPECT_EQ(consumed, 5u);
 }
@@ -262,14 +262,14 @@ TEST(DecodeDecimalTest, WithFraction) {
   // XOR first byte with 0x80 => 0x80, 0xBC, 0x61, 0x4E, 0x0C
   uint8_t data[] = {0x80, 0xBC, 0x61, 0x4E, 0x0C};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 10, 2, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 10, 2, consumed);
   EXPECT_EQ(result, "12345678.12");
   EXPECT_EQ(consumed, 5u);
 }
 
 TEST(DecodeDecimalTest, ZeroPrecision) {
   size_t consumed = 0;
-  auto result = DecodeDecimal(nullptr, 0, 0, consumed);
+  auto result = DecodeDecimal(nullptr, 0, 0, 0, consumed);
   EXPECT_EQ(result, "0");
   EXPECT_EQ(consumed, 0u);
 }
@@ -283,7 +283,7 @@ TEST(DecodeDecimalTest, SmallPositive) {
   // XOR first byte with 0x80 => 0x81, 0x05
   uint8_t data[] = {0x81, 0x05};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 3, 1, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 3, 1, consumed);
   EXPECT_EQ(result, "1.5");
   EXPECT_EQ(consumed, 2u);
 }
@@ -292,75 +292,75 @@ TEST(DecodeDecimalTest, SmallPositive) {
 
 TEST(CalcFieldSizeTest, FixedSizeTypes) {
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0x01, dummy, 0), 1u);   // TINY
-  EXPECT_EQ(CalcFieldSize(0x02, dummy, 0), 2u);   // SHORT
-  EXPECT_EQ(CalcFieldSize(0x03, dummy, 0), 4u);   // LONG
-  EXPECT_EQ(CalcFieldSize(0x04, dummy, 0), 4u);   // FLOAT
-  EXPECT_EQ(CalcFieldSize(0x05, dummy, 0), 8u);   // DOUBLE
-  EXPECT_EQ(CalcFieldSize(0x08, dummy, 0), 8u);   // LONGLONG
-  EXPECT_EQ(CalcFieldSize(0x09, dummy, 0), 3u);   // INT24
-  EXPECT_EQ(CalcFieldSize(0x0D, dummy, 0), 1u);   // YEAR
+  EXPECT_EQ(CalcFieldSize(0x01, dummy, sizeof(dummy), 0), 1u);   // TINY
+  EXPECT_EQ(CalcFieldSize(0x02, dummy, sizeof(dummy), 0), 2u);   // SHORT
+  EXPECT_EQ(CalcFieldSize(0x03, dummy, sizeof(dummy), 0), 4u);   // LONG
+  EXPECT_EQ(CalcFieldSize(0x04, dummy, sizeof(dummy), 0), 4u);   // FLOAT
+  EXPECT_EQ(CalcFieldSize(0x05, dummy, sizeof(dummy), 0), 8u);   // DOUBLE
+  EXPECT_EQ(CalcFieldSize(0x08, dummy, sizeof(dummy), 0), 8u);   // LONGLONG
+  EXPECT_EQ(CalcFieldSize(0x09, dummy, sizeof(dummy), 0), 3u);   // INT24
+  EXPECT_EQ(CalcFieldSize(0x0D, dummy, sizeof(dummy), 0), 1u);   // YEAR
 }
 
 TEST(CalcFieldSizeTest, DateTimeTypes) {
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0x0A, dummy, 0), 3u);   // DATE
-  EXPECT_EQ(CalcFieldSize(0x0B, dummy, 0), 3u);   // TIME
-  EXPECT_EQ(CalcFieldSize(0x07, dummy, 0), 4u);   // TIMESTAMP
-  EXPECT_EQ(CalcFieldSize(0x0C, dummy, 0), 8u);   // DATETIME
+  EXPECT_EQ(CalcFieldSize(0x0A, dummy, sizeof(dummy), 0), 3u);   // DATE
+  EXPECT_EQ(CalcFieldSize(0x0B, dummy, sizeof(dummy), 0), 3u);   // TIME
+  EXPECT_EQ(CalcFieldSize(0x07, dummy, sizeof(dummy), 0), 4u);   // TIMESTAMP
+  EXPECT_EQ(CalcFieldSize(0x0C, dummy, sizeof(dummy), 0), 8u);   // DATETIME
 }
 
 TEST(CalcFieldSizeTest, DateTimeWithFractionalSeconds) {
   uint8_t dummy[8] = {};
   // TIMESTAMP2: 4 + (metadata+1)/2
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, 0), 4u);   // fsp=0
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, 3), 6u);   // fsp=3
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, 6), 7u);   // fsp=6
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 0), 4u);   // fsp=0
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 3), 6u);   // fsp=3
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 6), 7u);   // fsp=6
 
   // DATETIME2: 5 + (metadata+1)/2
-  EXPECT_EQ(CalcFieldSize(0x12, dummy, 0), 5u);
-  EXPECT_EQ(CalcFieldSize(0x12, dummy, 3), 7u);
-  EXPECT_EQ(CalcFieldSize(0x12, dummy, 6), 8u);
+  EXPECT_EQ(CalcFieldSize(0x12, dummy, sizeof(dummy), 0), 5u);
+  EXPECT_EQ(CalcFieldSize(0x12, dummy, sizeof(dummy), 3), 7u);
+  EXPECT_EQ(CalcFieldSize(0x12, dummy, sizeof(dummy), 6), 8u);
 
   // TIME2: 3 + (metadata+1)/2
-  EXPECT_EQ(CalcFieldSize(0x13, dummy, 0), 3u);
-  EXPECT_EQ(CalcFieldSize(0x13, dummy, 3), 5u);
-  EXPECT_EQ(CalcFieldSize(0x13, dummy, 6), 6u);
+  EXPECT_EQ(CalcFieldSize(0x13, dummy, sizeof(dummy), 0), 3u);
+  EXPECT_EQ(CalcFieldSize(0x13, dummy, sizeof(dummy), 3), 5u);
+  EXPECT_EQ(CalcFieldSize(0x13, dummy, sizeof(dummy), 6), 6u);
 }
 
 TEST(CalcFieldSizeTest, Varchar) {
   // metadata <= 255: 1 byte length prefix
   uint8_t data_short[] = {5, 'h', 'e', 'l', 'l', 'o'};
-  EXPECT_EQ(CalcFieldSize(0x0F, data_short, 100), 6u);  // 1 + 5
+  EXPECT_EQ(CalcFieldSize(0x0F, data_short, sizeof(data_short), 100), 6u);  // 1 + 5
 
   // metadata > 255: 2 byte length prefix
   uint8_t data_long[] = {0x03, 0x00, 'a', 'b', 'c'};  // length = 3
-  EXPECT_EQ(CalcFieldSize(0x0F, data_long, 500), 5u);   // 2 + 3
+  EXPECT_EQ(CalcFieldSize(0x0F, data_long, sizeof(data_long), 500), 5u);   // 2 + 3
 }
 
 TEST(CalcFieldSizeTest, Blob) {
   // metadata=1: 1 byte length
   uint8_t data1[] = {3, 'a', 'b', 'c'};
-  EXPECT_EQ(CalcFieldSize(0xFC, data1, 1), 4u);  // 1 + 3
+  EXPECT_EQ(CalcFieldSize(0xFC, data1, sizeof(data1), 1), 4u);  // 1 + 3
 
   // metadata=2: 2 byte length
   uint8_t data2[] = {0x05, 0x00, 'h', 'e', 'l', 'l', 'o'};
-  EXPECT_EQ(CalcFieldSize(0xFC, data2, 2), 7u);  // 2 + 5
+  EXPECT_EQ(CalcFieldSize(0xFC, data2, sizeof(data2), 2), 7u);  // 2 + 5
 }
 
 TEST(CalcFieldSizeTest, StringEnum) {
   // ENUM: metadata high byte = 0xF7, low byte = size
   uint8_t dummy[8] = {};
   // ENUM with 1-byte storage
-  EXPECT_EQ(CalcFieldSize(0xFE, dummy, 0xF701), 1u);
+  EXPECT_EQ(CalcFieldSize(0xFE, dummy, sizeof(dummy), 0xF701), 1u);
   // ENUM with 2-byte storage
-  EXPECT_EQ(CalcFieldSize(0xFE, dummy, 0xF702), 2u);
+  EXPECT_EQ(CalcFieldSize(0xFE, dummy, sizeof(dummy), 0xF702), 2u);
 }
 
 TEST(CalcFieldSizeTest, StringSet) {
   // SET: metadata high byte = 0xF8, low byte = size
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0xFE, dummy, 0xF804), 4u);
+  EXPECT_EQ(CalcFieldSize(0xFE, dummy, sizeof(dummy), 0xF804), 4u);
 }
 
 TEST(CalcFieldSizeTest, StringChar) {
@@ -369,13 +369,13 @@ TEST(CalcFieldSizeTest, StringChar) {
   // For max_len <= 255 (1-byte length prefix): need (metadata>>4)&0x300 == 0x300
   // metadata = 0x3005: type_byte=0x30, max_len = (0x300^0x300)+5 = 5
   uint8_t data1[] = {3, 'a', 'b', 'c'};
-  EXPECT_EQ(CalcFieldSize(0xFE, data1, 0x3005), 4u);  // 1 + 3
+  EXPECT_EQ(CalcFieldSize(0xFE, data1, sizeof(data1), 0x3005), 4u);  // 1 + 3
 
   // For max_len > 255 (2-byte length prefix): metadata = 0x0105
   // (0x0105 >> 4) = 0x10, 0x10 & 0x300 = 0, 0 ^ 0x300 = 0x300, 0x300 + 5 = 773
   // max_len = 773 > 255, so uses 2-byte length prefix
   uint8_t data2[] = {0x03, 0x00, 'a', 'b', 'c'};  // length = 3 (LE)
-  EXPECT_EQ(CalcFieldSize(0xFE, data2, 0x0105), 5u);  // 2 + 3
+  EXPECT_EQ(CalcFieldSize(0xFE, data2, sizeof(data2), 0x0105), 5u);  // 2 + 3
 }
 
 TEST(CalcFieldSizeTest, NewDecimal) {
@@ -385,97 +385,97 @@ TEST(CalcFieldSizeTest, NewDecimal) {
   // dig2bytes[8]=4, frac0=0, frac_rem=2, dig2bytes[2]=1
   // total = 4 + 0 + 0 + 1 = 5
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0xF6, dummy, 0x0A02), 5u);
+  EXPECT_EQ(CalcFieldSize(0xF6, dummy, sizeof(dummy), 0x0A02), 5u);
 }
 
 TEST(CalcFieldSizeTest, Bit) {
   uint8_t dummy[8] = {};
   // BIT(1): metadata = (0 << 8) | 1 => bytes=0, bits=1 => 0 + 1 = 1
-  EXPECT_EQ(CalcFieldSize(0x10, dummy, 0x0001), 1u);
+  EXPECT_EQ(CalcFieldSize(0x10, dummy, sizeof(dummy), 0x0001), 1u);
   // BIT(8): metadata = (1 << 8) | 0 => bytes=1, bits=0 => 1 + 0 = 1
-  EXPECT_EQ(CalcFieldSize(0x10, dummy, 0x0100), 1u);
+  EXPECT_EQ(CalcFieldSize(0x10, dummy, sizeof(dummy), 0x0100), 1u);
   // BIT(9): metadata = (1 << 8) | 1 => bytes=1, bits=1 => 1 + 1 = 2
-  EXPECT_EQ(CalcFieldSize(0x10, dummy, 0x0101), 2u);
+  EXPECT_EQ(CalcFieldSize(0x10, dummy, sizeof(dummy), 0x0101), 2u);
 }
 
 TEST(CalcFieldSizeTest, Json) {
   // JSON with metadata=4: 4 bytes length prefix
   uint8_t data[] = {0x0A, 0x00, 0x00, 0x00, /* 10 bytes of JSON data */
                     'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'};
-  EXPECT_EQ(CalcFieldSize(0xF5, data, 4), 14u);  // 4 + 10
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 4), 14u);  // 4 + 10
 }
 
 TEST(CalcFieldSizeTest, Geometry) {
   // GEOMETRY with metadata=4: like BLOB
   uint8_t data[] = {0x05, 0x00, 0x00, 0x00, 1, 2, 3, 4, 5};
-  EXPECT_EQ(CalcFieldSize(0xFF, data, 4), 9u);  // 4 + 5
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 4), 9u);  // 4 + 5
 }
 
 TEST(CalcFieldSizeTest, UnsupportedType) {
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0x06, dummy, 0), 0u);  // MYSQL_TYPE_NULL
+  EXPECT_EQ(CalcFieldSize(0x06, dummy, sizeof(dummy), 0), 0u);  // MYSQL_TYPE_NULL
 }
 
 // --- CalcFieldSize for JSON with various pack_length values ---
 
 TEST(CalcFieldSizeTest, JsonPack1) {
   uint8_t data[] = {0x05, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xF5, data, 1), 6u);  // 1 + 5
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 1), 6u);  // 1 + 5
 }
 
 TEST(CalcFieldSizeTest, JsonPack2) {
   uint8_t data[] = {0x05, 0x00, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xF5, data, 2), 7u);  // 2 + 5
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 2), 7u);  // 2 + 5
 }
 
 TEST(CalcFieldSizeTest, JsonPack3) {
   uint8_t data[] = {0x05, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xF5, data, 3), 8u);  // 3 + 5
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 3), 8u);  // 3 + 5
 }
 
 TEST(CalcFieldSizeTest, JsonDefaultPack) {
   // metadata=0 defaults to pack_length=4, uses U32Le
   uint8_t data[] = {0x05, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xF5, data, 0), 9u);  // 4 + 5
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 0), 9u);  // 4 + 5
 }
 
 // --- CalcFieldSize for BLOB with pack_length 3, 4 ---
 
 TEST(CalcFieldSizeTest, BlobPack3) {
   uint8_t data[] = {0x05, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xFC, data, 3), 8u);  // 3 + 5
+  EXPECT_EQ(CalcFieldSize(0xFC, data, sizeof(data), 3), 8u);  // 3 + 5
 }
 
 TEST(CalcFieldSizeTest, BlobPack4) {
   uint8_t data[] = {0x05, 0x00, 0x00, 0x00, 'a', 'b', 'c', 'd', 'e'};
-  EXPECT_EQ(CalcFieldSize(0xFC, data, 4), 9u);  // 4 + 5
+  EXPECT_EQ(CalcFieldSize(0xFC, data, sizeof(data), 4), 9u);  // 4 + 5
 }
 
 TEST(CalcFieldSizeTest, BlobUnsupportedPack) {
   uint8_t data[8] = {};
-  EXPECT_EQ(CalcFieldSize(0xFC, data, 5), 0u);
+  EXPECT_EQ(CalcFieldSize(0xFC, data, sizeof(data), 5), 0u);
 }
 
 // --- CalcFieldSize for GEOMETRY with various pack lengths ---
 
 TEST(CalcFieldSizeTest, GeometryPack1) {
   uint8_t data[] = {0x05, 1, 2, 3, 4, 5};
-  EXPECT_EQ(CalcFieldSize(0xFF, data, 1), 6u);  // 1 + 5
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 1), 6u);  // 1 + 5
 }
 
 TEST(CalcFieldSizeTest, GeometryPack2) {
   uint8_t data[] = {0x05, 0x00, 1, 2, 3, 4, 5};
-  EXPECT_EQ(CalcFieldSize(0xFF, data, 2), 7u);  // 2 + 5
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 2), 7u);  // 2 + 5
 }
 
 TEST(CalcFieldSizeTest, GeometryPack3) {
   uint8_t data[] = {0x05, 0x00, 0x00, 1, 2, 3, 4, 5};
-  EXPECT_EQ(CalcFieldSize(0xFF, data, 3), 8u);  // 3 + 5
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 3), 8u);  // 3 + 5
 }
 
 TEST(CalcFieldSizeTest, GeometryUnsupportedPack) {
   uint8_t data[8] = {};
-  EXPECT_EQ(CalcFieldSize(0xFF, data, 5), 0u);
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 5), 0u);
 }
 
 // --- DecodeDecimal with full 9-digit groups ---
@@ -499,7 +499,7 @@ TEST(DecodeDecimalTest, LargeWithFullGroups) {
   // Positive: XOR first byte with 0x80
   data[0] ^= 0x80;
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 18, 0, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 18, 0, consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result, "123456789012345678");
 }
@@ -518,7 +518,7 @@ TEST(DecodeDecimalTest, WithFullFracGroup) {
   data[4] = f1 & 0xFF;
   data[0] ^= 0x80;  // positive
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 11, 9, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 11, 9, consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result, "12.123456789");
 }
@@ -531,7 +531,7 @@ TEST(DecodeDecimalTest, NegativeWithFraction) {
   // Negative: XOR all with 0xFF => 0x7F, 0xFE, 0xCD
   uint8_t data[] = {0x7F, 0xFE, 0xCD};
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 5, 2, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 5, 2, consumed);
   EXPECT_EQ(result, "-1.50");
   EXPECT_EQ(consumed, 3u);
 }
@@ -542,7 +542,7 @@ TEST(DecodeDecimalTest, ScaleOnly) {
   // total = dig2bytes[2] = 1
   uint8_t data[] = {0x80 | 99};  // positive, value 99
   size_t consumed = 0;
-  auto result = DecodeDecimal(data, 2, 2, consumed);
+  auto result = DecodeDecimal(data, sizeof(data), 2, 2, consumed);
   EXPECT_EQ(consumed, 1u);
   EXPECT_EQ(result, "0.99");
 }

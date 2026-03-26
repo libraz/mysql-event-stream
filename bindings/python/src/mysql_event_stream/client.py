@@ -48,6 +48,7 @@ class BinlogClient:
     def __init__(
         self,
         *,
+        config: ClientConfig | None = None,
         host: str = "127.0.0.1",
         port: int = 3306,
         user: str = "root",
@@ -66,6 +67,8 @@ class BinlogClient:
         """Create a new BinlogClient.
 
         Args:
+            config: Pre-built configuration object. If provided, all other
+                connection parameters are ignored (except ``lib_path``).
             host: MySQL host.
             port: MySQL port.
             user: MySQL user.
@@ -74,8 +77,8 @@ class BinlogClient:
             start_gtid: GTID to start from (empty = current position).
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
-            ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
-                3=verify_ca, 4=verify_identity).
+            ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,
+                1=preferred, 2=required, 3=verify_ca, 4=verify_identity).
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
@@ -92,21 +95,24 @@ class BinlogClient:
                 "BinlogClient is not available. Rebuild libmes with OpenSSL installed"
             )
 
-        self._config = ClientConfig(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            server_id=server_id,
-            start_gtid=start_gtid,
-            connect_timeout_s=connect_timeout_s,
-            read_timeout_s=read_timeout_s,
-            ssl_mode=ssl_mode,
-            ssl_ca=ssl_ca,
-            ssl_cert=ssl_cert,
-            ssl_key=ssl_key,
-            max_queue_size=max_queue_size,
-        )
+        if config is not None:
+            self._config = config
+        else:
+            self._config = ClientConfig(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                server_id=server_id,
+                start_gtid=start_gtid,
+                connect_timeout_s=connect_timeout_s,
+                read_timeout_s=read_timeout_s,
+                ssl_mode=ssl_mode,
+                ssl_ca=ssl_ca,
+                ssl_cert=ssl_cert,
+                ssl_key=ssl_key,
+                max_queue_size=max_queue_size,
+            )
         self._handle: int | None = self._lib.mes_client_create()
         if self._handle is None:
             raise RuntimeError("Failed to create BinlogClient")
@@ -193,8 +199,10 @@ class BinlogClient:
             self._lib.mes_client_disconnect(self._handle)
 
     def close(self) -> None:
-        """Destroy the client and free resources."""
+        """Stop, disconnect, and destroy the client, freeing all resources."""
         if self._handle is not None:
+            self.stop()
+            self.disconnect()
             self._lib.mes_client_destroy(self._handle)
             self._handle = None
 

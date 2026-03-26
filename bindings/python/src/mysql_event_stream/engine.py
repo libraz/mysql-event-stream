@@ -297,7 +297,7 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
         col = cols[i]
 
         # Key: column name if available, otherwise string index
-        name = col.col_name.decode("utf-8") if col.col_name else ""
+        name = ctypes.string_at(col.col_name).decode("utf-8") if col.col_name else ""
         key = name if name else str(i)
 
         col_type = col.type
@@ -309,7 +309,8 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
             result[key] = col.double_val
         elif col_type == MES_COL_STRING:
             if col.str_data and col.str_len > 0:
-                result[key] = ctypes.string_at(col.str_data, col.str_len).decode("utf-8")
+                raw = ctypes.string_at(col.str_data, col.str_len)
+                result[key] = raw.decode("utf-8", errors="surrogateescape")
             else:
                 result[key] = ""
         elif col_type == MES_COL_BYTES:
