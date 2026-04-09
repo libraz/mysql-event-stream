@@ -1,9 +1,14 @@
 # mysql-event-stream
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
+[![Version](https://img.shields.io/github/v/release/libraz/mysql-event-stream?label=version)](https://github.com/libraz/mysql-event-stream/releases)
+[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream?logo=npm)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
+[![PyPI](https://img.shields.io/pypi/v/mysql-event-stream?logo=python)](https://pypi.org/project/mysql-event-stream/)
 [![codecov](https://codecov.io/gh/libraz/mysql-event-stream/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.x-blue?logo=mysql)](https://dev.mysql.com/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
 A lightweight library that converts MySQL binlog replication events into a streaming API for applications.
 
@@ -11,13 +16,13 @@ Extracted from [mygram-db](https://github.com/libraz/mygram-db)'s replication la
 
 ## Overview
 
-mysql-event-stream parses MySQL 8.4 binary log events and emits structured row-level change events (INSERT / UPDATE / DELETE). It provides a C ABI core with first-class bindings for Node.js and Python, making it easy to build real-time data pipelines, audit logs, cache invalidation, and event-driven architectures on top of MySQL.
+mysql-event-stream parses MySQL 8.4 / 9.x binary log events and emits structured row-level change events (INSERT / UPDATE / DELETE). It provides a C ABI core with first-class bindings for Node.js and Python, making it easy to build real-time data pipelines, audit logs, cache invalidation, and event-driven architectures on top of MySQL.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    MySQL[MySQL 8.4 Primary] -->|binlog stream / GTID| Proto
+    MySQL[MySQL 8.4 / 9.x Primary] -->|binlog stream / GTID| Proto
 
     subgraph mysql-event-stream
         Proto[Protocol Layer\nTCP + TLS + MySQL Wire Protocol] --> Core[CDC Engine\nC ABI: libmes]
@@ -128,9 +133,10 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Zero native dependencies** - Ships as a self-contained binary; no libmysqlclient required (only OpenSSL)
 - **Streaming** - Process events incrementally as bytes arrive
 - **Multi-language** - C/C++, Node.js (N-API), and Python (ctypes) bindings
-- **MySQL 8.4** - Built for the latest MySQL LTS release
+- **MySQL 8.4 / 9.x** - Supports both the LTS and Innovation releases
 - **GTID support** - Native BinlogClient with GTID-based replication
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
+- **VECTOR type** - Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
 - **Column Names** - Automatic column name resolution via metadata queries
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 - **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
@@ -286,7 +292,7 @@ mysql-event-stream/
       protocol/                #   MySQL wire protocol (TCP, TLS, auth, query, binlog)
       client/                  #   BinlogClient, EventQueue, ConnectionValidator
     tests/                     #   Unit tests (Google Test)
-      e2e/                     #   E2E tests (Docker MySQL 8.4)
+      e2e/                     #   E2E tests (Docker MySQL 8.4 / 9.x)
   bindings/
     node/                      # Node.js binding (N-API addon)
     python/                    # Python binding (ctypes)
@@ -301,8 +307,7 @@ This project extracts the binlog parsing and replication components from [mygram
 ## Requirements
 
 **MySQL:**
-- Version: 8.4
-- Binary log format: ROW (`binlog_format=ROW`)
+- Version: 8.4, 9.x
 - GTID mode enabled (for BinlogClient)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
