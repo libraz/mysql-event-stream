@@ -1,9 +1,14 @@
 # mysql-event-stream
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
+[![Version](https://img.shields.io/github/v/release/libraz/mysql-event-stream?label=version)](https://github.com/libraz/mysql-event-stream/releases)
+[![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream?logo=npm)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
+[![PyPI](https://img.shields.io/pypi/v/mysql-event-stream?logo=python)](https://pypi.org/project/mysql-event-stream/)
 [![codecov](https://codecov.io/gh/libraz/mysql-event-stream/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
 MySQL の binlog レプリケーションイベントをアプリケーション向けのストリーミング API に変換する軽量ライブラリです。
 
@@ -11,13 +16,13 @@ MySQL の binlog レプリケーションイベントをアプリケーション
 
 ## 概要
 
-mysql-event-stream は MySQL 8.4 のバイナリログイベントをパースし、行レベルの変更イベント (INSERT / UPDATE / DELETE) を構造化データとして出力します。C ABI のコアライブラリに加え、Node.js と Python のバインディングを提供しており、リアルタイムデータパイプライン、監査ログ、キャッシュ無効化、イベント駆動アーキテクチャの構築に利用できます。
+mysql-event-stream は MySQL 8.4+ のバイナリログイベントをパースし、行レベルの変更イベント (INSERT / UPDATE / DELETE) を構造化データとして出力します。C ABI のコアライブラリに加え、Node.js と Python のバインディングを提供しており、リアルタイムデータパイプライン、監査ログ、キャッシュ無効化、イベント駆動アーキテクチャの構築に利用できます。
 
 ## アーキテクチャ
 
 ```mermaid
 graph TD
-    MySQL[MySQL 8.4 Primary] -->|binlog stream / GTID| Proto
+    MySQL[MySQL 8.4+ Primary] -->|binlog stream / GTID| Proto
 
     subgraph mysql-event-stream
         Proto[プロトコル層\nTCP + TLS + MySQL ワイヤープロトコル] --> Core[CDC エンジン\nC ABI: libmes]
@@ -127,9 +132,10 @@ mes_destroy(engine);
 - **外部依存なし** - MySQL クライアントライブラリ不要。ワイヤープロトコルを自前実装した自己完結バイナリ
 - **ストリーミング処理** - バイト列の到着に合わせて逐次的にイベントを処理
 - **多言語対応** - C/C++、Node.js (N-API)、Python (ctypes) バインディング
-- **MySQL 8.4** - 最新の MySQL LTS リリースに対応
+- **MySQL 8.4+** - LTS および Innovation リリースに対応
 - **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
+- **VECTOR 型** - MySQL 9.0+ の VECTOR カラムをネイティブサポート（生バイト列としてデコード）
 - **カラム名解決** - メタデータクエリによる自動カラム名解決
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 - **SSL/TLS** - MySQL 接続の SSL/TLS 暗号化に対応
@@ -282,7 +288,7 @@ mysql-event-stream/
       protocol/                #   MySQL ワイヤープロトコル (TCP, TLS, 認証, クエリ, binlog)
       client/                  #   BinlogClient, EventQueue, ConnectionValidator
     tests/                     #   ユニットテスト (Google Test)
-      e2e/                     #   E2E テスト (Docker MySQL 8.4)
+      e2e/                     #   E2E テスト (Docker MySQL 8.4+)
   bindings/
     node/                      # Node.js バインディング (N-API アドオン)
     python/                    # Python バインディング (ctypes)
@@ -297,8 +303,7 @@ mysql-event-stream/
 ## 要件
 
 **MySQL:**
-- バージョン: 8.4
-- バイナリログフォーマット: ROW (`binlog_format=ROW`)
+- バージョン: 8.4+
 - GTID モード有効 (BinlogClient 使用時)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
