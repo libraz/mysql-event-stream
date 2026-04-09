@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mysql-event-stream"
-version = "1.0.1"
+version = "1.1.0"
 description = "MySQL 8.4 CDC engine - Python binding (native ctypes)"
 requires-python = ">=3.11"
 license = "Apache-2.0"
