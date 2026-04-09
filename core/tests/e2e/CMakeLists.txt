@@ -1,4 +1,4 @@
-# E2E protocol tests (requires running MySQL 8.4 at localhost:13307)
+# E2E protocol tests (requires running MySQL 8.4+ or 9.x at localhost:13307)
 
 add_executable(test_e2e_protocol test_e2e_protocol.cpp)
 target_link_libraries(test_e2e_protocol PRIVATE mes-core GTest::gtest_main)

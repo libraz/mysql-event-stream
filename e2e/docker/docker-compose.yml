@@ -1,6 +1,6 @@
 services:
   mysql:
-    image: mysql:8.4
+    image: mysql:${MYSQL_VERSION:-8.4}
     container_name: mes_test_mysql
     ports:
       - "13307:3306"
@@ -12,11 +12,9 @@ services:
       - --log-bin=mysql-bin
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
-      - --binlog-format=ROW
       - --binlog-row-image=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
-      - --mysql-native-password=ON
       - --ssl-ca=/etc/mysql/certs/ca.pem
       - --ssl-cert=/etc/mysql/certs/server-cert.pem
       - --ssl-key=/etc/mysql/certs/server-key.pem

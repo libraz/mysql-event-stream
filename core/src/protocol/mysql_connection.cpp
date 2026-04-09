@@ -3,6 +3,11 @@
 
 #include "protocol/mysql_connection.h"
 
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -465,21 +470,128 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
 
       if (status == kCachingSha2FullAuthRequired) {
         // Full authentication required
-        if (!socket_.IsTlsActive()) {
-          last_error_ =
-              "caching_sha2_password full auth requires TLS connection";
-          return MES_ERR_AUTH;
-        }
+        if (socket_.IsTlsActive()) {
+          // Send cleartext password + NUL terminator over TLS
+          std::vector<uint8_t> cleartext_payload(password.begin(),
+                                                 password.end());
+          cleartext_payload.push_back(0);
 
-        // Send cleartext password + NUL terminator over TLS
-        std::vector<uint8_t> cleartext_payload(password.begin(),
-                                               password.end());
-        cleartext_payload.push_back(0);
+          rc = SendPacket(cleartext_payload);
+          if (rc != MES_OK) {
+            last_error_ = "Failed to send cleartext password";
+            return MES_ERR_AUTH;
+          }
+        } else {
+          // No TLS: request server's RSA public key and encrypt password
+          std::vector<uint8_t> rsa_request = {0x02};
+          rc = SendPacket(rsa_request);
+          if (rc != MES_OK) {
+            last_error_ = "Failed to send RSA public key request";
+            return MES_ERR_AUTH;
+          }
 
-        rc = SendPacket(cleartext_payload);
-        if (rc != MES_OK) {
-          last_error_ = "Failed to send cleartext password";
-          return MES_ERR_AUTH;
+          std::vector<uint8_t> key_packet;
+          rc = ReadPacket(&socket_, &key_packet, &sequence_id_);
+          if (rc != MES_OK) {
+            last_error_ = "Failed to read RSA public key response";
+            return MES_ERR_AUTH;
+          }
+          ++sequence_id_;
+
+          if (key_packet.size() < 2 || key_packet[0] != kPacketAuthMoreData) {
+            last_error_ = "Unexpected response to RSA public key request";
+            return MES_ERR_AUTH;
+          }
+
+          // PEM key starts after the 0x01 status byte
+          std::string pem_key(
+              reinterpret_cast<const char*>(key_packet.data() + 1),
+              key_packet.size() - 1);
+
+          // XOR (password + NUL) with the auth scramble
+          const std::vector<uint8_t>& scramble = server_info_.auth_data;
+          if (scramble.empty()) {
+            last_error_ = "Empty auth scramble for RSA encryption";
+            return MES_ERR_AUTH;
+          }
+
+          std::vector<uint8_t> xored;
+          xored.reserve(password.size() + 1);
+          for (size_t i = 0; i <= password.size(); ++i) {
+            uint8_t pw_byte =
+                (i < password.size())
+                    ? static_cast<uint8_t>(password[i])
+                    : 0;
+            xored.push_back(pw_byte ^ scramble[i % scramble.size()]);
+          }
+
+          // Parse PEM and encrypt with RSA OAEP padding
+          BIO* bio = BIO_new_mem_buf(pem_key.data(),
+                                     static_cast<int>(pem_key.size()));
+          if (bio == nullptr) {
+            last_error_ = "Failed to create BIO for RSA public key";
+            return MES_ERR_AUTH;
+          }
+
+          EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+          BIO_free(bio);
+          if (pkey == nullptr) {
+            last_error_ = "Failed to parse server RSA public key";
+            return MES_ERR_AUTH;
+          }
+
+          EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, nullptr);
+          if (ctx == nullptr) {
+            EVP_PKEY_free(pkey);
+            last_error_ = "Failed to create EVP_PKEY_CTX for RSA encryption";
+            return MES_ERR_AUTH;
+          }
+
+          mes_error_t encrypt_rc = MES_OK;
+          do {
+            if (EVP_PKEY_encrypt_init(ctx) <= 0) {
+              last_error_ = "EVP_PKEY_encrypt_init failed";
+              encrypt_rc = MES_ERR_AUTH;
+              break;
+            }
+            if (EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <=
+                0) {
+              last_error_ = "Failed to set RSA OAEP padding";
+              encrypt_rc = MES_ERR_AUTH;
+              break;
+            }
+
+            size_t encrypted_len = 0;
+            if (EVP_PKEY_encrypt(ctx, nullptr, &encrypted_len, xored.data(),
+                                 xored.size()) <= 0) {
+              last_error_ = "Failed to determine RSA encrypted length";
+              encrypt_rc = MES_ERR_AUTH;
+              break;
+            }
+
+            std::vector<uint8_t> encrypted(encrypted_len);
+            if (EVP_PKEY_encrypt(ctx, encrypted.data(), &encrypted_len,
+                                 xored.data(), xored.size()) <= 0) {
+              last_error_ = "RSA encryption of password failed";
+              encrypt_rc = MES_ERR_AUTH;
+              break;
+            }
+            encrypted.resize(encrypted_len);
+
+            rc = SendPacket(encrypted);
+            if (rc != MES_OK) {
+              last_error_ = "Failed to send RSA-encrypted password";
+              encrypt_rc = MES_ERR_AUTH;
+              break;
+            }
+          } while (false);
+
+          EVP_PKEY_CTX_free(ctx);
+          EVP_PKEY_free(pkey);
+
+          if (encrypt_rc != MES_OK) {
+            return encrypt_rc;
+          }
         }
 
         // Read final OK/ERR

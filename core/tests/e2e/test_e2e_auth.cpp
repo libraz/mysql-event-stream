@@ -5,13 +5,13 @@
  * @file test_e2e_auth.cpp
  * @brief End-to-end tests for MySQL authentication edge cases
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
- *   - root/test_root_password (mysql_native_password)
- *   - repl_user/test_password (mysql_native_password, REPLICATION SLAVE)
+ * Requires a running MySQL 8.4+ instance at localhost:13307 with:
+ *   - root/test_root_password (caching_sha2_password)
+ *   - repl_user/test_password (caching_sha2_password, REPLICATION SLAVE)
  *   - sha2_user/sha2_test_pwd (caching_sha2_password, REPLICATION SLAVE)
- *   - empty_pass_user/"" (mysql_native_password, SELECT only)
- *   - no_repl_user/no_repl_pass (mysql_native_password, SELECT only)
- *   - special_user/p@ss'w\\ord"! (mysql_native_password, SELECT only)
+ *   - empty_pass_user/"" (caching_sha2_password, SELECT only)
+ *   - no_repl_user/no_repl_pass (caching_sha2_password, SELECT only)
+ *   - special_user/p@ss'w\\ord"! (caching_sha2_password, SELECT only)
  *
  * Start with: cd e2e/docker && docker compose up -d
  */
@@ -78,15 +78,17 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
   ExecuteDML("GRANT SELECT ON *.* TO '" + temp_user + "'@'%'");
   ExecuteDML("FLUSH PRIVILEGES");
 
-  // Attempt connection without TLS. With a cold cache, caching_sha2_password
-  // full auth requires TLS to send cleartext password, so this should fail.
+  // Attempt connection without TLS. With RSA public key auth, this should
+  // succeed even with a cold cache.
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(),
                          kTimeout, kTimeout, 0, "", "", "");
 
-  // Expect auth failure because full auth over non-TLS is not possible
-  EXPECT_EQ(rc, MES_ERR_AUTH) << "Expected auth failure without TLS, got: "
-                              << conn.GetLastError();
+  EXPECT_EQ(rc, MES_OK) << "RSA public key auth should succeed without TLS: "
+                         << conn.GetLastError();
+  if (conn.IsConnected()) {
+    conn.Disconnect();
+  }
 
   // Clean up temp user
   ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
@@ -94,17 +96,16 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
 
 // -- Auth switch tests --
 
-TEST(E2EAuth, AuthSwitchFromSha2ToNative) {
-  // MySQL 8.4 default auth plugin is caching_sha2_password. When connecting
-  // as repl_user (mysql_native_password), the server sends an AuthSwitchRequest.
+TEST(E2EAuth, CachingSha2DefaultPlugin) {
+  // All users use caching_sha2_password (default in 8.4+, only option in 9.x).
+  // repl_user uses caching_sha2_password, so no auth switch is needed.
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout,
-                         0, "", "", "");
+                         2, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
 
-  // The server's default plugin (from the initial handshake) should be
-  // caching_sha2_password, not the user's plugin
+  // Server default auth plugin should be caching_sha2_password
   EXPECT_EQ(conn.GetServerInfo().auth_plugin_name, "caching_sha2_password");
 
   conn.Disconnect();
@@ -122,25 +123,27 @@ TEST(E2EAuth, EmptyPassword) {
 }
 
 TEST(E2EAuth, LongPassword) {
-  // Generate a 500-character password
-  std::string long_pass(500, 'A');
+  // Generate a 200-character password (caching_sha2_password limit ~255)
+  std::string long_pass(200, 'A');
   for (size_t i = 0; i < long_pass.size(); i++) {
     long_pass[i] = 'a' + static_cast<char>(i % 26);
   }
 
   const std::string user = "long_pwd_user";
 
-  // Create user with long password
-  auto dml_rc = ExecuteDML("CREATE USER IF NOT EXISTS '" + user +
-                           "'@'%' IDENTIFIED WITH mysql_native_password BY '" +
-                           long_pass + "'");
+  // Drop first to avoid stale state from previous runs
+  ExecuteDML("DROP USER IF EXISTS '" + user + "'@'%'");
+
+  // Create user with long password (default auth plugin)
+  auto dml_rc = ExecuteDML("CREATE USER '" + user +
+                           "'@'%' IDENTIFIED BY '" + long_pass + "'");
   ASSERT_EQ(dml_rc, MES_OK) << "Failed to create long password user";
   ExecuteDML("GRANT SELECT ON *.* TO '" + user + "'@'%'");
 
-  // Connect with the long password
+  // Connect with the long password over TLS
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, user.c_str(), long_pass.c_str(),
-                         kTimeout, kTimeout, 0, "", "", "");
+                         kTimeout, kTimeout, 2, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -150,9 +153,10 @@ TEST(E2EAuth, LongPassword) {
 }
 
 TEST(E2EAuth, SpecialCharsInPassword) {
+  // Connect over TLS since caching_sha2_password may need full auth
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "special_user", "p@ss'w\\ord\"!",
-                         kTimeout, kTimeout, 0, "", "", "");
+                         kTimeout, kTimeout, 2, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -183,7 +187,7 @@ TEST(E2EAuth, NoReplPrivilegesConnect) {
   // Connection itself should succeed (SELECT privilege is enough for auth)
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "no_repl_user", "no_repl_pass",
-                         kTimeout, kTimeout, 0, "", "", "");
+                         kTimeout, kTimeout, 2, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -208,8 +212,9 @@ TEST(E2EAuth, NoReplPrivilegesStreamFails) {
   config.start_gtid = gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = kTimeout;
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  std::string ca_cert = CaCert();
+  config.ssl_mode = MES_SSL_REQUIRED;
+  config.ssl_ca = ca_cert.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
@@ -240,13 +245,13 @@ TEST(E2EAuth, ReconnectAfterFailure) {
 
   // First attempt: bad password, should fail
   auto rc = conn.Connect(kHost, kPort, kReplUser, "wrong_password", kTimeout,
-                         kTimeout, 0, "", "", "");
+                         kTimeout, 2, CaCert(), "", "");
   EXPECT_EQ(rc, MES_ERR_AUTH);
   EXPECT_FALSE(conn.IsConnected());
 
   // Second attempt: correct password on the same connection object
-  rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 0,
-                    "", "", "");
+  rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 2,
+                    CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
 

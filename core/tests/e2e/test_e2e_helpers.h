@@ -90,11 +90,11 @@ inline CapturedEvent CopyEvent(const mes_event_t* e) {
   return ce;
 }
 
-// Get current GTID executed from server
+// Get current GTID executed from server (uses TLS for caching_sha2_password)
 inline std::string GetCurrentGtid() {
   mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0,
-                   "", "", "") != MES_OK)
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2,
+                   CaCert(), "", "") != MES_OK)
     return "";
   mes::protocol::QueryResult qr;
   std::string err;
@@ -106,11 +106,11 @@ inline std::string GetCurrentGtid() {
   return qr.rows[0].values[0];
 }
 
-// Execute a DML/DDL statement as root
+// Execute a DML/DDL statement as root (uses TLS for caching_sha2_password)
 inline mes_error_t ExecuteDML(const std::string& sql) {
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", "");
+                         2, CaCert(), "", "");
   if (rc != MES_OK) return rc;
   mes::protocol::QueryResult qr;
   std::string err;
@@ -202,6 +202,24 @@ inline std::vector<CapturedEvent> CaptureTableEvents(
       },
       200, engine);
 }
+
+// Get MySQL major version from server
+inline int GetMysqlMajorVersion() {
+  mes::protocol::MysqlConnection conn;
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2,
+                   CaCert(), "", "") != MES_OK)
+    return 0;
+  mes::protocol::QueryResult qr;
+  std::string err;
+  if (mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@version", &qr,
+                                  &err) != MES_OK)
+    return 0;
+  if (qr.rows.empty()) return 0;
+  const std::string& ver = qr.rows[0].values[0];
+  return std::atoi(ver.c_str());
+}
+
+inline bool IsMysql9OrLater() { return GetMysqlMajorVersion() >= 9; }
 
 // Filter events by table name
 inline std::vector<CapturedEvent> FilterByTable(

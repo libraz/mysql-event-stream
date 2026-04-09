@@ -1,31 +1,26 @@
 USE mes_test;
 
--- Ensure root uses mysql_native_password for PyMySQL compatibility
-ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY 'test_root_password';
-ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY 'test_root_password';
-FLUSH PRIVILEGES;
-
--- Create replication user
-CREATE USER IF NOT EXISTS 'repl_user'@'%' IDENTIFIED WITH mysql_native_password BY 'test_password';
+-- Create replication user (uses server default auth plugin: caching_sha2_password)
+CREATE USER IF NOT EXISTS 'repl_user'@'%' IDENTIFIED BY 'test_password';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 GRANT SELECT ON mes_test.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 
--- caching_sha2_password user (MySQL 8.4 default plugin)
+-- caching_sha2_password user (explicit, same as default)
 CREATE USER IF NOT EXISTS 'sha2_user'@'%' IDENTIFIED WITH caching_sha2_password BY 'sha2_test_pwd';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'sha2_user'@'%';
 GRANT SELECT ON mes_test.* TO 'sha2_user'@'%';
 
 -- User with empty password
-CREATE USER IF NOT EXISTS 'empty_pass_user'@'%' IDENTIFIED WITH mysql_native_password BY '';
+CREATE USER IF NOT EXISTS 'empty_pass_user'@'%' IDENTIFIED BY '';
 GRANT SELECT ON mes_test.* TO 'empty_pass_user'@'%';
 
 -- User with no replication privileges
-CREATE USER IF NOT EXISTS 'no_repl_user'@'%' IDENTIFIED WITH mysql_native_password BY 'no_repl_pass';
+CREATE USER IF NOT EXISTS 'no_repl_user'@'%' IDENTIFIED BY 'no_repl_pass';
 GRANT SELECT ON mes_test.* TO 'no_repl_user'@'%';
 
 -- User with special characters in password
-CREATE USER IF NOT EXISTS 'special_user'@'%' IDENTIFIED WITH mysql_native_password BY 'p@ss''w\\ord"!';
+CREATE USER IF NOT EXISTS 'special_user'@'%' IDENTIFIED BY 'p@ss''w\\ord"!';
 GRANT SELECT ON mes_test.* TO 'special_user'@'%';
 
 FLUSH PRIVILEGES;
