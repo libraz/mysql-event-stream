@@ -17,8 +17,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.21.0'
+          node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
+
+      - run: npm install -g npm@latest
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
 
@@ -139,7 +141,7 @@ jobs:
 
   publish-pypi:
     needs: [python-wheels]
-    if: needs.python-wheels.result == 'success'
+    if: always() && needs.python-wheels.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: pypi
