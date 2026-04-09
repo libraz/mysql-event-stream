@@ -249,6 +249,16 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
       return static_cast<uint32_t>(consumed) + json_len;
     }
 
+    // VECTOR (same encoding as BLOB, MySQL 9.0+)
+    case 0xF2: {  // MYSQL_TYPE_VECTOR
+      uint8_t pack_len = static_cast<uint8_t>(metadata);
+      if (pack_len == 0 || pack_len > 4) return 0;
+      size_t consumed = 0;
+      uint32_t vec_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
+      if (consumed == 0) return 0;
+      return static_cast<uint32_t>(consumed) + vec_len;
+    }
+
     // BLOB (includes TEXT)
     case 0xFC: {  // MYSQL_TYPE_BLOB
       uint8_t pack_len = static_cast<uint8_t>(metadata);

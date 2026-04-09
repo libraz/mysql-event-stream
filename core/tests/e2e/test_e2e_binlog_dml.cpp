@@ -5,8 +5,8 @@
  * @file test_e2e_binlog_dml.cpp
  * @brief End-to-end tests for DML binlog event capture and decoding
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
- *   - root/test_root_password (mysql_native_password)
+ * Requires a running MySQL 8.4+ instance at localhost:13307 with:
+ *   - root/test_root_password (caching_sha2_password)
  *   - repl_user/test_password (replication grants)
  *   - Database: mes_test with tables: users, items, large_data
  *   - binlog_row_image=FULL
@@ -665,6 +665,130 @@ TEST(E2EBinlogDML, BooleanValues) {
 
   // Cleanup
   e2e::ExecuteDML("DELETE FROM mes_test.users WHERE id IN (1017, 1018)");
+}
+
+// ---- VECTOR type tests (MySQL 9.0+) ----
+
+TEST(E2EBinlogDML, VectorInsert) {
+  if (!e2e::IsMysql9OrLater()) {
+    GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
+  }
+
+  e2e::ExecuteDML(
+      "CREATE TABLE IF NOT EXISTS mes_test.vec_test ("
+      "  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+      "  embedding VECTOR(3)"
+      ") ENGINE=InnoDB");
+  e2e::ExecuteDML("DELETE FROM mes_test.vec_test WHERE id = 1");
+
+  auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+
+  auto rc = e2e::ExecuteDML(
+      "INSERT INTO mes_test.vec_test (id, embedding) VALUES "
+      "(1, TO_VECTOR('[1.0, 2.0, 3.0]'))");
+  ASSERT_EQ(rc, MES_OK);
+
+  auto events = e2e::CaptureTableEvents(gtid, 520, "vec_test", 1);
+  auto filtered = e2e::FilterByTable(events, "vec_test");
+  ASSERT_GE(filtered.size(), 1u);
+
+  const auto& ev = filtered[0];
+  EXPECT_EQ(ev.type, MES_EVENT_INSERT);
+  ASSERT_GE(ev.after.size(), 2u);
+
+  // Index 0: id
+  EXPECT_EQ(ev.after[0].type, MES_COL_INT);
+  EXPECT_EQ(ev.after[0].int_val, 1);
+
+  // Index 1: embedding (VECTOR -> BYTES, 3 float32 = 12 bytes)
+  EXPECT_EQ(ev.after[1].type, MES_COL_BYTES);
+  EXPECT_EQ(ev.after[1].str_data.size(), 12u);
+
+  // Cleanup
+  e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.vec_test");
+}
+
+TEST(E2EBinlogDML, VectorUpdate) {
+  if (!e2e::IsMysql9OrLater()) {
+    GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
+  }
+
+  e2e::ExecuteDML(
+      "CREATE TABLE IF NOT EXISTS mes_test.vec_test ("
+      "  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+      "  embedding VECTOR(3)"
+      ") ENGINE=InnoDB");
+  e2e::ExecuteDML(
+      "INSERT INTO mes_test.vec_test (id, embedding) VALUES "
+      "(1, TO_VECTOR('[1.0, 2.0, 3.0]'))");
+
+  auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+
+  auto rc = e2e::ExecuteDML(
+      "UPDATE mes_test.vec_test SET embedding = TO_VECTOR('[4.0, 5.0, 6.0]') "
+      "WHERE id = 1");
+  ASSERT_EQ(rc, MES_OK);
+
+  auto events = e2e::CaptureTableEvents(gtid, 521, "vec_test", 1);
+  auto filtered = e2e::FilterByTable(events, "vec_test");
+  ASSERT_GE(filtered.size(), 1u);
+
+  const auto& ev = filtered[0];
+  EXPECT_EQ(ev.type, MES_EVENT_UPDATE);
+  ASSERT_GE(ev.before.size(), 2u);
+  ASSERT_GE(ev.after.size(), 2u);
+
+  // Both before and after should have VECTOR as BYTES
+  EXPECT_EQ(ev.before[1].type, MES_COL_BYTES);
+  EXPECT_EQ(ev.after[1].type, MES_COL_BYTES);
+  EXPECT_EQ(ev.before[1].str_data.size(), 12u);
+  EXPECT_EQ(ev.after[1].str_data.size(), 12u);
+
+  // Before and after should differ
+  EXPECT_NE(ev.before[1].str_data, ev.after[1].str_data);
+
+  // Cleanup
+  e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.vec_test");
+}
+
+TEST(E2EBinlogDML, VectorDelete) {
+  if (!e2e::IsMysql9OrLater()) {
+    GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
+  }
+
+  e2e::ExecuteDML(
+      "CREATE TABLE IF NOT EXISTS mes_test.vec_test ("
+      "  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+      "  embedding VECTOR(3)"
+      ") ENGINE=InnoDB");
+  e2e::ExecuteDML(
+      "INSERT INTO mes_test.vec_test (id, embedding) VALUES "
+      "(1, TO_VECTOR('[1.0, 2.0, 3.0]'))");
+
+  auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+
+  auto rc = e2e::ExecuteDML("DELETE FROM mes_test.vec_test WHERE id = 1");
+  ASSERT_EQ(rc, MES_OK);
+
+  auto events = e2e::CaptureTableEvents(gtid, 522, "vec_test", 1);
+  auto filtered = e2e::FilterByTable(events, "vec_test");
+  ASSERT_GE(filtered.size(), 1u);
+
+  const auto& ev = filtered[0];
+  EXPECT_EQ(ev.type, MES_EVENT_DELETE);
+  EXPECT_FALSE(ev.before.empty());
+  EXPECT_TRUE(ev.after.empty());
+
+  // before should have VECTOR data
+  ASSERT_GE(ev.before.size(), 2u);
+  EXPECT_EQ(ev.before[1].type, MES_COL_BYTES);
+  EXPECT_EQ(ev.before[1].str_data.size(), 12u);
+
+  // Cleanup
+  e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.vec_test");
 }
 
 }  // namespace

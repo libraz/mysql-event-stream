@@ -65,6 +65,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     case mes::ColumnType::kMediumBlob:
     case mes::ColumnType::kLongBlob:
     case mes::ColumnType::kGeometry:
+    case mes::ColumnType::kVector:
       c.type = MES_COL_BYTES;
       c.str_data = reinterpret_cast<const char*>(col.bytes_val.data());
       c.str_len = static_cast<uint32_t>(col.bytes_val.size());

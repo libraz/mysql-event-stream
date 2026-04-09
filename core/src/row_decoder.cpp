@@ -304,7 +304,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
     case ColumnType::kBlob:
     case ColumnType::kTinyBlob:
     case ColumnType::kMediumBlob:
-    case ColumnType::kLongBlob: {
+    case ColumnType::kLongBlob:
+    case ColumnType::kVector: {
       uint8_t pack_length = static_cast<uint8_t>(meta);
       if (pack_length == 0) pack_length = 1;
       if (pack_length > 4) return ColumnValue::Null(type);

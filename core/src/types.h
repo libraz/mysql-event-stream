@@ -43,6 +43,7 @@ enum class ColumnType : uint8_t {
   kTimestamp2 = 0x11,  ///< MYSQL_TYPE_TIMESTAMP2 (with fractional seconds)
   kDatetime2 = 0x12,   ///< MYSQL_TYPE_DATETIME2 (with fractional seconds)
   kTime2 = 0x13,       ///< MYSQL_TYPE_TIME2 (with fractional seconds)
+  kVector = 0xF2,      ///< MYSQL_TYPE_VECTOR (MySQL 9.0+)
   kJson = 0xF5,        ///< MYSQL_TYPE_JSON
   kNewDecimal = 0xF6,  ///< MYSQL_TYPE_NEWDECIMAL
   kEnum = 0xF7,        ///< MYSQL_TYPE_ENUM

@@ -29,6 +29,7 @@ size_t ReadColumnMetadataValue(uint8_t col_type, const uint8_t* data, size_t rem
     case static_cast<uint8_t>(ColumnType::kLongBlob):
     case static_cast<uint8_t>(ColumnType::kGeometry):
     case static_cast<uint8_t>(ColumnType::kJson):
+    case static_cast<uint8_t>(ColumnType::kVector):
       if (remaining < 1) return 0;
       *out = binary::ReadU8(data);
       return 1;
