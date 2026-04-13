@@ -15,6 +15,10 @@ endif()
 find_package(OpenSSL REQUIRED)
 message(STATUS "OpenSSL found: ${OPENSSL_VERSION} (static=${MES_OPENSSL_STATIC})")
 
+# ZLIB (required for CRC32 checksum verification)
+find_package(ZLIB REQUIRED)
+message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING}")
+
 # Protocol layer (MySQL wire protocol implementation)
 set(PROTOCOL_SOURCES
   src/protocol/mysql_socket.cpp
@@ -73,7 +77,7 @@ target_compile_options(mes-objects PRIVATE
 )
 
 # OpenSSL include directories needed at compile time
-target_link_libraries(mes-objects PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(mes-objects PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 
 # Sanitizers (applied to OBJECT library so both static and shared inherit them)
 if(MES_ENABLE_ASAN)
@@ -104,7 +108,7 @@ target_include_directories(mes-core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(mes-core PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(mes-core PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 
 # Propagate sanitizer/coverage link flags to consumers (PUBLIC required for static lib)
 if(MES_ENABLE_ASAN)
@@ -134,7 +138,7 @@ set_target_properties(mes-shared PROPERTIES
   SOVERSION 1
 )
 
-target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 
 # Propagate sanitizer/coverage link flags to final targets
 if(MES_ENABLE_ASAN)

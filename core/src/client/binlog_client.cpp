@@ -12,6 +12,7 @@
 #include "event_header.h"
 #include "logger.h"
 #include "protocol/mysql_query.h"
+#include "crc32.h"
 
 namespace mes {
 
@@ -68,12 +69,12 @@ mes_error_t BinlogClient::StartStream() {
     return MES_OK;
   }
 
-  // Disable checksums
+  // Enable CRC32 checksums for data integrity verification
   {
     protocol::QueryResult qr;
     std::string err;
     if (protocol::ExecuteQuery(conn_.Socket(),
-                               "SET @source_binlog_checksum='NONE'", &qr,
+                               "SET @source_binlog_checksum='CRC32'", &qr,
                                &err) != MES_OK) {
       last_error_ = err;
       return MES_ERR_STREAM;
@@ -151,6 +152,27 @@ void BinlogClient::ReaderLoop() {
     // Heartbeat: consume silently
     if (event_pkt.is_heartbeat) {
       continue;
+    }
+
+    // Verify CRC32 checksum for data integrity.
+    // MySQL appends a 4-byte CRC32 to every event when @source_binlog_checksum='CRC32'.
+    // The checksum covers all bytes except the trailing 4-byte CRC itself.
+    if (event_pkt.size >= kEventHeaderSize + kChecksumSize) {
+      const size_t data_length = event_pkt.size - kChecksumSize;
+      uint32_t computed_crc = ComputeCRC32(event_pkt.data, data_length);
+      uint32_t stored_crc = 0;
+      std::memcpy(&stored_crc, event_pkt.data + data_length, sizeof(stored_crc));
+      if (computed_crc != stored_crc) {
+        crc_errors_.fetch_add(1, std::memory_order_relaxed);
+        StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "crc32_checksum_mismatch")
+            .Field("computed_crc", static_cast<uint64_t>(computed_crc))
+            .Field("stored_crc", static_cast<uint64_t>(stored_crc))
+            .Field("event_length", static_cast<uint64_t>(event_pkt.size))
+            .Error();
+        continue;  // Skip corrupted event
+      }
     }
 
     // Update GTID tracking (protected by gtid_mutex_)
@@ -280,6 +302,10 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
 
   std::lock_guard<std::mutex> lock(gtid_mutex_);
   current_gtid_ = gtid_buf;
+}
+
+uint64_t BinlogClient::GetCRCErrors() const {
+  return crc_errors_.load(std::memory_order_relaxed);
 }
 
 }  // namespace mes

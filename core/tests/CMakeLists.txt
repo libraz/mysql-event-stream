@@ -98,4 +98,10 @@ target_link_libraries(test_event_queue PRIVATE mes-core GTest::gtest_main)
 target_compile_options(test_event_queue PRIVATE -fno-exceptions -fno-rtti)
 gtest_discover_tests(test_event_queue)
 
+# test_crc32
+add_executable(test_crc32 test_crc32.cpp)
+target_link_libraries(test_crc32 PRIVATE mes-core ZLIB::ZLIB GTest::gtest_main)
+target_compile_options(test_crc32 PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_crc32)
+
 add_subdirectory(e2e)

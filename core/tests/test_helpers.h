@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "event_header.h"
+#include "crc32.h"
 
 namespace mes {
 namespace test {
@@ -209,6 +210,17 @@ inline std::vector<uint8_t> BuildRotateBody(uint64_t position,
   b.WriteU64Le(position);
   b.WriteString(filename);
   return b.Data();
+}
+
+/// @brief Compute CRC32 over all bytes except the trailing 4-byte checksum
+///        and write the result into the last 4 bytes (little-endian).
+inline void FixChecksum(std::vector<uint8_t>& buf) {
+  if (buf.size() < kChecksumSize) {
+    return;
+  }
+  size_t data_len = buf.size() - kChecksumSize;
+  uint32_t crc = ComputeCRC32(buf.data(), data_len);
+  std::memcpy(buf.data() + data_len, &crc, sizeof(crc));
 }
 
 }  // namespace test

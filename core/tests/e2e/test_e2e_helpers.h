@@ -22,7 +22,7 @@ namespace e2e {
 
 // Connection defaults
 constexpr const char* kHost = "127.0.0.1";
-constexpr uint16_t kPort = 13307;
+constexpr uint16_t kPort = 13308;
 constexpr const char* kRootUser = "root";
 constexpr const char* kRootPass = "test_root_password";
 constexpr const char* kReplUser = "repl_user";

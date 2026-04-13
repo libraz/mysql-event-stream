@@ -127,6 +127,9 @@ class BinlogClient {
   /** @brief Get current GTID position (thread-safe) */
   const char* GetCurrentGtid() const;
 
+  /** @brief Get total CRC32 checksum errors detected (thread-safe) */
+  uint64_t GetCRCErrors() const;
+
  private:
   protocol::MysqlConnection conn_;
   protocol::BinlogStream binlog_stream_;
@@ -145,6 +148,9 @@ class BinlogClient {
   // GTID tracking (reader thread writes, GetCurrentGtid reads)
   std::string current_gtid_;
   mutable std::mutex gtid_mutex_;
+
+  // CRC error tracking (reader thread writes, GetCRCErrors reads)
+  std::atomic<uint64_t> crc_errors_{0};
 
   /** @brief Reader thread main loop */
   void ReaderLoop();

@@ -50,6 +50,7 @@ typedef enum {
   MES_ERR_INTERNAL = 99,
   /* Parse errors (100-199) */
   MES_ERR_PARSE = 100,
+  MES_ERR_CHECKSUM = 101,     /**< CRC32 checksum mismatch */
   /* Decode errors (200-299) */
   MES_ERR_DECODE = 200,         /**< General decode error */
   MES_ERR_DECODE_COLUMN = 201,  /**< Column value decode error */
