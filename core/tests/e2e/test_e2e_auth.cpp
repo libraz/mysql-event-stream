@@ -5,7 +5,7 @@
  * @file test_e2e_auth.cpp
  * @brief End-to-end tests for MySQL authentication edge cases
  *
- * Requires a running MySQL 8.4+ instance at localhost:13307 with:
+ * Requires a running MySQL 8.4+ instance at localhost:13308 with:
  *   - root/test_root_password (caching_sha2_password)
  *   - repl_user/test_password (caching_sha2_password, REPLICATION SLAVE)
  *   - sha2_user/sha2_test_pwd (caching_sha2_password, REPLICATION SLAVE)

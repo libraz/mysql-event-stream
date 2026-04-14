@@ -10,24 +10,24 @@ from mysql_event_stream.stream import CdcStream
 
 
 class TestStreamClose:
-    """Verify that close() calls stop before disconnect."""
+    """Verify that close() delegates to BinlogClient.close()."""
 
     @pytest.mark.asyncio
-    async def test_close_calls_stop_before_disconnect(self) -> None:
+    async def test_close_delegates_to_client_close(self) -> None:
         stream = CdcStream.__new__(CdcStream)
         stream._closed = False
         stream._engine = MagicMock()
 
         mock_client = MagicMock()
-        call_order: list[str] = []
-        mock_client.stop.side_effect = lambda: call_order.append("stop")
-        mock_client.disconnect.side_effect = lambda: call_order.append("disconnect")
-        mock_client.close.side_effect = lambda: call_order.append("close")
         stream._client = mock_client
 
         await stream.close()
 
-        assert call_order == ["stop", "disconnect", "close"]
+        # CdcStream.close() should call BinlogClient.close() which
+        # internally calls stop() and disconnect(). No redundant calls.
+        mock_client.close.assert_called_once()
+        mock_client.stop.assert_not_called()
+        mock_client.disconnect.assert_not_called()
         assert stream._client is None
         assert stream._engine is None
 

@@ -5,7 +5,7 @@
  * @file test_e2e_ssl.cpp
  * @brief End-to-end tests for SSL/TLS connection modes
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
+ * Requires a running MySQL 8.4 instance at localhost:13308 with:
  *   - SSL enabled with server certificates signed by the test CA
  *   - root/test_root_password
  *   - repl_user/test_password (replication grants)

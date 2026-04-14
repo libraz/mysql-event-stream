@@ -26,9 +26,14 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ChangeEvent> {
-    if (!this.iterator) {
-      this.iterator = this.generate();
+    if (this.closed) {
+      // Return an already-completed iterator if the stream has been closed
+      return (async function* () {})();
     }
+    if (this.iterator) {
+      throw new Error("CdcStream is already being iterated. Use a single for-await loop.");
+    }
+    this.iterator = this.generate();
     return this.iterator;
   }
 
@@ -89,9 +94,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         reconnectAttempts++;
         if (reconnectAttempts > maxAttempts) throw err;
 
-        const maxDelayS = 10;
-        const baseDelay = 1000 * Math.min(reconnectAttempts, maxDelayS);
-        const delay = baseDelay * (0.5 + Math.random() * 0.5);
+        const kBaseDelayMs = 1000;
+        const kMaxDelaySteps = 10;
+        const kJitterMin = 0.5;
+        const baseDelay = kBaseDelayMs * Math.min(reconnectAttempts, kMaxDelaySteps);
+        const delay = baseDelay * (kJitterMin + Math.random() * (1 - kJitterMin));
         await new Promise((resolve) => setTimeout(resolve, delay));
 
         this.engine!.reset();

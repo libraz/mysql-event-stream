@@ -71,7 +71,8 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
   row->values.resize(column_count);
   row->is_null.resize(column_count);
 
-  for (size_t i = 0; i < column_count && pos < data_size; ++i) {
+  size_t i = 0;
+  for (; i < column_count && pos < data_size; ++i) {
     if (data[pos] == kNullColumnMarker) {
       // NULL value
       row->is_null[i] = true;
@@ -86,6 +87,11 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
       }
       pos += str_len;
     }
+  }
+  // Mark remaining columns as NULL if the row data was truncated
+  for (; i < column_count; ++i) {
+    row->is_null[i] = true;
+    row->values[i].clear();
   }
 }
 

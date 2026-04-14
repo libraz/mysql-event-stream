@@ -181,6 +181,11 @@ std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {
 
   std::string after_colon = gtid.substr(colon_pos + 1);
 
+  // "uuid:0" means no transactions executed — return empty to start from beginning
+  if (after_colon == "0") {
+    return "";
+  }
+
   // Already a range (contains dash) - pass through
   if (after_colon.find('-') != std::string::npos) {
     return gtid;

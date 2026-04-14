@@ -167,6 +167,11 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
     col_metadata[i] = meta_val;
     meta_offset += consumed;
   }
+  // Verify metadata was fully consumed. A mismatch indicates a corrupt
+  // or unsupported TABLE_MAP event. Strict equality is intentional:
+  // MySQL 8.4+ and MariaDB do not pad metadata for fixed-size column
+  // types, so exact consumption is the expected behavior.
+  if (meta_offset != metadata_length) return false;
   offset += metadata_length;
 
   // null_bitmap: ceil(column_count / 8) bytes

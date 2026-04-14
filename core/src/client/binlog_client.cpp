@@ -4,7 +4,6 @@
 #include "client/binlog_client.h"
 
 #include <cstdio>
-#include <cstring>
 
 #include "binary_util.h"
 #include "client/connection_validator.h"
@@ -307,8 +306,7 @@ void BinlogClient::ReaderLoop() {
     if (checksum_enabled_ && event_pkt.size >= kEventHeaderSize + kChecksumSize) {
       const size_t data_length = event_pkt.size - kChecksumSize;
       uint32_t computed_crc = ComputeCRC32(event_pkt.data, data_length);
-      uint32_t stored_crc = 0;
-      std::memcpy(&stored_crc, event_pkt.data + data_length, sizeof(stored_crc));
+      uint32_t stored_crc = binary::ReadU32Le(event_pkt.data + data_length);
       if (computed_crc != stored_crc) {
         crc_errors_.fetch_add(1, std::memory_order_relaxed);
         StructuredLog()
@@ -357,7 +355,7 @@ PollResult BinlogClient::Poll() {
   if (event.error != MES_OK) {
     // Error from reader thread
     last_error_ = "Binlog stream read error";
-    LogBinlogError("poll_error", current_gtid_, last_error_);
+    LogBinlogError("poll_error", GetCurrentGtid(), last_error_);
     streaming_ = false;
     return {event.error, nullptr, 0, false};
   }
@@ -375,6 +373,9 @@ void BinlogClient::Stop() {
 
 void BinlogClient::StopReaderThread() {
   stop_requested_.store(true, std::memory_order_release);
+  // Poll() checks both !streaming_ and !event_queue_ (early exit for
+  // concurrent callers before event_queue_ is reset below).
+  streaming_ = false;
 
   if (event_queue_) {
     event_queue_->Close();
@@ -399,7 +400,6 @@ void BinlogClient::Disconnect() {
     std::lock_guard<std::mutex> lock(stop_mutex_);
     StopReaderThread();
   }
-  streaming_ = false;
   conn_.Disconnect();
   StructuredLog().Event("mysql_disconnected").Info();
 }

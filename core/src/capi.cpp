@@ -121,9 +121,11 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
   }
   *consumed = engine->engine.Feed(data, len);
   if (engine->engine.IsError()) {
-    // Reset consumed to 0 to signal that no bytes should be considered
-    // successfully processed. The engine's internal state is now in error;
-    // call mes_reset() before feeding more data.
+    // Intentionally reset consumed to 0: the engine's internal state is now
+    // corrupt and must be reset via mes_reset(). By reporting 0 consumed,
+    // the caller keeps their full input buffer intact. After mes_reset()
+    // clears all internal state (including any buffered bytes), the caller
+    // can re-feed from the start or seek to a known-good stream position.
     *consumed = 0;
     return MES_ERR_PARSE;
   }

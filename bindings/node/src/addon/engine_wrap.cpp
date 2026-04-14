@@ -7,6 +7,7 @@
 #include <string>
 
 #include "addon_constants.h"
+#include "config_parser.h"
 
 static const char* const kEventTypeNames[] = {"INSERT", "UPDATE", "DELETE"};
 
@@ -312,9 +313,12 @@ static std::vector<std::string> ExtractStringArray(Napi::Env env,
   auto arr = val.As<Napi::Array>();
   for (uint32_t i = 0; i < arr.Length(); i++) {
     Napi::Value item = arr[i];
-    if (item.IsString()) {
-      result.push_back(item.As<Napi::String>().Utf8Value());
+    if (!item.IsString()) {
+      Napi::TypeError::New(env, "Array must contain only strings")
+          .ThrowAsJavaScriptException();
+      return {};
     }
+    result.push_back(item.As<Napi::String>().Utf8Value());
   }
   return result;
 }
@@ -332,6 +336,7 @@ void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
     return;
   }
   auto dbs = ExtractStringArray(env, info[0]);
+  if (env.IsExceptionPending()) return;
   std::vector<const char*> ptrs;
   for (const auto& s : dbs) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_include_databases(engine_, ptrs.data(), ptrs.size());
@@ -355,6 +360,7 @@ void EngineWrap::SetIncludeTables(const Napi::CallbackInfo& info) {
     return;
   }
   auto tables = ExtractStringArray(env, info[0]);
+  if (env.IsExceptionPending()) return;
   std::vector<const char*> ptrs;
   for (const auto& s : tables) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_include_tables(engine_, ptrs.data(), ptrs.size());
@@ -378,6 +384,7 @@ void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
     return;
   }
   auto tables = ExtractStringArray(env, info[0]);
+  if (env.IsExceptionPending()) return;
   std::vector<const char*> ptrs;
   for (const auto& s : tables) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_exclude_tables(engine_, ptrs.data(), ptrs.size());
@@ -413,71 +420,9 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   Napi::Object config = info[0].As<Napi::Object>();
 
   mes_client_config_t cfg{};
-  std::string host = "127.0.0.1";
-  std::string user = "root";
-  std::string password;
-
-  if (config.Has("host") && config.Get("host").IsString()) {
-    host = config.Get("host").As<Napi::String>().Utf8Value();
-  }
-  cfg.host = host.c_str();
-
-  if (config.Has("port") && config.Get("port").IsNumber()) {
-    cfg.port = static_cast<uint16_t>(
-        config.Get("port").As<Napi::Number>().Uint32Value());
-  } else {
-    cfg.port = kDefaultPort;
-  }
-
-  if (config.Has("user") && config.Get("user").IsString()) {
-    user = config.Get("user").As<Napi::String>().Utf8Value();
-  }
-  cfg.user = user.c_str();
-
-  if (config.Has("password") && config.Get("password").IsString()) {
-    password = config.Get("password").As<Napi::String>().Utf8Value();
-  }
-  cfg.password = password.c_str();
-
-  if (config.Has("serverId") && config.Get("serverId").IsNumber()) {
-    cfg.server_id = config.Get("serverId").As<Napi::Number>().Uint32Value();
-  } else {
-    cfg.server_id = kDefaultServerId;
-  }
-
-  if (config.Has("connectTimeoutS") &&
-      config.Get("connectTimeoutS").IsNumber()) {
-    cfg.connect_timeout_s =
-        config.Get("connectTimeoutS").As<Napi::Number>().Uint32Value();
-  } else {
-    cfg.connect_timeout_s = kDefaultConnectTimeoutS;
-  }
-
-  std::string ssl_ca;
-  std::string ssl_cert;
-  std::string ssl_key;
-
-  if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
-    uint32_t ssl_mode_val =
-        config.Get("sslMode").As<Napi::Number>().Uint32Value();
-    if (ssl_mode_val > 4) {
-      Napi::TypeError::New(env, "sslMode must be 0-4")
-          .ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
-    cfg.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode_val);
-  }
-  if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
-    ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();
-    cfg.ssl_ca = ssl_ca.c_str();
-  }
-  if (config.Has("sslCert") && config.Get("sslCert").IsString()) {
-    ssl_cert = config.Get("sslCert").As<Napi::String>().Utf8Value();
-    cfg.ssl_cert = ssl_cert.c_str();
-  }
-  if (config.Has("sslKey") && config.Get("sslKey").IsString()) {
-    ssl_key = config.Get("sslKey").As<Napi::String>().Utf8Value();
-    cfg.ssl_key = ssl_key.c_str();
+  mes_node::ConfigStrings strings;
+  if (!mes_node::ParseClientConfig(env, config, cfg, strings)) {
+    return env.Undefined();
   }
 
   mes_error_t rc = mes_engine_set_metadata_conn(engine_, &cfg);

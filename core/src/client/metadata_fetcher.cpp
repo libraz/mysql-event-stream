@@ -120,9 +120,13 @@ std::string MetadataFetcher::MakeCacheKey(const std::string& db, const std::stri
 }
 
 std::string MetadataFetcher::EscapeIdentifier(const std::string& id) {
-  // Escape backticks within the identifier by doubling them
+  // Escape backticks within the identifier by doubling them.
+  // Null bytes are skipped to prevent query truncation.
   std::string escaped = "`";
   for (char c : id) {
+    if (c == '\0') {
+      continue;
+    }
     if (c == '`') {
       escaped += "``";
     } else {

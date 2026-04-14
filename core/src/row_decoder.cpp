@@ -132,14 +132,17 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
     row->columns[i] =
         DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
     if (consumed == 0) {
-      // consumed=0 is valid only for DECIMAL(0,0), which returns is_null=false
-      // with string_val="0". In all other cases — unknown column type
-      // (CalcFieldSize returns 0) or insufficient data — the data pointer
-      // won't advance and subsequent columns would decode from wrong offsets.
+      // consumed=0 is valid ONLY for DECIMAL(0,0): DecodeDecimal returns
+      // is_null=false, string_val="0", bytes_consumed=0. All other types
+      // that return consumed=0 indicate an error (unknown type or
+      // insufficient data). The guards below enforce this invariant:
+      //   - is_null=true → error (no type should produce null with 0 bytes)
+      //   - string_val empty → error (not the DECIMAL(0,0) special case)
+      // Without these checks, the data pointer would not advance and all
+      // subsequent columns would decode from wrong offsets.
       if (row->columns[i].is_null) {
         return false;
       }
-      // Non-null with consumed=0: valid only for DECIMAL(0,0) returning "0".
       if (row->columns[i].string_val.empty()) {
         return false;
       }
@@ -155,17 +158,17 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
 int FracToMicroseconds(int frac, uint16_t meta) {
   switch (meta) {
     case 1:
-      return (frac / 10) * 100000;
+      return frac * 100000;   // tenths → microseconds
     case 2:
-      return frac * 10000;
+      return frac * 10000;    // hundredths → microseconds
     case 3:
-      return (frac / 10) * 1000;
+      return frac * 1000;     // milliseconds → microseconds
     case 4:
-      return frac * 100;
+      return frac * 100;      // 10-microseconds → microseconds (unchanged)
     case 5:
-      return (frac / 10) * 10;
+      return frac * 10;       // 100-microseconds → microseconds
     case 6:
-      return frac;
+      return frac;            // microseconds (unchanged)
     default:
       return 0;
   }

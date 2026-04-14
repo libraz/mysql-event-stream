@@ -7,6 +7,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstring>
@@ -455,7 +456,9 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
   while (total < len) {
     int n;
     if (tls_active_) {
-      n = SSL_read(ssl_, buf + total, static_cast<int>(len - total));
+      n = SSL_read(ssl_, buf + total,
+                   static_cast<int>(std::min(len - total,
+                                             static_cast<size_t>(INT_MAX))));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ ||
@@ -477,7 +480,8 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
     } else {
 #ifdef _WIN32
       n = recv(fd_, reinterpret_cast<char*>(buf + total),
-               static_cast<int>(len - total), 0);
+               static_cast<int>(std::min(len - total,
+                                         static_cast<size_t>(INT_MAX))), 0);
 #else
       n = static_cast<int>(
           recv(fd_, buf + total, len - total, 0));
@@ -509,7 +513,9 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   while (total < len) {
     int n;
     if (tls_active_) {
-      n = SSL_write(ssl_, buf + total, static_cast<int>(len - total));
+      n = SSL_write(ssl_, buf + total,
+                    static_cast<int>(std::min(len - total,
+                                              static_cast<size_t>(INT_MAX))));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ ||
@@ -526,7 +532,8 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
     } else {
 #ifdef _WIN32
       n = send(fd_, reinterpret_cast<const char*>(buf + total),
-               static_cast<int>(len - total), 0);
+               static_cast<int>(std::min(len - total,
+                                         static_cast<size_t>(INT_MAX))), 0);
 #elif defined(__linux__)
       n = static_cast<int>(
           send(fd_, buf + total, len - total, MSG_NOSIGNAL));

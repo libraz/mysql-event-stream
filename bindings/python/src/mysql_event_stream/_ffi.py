@@ -6,6 +6,7 @@ import ctypes
 import ctypes.util
 import os
 import platform
+import threading
 from pathlib import Path
 
 
@@ -78,6 +79,10 @@ MES_COL_STRING = 3
 MES_COL_BYTES = 4
 
 
+# NOTE: ctypes automatically inserts inter-field padding to match C ABI
+# alignment rules (e.g., 6 bytes after uint16_t port to align the next
+# pointer). Manual padding fields are NOT needed. A sizeof assertion in
+# load_library() verifies layout correctness at import time.
 class MESClientConfig(ctypes.Structure):
     """Maps to mes_client_config_t."""
 
@@ -130,7 +135,13 @@ def _find_library() -> str:
 
     # Dev build dir: src/mysql_event_stream/ -> bindings/python -> bindings -> project root
     project_root = pkg_dir.parent.parent.parent.parent
-    lib_name = "libmes.dylib" if platform.system() == "Darwin" else "libmes.so"
+    system = platform.system()
+    if system == "Darwin":
+        lib_name = "libmes.dylib"
+    elif system == "Windows":
+        lib_name = "mes.dll"
+    else:
+        lib_name = "libmes.so"
     build_path = project_root / "build" / "core" / lib_name
     if build_path.exists():
         return str(build_path)
@@ -143,6 +154,32 @@ def _find_library() -> str:
         "libmes shared library not found. "
         "Set MES_LIB_PATH or build with: cmake --build build --parallel"
     )
+
+
+def _verify_struct_sizes() -> None:
+    """Verify ctypes struct sizes match expected C ABI layout."""
+    import struct as _struct
+    ptr_size = _struct.calcsize("P")
+    if ptr_size == 8:  # 64-bit
+        # mes_client_config_t: 7 pointers (56) + uint16 w/pad (8) + 4x uint32 (16)
+        # + enum w/pad (8) + size_t (8) = 96
+        expected_config = 96
+        if ctypes.sizeof(MESClientConfig) != expected_config:
+            raise RuntimeError(
+                f"MESClientConfig size mismatch: got {ctypes.sizeof(MESClientConfig)}, "
+                f"expected {expected_config}. ABI incompatibility detected."
+            )
+        # mes_event_t: uint8 w/pad (4) + 2x uint32 (8) + ptr (8) + 2x ptr (16)
+        # + 2x uint32 (8) + ptr (8) + uint32 w/pad (8) = 60 -> padded to 64
+        # Verify by checking it's within a reasonable range
+        event_size = ctypes.sizeof(MESEvent)
+        if event_size < 48 or event_size > 128:
+            raise RuntimeError(
+                f"MESEvent size unexpected: got {event_size}. "
+                "ABI incompatibility detected."
+            )
+    # On 32-bit platforms, sizes differ but struct layout integrity is
+    # still validated at runtime by the C library's internal checks.
 
 
 def load_library(lib_path: str | None = None) -> ctypes.CDLL:
@@ -233,10 +270,15 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
         ctypes.c_size_t,
     ]
 
+    # Verify struct layout matches C ABI. If this fails, the ctypes struct
+    # fields are misaligned and all C calls using this struct will corrupt memory.
+    _verify_struct_sizes()
+
     return lib
 
 
 _loaded_lib: ctypes.CDLL | None = None
+_lib_lock = threading.Lock()
 
 
 def get_library(lib_path: str | None = None) -> ctypes.CDLL:
@@ -258,12 +300,38 @@ def get_library(lib_path: str | None = None) -> ctypes.CDLL:
     if lib_path is not None:
         return load_library(lib_path)
     if _loaded_lib is None:
-        _loaded_lib = load_library()
+        with _lib_lock:
+            if _loaded_lib is None:
+                _loaded_lib = load_library()
     return _loaded_lib
+
+
+_CLIENT_SYMBOLS = [
+    "mes_client_create",
+    "mes_client_destroy",
+    "mes_client_connect",
+    "mes_client_start",
+    "mes_client_poll",
+    "mes_client_stop",
+    "mes_client_disconnect",
+    "mes_client_is_connected",
+    "mes_client_last_error",
+    "mes_client_current_gtid",
+    "mes_engine_set_metadata_conn",
+]
+
+
+_client_configured = False
+_client_lock = threading.Lock()
 
 
 def load_client_library(lib: ctypes.CDLL) -> bool:
     """Configure BinlogClient function signatures if available.
+
+    All required symbols are verified to exist before any signature is
+    configured, preventing partial configuration on incomplete builds.
+    Thread-safe: uses double-checked locking to prevent concurrent
+    partial configuration.
 
     Args:
         lib: Already-loaded ctypes.CDLL instance.
@@ -271,7 +339,15 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
     Returns:
         True if client functions are available, False otherwise.
     """
-    try:
+    global _client_configured
+    if _client_configured:
+        return True
+    with _client_lock:
+        if _client_configured:
+            return True
+        if not all(hasattr(lib, sym) for sym in _CLIENT_SYMBOLS):
+            return False
+
         lib.mes_client_create.restype = ctypes.c_void_p
         lib.mes_client_create.argtypes = []
 
@@ -311,6 +387,5 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
             ctypes.POINTER(MESClientConfig),
         ]
 
+        _client_configured = True
         return True
-    except AttributeError:
-        return False

@@ -20,8 +20,13 @@ bool ParseRotateEvent(const uint8_t* data, size_t len, RotateEventData* result) 
   result->position = binary::ReadU64Le(data);
 
   if (len > 8) {
+    size_t fname_len = len - 8;
+    // Some MySQL servers include a trailing null byte in the filename
+    if (fname_len > 0 && data[8 + fname_len - 1] == '\0') {
+      --fname_len;
+    }
     result->new_log_file =
-        std::string(reinterpret_cast<const char*>(data + 8), len - 8);
+        std::string(reinterpret_cast<const char*>(data + 8), fname_len);
   } else {
     result->new_log_file.clear();
   }

@@ -36,6 +36,9 @@ export class BinlogClient {
     if (config.port !== undefined && (config.port < 1 || config.port > 65535)) {
       throw new Error(`port must be 1-65535, got ${config.port}`);
     }
+    // If new addon.BinlogClient() throws, the exception propagates before
+    // assignment completes — this.client stays null and the try block is
+    // never entered. The catch below only handles connect() failures.
     this.client = new addon.BinlogClient();
     try {
       this.client.connect(config);

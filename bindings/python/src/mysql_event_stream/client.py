@@ -131,23 +131,30 @@ class BinlogClient:
         """
         self._check_open()
 
-        ssl_ca = self._config.ssl_ca.encode("utf-8") if self._config.ssl_ca else None
-        ssl_cert = self._config.ssl_cert.encode("utf-8") if self._config.ssl_cert else None
-        ssl_key = self._config.ssl_key.encode("utf-8") if self._config.ssl_key else None
+        # Keep explicit references to encoded bytes so they are not
+        # garbage-collected before the C call completes (matters on
+        # non-CPython runtimes like PyPy).
+        host_b = self._config.host.encode("utf-8")
+        user_b = self._config.user.encode("utf-8")
+        password_b = self._config.password.encode("utf-8")
+        start_gtid_b = self._config.start_gtid.encode("utf-8")
+        ssl_ca_b = self._config.ssl_ca.encode("utf-8") if self._config.ssl_ca else None
+        ssl_cert_b = self._config.ssl_cert.encode("utf-8") if self._config.ssl_cert else None
+        ssl_key_b = self._config.ssl_key.encode("utf-8") if self._config.ssl_key else None
 
         config = MESClientConfig(
-            host=self._config.host.encode("utf-8"),
+            host=host_b,
             port=self._config.port,
-            user=self._config.user.encode("utf-8"),
-            password=self._config.password.encode("utf-8"),
+            user=user_b,
+            password=password_b,
             server_id=self._config.server_id,
-            start_gtid=self._config.start_gtid.encode("utf-8"),
+            start_gtid=start_gtid_b,
             connect_timeout_s=self._config.connect_timeout_s,
             read_timeout_s=self._config.read_timeout_s,
             ssl_mode=self._config.ssl_mode,
-            ssl_ca=ssl_ca,
-            ssl_cert=ssl_cert,
-            ssl_key=ssl_key,
+            ssl_ca=ssl_ca_b,
+            ssl_cert=ssl_cert_b,
+            ssl_key=ssl_key_b,
             max_queue_size=self._config.max_queue_size,
         )
 
@@ -219,7 +226,7 @@ class BinlogClient:
         """Check if client is connected."""
         if self._handle is None:
             return False
-        return bool(self._lib.mes_client_is_connected(self._handle) == 1)
+        return self._lib.mes_client_is_connected(self._handle) != 0
 
     @property
     def current_gtid(self) -> str:
@@ -236,7 +243,9 @@ class BinlogClient:
         self.close()
 
     def __del__(self) -> None:
-        self.close()
+        # Guard against interpreter shutdown where self._lib may be None
+        if self._lib is not None:
+            self.close()
 
     def _check_open(self) -> None:
         if self._handle is None:

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "addon_constants.h"
+#include "config_parser.h"
 
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
 class PollWorker : public Napi::AsyncWorker {
@@ -113,13 +114,11 @@ ClientWrap::~ClientWrap() {
 
 void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-
   if (!client_) {
     Napi::Error::New(env, "Client has been destroyed")
         .ThrowAsJavaScriptException();
     return;
   }
-
   if (info.Length() < 1 || !info[0].IsObject()) {
     Napi::TypeError::New(env, "Expected config object")
         .ThrowAsJavaScriptException();
@@ -128,87 +127,31 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
   Napi::Object config = info[0].As<Napi::Object>();
 
-  // Extract config values with defaults
-  std::string host = "127.0.0.1";
-  uint16_t port = kDefaultPort;
-  std::string user = "root";
-  std::string password;
-  uint32_t server_id = kDefaultServerId;
-  std::string start_gtid;
-  uint32_t connect_timeout_s = kDefaultConnectTimeoutS;
-  uint32_t read_timeout_s = kDefaultReadTimeoutS;
-
-  if (config.Has("host") && config.Get("host").IsString()) {
-    host = config.Get("host").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("port") && config.Get("port").IsNumber()) {
-    port = static_cast<uint16_t>(
-        config.Get("port").As<Napi::Number>().Uint32Value());
-  }
-  if (config.Has("user") && config.Get("user").IsString()) {
-    user = config.Get("user").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("password") && config.Get("password").IsString()) {
-    password = config.Get("password").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("serverId") && config.Get("serverId").IsNumber()) {
-    server_id = config.Get("serverId").As<Napi::Number>().Uint32Value();
-  }
-  if (config.Has("startGtid") && config.Get("startGtid").IsString()) {
-    start_gtid = config.Get("startGtid").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("connectTimeoutS") &&
-      config.Get("connectTimeoutS").IsNumber()) {
-    connect_timeout_s =
-        config.Get("connectTimeoutS").As<Napi::Number>().Uint32Value();
-  }
-  if (config.Has("readTimeoutS") && config.Get("readTimeoutS").IsNumber()) {
-    read_timeout_s =
-        config.Get("readTimeoutS").As<Napi::Number>().Uint32Value();
-  }
-
-  uint32_t ssl_mode = 0;
-  std::string ssl_ca;
-  std::string ssl_cert;
-  std::string ssl_key;
-
-  if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
-    ssl_mode = config.Get("sslMode").As<Napi::Number>().Uint32Value();
-    if (ssl_mode > 4) {
-      Napi::TypeError::New(env, "sslMode must be 0-4")
-          .ThrowAsJavaScriptException();
-      return;
-    }
-  }
-  if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
-    ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("sslCert") && config.Get("sslCert").IsString()) {
-    ssl_cert = config.Get("sslCert").As<Napi::String>().Utf8Value();
-  }
-  if (config.Has("sslKey") && config.Get("sslKey").IsString()) {
-    ssl_key = config.Get("sslKey").As<Napi::String>().Utf8Value();
-  }
-
-  uint32_t max_queue_size = 0;
-  if (config.Has("maxQueueSize") && config.Get("maxQueueSize").IsNumber()) {
-    max_queue_size = config.Get("maxQueueSize").As<Napi::Number>().Uint32Value();
-  }
-
   mes_client_config_t c_config{};
-  c_config.host = host.c_str();
-  c_config.port = port;
-  c_config.user = user.c_str();
-  c_config.password = password.c_str();
-  c_config.server_id = server_id;
-  c_config.start_gtid = start_gtid.empty() ? nullptr : start_gtid.c_str();
-  c_config.connect_timeout_s = connect_timeout_s;
-  c_config.read_timeout_s = read_timeout_s;
-  c_config.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode);
-  c_config.ssl_ca = ssl_ca.empty() ? nullptr : ssl_ca.c_str();
-  c_config.ssl_cert = ssl_cert.empty() ? nullptr : ssl_cert.c_str();
-  c_config.ssl_key = ssl_key.empty() ? nullptr : ssl_key.c_str();
-  c_config.max_queue_size = max_queue_size;
+  mes_node::ConfigStrings strings;
+  if (!mes_node::ParseClientConfig(env, config, c_config, strings)) {
+    return;  // JS exception already scheduled
+  }
+
+  // Client-specific fields not in the shared parser
+  if (config.Has("startGtid") && config.Get("startGtid").IsString()) {
+    strings.start_gtid =
+        config.Get("startGtid").As<Napi::String>().Utf8Value();
+    c_config.start_gtid = strings.start_gtid.c_str();
+  }
+
+  constexpr uint32_t kDefaultReadTimeoutS = 30;
+  if (config.Has("readTimeoutS") && config.Get("readTimeoutS").IsNumber()) {
+    c_config.read_timeout_s =
+        config.Get("readTimeoutS").As<Napi::Number>().Uint32Value();
+  } else {
+    c_config.read_timeout_s = kDefaultReadTimeoutS;
+  }
+
+  if (config.Has("maxQueueSize") && config.Get("maxQueueSize").IsNumber()) {
+    c_config.max_queue_size =
+        config.Get("maxQueueSize").As<Napi::Number>().Uint32Value();
+  }
 
   mes_error_t err = mes_client_connect(client_, &c_config);
   if (err != MES_OK) {

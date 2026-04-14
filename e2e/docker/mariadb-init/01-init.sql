@@ -1,6 +1,7 @@
 USE mes_test;
 
 -- Grant replication privileges to the user created by MARIADB_USER env var
+CREATE USER IF NOT EXISTS 'repl_user'@'%' IDENTIFIED BY 'test_password';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 GRANT SELECT ON mes_test.* TO 'repl_user'@'%';
 

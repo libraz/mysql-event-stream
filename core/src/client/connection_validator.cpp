@@ -41,7 +41,8 @@ mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
     return rc;
   }
 
-  if (qr.rows.empty() || qr.rows[0].is_null[1]) {
+  if (qr.rows.empty() || qr.rows[0].values.size() < 2 ||
+      qr.rows[0].is_null.size() < 2 || qr.rows[0].is_null[1]) {
     out_value.clear();
     return MES_ERR_VALIDATION;
   }

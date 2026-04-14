@@ -12,6 +12,7 @@ namespace mes::protocol {
 namespace {
 constexpr size_t kMaxPacketPayload = 0xFFFFFF;  // 16 MB - 1
 constexpr size_t kPacketHeaderSize = 4;          // 3 length + 1 sequence
+constexpr size_t kMaxReassembledPayload = 64 * 1024 * 1024;  // 64 MB
 }  // namespace
 
 // --- PacketBuffer ---
@@ -79,6 +80,10 @@ mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload,
 
     if (payload_length > 0) {
       size_t prev_size = payload->size();
+      // Check before resize to prevent overflow on 32-bit targets (WASM)
+      if (prev_size > kMaxReassembledPayload - payload_length) {
+        return MES_ERR_STREAM;
+      }
       payload->resize(prev_size + payload_length);
       err = sock->ReadExact(payload->data() + prev_size, payload_length);
       if (err != MES_OK) {

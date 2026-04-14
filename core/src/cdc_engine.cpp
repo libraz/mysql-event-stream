@@ -84,14 +84,17 @@ bool CdcEngine::IsError() const {
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
   include_databases_ = std::set<std::string>(databases.begin(), databases.end());
+  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
 void CdcEngine::SetIncludeTables(const std::vector<std::string>& tables) {
   include_tables_ = std::set<std::string>(tables.begin(), tables.end());
+  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
 void CdcEngine::SetExcludeTables(const std::vector<std::string>& tables) {
   exclude_tables_ = std::set<std::string>(tables.begin(), tables.end());
+  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
 bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& table) const {
@@ -192,7 +195,12 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   uint64_t table_id = binary::ReadU48Le(body);
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const TableMetadata* meta = table_registry_.Lookup(table_id);
-  if (meta == nullptr) return;
+  if (meta == nullptr) {
+    StructuredLog().Event("rows_event_no_table_map")
+        .Field("table_id", static_cast<uint64_t>(table_id))
+        .Warn();
+    return;
+  }
 
   uint8_t type_code = header.type_code;
   bool is_v2 = (type_code == static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent) ||

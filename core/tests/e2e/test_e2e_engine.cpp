@@ -8,7 +8,7 @@
  * Tests query execution, binlog streaming, table filtering, backpressure,
  * event ordering, connection lifecycle, and GTID tracking.
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
+ * Requires a running MySQL 8.4 instance at localhost:13308 with:
  *   - root/test_root_password (mysql_native_password)
  *   - repl_user/test_password (replication grants)
  *   - Database: mes_test with tables: users, items

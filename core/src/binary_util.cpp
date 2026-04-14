@@ -76,9 +76,9 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   int frac_rem = scale % 9;    // Remaining digits in fractional part
 
   int total_size = static_cast<int>(DecimalBinarySize(precision, scale));
-  bytes_consumed = static_cast<size_t>(total_size);
 
   if (total_size == 0) {
+    bytes_consumed = 0;
     return "0";
   }
 
@@ -86,6 +86,8 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
     bytes_consumed = 0;
     return "";
   }
+
+  bytes_consumed = static_cast<size_t>(total_size);
 
   // Make a mutable copy for sign-based transformation
   std::vector<uint8_t> buf(data, data + total_size);

@@ -5,7 +5,7 @@
  * @file test_e2e_binlog_dml.cpp
  * @brief End-to-end tests for DML binlog event capture and decoding
  *
- * Requires a running MySQL 8.4+ instance at localhost:13307 with:
+ * Requires a running MySQL 8.4+ instance at localhost:13308 with:
  *   - root/test_root_password (caching_sha2_password)
  *   - repl_user/test_password (replication grants)
  *   - Database: mes_test with tables: users, items, large_data

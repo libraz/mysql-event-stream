@@ -5,7 +5,7 @@
  * @file test_e2e_protocol.cpp
  * @brief End-to-end tests for the custom MySQL protocol implementation
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
+ * Requires a running MySQL 8.4 instance at localhost:13308 with:
  *   - root/test_root_password (mysql_native_password)
  *   - repl_user/test_password (replication grants)
  *   - Database: mes_test with tables: users, items
@@ -28,13 +28,7 @@
 
 namespace {
 
-constexpr const char* kHost = "127.0.0.1";
-constexpr uint16_t kPort = 13308;
-constexpr const char* kRootUser = "root";
-constexpr const char* kRootPass = "test_root_password";
-constexpr const char* kReplUser = "repl_user";
-constexpr const char* kReplPass = "test_password";
-constexpr uint32_t kTimeout = 5;
+using namespace e2e;
 
 // -- MysqlConnection tests --
 

@@ -8,7 +8,7 @@
 
 #include "mariadb_event_parser.h"
 
-#include <cstring>
+#include "binary_util.h"
 
 namespace mes {
 
@@ -34,19 +34,16 @@ mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer,
   }
 
   // Extract server_id from event header (bytes 5-8, little-endian)
-  uint32_t server_id = 0;
-  std::memcpy(&server_id, buffer + 5, sizeof(server_id));
+  uint32_t server_id = binary::ReadU32Le(buffer + 5);
 
   // Post-header starts after 19-byte event header
   const uint8_t* post_header = buffer + kEventHeaderSize;
 
   // seq_no: 8 bytes at offset 0 (little-endian uint64)
-  uint64_t seq_no = 0;
-  std::memcpy(&seq_no, post_header, sizeof(seq_no));
+  uint64_t seq_no = binary::ReadU64Le(post_header);
 
   // domain_id: 4 bytes at offset 8 (little-endian uint32)
-  uint32_t domain_id = 0;
-  std::memcpy(&domain_id, post_header + 8, sizeof(domain_id));
+  uint32_t domain_id = binary::ReadU32Le(post_header + 8);
 
   // Construct "domain-server-seq" format
   MariaDBGtid gtid;
@@ -72,8 +69,7 @@ mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
   const uint8_t* post_header = buffer + kEventHeaderSize;
 
   // count_and_flags: 4 bytes (lower 28 bits = count)
-  uint32_t count_and_flags = 0;
-  std::memcpy(&count_and_flags, post_header, sizeof(count_and_flags));
+  uint32_t count_and_flags = binary::ReadU32Le(post_header);
   uint32_t count = count_and_flags & kGtidListCountMask;
 
   // Guard against size_t overflow on 32-bit platforms (e.g., WASM)
@@ -96,9 +92,9 @@ mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
   const uint8_t* entry_ptr = buffer + entries_offset;
   for (uint32_t i = 0; i < count; ++i) {
     MariaDBGtid gtid;
-    std::memcpy(&gtid.domain_id, entry_ptr, sizeof(gtid.domain_id));
-    std::memcpy(&gtid.server_id, entry_ptr + 4, sizeof(gtid.server_id));
-    std::memcpy(&gtid.sequence_no, entry_ptr + 8, sizeof(gtid.sequence_no));
+    gtid.domain_id = binary::ReadU32Le(entry_ptr);
+    gtid.server_id = binary::ReadU32Le(entry_ptr + 4);
+    gtid.sequence_no = binary::ReadU64Le(entry_ptr + 8);
     result.push_back(gtid);
     entry_ptr += kGtidListEntrySize;
   }

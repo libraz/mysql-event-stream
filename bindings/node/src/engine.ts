@@ -22,7 +22,7 @@ interface NativeEngine {
   setIncludeTables(tables: string[]): void;
   setExcludeTables(tables: string[]): void;
   destroy(): void;
-  enableMetadata?(config: ClientConfig): void;
+  enableMetadata(config: ClientConfig): void;
 }
 
 const addon: NativeAddon = require("../build/Release/mes-node.node");
@@ -100,9 +100,7 @@ export class CdcEngine {
   /** Enable metadata queries for column name resolution. */
   enableMetadata(config: ClientConfig): void {
     this.ensureNotDestroyed();
-    if (typeof this.engine!.enableMetadata === "function") {
-      this.engine!.enableMetadata(config);
-    }
+    this.engine!.enableMetadata(config);
   }
 
   /** Destroy the engine and free native resources. */

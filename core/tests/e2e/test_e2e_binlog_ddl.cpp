@@ -9,7 +9,7 @@
  * DROP, RENAME, TRUNCATE) and continues to parse row events with the updated
  * column layout.
  *
- * Requires a running MySQL 8.4 instance at localhost:13307 with:
+ * Requires a running MySQL 8.4 instance at localhost:13308 with:
  *   - root/test_root_password (mysql_native_password)
  *   - repl_user/test_password (replication grants)
  *   - Database: mes_test with table: ddl_test (id INT AUTO_INCREMENT PK, val VARCHAR(100))

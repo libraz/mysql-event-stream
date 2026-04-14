@@ -174,7 +174,11 @@ class CdcStream:
                     await self.close()
                     raise StopAsyncIteration from err
 
-                await self._reconnect()
+                try:
+                    await self._reconnect()
+                except Exception:
+                    await self.close()
+                    raise
                 continue
 
             if result.data:
@@ -187,8 +191,7 @@ class CdcStream:
         self._closed = True
         self._started = False
         if self._client is not None:
-            self._client.stop()
-            self._client.disconnect()
+            # close() internally calls stop() and disconnect()
             self._client.close()
             self._client = None
         if self._engine is not None:
@@ -206,8 +209,7 @@ class CdcStream:
         """Reconnect with linear backoff using last known GTID."""
         gtid = self.current_gtid
         if self._client is not None:
-            self._client.stop()
-            self._client.disconnect()
+            # close() internally calls stop() and disconnect()
             self._client.close()
             self._client = None
 
@@ -236,6 +238,20 @@ class CdcStream:
         )
         assert self._engine is not None
         self._engine.reset()
+        try:
+            self._engine.enable_metadata(
+                host=self._host,
+                port=self._port,
+                user=self._user,
+                password=self._password,
+                connect_timeout_s=self._connect_timeout_s,
+                ssl_mode=self._ssl_mode,
+                ssl_ca=self._ssl_ca,
+                ssl_cert=self._ssl_cert,
+                ssl_key=self._ssl_key,
+            )
+        except RuntimeError:
+            pass  # Metadata is optional; column names fall back to indices
         await asyncio.to_thread(self._client.connect)
         await asyncio.to_thread(self._client.start)
         # Do NOT reset _reconnect_attempts here. The counter should only
