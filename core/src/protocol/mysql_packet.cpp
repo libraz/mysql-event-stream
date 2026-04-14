@@ -10,8 +10,8 @@
 namespace mes::protocol {
 
 namespace {
-constexpr size_t kMaxPacketPayload = 0xFFFFFF;  // 16 MB - 1
-constexpr size_t kPacketHeaderSize = 4;          // 3 length + 1 sequence
+constexpr size_t kMaxPacketPayload = 0xFFFFFF;               // 16 MB - 1
+constexpr size_t kPacketHeaderSize = 4;                      // 3 length + 1 sequence
 constexpr size_t kMaxReassembledPayload = 64 * 1024 * 1024;  // 64 MB
 }  // namespace
 
@@ -19,8 +19,7 @@ constexpr size_t kMaxReassembledPayload = 64 * 1024 * 1024;  // 64 MB
 
 void PacketBuffer::Clear() { buf_.clear(); }
 
-void PacketBuffer::WritePacket(const uint8_t* payload, size_t len,
-                               uint8_t* sequence_id) {
+void PacketBuffer::WritePacket(const uint8_t* payload, size_t len, uint8_t* sequence_id) {
   size_t offset = 0;
 
   // Split into chunks of kMaxPacketPayload
@@ -62,8 +61,7 @@ size_t PacketBuffer::Size() const { return buf_.size(); }
 
 // --- ReadPacket ---
 
-mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload,
-                       uint8_t* sequence_id) {
+mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id) {
   payload->clear();
 
   for (;;) {
@@ -115,7 +113,14 @@ uint64_t ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos) {
   }
 
   if (first == 0xFB) {
-    // NULL marker
+    // NOTE(review): 0xFB (NULL marker) and a legitimate length of 0 both
+    // return 0 here. This ambiguity is intentional and safe because every
+    // caller in this codebase that has to distinguish NULL from length-0
+    // inspects the raw 0xFB byte *before* invoking ReadLenEncInt (see
+    // ParseRowData in mysql_query.cpp for the canonical example). If a
+    // future caller needs to disambiguate, add a bool* is_null overload
+    // rather than changing this return value, which many callers rely on
+    // to be 0 for safe bounds arithmetic.
     return 0;
   }
 
@@ -189,8 +194,8 @@ uint64_t ReadFixedInt(const uint8_t* data, size_t width) {
   return val;
 }
 
-void ParseErrPacketPayload(const uint8_t* data, size_t len,
-                           uint16_t* error_code, std::string* message) {
+void ParseErrPacketPayload(const uint8_t* data, size_t len, uint16_t* error_code,
+                           std::string* message) {
   *error_code = 0;
   if (len < 3) {
     *message = "Unknown MySQL error";

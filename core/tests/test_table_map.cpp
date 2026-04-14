@@ -1,14 +1,13 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "table_map.h"
+#include <gtest/gtest.h>
 
 #include <cstring>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "binary_util.h"
+#include "table_map.h"
 #include "test_helpers.h"
 
 namespace mes {
@@ -84,9 +83,7 @@ class TableMapBuilder {
 
  private:
   void WriteByte(uint8_t b) { buf_.push_back(b); }
-  void WriteString(const std::string& s) {
-    buf_.insert(buf_.end(), s.begin(), s.end());
-  }
+  void WriteString(const std::string& s) { buf_.insert(buf_.end(), s.begin(), s.end()); }
 
   std::vector<uint8_t> buf_;
 };
@@ -101,8 +98,8 @@ TEST(TableMapTest, ParseBasicIntColumns) {
   // 3 columns: INT, BIGINT, TINYINT
   std::vector<uint8_t> col_types = {
       static_cast<uint8_t>(ColumnType::kLong),      // INT
-      static_cast<uint8_t>(ColumnType::kLongLong),   // BIGINT
-      static_cast<uint8_t>(ColumnType::kTiny),       // TINYINT
+      static_cast<uint8_t>(ColumnType::kLongLong),  // BIGINT
+      static_cast<uint8_t>(ColumnType::kTiny),      // TINYINT
   };
   builder.WriteColumnCount(3);
   builder.WriteColumnTypes(col_types);
@@ -140,11 +137,11 @@ TEST(TableMapTest, ParseMixedColumnTypes) {
 
   // 5 columns: INT, VARCHAR(255), BLOB, DATETIME2(3), NEWDECIMAL(10,2)
   std::vector<uint8_t> col_types = {
-      static_cast<uint8_t>(ColumnType::kLong),       // INT
-      static_cast<uint8_t>(ColumnType::kVarchar),    // VARCHAR
-      static_cast<uint8_t>(ColumnType::kBlob),       // BLOB
-      static_cast<uint8_t>(ColumnType::kDatetime2),  // DATETIME2
-      static_cast<uint8_t>(ColumnType::kNewDecimal), // NEWDECIMAL
+      static_cast<uint8_t>(ColumnType::kLong),        // INT
+      static_cast<uint8_t>(ColumnType::kVarchar),     // VARCHAR
+      static_cast<uint8_t>(ColumnType::kBlob),        // BLOB
+      static_cast<uint8_t>(ColumnType::kDatetime2),   // DATETIME2
+      static_cast<uint8_t>(ColumnType::kNewDecimal),  // NEWDECIMAL
   };
   builder.WriteColumnCount(5);
   builder.WriteColumnTypes(col_types);
@@ -358,12 +355,12 @@ TEST(TableMapRegistryTest, ProcessMalformedData) {
 
 TEST(ParseTableMapTest, VarcharColumn) {
   test::EventBuilder b;
-  b.WriteU48Le(42);   // table_id
-  b.WriteU16Le(0);    // flags
-  b.WriteU8(4);       // db name len
+  b.WriteU48Le(42);  // table_id
+  b.WriteU16Le(0);   // flags
+  b.WriteU8(4);      // db name len
   b.WriteString("test");
-  b.WriteU8(0);       // null term
-  b.WriteU8(1);       // table name len
+  b.WriteU8(0);  // null term
+  b.WriteU8(1);  // table name len
   b.WriteString("t");
   b.WriteU8(0);       // null term
   b.WriteU8(1);       // column count
@@ -387,11 +384,11 @@ TEST(ParseTableMapTest, BlobColumn) {
   b.WriteU8(1);
   b.WriteString("t");
   b.WriteU8(0);
-  b.WriteU8(1);      // column count
-  b.WriteU8(0xFC);   // BLOB
-  b.WriteU8(1);      // metadata length
-  b.WriteU8(2);      // pack_length = 2
-  b.WriteU8(0x01);   // null bitmap
+  b.WriteU8(1);     // column count
+  b.WriteU8(0xFC);  // BLOB
+  b.WriteU8(1);     // metadata length
+  b.WriteU8(2);     // pack_length = 2
+  b.WriteU8(0x01);  // null bitmap
   TableMetadata metadata;
   ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
   EXPECT_EQ(metadata.columns[0].type, ColumnType::kBlob);
@@ -408,11 +405,11 @@ TEST(ParseTableMapTest, Datetime2Column) {
   b.WriteU8(1);
   b.WriteString("t");
   b.WriteU8(0);
-  b.WriteU8(1);      // column count
-  b.WriteU8(0x12);   // DATETIME2
-  b.WriteU8(1);      // metadata length
-  b.WriteU8(6);      // fsp = 6
-  b.WriteU8(0x01);   // null bitmap
+  b.WriteU8(1);     // column count
+  b.WriteU8(0x12);  // DATETIME2
+  b.WriteU8(1);     // metadata length
+  b.WriteU8(6);     // fsp = 6
+  b.WriteU8(0x01);  // null bitmap
   TableMetadata metadata;
   ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
   EXPECT_EQ(metadata.columns[0].type, ColumnType::kDatetime2);
@@ -430,10 +427,10 @@ TEST(ParseTableMapTest, NewDecimalColumn) {
   b.WriteString("t");
   b.WriteU8(0);
   b.WriteU8(1);
-  b.WriteU8(0xF6);   // NEWDECIMAL
-  b.WriteU8(2);      // metadata length
-  b.WriteU8(10);     // precision
-  b.WriteU8(2);      // scale
+  b.WriteU8(0xF6);  // NEWDECIMAL
+  b.WriteU8(2);     // metadata length
+  b.WriteU8(10);    // precision
+  b.WriteU8(2);     // scale
   b.WriteU8(0x01);
   TableMetadata metadata;
   ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
@@ -451,14 +448,14 @@ TEST(ParseTableMapTest, MultipleColumnTypes) {
   b.WriteU8(1);
   b.WriteString("t");
   b.WriteU8(0);
-  b.WriteU8(3);           // 3 columns
-  b.WriteU8(0x03);        // INT
-  b.WriteU8(0x0F);        // VARCHAR
-  b.WriteU8(0x12);        // DATETIME2
-  b.WriteU8(3);           // metadata length: 0 + 2 + 1
-  b.WriteU16Le(500);      // VARCHAR metadata
-  b.WriteU8(3);           // DATETIME2 fsp
-  b.WriteU8(0x07);        // null bitmap: all nullable
+  b.WriteU8(3);       // 3 columns
+  b.WriteU8(0x03);    // INT
+  b.WriteU8(0x0F);    // VARCHAR
+  b.WriteU8(0x12);    // DATETIME2
+  b.WriteU8(3);       // metadata length: 0 + 2 + 1
+  b.WriteU16Le(500);  // VARCHAR metadata
+  b.WriteU8(3);       // DATETIME2 fsp
+  b.WriteU8(0x07);    // null bitmap: all nullable
   TableMetadata metadata;
   ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
   ASSERT_EQ(metadata.columns.size(), 3u);

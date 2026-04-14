@@ -171,7 +171,12 @@ def _verify_struct_sizes() -> None:
             )
         # mes_event_t: uint8 w/pad (4) + 2x uint32 (8) + ptr (8) + 2x ptr (16)
         # + 2x uint32 (8) + ptr (8) + uint32 w/pad (8) = 60 -> padded to 64
-        # Verify by checking it's within a reasonable range
+        # Verify by checking it's within a reasonable range.
+        # NOTE(review): event_size varies by platform (32-bit vs 64-bit
+        # pointers) and by struct-packing of mes_event_t on the C side.
+        # The range check is intentionally loose; exact sizeof is not
+        # portable. TODO: expose a `mes_sizeof_event()` helper in the C
+        # ABI so bindings can assert an exact match.
         event_size = ctypes.sizeof(MESEvent)
         if event_size < 48 or event_size > 128:
             raise RuntimeError(

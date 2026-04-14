@@ -35,8 +35,7 @@ struct UpdatePair {
  * @param[out] rows Decoded rows output.
  * @return true on success, false on malformed data.
  */
-bool DecodeWriteRows(const uint8_t* data, size_t len,
-                     const TableMetadata& metadata, bool is_v2,
+bool DecodeWriteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                      std::vector<RowData>* rows);
 
 /**
@@ -48,8 +47,7 @@ bool DecodeWriteRows(const uint8_t* data, size_t len,
  * @param[out] pairs Before/after row pairs output.
  * @return true on success, false on malformed data.
  */
-bool DecodeUpdateRows(const uint8_t* data, size_t len,
-                      const TableMetadata& metadata, bool is_v2,
+bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                       std::vector<UpdatePair>* pairs);
 
 /**
@@ -61,8 +59,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len,
  * @param[out] rows Decoded rows output.
  * @return true on success, false on malformed data.
  */
-bool DecodeDeleteRows(const uint8_t* data, size_t len,
-                      const TableMetadata& metadata, bool is_v2,
+bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                       std::vector<RowData>* rows);
 
 /**
@@ -75,9 +72,8 @@ bool DecodeDeleteRows(const uint8_t* data, size_t len,
  * @param[out] bytes_consumed Number of bytes consumed.
  * @return Decoded ColumnValue.
  */
-ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
-                              const uint8_t* data, size_t len,
-                              size_t* bytes_consumed);
+ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, const uint8_t* data,
+                              size_t len, size_t* bytes_consumed);
 
 }  // namespace mes
 

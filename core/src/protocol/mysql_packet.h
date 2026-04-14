@@ -80,8 +80,7 @@ class PacketBuffer {
  * @param sequence_id Output: sequence ID of the last packet header read
  * @return MES_OK on success, MES_ERR_STREAM on socket errors
  */
-mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload,
-                       uint8_t* sequence_id);
+mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id);
 
 /**
  * @brief Read a MySQL length-encoded integer from a buffer
@@ -142,8 +141,8 @@ uint64_t ReadFixedInt(const uint8_t* data, size_t width);
  * @param[out] error_code Extracted MySQL error code
  * @param[out] message Extracted error message
  */
-void ParseErrPacketPayload(const uint8_t* data, size_t len,
-                           uint16_t* error_code, std::string* message);
+void ParseErrPacketPayload(const uint8_t* data, size_t len, uint16_t* error_code,
+                           std::string* message);
 
 }  // namespace mes::protocol
 

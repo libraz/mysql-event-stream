@@ -3,8 +3,9 @@
 
 #include "binary_util.h"
 
+#include <array>
 #include <cstdio>
-#include <vector>
+#include <cstring>
 
 namespace mes::binary {
 
@@ -18,8 +19,7 @@ inline size_t DecimalBinarySize(uint8_t precision, uint8_t scale) {
   int frac = scale;
   int intg0 = intg / 9, intg_rem = intg % 9;
   int frac0 = frac / 9, frac_rem = frac % 9;
-  return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 +
-                             kDig2Bytes[frac_rem]);
+  return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 + kDig2Bytes[frac_rem]);
 }
 
 uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
@@ -57,8 +57,8 @@ uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) 
   return ReadU64Le(data + 1);
 }
 
-std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision,
-                          uint8_t scale, size_t& bytes_consumed) {
+std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision, uint8_t scale,
+                          size_t& bytes_consumed) {
   if (precision == 0) {
     bytes_consumed = 0;
     return "0";
@@ -70,10 +70,10 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   }
 
   int intg = precision - scale;
-  int intg0 = intg / 9;        // Full 4-byte groups in integer part
-  int intg_rem = intg % 9;     // Remaining digits in integer part
-  int frac0 = scale / 9;       // Full 4-byte groups in fractional part
-  int frac_rem = scale % 9;    // Remaining digits in fractional part
+  int intg0 = intg / 9;      // Full 4-byte groups in integer part
+  int intg_rem = intg % 9;   // Remaining digits in integer part
+  int frac0 = scale / 9;     // Full 4-byte groups in fractional part
+  int frac_rem = scale % 9;  // Remaining digits in fractional part
 
   int total_size = static_cast<int>(DecimalBinarySize(precision, scale));
 
@@ -89,8 +89,19 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
 
   bytes_consumed = static_cast<size_t>(total_size);
 
-  // Make a mutable copy for sign-based transformation
-  std::vector<uint8_t> buf(data, data + total_size);
+  // Make a mutable copy for sign-based transformation. The upper bound on
+  // total_size is ceil(65/9)*4 + dig2bytes[65%9] + ceil(30/9)*4 +
+  // dig2bytes[30%9] = 28 + 4 + 12 + 4 = ~30 bytes for MySQL's maximum
+  // DECIMAL(65, 30). 40 bytes gives comfortable headroom while keeping
+  // the allocation on the stack and avoiding a heap round-trip per call.
+  static constexpr size_t kDecimalStackBufferSize = 40;
+  std::array<uint8_t, kDecimalStackBufferSize> buf{};
+  if (static_cast<size_t>(total_size) > buf.size()) {
+    // Defensive: beyond MySQL's max DECIMAL precision. Treat as malformed.
+    bytes_consumed = 0;
+    return "";
+  }
+  std::memcpy(buf.data(), data, static_cast<size_t>(total_size));
 
   // MSB of first byte: set (>= 0x80) = positive, clear (< 0x80) = negative
   bool is_negative = (buf[0] & 0x80) == 0;
@@ -101,8 +112,8 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   // correctly reverses the encoding of sign-bit-set + full complement.
   buf[0] ^= 0x80;
   if (is_negative) {
-    for (auto& byte : buf) {
-      byte ^= 0xFF;
+    for (int i = 0; i < total_size; i++) {
+      buf[i] ^= 0xFF;
     }
   }
 
@@ -193,8 +204,7 @@ uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
   }
 }
 
-uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
-                       uint16_t metadata) {
+uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint16_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
     case 0x01:  // MYSQL_TYPE_TINY
@@ -233,7 +243,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
       return 3 + (metadata + 1) / 2;
 
     // VARCHAR / VAR_STRING
-    case 0xFD:  // MYSQL_TYPE_VAR_STRING
+    case 0xFD:    // MYSQL_TYPE_VAR_STRING
     case 0x0F: {  // MYSQL_TYPE_VARCHAR
       if (metadata > 255) {
         if (buf_len < 2) return 0;
@@ -252,6 +262,12 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
 
     // NEWDECIMAL
     case 0xF6: {  // MYSQL_TYPE_NEWDECIMAL
+      // MySQL TABLE_MAP stores NEWDECIMAL metadata as two bytes packed into
+      // the 16-bit metadata value: metadata_bytes[0] = precision,
+      // metadata_bytes[1] = scale (see MySQL log_event.cc
+      // Table_map_log_event::save_field_metadata). table_map.cpp assembles
+      // the high byte as precision and the low byte as scale, so we
+      // extract them in the same order here.
       uint8_t precision = static_cast<uint8_t>(metadata >> 8);
       uint8_t scale = static_cast<uint8_t>(metadata & 0xFF);
       return static_cast<uint32_t>(DecimalBinarySize(precision, scale));
@@ -278,9 +294,9 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
     }
 
     // BLOB (includes TEXT, TINY_BLOB, MEDIUM_BLOB, LONG_BLOB)
-    case 0xF9:  // MYSQL_TYPE_TINY_BLOB
-    case 0xFA:  // MYSQL_TYPE_MEDIUM_BLOB
-    case 0xFB:  // MYSQL_TYPE_LONG_BLOB
+    case 0xF9:    // MYSQL_TYPE_TINY_BLOB
+    case 0xFA:    // MYSQL_TYPE_MEDIUM_BLOB
+    case 0xFB:    // MYSQL_TYPE_LONG_BLOB
     case 0xFC: {  // MYSQL_TYPE_BLOB
       uint8_t pack_len = static_cast<uint8_t>(metadata);
       if (pack_len == 0 || pack_len > 4) return 0;
@@ -298,8 +314,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
         return metadata & 0xFF;
       }
       // Fixed or variable length string
-      uint32_t max_len =
-          (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xFF);
+      uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xFF);
       if (max_len > 255) {
         if (buf_len < 2) return 0;
         return 2 + ReadU16Le(data);

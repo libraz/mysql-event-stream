@@ -17,28 +17,30 @@ namespace {
 /** @brief Skip a length-encoded string at the current position */
 void SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
   uint64_t str_len = ReadLenEncInt(data, len, pos);
-  if (*pos + str_len > len) {
+  // Subtraction-form bounds check: avoids overflow when str_len is huge
+  // (up to 2^64) and size_t is 32-bit (WASM). `*pos <= len` is guaranteed
+  // by ReadLenEncInt's own bounds check.
+  if (str_len > static_cast<uint64_t>(len - *pos)) {
     *pos = len;
     return;
   }
-  *pos += str_len;
+  *pos += static_cast<size_t>(str_len);
 }
 
 /** @brief Read a length-encoded string at the current position */
 std::string ReadLenEncString(const uint8_t* data, size_t len, size_t* pos) {
   uint64_t str_len = ReadLenEncInt(data, len, pos);
-  if (*pos + str_len > len) {
+  if (str_len > static_cast<uint64_t>(len - *pos)) {
     *pos = len;
     return {};
   }
-  std::string result(reinterpret_cast<const char*>(data + *pos), str_len);
-  *pos += str_len;
+  std::string result(reinterpret_cast<const char*>(data + *pos), static_cast<size_t>(str_len));
+  *pos += static_cast<size_t>(str_len);
   return result;
 }
 
 /** @brief Extract error message from an ERR packet payload */
-void ParseErrPacket(const std::vector<uint8_t>& payload,
-                    std::string* error_msg) {
+void ParseErrPacket(const std::vector<uint8_t>& payload, std::string* error_msg) {
   uint16_t error_code = 0;
   std::string msg;
   ParseErrPacketPayload(payload.data(), payload.size(), &error_code, &msg);
@@ -62,8 +64,7 @@ std::string ParseColumnName(const std::vector<uint8_t>& payload) {
 }
 
 /** @brief Parse a result set row into values and null flags */
-void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
-                  QueryResultRow* row) {
+void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, QueryResultRow* row) {
   const uint8_t* data = payload.data();
   size_t data_size = payload.size();
   size_t pos = 0;
@@ -74,18 +75,27 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
   size_t i = 0;
   for (; i < column_count && pos < data_size; ++i) {
     if (data[pos] == kNullColumnMarker) {
-      // NULL value
+      // NULL value: text-protocol row uses a dedicated 0xFB marker byte
+      // *before* ReadLenEncInt is consulted. ReadLenEncInt's built-in
+      // "return 0 on 0xFB" behavior is therefore not relied on here; see
+      // the defensive comment in ReadLenEncInt for details.
       row->is_null[i] = true;
       row->values[i].clear();
       pos += 1;
     } else {
       row->is_null[i] = false;
       uint64_t str_len = ReadLenEncInt(data, data_size, &pos);
-      if (pos + str_len <= data_size) {
+      // Subtraction-form bounds check to prevent size_t overflow when
+      // str_len is attacker-controlled and size_t is 32-bit (WASM).
+      // ReadLenEncInt guarantees pos <= data_size on return.
+      if (str_len <= static_cast<uint64_t>(data_size - pos)) {
         row->values[i].assign(reinterpret_cast<const char*>(data + pos),
-                              str_len);
+                              static_cast<size_t>(str_len));
+        pos += static_cast<size_t>(str_len);
+      } else {
+        // Truncated row: stop parsing further columns.
+        pos = data_size;
       }
-      pos += str_len;
     }
   }
   // Mark remaining columns as NULL if the row data was truncated
@@ -97,9 +107,8 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
 
 }  // namespace
 
-mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
-                         QueryResult* result, std::string* error_msg,
-                         bool deprecate_eof) {
+mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResult* result,
+                         std::string* error_msg, bool deprecate_eof) {
   // Build COM_QUERY payload: command byte + query bytes
   std::vector<uint8_t> cmd_payload;
   cmd_payload.reserve(1 + query.size());
@@ -149,8 +158,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
   size_t pos = 0;
   uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
   if (column_count > kMaxColumnCount) {
-    *error_msg = "Column count exceeds maximum (" +
-                 std::to_string(column_count) + ")";
+    *error_msg = "Column count exceeds maximum (" + std::to_string(column_count) + ")";
     return MES_ERR_PARSE;
   }
 

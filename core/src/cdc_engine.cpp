@@ -78,22 +78,20 @@ void CdcEngine::Reset() {
 
 size_t CdcEngine::PendingEventCount() const { return event_queue_.size(); }
 
-bool CdcEngine::IsError() const {
-  return stream_parser_.GetState() == ParserState::kError;
-}
+bool CdcEngine::IsError() const { return stream_parser_.GetState() == ParserState::kError; }
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
-  include_databases_ = std::set<std::string>(databases.begin(), databases.end());
+  include_databases_ = std::unordered_set<std::string>(databases.begin(), databases.end());
   blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
 void CdcEngine::SetIncludeTables(const std::vector<std::string>& tables) {
-  include_tables_ = std::set<std::string>(tables.begin(), tables.end());
+  include_tables_ = std::unordered_set<std::string>(tables.begin(), tables.end());
   blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
 void CdcEngine::SetExcludeTables(const std::vector<std::string>& tables) {
-  exclude_tables_ = std::set<std::string>(tables.begin(), tables.end());
+  exclude_tables_ = std::unordered_set<std::string>(tables.begin(), tables.end());
   blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
 }
 
@@ -183,7 +181,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
 
     default:
-      // Skip unhandled event types
+      // TODO(review): FORMAT_DESCRIPTION_EVENT is currently treated as a
+      // no-op. Post-header sizes are assumed fixed for MySQL 5.6+/MariaDB
+      // 10.0+ (which covers MySQL 8.4 and MariaDB 10.x, the target versions).
+      // If supporting other versions, parse the post-header size array here
+      // to dynamically determine event offsets.
       break;
   }
 }
@@ -196,7 +198,8 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const TableMetadata* meta = table_registry_.Lookup(table_id);
   if (meta == nullptr) {
-    StructuredLog().Event("rows_event_no_table_map")
+    StructuredLog()
+        .Event("rows_event_no_table_map")
         .Field("table_id", static_cast<uint64_t>(table_id))
         .Warn();
     return;

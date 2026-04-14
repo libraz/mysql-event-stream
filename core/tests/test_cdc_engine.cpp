@@ -320,16 +320,14 @@ TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
   size_t events_seen = 0;
   int iterations = 0;
   constexpr int kMaxIterations = 10000;
-  while ((total_consumed < combined.size() || engine.HasEvents()) &&
-         iterations < kMaxIterations) {
+  while ((total_consumed < combined.size() || engine.HasEvents()) && iterations < kMaxIterations) {
     ++iterations;
     ChangeEvent event;
     while (engine.NextEvent(&event)) {
       events_seen++;
     }
     if (total_consumed < combined.size()) {
-      size_t c = engine.Feed(combined.data() + total_consumed,
-                             combined.size() - total_consumed);
+      size_t c = engine.Feed(combined.data() + total_consumed, combined.size() - total_consumed);
       total_consumed += c;
     }
   }
@@ -378,7 +376,7 @@ TEST(CdcEngineTest, IncludeDatabasesFilter) {
   engine.Feed(ev1.data(), ev1.size());
 
   auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                        BuildWriteRowsBody(1, 10));
+                       BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
@@ -388,7 +386,7 @@ TEST(CdcEngineTest, IncludeDatabasesFilter) {
   engine.Feed(ev2.data(), ev2.size());
 
   auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
-                        BuildWriteRowsBody(2, 20));
+                       BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
   // Should still have only 1 event (from mydb.users)
@@ -412,7 +410,7 @@ TEST(CdcEngineTest, ExcludeTablesFilter) {
   engine.Feed(ev1.data(), ev1.size());
 
   auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                        BuildWriteRowsBody(1, 10));
+                       BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
@@ -422,7 +420,7 @@ TEST(CdcEngineTest, ExcludeTablesFilter) {
   engine.Feed(ev2.data(), ev2.size());
 
   auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
-                        BuildWriteRowsBody(2, 20));
+                       BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
   // Should still have only 1 event
@@ -445,7 +443,7 @@ TEST(CdcEngineTest, IncludeTablesFilter) {
   engine.Feed(ev1.data(), ev1.size());
 
   auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                        BuildWriteRowsBody(1, 10));
+                       BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
@@ -455,7 +453,7 @@ TEST(CdcEngineTest, IncludeTablesFilter) {
   engine.Feed(ev2.data(), ev2.size());
 
   auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
-                        BuildWriteRowsBody(2, 20));
+                       BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
   EXPECT_EQ(engine.PendingEventCount(), 1u);
@@ -476,7 +474,7 @@ TEST(CdcEngineTest, ExcludeTableUnqualifiedName) {
   engine.Feed(ev1.data(), ev1.size());
 
   auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                        BuildWriteRowsBody(1, 10));
+                       BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
 
   auto tm2 = BuildTableMapBody(2, "db2", "logs");
@@ -484,7 +482,7 @@ TEST(CdcEngineTest, ExcludeTableUnqualifiedName) {
   engine.Feed(ev2.data(), ev2.size());
 
   auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
-                        BuildWriteRowsBody(2, 20));
+                       BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
   // Both should be blocked
@@ -501,7 +499,7 @@ TEST(CdcEngineTest, FilterResetClearsBlockedIds) {
   engine.Feed(ev1.data(), ev1.size());
 
   auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                        BuildWriteRowsBody(1, 10));
+                       BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_FALSE(engine.HasEvents());
 
@@ -518,8 +516,8 @@ TEST(CdcEngineTest, TableMapTooShortBodyNoEvent) {
 
   // Build a TABLE_MAP event with a body that is too short (< 8 bytes)
   std::vector<uint8_t> short_body = {0x01, 0x02, 0x03};
-  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
-                           short_body);
+  auto event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, short_body);
 
   size_t consumed = engine.Feed(event.data(), event.size());
   EXPECT_EQ(consumed, event.size());

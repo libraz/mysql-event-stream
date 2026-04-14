@@ -4,9 +4,9 @@
 #ifndef MES_NODE_CLIENT_WRAP_H_
 #define MES_NODE_CLIENT_WRAP_H_
 
-#include <atomic>
-
 #include <napi.h>
+
+#include <atomic>
 
 #include "mes.h"
 
@@ -35,7 +35,9 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
 
   mes_client_t* client_;
   std::atomic<int> pending_workers_{0};
-  bool destroy_pending_{false};
+  // N-API callbacks are serialized on the JS thread, but keep as atomic to
+  // defensively document the shared-state contract with PollWorker completion.
+  std::atomic<bool> destroy_pending_{false};
 };
 
 #endif  // MES_NODE_CLIENT_WRAP_H_

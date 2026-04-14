@@ -32,8 +32,8 @@ TEST(E2ESSL, SslPreferredConnects) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         1, CaCert(), "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 1, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_TRUE(conn.Socket()->IsTlsActive());
@@ -47,8 +47,8 @@ TEST(E2ESSL, SslRequiredConnects) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         2, CaCert(), "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_TRUE(conn.Socket()->IsTlsActive());
@@ -62,8 +62,8 @@ TEST(E2ESSL, SslVerifyCaValid) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         3, CaCert(), "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 3, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_TRUE(conn.Socket()->IsTlsActive());
@@ -77,8 +77,8 @@ TEST(E2ESSL, SslVerifyCaWrongCa) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         3, WrongCa(), "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 3, WrongCa(), "", "");
   EXPECT_NE(rc, MES_OK);
   EXPECT_TRUE(rc == MES_ERR_CONNECT || rc == MES_ERR_AUTH)
       << "Expected MES_ERR_CONNECT or MES_ERR_AUTH, got " << rc;
@@ -92,8 +92,8 @@ TEST(E2ESSL, SslVerifyCaBadPath) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         3, "/nonexistent/ca.pem", "", "");
+  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 3,
+                         "/nonexistent/ca.pem", "", "");
   EXPECT_NE(rc, MES_OK);
   EXPECT_FALSE(conn.IsConnected());
 }
@@ -105,8 +105,8 @@ TEST(E2ESSL, SslVerifyIdentityValid) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         4, CaCert(), "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 4, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_TRUE(conn.Socket()->IsTlsActive());
@@ -120,8 +120,8 @@ TEST(E2ESSL, SslClientCert) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         2, CaCert(), ClientCert(), ClientKey());
+  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2, CaCert(),
+                         ClientCert(), ClientKey());
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_TRUE(conn.Socket()->IsTlsActive());
@@ -135,16 +135,15 @@ TEST(E2ESSL, SslQueryAfterUpgrade) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         2, CaCert(), "", ""),
-            MES_OK)
+  ASSERT_EQ(
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2, CaCert(), "", ""),
+      MES_OK)
       << conn.GetLastError();
   ASSERT_TRUE(conn.Socket()->IsTlsActive());
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT 1 AS n",
-                                        &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT 1 AS n", &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   ASSERT_EQ(result.rows.size(), 1u);
   EXPECT_EQ(result.rows[0].values[0], "1");
@@ -159,17 +158,17 @@ TEST(E2ESSL, SslMultipleQueries) {
     GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
   }
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         2, CaCert(), "", ""),
-            MES_OK)
+  ASSERT_EQ(
+      conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2, CaCert(), "", ""),
+      MES_OK)
       << conn.GetLastError();
   ASSERT_TRUE(conn.Socket()->IsTlsActive());
 
   for (int i = 0; i < 5; i++) {
     mes::protocol::QueryResult result;
     std::string err;
-    auto rc = mes::protocol::ExecuteQuery(
-        conn.Socket(), "SELECT " + std::to_string(i) + " AS n", &result, &err);
+    auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT " + std::to_string(i) + " AS n",
+                                          &result, &err);
     ASSERT_EQ(rc, MES_OK) << "Query " << i << " failed: " << err;
     ASSERT_EQ(result.rows.size(), 1u);
     EXPECT_EQ(result.rows[0].values[0], std::to_string(i));
@@ -189,10 +188,7 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
   ASSERT_FALSE(gtid_before.empty()) << "Failed to fetch current GTID";
 
   // Insert a row to generate a binlog event
-  ASSERT_EQ(
-      ExecuteDML(
-          "INSERT INTO mes_test.items (name, value) VALUES ('ssl_e2e', 77)"),
-      MES_OK);
+  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('ssl_e2e', 77)"), MES_OK);
 
   // Set up binlog client with SSL mode 2 and caching_sha2_password user
   mes_client_t* client = mes_client_create();
@@ -214,10 +210,8 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // Feed binlog data into engine and look for the INSERT event
   mes_engine_t* engine = mes_create();
@@ -239,8 +233,7 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT &&
-          std::strcmp(event->table, "items") == 0) {
+      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
         found_insert = true;
         EXPECT_GT(event->after_count, 0u);
         break;
@@ -248,8 +241,8 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
     }
   }
 
-  EXPECT_TRUE(found_insert) << "Did not capture INSERT event over TLS after "
-                             << poll_count << " polls";
+  EXPECT_TRUE(found_insert) << "Did not capture INSERT event over TLS after " << poll_count
+                            << " polls";
 
   // Verify GTID was tracked
   const char* gtid = mes_client_current_gtid(client);

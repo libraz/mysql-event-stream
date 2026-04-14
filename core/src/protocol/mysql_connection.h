@@ -79,10 +79,9 @@ class MysqlConnection {
    * @return MES_OK on success, MES_ERR_CONNECT on TCP failure,
    *         MES_ERR_AUTH on authentication failure
    */
-  mes_error_t Connect(const std::string& host, uint16_t port,
-                      const std::string& user, const std::string& password,
-                      uint32_t connect_timeout_s, uint32_t read_timeout_s,
-                      uint32_t ssl_mode, const std::string& ssl_ca,
+  mes_error_t Connect(const std::string& host, uint16_t port, const std::string& user,
+                      const std::string& password, uint32_t connect_timeout_s,
+                      uint32_t read_timeout_s, uint32_t ssl_mode, const std::string& ssl_ca,
                       const std::string& ssl_cert, const std::string& ssl_key);
 
   /** @brief Send COM_QUIT and close the connection */
@@ -139,15 +138,11 @@ class MysqlConnection {
    * @param host        Server hostname for TLS SNI and hostname verification
    * @return MES_OK on success
    */
-  mes_error_t SendHandshakeResponse(const std::string& user,
-                                    const std::string& password,
+  mes_error_t SendHandshakeResponse(const std::string& user, const std::string& password,
                                     const std::string& auth_plugin,
-                                    const std::vector<uint8_t>& auth_data,
-                                    uint32_t ssl_mode,
-                                    const std::string& ssl_ca,
-                                    const std::string& ssl_cert,
-                                    const std::string& ssl_key,
-                                    const std::string& host);
+                                    const std::vector<uint8_t>& auth_data, uint32_t ssl_mode,
+                                    const std::string& ssl_ca, const std::string& ssl_cert,
+                                    const std::string& ssl_key, const std::string& host);
 
   /**
    * @brief Handle server's auth response (OK, ERR, AuthSwitch, AuthMoreData)
@@ -180,10 +175,8 @@ class MysqlConnection {
    * @param response  Output: computed auth response
    * @return MES_OK on success
    */
-  mes_error_t ComputeAuthResponse(const std::string& plugin,
-                                  const std::string& password,
-                                  const std::vector<uint8_t>& salt,
-                                  std::vector<uint8_t>* response);
+  mes_error_t ComputeAuthResponse(const std::string& plugin, const std::string& password,
+                                  const std::vector<uint8_t>& salt, std::vector<uint8_t>* response);
 
   /**
    * @brief Send a packet and advance the sequence ID

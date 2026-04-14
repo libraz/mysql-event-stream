@@ -27,11 +27,37 @@ bool EqualsIgnoreCase(const char* a, const char* b) {
   return *a == *b;
 }
 
-/** @brief Query a single MySQL variable value via SHOW VARIABLES */
+/** @brief Allow-list of variable names that may be passed to QueryVariable.
+ *
+ * var_name is embedded into a SQL literal, so it must never originate from
+ * untrusted input. This allow-list enforces that contract at runtime and
+ * provides a cheap defense-in-depth guard against future callers mistakenly
+ * plumbing external input into this helper.
+ */
+bool IsAllowedVariableName(const char* var_name) {
+  static constexpr const char* kAllowed[] = {
+      "log_bin", "gtid_mode", "binlog_format", "binlog_row_image", "binlog_transaction_compression",
+  };
+  if (var_name == nullptr) return false;
+  for (const char* allowed : kAllowed) {
+    if (std::strcmp(var_name, allowed) == 0) return true;
+  }
+  return false;
+}
+
+/** @brief Query a single MySQL variable value via SHOW VARIABLES
+ *
+ * @warning var_name is interpolated into a SQL literal. It MUST be one of
+ * the compile-time constants enumerated in IsAllowedVariableName(); external
+ * input MUST NOT be passed. The allow-list check enforces this at runtime.
+ */
 mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
                           std::string& out_value) {
-  std::string query =
-      "SHOW VARIABLES WHERE Variable_name = '" + std::string(var_name) + "'";
+  if (!IsAllowedVariableName(var_name)) {
+    out_value.clear();
+    return MES_ERR_INVALID_ARG;
+  }
+  std::string query = "SHOW VARIABLES WHERE Variable_name = '" + std::string(var_name) + "'";
 
   protocol::QueryResult qr;
   std::string err;
@@ -41,8 +67,8 @@ mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
     return rc;
   }
 
-  if (qr.rows.empty() || qr.rows[0].values.size() < 2 ||
-      qr.rows[0].is_null.size() < 2 || qr.rows[0].is_null[1]) {
+  if (qr.rows.empty() || qr.rows[0].values.size() < 2 || qr.rows[0].is_null.size() < 2 ||
+      qr.rows[0].is_null[1]) {
     out_value.clear();
     return MES_ERR_VALIDATION;
   }
@@ -53,14 +79,13 @@ mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
 
 }  // namespace
 
-ValidationResult ConnectionValidator::Validate(
-    protocol::MysqlConnection* conn, ServerFlavor flavor) {
+ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
+                                               ServerFlavor flavor) {
   ValidationResult result;
 
   if (conn == nullptr) {
     result.error = MES_ERR_VALIDATION;
-    std::snprintf(result.message, sizeof(result.message),
-                  "MySQL connection is null");
+    std::snprintf(result.message, sizeof(result.message), "MySQL connection is null");
     return result;
   }
 
@@ -98,20 +123,16 @@ ValidationResult ConnectionValidator::Validate(
   return result;
 }
 
-bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn,
-                                        const char* var_name,
-                                        const char* expected,
-                                        ValidationResult* result) {
+bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn, const char* var_name,
+                                        const char* expected, ValidationResult* result) {
   std::string value;
   mes_error_t rc = QueryVariable(conn, var_name, value);
   if (rc != MES_OK) {
     result->error = MES_ERR_VALIDATION;
     if (rc == MES_ERR_VALIDATION) {
-      std::snprintf(result->message, sizeof(result->message),
-                    "Variable %s not found", var_name);
+      std::snprintf(result->message, sizeof(result->message), "Variable %s not found", var_name);
     } else {
-      std::snprintf(result->message, sizeof(result->message),
-                    "Failed to query %s", var_name);
+      std::snprintf(result->message, sizeof(result->message), "Failed to query %s", var_name);
     }
     return false;
   }
@@ -127,10 +148,8 @@ bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn,
   return match;
 }
 
-bool ConnectionValidator::CheckVariableNot(protocol::MysqlConnection* conn,
-                                           const char* var_name,
-                                           const char* rejected,
-                                           ValidationResult* result) {
+bool ConnectionValidator::CheckVariableNot(protocol::MysqlConnection* conn, const char* var_name,
+                                           const char* rejected, ValidationResult* result) {
   std::string value;
   mes_error_t rc = QueryVariable(conn, var_name, value);
   if (rc != MES_OK) {
@@ -141,8 +160,8 @@ bool ConnectionValidator::CheckVariableNot(protocol::MysqlConnection* conn,
   bool is_rejected = EqualsIgnoreCase(value.c_str(), rejected);
   if (is_rejected) {
     result->error = MES_ERR_VALIDATION;
-    std::snprintf(result->message, sizeof(result->message),
-                  "%s must not be %s", var_name, rejected);
+    std::snprintf(result->message, sizeof(result->message), "%s must not be %s", var_name,
+                  rejected);
   }
 
   return !is_rejected;

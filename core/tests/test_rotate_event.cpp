@@ -1,12 +1,11 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "rotate_event.h"
+#include <gtest/gtest.h>
 
 #include <vector>
 
-#include <gtest/gtest.h>
-
+#include "rotate_event.h"
 #include "test_helpers.h"
 
 namespace mes {

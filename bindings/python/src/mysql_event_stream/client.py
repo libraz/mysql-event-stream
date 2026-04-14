@@ -6,8 +6,18 @@ import ctypes
 
 from ._ffi import (
     MES_ERR_AUTH,
+    MES_ERR_CHECKSUM,
     MES_ERR_CONNECT,
+    MES_ERR_DECODE,
+    MES_ERR_DECODE_COLUMN,
+    MES_ERR_DECODE_ROW,
     MES_ERR_DISCONNECTED,
+    MES_ERR_INTERNAL,
+    MES_ERR_INVALID_ARG,
+    MES_ERR_NO_EVENT,
+    MES_ERR_NULL_ARG,
+    MES_ERR_PARSE,
+    MES_ERR_QUEUE_FULL,
     MES_ERR_STREAM,
     MES_ERR_VALIDATION,
     MES_OK,
@@ -18,8 +28,18 @@ from ._ffi import (
 from .types import ClientConfig, PollResult
 
 _ERROR_MESSAGES = {
-    MES_ERR_AUTH: "Authentication failed",
+    MES_ERR_NULL_ARG: "Null argument",
+    MES_ERR_INVALID_ARG: "Invalid argument",
+    MES_ERR_INTERNAL: "Internal error",
+    MES_ERR_PARSE: "Failed to parse binlog event",
+    MES_ERR_CHECKSUM: "CRC32 checksum mismatch",
+    MES_ERR_DECODE: "Failed to decode row data",
+    MES_ERR_DECODE_COLUMN: "Failed to decode column value",
+    MES_ERR_DECODE_ROW: "Failed to decode row data",
+    MES_ERR_NO_EVENT: "No event available",
+    MES_ERR_QUEUE_FULL: "Event queue is full",
     MES_ERR_CONNECT: "Connection failed",
+    MES_ERR_AUTH: "Authentication failed",
     MES_ERR_VALIDATION: "Server validation failed",
     MES_ERR_STREAM: "Streaming error",
     MES_ERR_DISCONNECTED: "Not connected",
@@ -226,7 +246,7 @@ class BinlogClient:
         """Check if client is connected."""
         if self._handle is None:
             return False
-        return self._lib.mes_client_is_connected(self._handle) != 0
+        return bool(self._lib.mes_client_is_connected(self._handle) != 0)
 
     @property
     def current_gtid(self) -> str:

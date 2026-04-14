@@ -3,30 +3,51 @@
 
 #include "logger.h"
 
+#include <mutex>
+
 namespace mes {
 
-std::atomic<mes_log_callback_t> LogConfig::callback_{nullptr};
-std::atomic<mes_log_level_t> LogConfig::log_level_{MES_LOG_ERROR};
-std::atomic<void*> LogConfig::userdata_{nullptr};
+namespace {
+
+// Serializes updates to snapshot_. Reads take a local shared_ptr copy
+// under the same lock, which is cheap (atomic refcount bump) and ensures
+// that the observed (callback, level, userdata) triple is always internally
+// consistent. std::atomic<std::shared_ptr> is C++20-only; this lock is the
+// portable C++17 equivalent.
+std::mutex& SnapshotMutex() {
+  static std::mutex m;
+  return m;
+}
+
+}  // namespace
+
+std::shared_ptr<const LogConfigSnapshot> LogConfig::snapshot_ =
+    std::make_shared<const LogConfigSnapshot>();
 
 void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t log_level,
-                             void* userdata) {
-  userdata_.store(userdata, std::memory_order_release);
-  log_level_.store(log_level, std::memory_order_release);
-  callback_.store(callback, std::memory_order_release);
+                            void* userdata) {
+  auto next = std::make_shared<LogConfigSnapshot>();
+  next->callback = callback;
+  next->level = log_level;
+  next->userdata = userdata;
+  std::lock_guard<std::mutex> lock(SnapshotMutex());
+  snapshot_ = std::move(next);
 }
 
-mes_log_callback_t LogConfig::GetCallback() {
-  return callback_.load(std::memory_order_acquire);
+std::shared_ptr<const LogConfigSnapshot> LogConfig::GetSnapshot() {
+  std::lock_guard<std::mutex> lock(SnapshotMutex());
+  return snapshot_;
 }
-mes_log_level_t LogConfig::GetLogLevel() {
-  return log_level_.load(std::memory_order_acquire);
-}
-void* LogConfig::GetUserdata() { return userdata_.load(std::memory_order_acquire); }
+
+mes_log_callback_t LogConfig::GetCallback() { return GetSnapshot()->callback; }
+mes_log_level_t LogConfig::GetLogLevel() { return GetSnapshot()->level; }
+void* LogConfig::GetUserdata() { return GetSnapshot()->userdata; }
 
 void StructuredLog::Emit(mes_log_level_t level) {
-  auto* callback = LogConfig::GetCallback();
-  if (callback == nullptr || level > LogConfig::GetLogLevel()) {
+  // Single atomic read ensures the callback, level, and userdata we use
+  // below are all from the same configuration generation.
+  auto snap = LogConfig::GetSnapshot();
+  if (snap->callback == nullptr || level > snap->level) {
     return;
   }
 
@@ -43,7 +64,7 @@ void StructuredLog::Emit(mes_log_level_t level) {
     message += value;
   }
 
-  callback(level, message.c_str(), LogConfig::GetUserdata());
+  snap->callback(level, message.c_str(), snap->userdata);
 }
 
 }  // namespace mes

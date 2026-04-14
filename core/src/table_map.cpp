@@ -12,6 +12,17 @@ namespace {
 // Maximum column count for safety.
 constexpr size_t kMaxColumns = 4096;
 
+// Maximum number of TABLE_MAP entries retained in the registry. When this
+// threshold is exceeded (e.g. after heavy DDL or long-running replication
+// that cycles through many table_ids), the entire registry is cleared to
+// prevent unbounded memory growth. The server re-emits TABLE_MAP events
+// before each ROWS event, so clearing is safe: the next ROWS event will
+// simply be preceded by a fresh TABLE_MAP that re-populates the cache.
+// A simple single-threshold flush is preferred over strict LRU because it
+// keeps the hot path allocation-free and the worst case affects at most
+// one stale table_id per cleared entry.
+constexpr size_t kMaxTableMapEntries = 8192;
+
 // Read per-column metadata from the metadata block.
 // Returns the number of bytes consumed, or 0 on error.
 size_t ReadColumnMetadataValue(uint8_t col_type, const uint8_t* data, size_t remaining,
@@ -143,7 +154,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
 
   // column_types: 1 byte per column
   if (offset + column_count > len) return false;
-  std::vector<uint8_t> col_types(data + offset, data + offset + column_count);
+  const uint8_t* col_types_ptr = data + offset;
   offset += column_count;
 
   // metadata_length: packed integer
@@ -156,15 +167,17 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // column metadata block
   if (offset + metadata_length > len) return false;
 
-  // Parse per-column metadata
-  std::vector<uint16_t> col_metadata(column_count, 0);
+  // Single-pass: resize the target columns vector and write type+metadata
+  // directly, avoiding intermediate std::vector<uint8_t> and <uint16_t>.
+  metadata->columns.resize(column_count);
   size_t meta_offset = 0;
   for (size_t i = 0; i < column_count; i++) {
     if (meta_offset > metadata_length) return false;
     uint16_t meta_val = 0;
-    size_t consumed = ReadColumnMetadataValue(col_types[i], data + offset + meta_offset,
+    size_t consumed = ReadColumnMetadataValue(col_types_ptr[i], data + offset + meta_offset,
                                               metadata_length - meta_offset, &meta_val);
-    col_metadata[i] = meta_val;
+    metadata->columns[i].type = static_cast<ColumnType>(col_types_ptr[i]);
+    metadata->columns[i].metadata = meta_val;
     meta_offset += consumed;
   }
   // Verify metadata was fully consumed. A mismatch indicates a corrupt
@@ -179,11 +192,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   if (offset + null_bitmap_bytes > len) return false;
   const uint8_t* null_bitmap = data + offset;
 
-  // Build column metadata structures
-  metadata->columns.resize(column_count);
   for (size_t i = 0; i < column_count; i++) {
-    metadata->columns[i].type = static_cast<ColumnType>(col_types[i]);
-    metadata->columns[i].metadata = col_metadata[i];
     metadata->columns[i].is_nullable = binary::BitmapIsSet(null_bitmap, i);
   }
 
@@ -196,6 +205,13 @@ bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len) {
     return false;
   }
   uint64_t table_id = metadata.table_id;
+  // Bound registry growth. Clearing on overflow is acceptable because each
+  // ROWS event is always preceded by a TABLE_MAP event that re-registers the
+  // table; after a flush, the first subsequent ROWS event for any table will
+  // see a fresh TABLE_MAP before decoding begins.
+  if (entries_.size() >= kMaxTableMapEntries && entries_.find(table_id) == entries_.end()) {
+    entries_.clear();
+  }
   entries_[table_id] = std::move(metadata);
   return true;
 }

@@ -38,9 +38,7 @@ class PollWorker : public Napi::AsyncWorker {
     if (error_ != MES_OK) {
       const char* msg = mes_client_last_error(client_);
       std::string err_msg = msg ? msg : "poll failed";
-      deferred_.Reject(
-          Napi::Error::New(env, "mes_client_poll failed: " + err_msg)
-              .Value());
+      deferred_.Reject(Napi::Error::New(env, "mes_client_poll failed: " + err_msg).Value());
     } else {
       Napi::Object result = Napi::Object::New(env);
 
@@ -48,10 +46,7 @@ class PollWorker : public Napi::AsyncWorker {
         auto* moved = new std::vector<uint8_t>(std::move(data_));
         auto buffer = Napi::Buffer<uint8_t>::New(
             env, moved->data(), moved->size(),
-            [](Napi::Env, uint8_t*, std::vector<uint8_t>* hint) {
-              delete hint;
-            },
-            moved);
+            [](Napi::Env, uint8_t*, std::vector<uint8_t>* hint) { delete hint; }, moved);
         result.Set("data", buffer);
       } else {
         result.Set("data", env.Null());
@@ -79,19 +74,19 @@ class PollWorker : public Napi::AsyncWorker {
 };
 
 Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
-  Napi::Function func = DefineClass(
-      env, "BinlogClient",
-      {
-          InstanceMethod<&ClientWrap::Connect>("connect"),
-          InstanceMethod<&ClientWrap::Start>("start"),
-          InstanceMethod<&ClientWrap::Poll>("poll"),
-          InstanceMethod<&ClientWrap::Stop>("stop"),
-          InstanceMethod<&ClientWrap::Disconnect>("disconnect"),
-          InstanceMethod<&ClientWrap::Destroy>("destroy"),
-          InstanceAccessor<&ClientWrap::GetIsConnected>("isConnected"),
-          InstanceAccessor<&ClientWrap::GetLastError>("lastError"),
-          InstanceAccessor<&ClientWrap::GetCurrentGtid>("currentGtid"),
-      });
+  Napi::Function func =
+      DefineClass(env, "BinlogClient",
+                  {
+                      InstanceMethod<&ClientWrap::Connect>("connect"),
+                      InstanceMethod<&ClientWrap::Start>("start"),
+                      InstanceMethod<&ClientWrap::Poll>("poll"),
+                      InstanceMethod<&ClientWrap::Stop>("stop"),
+                      InstanceMethod<&ClientWrap::Disconnect>("disconnect"),
+                      InstanceMethod<&ClientWrap::Destroy>("destroy"),
+                      InstanceAccessor<&ClientWrap::GetIsConnected>("isConnected"),
+                      InstanceAccessor<&ClientWrap::GetLastError>("lastError"),
+                      InstanceAccessor<&ClientWrap::GetCurrentGtid>("currentGtid"),
+                  });
 
   exports.Set("BinlogClient", func);
   return exports;
@@ -100,8 +95,7 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
 ClientWrap::ClientWrap(const Napi::CallbackInfo& info)
     : Napi::ObjectWrap<ClientWrap>(info), client_(mes_client_create()) {
   if (!client_) {
-    Napi::Error::New(info.Env(), "Failed to create mes client")
-        .ThrowAsJavaScriptException();
+    Napi::Error::New(info.Env(), "Failed to create mes client").ThrowAsJavaScriptException();
   }
 }
 
@@ -115,13 +109,11 @@ ClientWrap::~ClientWrap() {
 void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (!client_) {
-    Napi::Error::New(env, "Client has been destroyed")
-        .ThrowAsJavaScriptException();
+    Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
     return;
   }
   if (info.Length() < 1 || !info[0].IsObject()) {
-    Napi::TypeError::New(env, "Expected config object")
-        .ThrowAsJavaScriptException();
+    Napi::TypeError::New(env, "Expected config object").ThrowAsJavaScriptException();
     return;
   }
 
@@ -133,32 +125,38 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     return;  // JS exception already scheduled
   }
 
-  // Client-specific fields not in the shared parser
-  if (config.Has("startGtid") && config.Get("startGtid").IsString()) {
-    strings.start_gtid =
-        config.Get("startGtid").As<Napi::String>().Utf8Value();
+  // Client-specific fields not in the shared parser.
+  // Single Get() per key: undefined returns env.Undefined(), which fails
+  // IsString()/IsNumber() checks — same semantics as the prior Has()+Get().
+  Napi::Value start_gtid_v = config.Get("startGtid");
+  if (start_gtid_v.IsString()) {
+    strings.start_gtid = start_gtid_v.As<Napi::String>().Utf8Value();
     c_config.start_gtid = strings.start_gtid.c_str();
   }
 
   constexpr uint32_t kDefaultReadTimeoutS = 30;
-  if (config.Has("readTimeoutS") && config.Get("readTimeoutS").IsNumber()) {
-    c_config.read_timeout_s =
-        config.Get("readTimeoutS").As<Napi::Number>().Uint32Value();
+  Napi::Value read_timeout_v = config.Get("readTimeoutS");
+  if (read_timeout_v.IsNumber()) {
+    c_config.read_timeout_s = read_timeout_v.As<Napi::Number>().Uint32Value();
   } else {
     c_config.read_timeout_s = kDefaultReadTimeoutS;
   }
 
-  if (config.Has("maxQueueSize") && config.Get("maxQueueSize").IsNumber()) {
-    c_config.max_queue_size =
-        config.Get("maxQueueSize").As<Napi::Number>().Uint32Value();
+  Napi::Value max_queue_size_v = config.Get("maxQueueSize");
+  if (max_queue_size_v.IsNumber()) {
+    c_config.max_queue_size = max_queue_size_v.As<Napi::Number>().Uint32Value();
   }
 
   mes_error_t err = mes_client_connect(client_, &c_config);
   if (err != MES_OK) {
+    // NOTE(review): verified last_error messages in core
+    // (core/src/client/binlog_client.cpp and
+    // core/src/protocol/mysql_connection.cpp) do not include credentials.
+    // Only descriptive strings (optionally with host:port, auth plugin name,
+    // or ssl_mode) are forwarded. Safe to surface directly.
     const char* msg = mes_client_last_error(client_);
     std::string err_msg = msg ? msg : "connection failed";
-    Napi::Error::New(env, "mes_client_connect failed: " + err_msg)
-        .ThrowAsJavaScriptException();
+    Napi::Error::New(env, "mes_client_connect failed: " + err_msg).ThrowAsJavaScriptException();
   }
 }
 
@@ -166,8 +164,7 @@ void ClientWrap::Start(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!client_) {
-    Napi::Error::New(env, "Client has been destroyed")
-        .ThrowAsJavaScriptException();
+    Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
     return;
   }
 
@@ -175,18 +172,16 @@ void ClientWrap::Start(const Napi::CallbackInfo& info) {
   if (err != MES_OK) {
     const char* msg = mes_client_last_error(client_);
     std::string err_msg = msg ? msg : "start failed";
-    Napi::Error::New(env, "mes_client_start failed: " + err_msg)
-        .ThrowAsJavaScriptException();
+    Napi::Error::New(env, "mes_client_start failed: " + err_msg).ThrowAsJavaScriptException();
   }
 }
 
 Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (!client_ || destroy_pending_) {
+  if (!client_ || destroy_pending_.load(std::memory_order_acquire)) {
     auto deferred = Napi::Promise::Deferred::New(env);
-    deferred.Reject(
-        Napi::Error::New(env, "Client has been destroyed").Value());
+    deferred.Reject(Napi::Error::New(env, "Client has been destroyed").Value());
     return deferred.Promise();
   }
 
@@ -195,13 +190,14 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   // next call to mes_client_poll() on the same client.
   if (pending_workers_.load(std::memory_order_acquire) > 0) {
     auto deferred = Napi::Promise::Deferred::New(env);
-    deferred.Reject(
-        Napi::Error::New(env, "A poll() is already in progress").Value());
+    deferred.Reject(Napi::Error::New(env, "A poll() is already in progress").Value());
     return deferred.Promise();
   }
 
   auto deferred = Napi::Promise::Deferred::New(env);
-  pending_workers_.fetch_add(1, std::memory_order_relaxed);
+  // acq_rel for consistency with the acquire load above; same-thread use
+  // makes the ordering choice immaterial to performance.
+  pending_workers_.fetch_add(1, std::memory_order_acq_rel);
   Ref();  // prevent GC while worker is in flight
   auto* worker = new PollWorker(env, client_, this, deferred);
   worker->Queue();
@@ -228,7 +224,7 @@ void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
     // any blocking mes_client_poll() call, but defer the actual destroy
     // until the last worker completes on the main thread.
     mes_client_stop(client_);
-    destroy_pending_ = true;
+    destroy_pending_.store(true, std::memory_order_release);
   } else {
     // Ensure the reader thread is stopped before destroying the client.
     // Without stop(), destroy() may block waiting for the thread to finish
@@ -240,17 +236,17 @@ void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
 }
 
 void ClientWrap::OnPollWorkerComplete() {
-  pending_workers_.fetch_sub(1, std::memory_order_release);
+  pending_workers_.fetch_sub(1, std::memory_order_acq_rel);
   Unref();  // allow GC now that worker is done
   MaybeFinalizeDeferredDestroy();
 }
 
 void ClientWrap::MaybeFinalizeDeferredDestroy() {
-  if (destroy_pending_ && client_ &&
+  if (destroy_pending_.load(std::memory_order_acquire) && client_ &&
       pending_workers_.load(std::memory_order_acquire) == 0) {
     mes_client_destroy(client_);
     client_ = nullptr;
-    destroy_pending_ = false;
+    destroy_pending_.store(false, std::memory_order_release);
   }
 }
 

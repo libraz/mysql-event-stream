@@ -70,43 +70,45 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     const maxAttempts = Math.max(0, this.config.maxReconnectAttempts ?? 10);
 
     try {
-    while (!this.closed) {
-      this.client = new BinlogClient(this.config);
-      try {
-        this.client.start();
-        reconnectAttempts = 0;
+      while (!this.closed) {
+        this.client = new BinlogClient(this.config);
+        try {
+          this.client.start();
+          reconnectAttempts = 0;
 
-        while (!this.closed) {
-          const result = await this.client.poll();
-          if (!result.data) continue;
-          this.engine!.feed(result.data);
-          for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
-            yield ev;
+          while (!this.closed) {
+            const result = await this.client.poll();
+            if (!result.data) continue;
+            this.engine!.feed(result.data);
+            for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
+              yield ev;
+            }
+          }
+        } catch (err) {
+          if (this.closed) break;
+          if (maxAttempts === 0) throw err;
+
+          const gtid = this.client.currentGtid;
+          this.cleanupClient();
+
+          reconnectAttempts++;
+          if (reconnectAttempts > maxAttempts) throw err;
+
+          // Linear backoff capped at kMaxDelayMs (10s), with 50%-100% jitter.
+          // Aligned with the Python binding (max_delay_s = 10.0).
+          const kBaseDelayMs = 1000;
+          const kMaxDelayMs = 10_000;
+          const kJitterMin = 0.5;
+          const baseDelay = Math.min(kBaseDelayMs * reconnectAttempts, kMaxDelayMs);
+          const delay = baseDelay * (kJitterMin + Math.random() * (1 - kJitterMin));
+          await new Promise((resolve) => setTimeout(resolve, delay));
+
+          this.engine!.reset();
+          if (gtid) {
+            this.config = { ...this.config, startGtid: gtid };
           }
         }
-      } catch (err) {
-        if (this.closed) break;
-        if (maxAttempts === 0) throw err;
-
-        const gtid = this.client.currentGtid;
-        this.cleanupClient();
-
-        reconnectAttempts++;
-        if (reconnectAttempts > maxAttempts) throw err;
-
-        const kBaseDelayMs = 1000;
-        const kMaxDelaySteps = 10;
-        const kJitterMin = 0.5;
-        const baseDelay = kBaseDelayMs * Math.min(reconnectAttempts, kMaxDelaySteps);
-        const delay = baseDelay * (kJitterMin + Math.random() * (1 - kJitterMin));
-        await new Promise((resolve) => setTimeout(resolve, delay));
-
-        this.engine!.reset();
-        if (gtid) {
-          this.config = { ...this.config, startGtid: gtid };
-        }
       }
-    }
     } finally {
       // Ensure resources are released whether the generator exits normally,
       // via .return() (break in for-await), or via .throw().

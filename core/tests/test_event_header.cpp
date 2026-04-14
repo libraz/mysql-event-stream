@@ -1,11 +1,11 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "event_header.h"
+#include <gtest/gtest.h>
 
 #include <cstring>
 
-#include <gtest/gtest.h>
+#include "event_header.h"
 
 namespace mes {
 namespace {

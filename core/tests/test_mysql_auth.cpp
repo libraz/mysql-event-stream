@@ -31,7 +31,10 @@ TEST(AuthNativePasswordTest, KnownPasswordProduces20Bytes) {
   // Verify at least one byte is non-zero
   bool all_zero = true;
   for (uint8_t b : response) {
-    if (b != 0) { all_zero = false; break; }
+    if (b != 0) {
+      all_zero = false;
+      break;
+    }
   }
   EXPECT_FALSE(all_zero);
 }
@@ -60,7 +63,10 @@ TEST(AuthCachingSha2PasswordTest, KnownPasswordProduces32Bytes) {
 
   bool all_zero = true;
   for (uint8_t b : response) {
-    if (b != 0) { all_zero = false; break; }
+    if (b != 0) {
+      all_zero = false;
+      break;
+    }
   }
   EXPECT_FALSE(all_zero);
 }

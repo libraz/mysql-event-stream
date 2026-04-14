@@ -34,8 +34,7 @@ using namespace e2e;
 
 TEST(E2EProtocol, ConnectWithNativePassword) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", "");
+  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   EXPECT_FALSE(conn.GetServerInfo().server_version.empty());
@@ -46,8 +45,7 @@ TEST(E2EProtocol, ConnectWithNativePassword) {
 
 TEST(E2EProtocol, ConnectWithReplUser) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout,
-                         0, "", "", "");
+  auto rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 0, "", "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -55,8 +53,8 @@ TEST(E2EProtocol, ConnectWithReplUser) {
 
 TEST(E2EProtocol, ConnectBadPassword) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, "wrong_password", kTimeout,
-                         kTimeout, 0, "", "", "");
+  auto rc =
+      conn.Connect(kHost, kPort, kRootUser, "wrong_password", kTimeout, kTimeout, 0, "", "", "");
   EXPECT_NE(rc, MES_OK);
   EXPECT_FALSE(conn.IsConnected());
   EXPECT_FALSE(conn.GetLastError().empty());
@@ -64,8 +62,7 @@ TEST(E2EProtocol, ConnectBadPassword) {
 
 TEST(E2EProtocol, ConnectBadHost) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect("192.0.2.1", kPort, kRootUser, kRootPass, 2, 2, 0, "",
-                         "", "");
+  auto rc = conn.Connect("192.0.2.1", kPort, kRootUser, kRootPass, 2, 2, 0, "", "", "");
   EXPECT_NE(rc, MES_OK);
   EXPECT_FALSE(conn.IsConnected());
 }
@@ -74,14 +71,13 @@ TEST(E2EProtocol, ConnectBadHost) {
 
 TEST(E2EProtocol, SimpleSelect) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT 1 AS val, 'hello' AS msg",
-                                        &result, &err);
+  auto rc =
+      mes::protocol::ExecuteQuery(conn.Socket(), "SELECT 1 AS val, 'hello' AS msg", &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   ASSERT_EQ(result.column_names.size(), 2u);
   EXPECT_EQ(result.column_names[0], "val");
@@ -98,15 +94,13 @@ TEST(E2EProtocol, ShowVariables) {
     GTEST_SKIP() << "gtid_mode variable is MySQL-specific";
   }
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
   auto rc = mes::protocol::ExecuteQuery(
-      conn.Socket(), "SHOW VARIABLES WHERE Variable_name = 'gtid_mode'",
-      &result, &err);
+      conn.Socket(), "SHOW VARIABLES WHERE Variable_name = 'gtid_mode'", &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   ASSERT_GE(result.rows.size(), 1u);
   // Column 0 = Variable_name, Column 1 = Value
@@ -120,14 +114,12 @@ TEST(E2EProtocol, SelectServerUuid) {
     GTEST_SKIP() << "@@server_uuid is MySQL-specific";
   }
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@server_uuid",
-                                        &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@server_uuid", &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   ASSERT_EQ(result.rows.size(), 1u);
   // UUID format: 8-4-4-4-12 hex chars = 36 chars
@@ -141,14 +133,13 @@ TEST(E2EProtocol, SetCommand) {
     GTEST_SKIP() << "@source_binlog_checksum is MySQL-specific";
   }
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(
-      conn.Socket(), "SET @source_binlog_checksum='NONE'", &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SET @source_binlog_checksum='NONE'",
+                                        &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   // SET returns no result set
   EXPECT_TRUE(result.rows.empty());
@@ -158,14 +149,13 @@ TEST(E2EProtocol, SetCommand) {
 
 TEST(E2EProtocol, ShowColumns) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(
-      conn.Socket(), "SHOW COLUMNS FROM `mes_test`.`items`", &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SHOW COLUMNS FROM `mes_test`.`items`",
+                                        &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   // items has 3 columns: id, name, value
   ASSERT_EQ(result.rows.size(), 3u);
@@ -178,15 +168,14 @@ TEST(E2EProtocol, ShowColumns) {
 
 TEST(E2EProtocol, MultipleQueriesOnSameConnection) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   for (int i = 0; i < 5; i++) {
     mes::protocol::QueryResult result;
     std::string err;
-    auto rc = mes::protocol::ExecuteQuery(
-        conn.Socket(), "SELECT " + std::to_string(i) + " AS n", &result, &err);
+    auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT " + std::to_string(i) + " AS n",
+                                          &result, &err);
     ASSERT_EQ(rc, MES_OK) << "Query " << i << " failed: " << err;
     ASSERT_EQ(result.rows.size(), 1u);
     EXPECT_EQ(result.rows[0].values[0], std::to_string(i));
@@ -197,14 +186,13 @@ TEST(E2EProtocol, MultipleQueriesOnSameConnection) {
 
 TEST(E2EProtocol, NullValues) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(
-      conn.Socket(), "SELECT NULL AS a, 'ok' AS b, NULL AS c", &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT NULL AS a, 'ok' AS b, NULL AS c",
+                                        &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   ASSERT_EQ(result.rows.size(), 1u);
   EXPECT_TRUE(result.rows[0].is_null[0]);
@@ -230,8 +218,7 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
   config.start_gtid = "";
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = kTimeout;
-  config.ssl_mode =
-      static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
   std::string validator_ca = e2e::DefaultCa();
   config.ssl_ca = validator_ca.empty() ? nullptr : validator_ca.c_str();
   config.ssl_cert = nullptr;
@@ -255,24 +242,22 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
   }
   // 1. Insert a row via a separate connection to generate a binlog event
   mes::protocol::MysqlConnection data_conn;
-  ASSERT_EQ(data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                              kTimeout, 0, "", "", ""),
-            MES_OK);
+  ASSERT_EQ(
+      data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK);
 
   mes::protocol::QueryResult qr;
   std::string err;
   // Get current GTID position before INSERT
-  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(),
-                                        "SELECT @@GLOBAL.gtid_executed", &qr,
-                                        &err),
-            MES_OK);
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT @@GLOBAL.gtid_executed", &qr, &err),
+      MES_OK);
   std::string gtid_before = qr.rows[0].values[0];
 
   // Do the INSERT
   ASSERT_EQ(mes::protocol::ExecuteQuery(
                 data_conn.Socket(),
-                "INSERT INTO mes_test.items (name, value) VALUES ('e2e_test', 42)",
-                &qr, &err),
+                "INSERT INTO mes_test.items (name, value) VALUES ('e2e_test', 42)", &qr, &err),
             MES_OK)
       << err;
 
@@ -297,10 +282,8 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // 3. Create engine and feed events until we get the INSERT
   mes_engine_t* engine = mes_create();
@@ -326,8 +309,7 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT &&
-          std::strcmp(event->table, "items") == 0) {
+      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
         found_insert = true;
         // Verify we got the right data
         EXPECT_GT(event->after_count, 0u);
@@ -336,8 +318,7 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
     }
   }
 
-  EXPECT_TRUE(found_insert) << "Did not capture INSERT event after "
-                             << poll_count << " polls";
+  EXPECT_TRUE(found_insert) << "Did not capture INSERT event after " << poll_count << " polls";
 
   // Check GTID was tracked
   const char* gtid = mes_client_current_gtid(client);
@@ -378,22 +359,20 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
 
   // Insert data via separate connection
   mes::protocol::MysqlConnection data_conn;
-  ASSERT_EQ(data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                              kTimeout, 0, "", "", ""),
-            MES_OK);
+  ASSERT_EQ(
+      data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK);
 
   mes::protocol::QueryResult qr;
   std::string err;
-  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(),
-                                        "SELECT @@GLOBAL.gtid_executed", &qr,
-                                        &err),
-            MES_OK);
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT @@GLOBAL.gtid_executed", &qr, &err),
+      MES_OK);
   std::string gtid_before = qr.rows[0].values[0];
 
   ASSERT_EQ(mes::protocol::ExecuteQuery(
                 data_conn.Socket(),
-                "INSERT INTO mes_test.items (name, value) VALUES ('meta_test', 99)",
-                &qr, &err),
+                "INSERT INTO mes_test.items (name, value) VALUES ('meta_test', 99)", &qr, &err),
             MES_OK)
       << err;
   data_conn.Disconnect();
@@ -417,10 +396,8 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   bool found = false;
   int poll_count = 0;
@@ -437,8 +414,7 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT &&
-          std::strcmp(event->table, "items") == 0) {
+      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
         found = true;
         // Check column names are populated (via MetadataFetcher)
         ASSERT_GT(event->after_count, 0u);
@@ -469,15 +445,14 @@ TEST(E2EProtocol, StopInterruptsPoll) {
 
   // Get current GTID to skip past existing events
   mes::protocol::MysqlConnection setup_conn;
-  ASSERT_EQ(setup_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                               kTimeout, 0, "", "", ""),
-            MES_OK);
+  ASSERT_EQ(
+      setup_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK);
   mes::protocol::QueryResult qr;
   std::string err;
-  ASSERT_EQ(mes::protocol::ExecuteQuery(setup_conn.Socket(),
-                                        "SELECT @@GLOBAL.gtid_executed", &qr,
-                                        &err),
-            MES_OK);
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(setup_conn.Socket(), "SELECT @@GLOBAL.gtid_executed", &qr, &err),
+      MES_OK);
   std::string current_gtid = qr.rows[0].values[0];
   setup_conn.Disconnect();
 
@@ -496,10 +471,8 @@ TEST(E2EProtocol, StopInterruptsPoll) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // With the reader thread model, Poll() blocks on the event queue CV.
   // To test Stop() interrupting Poll(), just start polling immediately
@@ -529,8 +502,7 @@ TEST(E2EProtocol, StopInterruptsPoll) {
 
   auto elapsed = std::chrono::steady_clock::now() - start;
   // Should complete well under the 30s read_timeout
-  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(),
-             10);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 10);
 
   mes_client_disconnect(client);
   mes_client_destroy(client);

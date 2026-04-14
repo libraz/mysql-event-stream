@@ -15,8 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <queue>
-#include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "event_header.h"
@@ -72,7 +72,14 @@ class CdcEngine {
   /** @brief Get number of pending events in queue. */
   size_t PendingEventCount() const;
 
-  /** @brief Set maximum event queue size. 0 means unlimited. */
+  /**
+   * @brief Set maximum event queue size. 0 means unlimited.
+   *
+   * The limit is enforced per binlog event, not per row. A single multi-row
+   * WRITE_ROWS/UPDATE_ROWS/DELETE_ROWS event is pushed atomically, so the
+   * queue may temporarily exceed @p max_size by up to (rows_per_event - 1)
+   * items before backpressure is re-evaluated on the next Feed() iteration.
+   */
   void SetMaxQueueSize(size_t max_size);
 
   /** @brief Check if the engine is in an error state (e.g., parse error). */
@@ -104,10 +111,10 @@ class CdcEngine {
 
   bool IsTableAllowed(const std::string& database, const std::string& table) const;
 
-  std::set<std::string> include_databases_;
-  std::set<std::string> include_tables_;
-  std::set<std::string> exclude_tables_;
-  std::set<uint64_t> blocked_table_ids_;
+  std::unordered_set<std::string> include_databases_;
+  std::unordered_set<std::string> include_tables_;
+  std::unordered_set<std::string> exclude_tables_;
+  std::unordered_set<uint64_t> blocked_table_ids_;
 
   // Non-owning pointer. Caller must ensure the MetadataFetcher outlives this CdcEngine.
   // Set via SetMetadataFetcher(). May be null if metadata resolution is not configured.

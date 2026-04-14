@@ -32,8 +32,7 @@ namespace mes::protocol {
  * @param response   Output: 20-byte auth response (empty for empty password)
  * @return MES_OK on success, MES_ERR_AUTH on hash failure
  */
-mes_error_t AuthNativePassword(const std::string& password,
-                               const uint8_t* salt, size_t salt_len,
+mes_error_t AuthNativePassword(const std::string& password, const uint8_t* salt, size_t salt_len,
                                std::vector<uint8_t>* response);
 
 /**
@@ -47,9 +46,8 @@ mes_error_t AuthNativePassword(const std::string& password,
  * @param response   Output: 32-byte auth response (empty for empty password)
  * @return MES_OK on success, MES_ERR_AUTH on hash failure
  */
-mes_error_t AuthCachingSha2Password(const std::string& password,
-                                    const uint8_t* salt, size_t salt_len,
-                                    std::vector<uint8_t>* response);
+mes_error_t AuthCachingSha2Password(const std::string& password, const uint8_t* salt,
+                                    size_t salt_len, std::vector<uint8_t>* response);
 
 }  // namespace mes::protocol
 

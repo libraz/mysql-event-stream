@@ -42,9 +42,9 @@ struct BinlogClientConfig {
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
   mes_ssl_mode_t ssl_mode = MES_SSL_DISABLED;
-  std::string ssl_ca;      // Path to CA certificate file
-  std::string ssl_cert;    // Path to client certificate file
-  std::string ssl_key;     // Path to client private key file
+  std::string ssl_ca;             // Path to CA certificate file
+  std::string ssl_cert;           // Path to client certificate file
+  std::string ssl_key;            // Path to client private key file
   size_t max_queue_size = 10000;  // 0 = use default (10000)
 };
 
@@ -137,8 +137,16 @@ class BinlogClient {
   ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
   BinlogClientConfig config_;
   std::vector<uint8_t> gtid_encoded_;
+  // last_error_ is written from both the owner thread (Connect/StartStream/
+  // Poll) and any thread calling Stop()/Disconnect(). Protect with its own
+  // mutex so GetLastError() can snapshot safely.
+  mutable std::mutex last_error_mutex_;
   std::string last_error_;
-  bool streaming_ = false;
+  mutable std::string last_error_snapshot_;  // stable buffer for c_str()
+  // streaming_ is written by Poll() on error/drain and by StopReaderThread()
+  // under stop_mutex_. It is also read from Poll() before taking any lock,
+  // so make it atomic to avoid torn reads / data races.
+  std::atomic<bool> streaming_{false};
   bool checksum_enabled_ = true;  // Whether server uses CRC32 binlog checksum
   std::atomic<bool> stop_requested_{false};
 
@@ -150,8 +158,16 @@ class BinlogClient {
 
   // GTID tracking (reader thread writes, GetCurrentGtid reads)
   std::string current_gtid_;
+  // NOTE(review): gtid_snapshot_ is written under gtid_mutex_ every call.
+  // Per mes.h contract, the returned pointer is valid only until the next
+  // GetCurrentGtid() call on the same BinlogClient. Concurrent callers from
+  // different threads may see the buffer re-assigned; single-owner-thread
+  // usage is required for stable pointer reads.
   mutable std::string gtid_snapshot_;  // protected by gtid_mutex_
   mutable std::mutex gtid_mutex_;
+
+  /** @brief Set last_error_ under its mutex (safe from any thread). */
+  void SetLastError(const std::string& msg);
 
   // CRC error tracking (reader thread writes, GetCRCErrors reads)
   std::atomic<uint64_t> crc_errors_{0};

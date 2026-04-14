@@ -90,8 +90,7 @@ class BinlogStream {
    * @param config  Binlog stream configuration (server_id, position, filename)
    * @return MES_OK on success, MES_ERR_STREAM on failure
    */
-  mes_error_t StartComBinlogDump(SocketHandle* sock,
-                                  const BinlogStreamConfig& config);
+  mes_error_t StartComBinlogDump(SocketHandle* sock, const BinlogStreamConfig& config);
 
  private:
   std::vector<uint8_t> packet_buf_;

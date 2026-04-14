@@ -8,11 +8,11 @@
 #include "binary_util.h"
 #include "client/connection_validator.h"
 #include "client/gtid_encoder.h"
+#include "crc32.h"
 #include "event_header.h"
 #include "logger.h"
 #include "mariadb_event_parser.h"
 #include "protocol/mysql_query.h"
-#include "crc32.h"
 
 namespace mes {
 
@@ -45,6 +45,11 @@ BinlogClient::BinlogClient() = default;
 
 BinlogClient::~BinlogClient() { Disconnect(); }
 
+void BinlogClient::SetLastError(const std::string& msg) {
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_ = msg;
+}
+
 mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   stop_requested_.store(false, std::memory_order_release);
 
@@ -53,17 +58,17 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   }
 
   if (config.ssl_mode > MES_SSL_VERIFY_IDENTITY) {
-    last_error_ = "Invalid ssl_mode value";
+    SetLastError("Invalid ssl_mode value");
     return MES_ERR_INVALID_ARG;
   }
 
-  mes_error_t rc = conn_.Connect(config.host, config.port, config.user,
-                                 config.password, config.connect_timeout_s,
-                                 config.read_timeout_s, config.ssl_mode,
+  mes_error_t rc = conn_.Connect(config.host, config.port, config.user, config.password,
+                                 config.connect_timeout_s, config.read_timeout_s, config.ssl_mode,
                                  config.ssl_ca, config.ssl_cert, config.ssl_key);
   if (rc != MES_OK) {
-    last_error_ = conn_.GetLastError();
-    LogMySQLConnectionError(config.host, config.port, last_error_);
+    std::string err = conn_.GetLastError();
+    SetLastError(err);
+    LogMySQLConnectionError(config.host, config.port, err);
     return rc;
   }
 
@@ -71,10 +76,9 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   server_flavor_ = conn_.GetServerFlavor();
 
   // Validate server configuration
-  ValidationResult validation =
-      ConnectionValidator::Validate(&conn_, server_flavor_);
+  ValidationResult validation = ConnectionValidator::Validate(&conn_, server_flavor_);
   if (validation.error != MES_OK) {
-    last_error_ = validation.message;
+    SetLastError(validation.message);
     conn_.Disconnect();
     return MES_ERR_VALIDATION;
   }
@@ -91,11 +95,11 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
 
 mes_error_t BinlogClient::StartStream() {
   if (!conn_.IsConnected()) {
-    last_error_ = "Not connected";
+    SetLastError("Not connected");
     return MES_ERR_DISCONNECTED;
   }
 
-  if (streaming_) {
+  if (streaming_.load(std::memory_order_acquire)) {
     return MES_OK;
   }
 
@@ -111,11 +115,10 @@ mes_error_t BinlogClient::StartStream() {
     return rc;
   }
 
-  streaming_ = true;
+  streaming_.store(true, std::memory_order_release);
 
   // Create bounded event queue and launch reader thread
-  size_t queue_size =
-      config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
+  size_t queue_size = config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
   event_queue_ = std::make_unique<EventQueue>(queue_size);
   reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
 
@@ -129,10 +132,9 @@ mes_error_t BinlogClient::StartStreamMySQL() {
   {
     protocol::QueryResult qr;
     std::string err;
-    if (protocol::ExecuteQuery(conn_.Socket(),
-                               "SET @source_binlog_checksum='CRC32'", &qr,
-                               &err) != MES_OK) {
-      last_error_ = err;
+    if (protocol::ExecuteQuery(conn_.Socket(), "SET @source_binlog_checksum='CRC32'", &qr, &err) !=
+        MES_OK) {
+      SetLastError(err);
       return MES_ERR_STREAM;
     }
   }
@@ -141,26 +143,20 @@ mes_error_t BinlogClient::StartStreamMySQL() {
   {
     protocol::QueryResult qr;
     std::string err;
-    std::string hb_query =
-        "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
-    mes_error_t hb_rc =
-        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
+    std::string hb_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+    mes_error_t hb_rc = protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
     if (hb_rc != MES_OK) {
-      StructuredLog()
-          .Event("heartbeat_setup_failed")
-          .Field("error", err)
-          .Warn();
+      StructuredLog().Event("heartbeat_setup_failed").Field("error", err).Warn();
     }
   }
 
   // Encode GTID set
-  std::string start_gtid =
-      GtidEncoder::ConvertSingleGtidToRange(config_.start_gtid);
+  std::string start_gtid = GtidEncoder::ConvertSingleGtidToRange(config_.start_gtid);
 
   if (!start_gtid.empty()) {
     mes_error_t rc = GtidEncoder::Encode(start_gtid.c_str(), &gtid_encoded_);
     if (rc != MES_OK) {
-      last_error_ = "Failed to encode GTID set";
+      SetLastError("Failed to encode GTID set");
       return rc;
     }
   }
@@ -173,7 +169,7 @@ mes_error_t BinlogClient::StartStreamMySQL() {
 
   auto rc = binlog_stream_.Start(conn_.Socket(), stream_config);
   if (rc != MES_OK) {
-    last_error_ = "Failed to start binlog stream";
+    SetLastError("Failed to start binlog stream");
     return MES_ERR_STREAM;
   }
 
@@ -185,49 +181,37 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   std::string err;
 
   // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
-  if (protocol::ExecuteQuery(
-          conn_.Socket(),
-          "SET @master_binlog_checksum = @@global.binlog_checksum", &qr,
-          &err) != MES_OK) {
-    last_error_ = "Failed to set MariaDB binlog checksum: " + err;
+  if (protocol::ExecuteQuery(conn_.Socket(),
+                             "SET @master_binlog_checksum = @@global.binlog_checksum", &qr,
+                             &err) != MES_OK) {
+    SetLastError("Failed to set MariaDB binlog checksum: " + err);
     return MES_ERR_STREAM;
   }
 
   // Strict GTID mode: fail on GTID gap rather than silently skipping
   {
-    mes_error_t rc = protocol::ExecuteQuery(
-        conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr, &err);
+    mes_error_t rc =
+        protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr, &err);
     if (rc != MES_OK) {
-      StructuredLog()
-          .Event("mariadb_strict_mode_failed")
-          .Field("error", err)
-          .Warn();
+      StructuredLog().Event("mariadb_strict_mode_failed").Field("error", err).Warn();
     }
   }
 
   // Don't skip duplicate GTIDs
   {
-    mes_error_t rc = protocol::ExecuteQuery(
-        conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0", &qr, &err);
+    mes_error_t rc =
+        protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0", &qr, &err);
     if (rc != MES_OK) {
-      StructuredLog()
-          .Event("mariadb_ignore_duplicates_failed")
-          .Field("error", err)
-          .Warn();
+      StructuredLog().Event("mariadb_ignore_duplicates_failed").Field("error", err).Warn();
     }
   }
 
   // Heartbeat period
   {
-    std::string hb_query =
-        "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
-    mes_error_t rc =
-        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
+    std::string hb_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
     if (rc != MES_OK) {
-      StructuredLog()
-          .Event("heartbeat_setup_failed")
-          .Field("error", err)
-          .Warn();
+      StructuredLog().Event("heartbeat_setup_failed").Field("error", err).Warn();
     }
   }
 
@@ -235,9 +219,8 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   {
     protocol::QueryResult checksum_qr;
     std::string checksum_err;
-    if (protocol::ExecuteQuery(conn_.Socket(),
-                               "SELECT @@global.binlog_checksum",
-                               &checksum_qr, &checksum_err) == MES_OK &&
+    if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@global.binlog_checksum", &checksum_qr,
+                               &checksum_err) == MES_OK &&
         !checksum_qr.rows.empty() && !checksum_qr.rows[0].values.empty()) {
       std::string val = checksum_qr.rows[0].values[0];
       checksum_enabled_ = (val != "NONE" && val != "none");
@@ -249,19 +232,16 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   // Empty string means "start from current binlog position".
   std::string gtid = config_.start_gtid;
   if (!IsValidMariaDBGtidSet(gtid)) {
-    last_error_ = "Invalid MariaDB GTID format: contains disallowed characters";
+    SetLastError("Invalid MariaDB GTID format: contains disallowed characters");
     return MES_ERR_INVALID_ARG;
   }
   std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
   if (protocol::ExecuteQuery(conn_.Socket(), gtid_query, &qr, &err) != MES_OK) {
-    last_error_ = "Failed to set slave_connect_state: " + err;
+    SetLastError("Failed to set slave_connect_state: " + err);
     return MES_ERR_STREAM;
   }
 
-  StructuredLog()
-      .Event("mariadb_gtid_state_set")
-      .Field("gtid", gtid)
-      .Debug();
+  StructuredLog().Event("mariadb_gtid_state_set").Field("gtid", gtid).Debug();
 
   // Start binlog stream via COM_BINLOG_DUMP (not COM_BINLOG_DUMP_GTID)
   protocol::BinlogStreamConfig stream_config;
@@ -270,7 +250,7 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
 
   auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
   if (rc != MES_OK) {
-    last_error_ = "Failed to start MariaDB binlog stream";
+    SetLastError("Failed to start MariaDB binlog stream");
     return MES_ERR_STREAM;
   }
 
@@ -327,8 +307,13 @@ void BinlogClient::ReaderLoop() {
     // Update GTID tracking (protected by gtid_mutex_)
     UpdateGtidFromEvent(event_pkt.data, event_pkt.size);
 
-    // Copy event data and push to queue
-    // Push blocks if queue is full (backpressure → TCP flow control)
+    // Copy event data and push to queue.
+    // Push blocks if queue is full (backpressure -> TCP flow control).
+    // TODO(perf): eliminate this per-event copy by having
+    // protocol::BinlogStream::FetchEvent hand off ownership of the event
+    // buffer (e.g. via std::vector<uint8_t>&& or a pooled allocator). That
+    // is a cross-cutting refactor spanning the protocol layer and is
+    // intentionally deferred to avoid conflicting changes in that module.
     QueuedEvent qe;
     qe.data.assign(event_pkt.data, event_pkt.data + event_pkt.size);
     qe.error = MES_OK;
@@ -341,29 +326,29 @@ void BinlogClient::ReaderLoop() {
 }
 
 PollResult BinlogClient::Poll() {
-  if (!streaming_ || !event_queue_) {
+  if (!streaming_.load(std::memory_order_acquire) || !event_queue_) {
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
   QueuedEvent event;
   if (!event_queue_->Pop(&event)) {
     // Queue closed (shutdown)
-    streaming_ = false;
+    streaming_.store(false, std::memory_order_release);
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
   if (event.error != MES_OK) {
     // Error from reader thread
-    last_error_ = "Binlog stream read error";
-    LogBinlogError("poll_error", GetCurrentGtid(), last_error_);
-    streaming_ = false;
+    const std::string err_msg = "Binlog stream read error";
+    SetLastError(err_msg);
+    LogBinlogError("poll_error", GetCurrentGtid(), err_msg);
+    streaming_.store(false, std::memory_order_release);
     return {event.error, nullptr, 0, false};
   }
 
   // Store event data so pointer remains valid until next Poll()
   current_event_ = std::move(event);
-  return {MES_OK, current_event_.data.data(), current_event_.data.size(),
-          false};
+  return {MES_OK, current_event_.data.data(), current_event_.data.size(), false};
 }
 
 void BinlogClient::Stop() {
@@ -372,10 +357,18 @@ void BinlogClient::Stop() {
 }
 
 void BinlogClient::StopReaderThread() {
+  // Shutdown order (must match FetchEvent unblock contract):
+  //   1. stop_requested_  -> reader loop condition flips to break on next iter
+  //   2. streaming_       -> Poll() fast-path short-circuits for any concurrent
+  //                          caller before event_queue_ is destroyed below
+  //   3. event_queue_.Close() -> unblocks Pop() in Poll() and Push() in reader
+  //   4. socket.Shutdown() -> unblocks a FetchEvent() currently in recv(). The
+  //      protocol layer relies on the socket's half-close causing the pending
+  //      syscall to return with an error; reader thread then sees
+  //      stop_requested_ and exits cleanly.
+  //   5. join() the reader.
   stop_requested_.store(true, std::memory_order_release);
-  // Poll() checks both !streaming_ and !event_queue_ (early exit for
-  // concurrent callers before event_queue_ is reset below).
-  streaming_ = false;
+  streaming_.store(false, std::memory_order_release);
 
   if (event_queue_) {
     event_queue_->Close();
@@ -406,9 +399,22 @@ void BinlogClient::Disconnect() {
 
 bool BinlogClient::IsConnected() const { return conn_.IsConnected(); }
 
-const char* BinlogClient::GetLastError() const { return last_error_.c_str(); }
+const char* BinlogClient::GetLastError() const {
+  // Snapshot last_error_ into a separate buffer so the returned c_str() is
+  // not invalidated by a concurrent writer resizing last_error_. Per mes.h
+  // contract, the pointer is valid until the next GetLastError() call on
+  // this BinlogClient.
+  std::lock_guard<std::mutex> lock(last_error_mutex_);
+  last_error_snapshot_ = last_error_;
+  return last_error_snapshot_.c_str();
+}
 
 const char* BinlogClient::GetCurrentGtid() const {
+  // NOTE(review): gtid_snapshot_ is a shared buffer protected by
+  // gtid_mutex_. The returned pointer is valid only until the next
+  // GetCurrentGtid() call on this BinlogClient. If multiple threads call
+  // this method concurrently, they must synchronize externally to avoid
+  // one caller's pointer being invalidated by another's assignment.
   std::lock_guard<std::mutex> lock(gtid_mutex_);
   gtid_snapshot_ = current_gtid_;
   return gtid_snapshot_.c_str();
@@ -424,8 +430,7 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
   uint8_t event_type = data[4];
 
   // MariaDB GTID event (type 162)
-  if (event_type ==
-      static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent)) {
+  if (event_type == static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent)) {
     std::string gtid_str;
     if (MariaDBEventParser::ExtractGtid(data, size, &gtid_str) == MES_OK) {
       std::lock_guard<std::mutex> lock(gtid_mutex_);
@@ -452,24 +457,19 @@ void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
 
   // Format UUID
   char uuid_str[37];
-  std::snprintf(
-      uuid_str, sizeof(uuid_str),
-      "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-      uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-      uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14],
-      uuid[15]);
+  std::snprintf(uuid_str, sizeof(uuid_str),
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid[0],
+                uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9],
+                uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
 
   // Format: "uuid:gno"
   char gtid_buf[80];
-  std::snprintf(gtid_buf, sizeof(gtid_buf), "%s:%lld", uuid_str,
-                static_cast<long long>(gno));
+  std::snprintf(gtid_buf, sizeof(gtid_buf), "%s:%lld", uuid_str, static_cast<long long>(gno));
 
   std::lock_guard<std::mutex> lock(gtid_mutex_);
   current_gtid_ = gtid_buf;
 }
 
-uint64_t BinlogClient::GetCRCErrors() const {
-  return crc_errors_.load(std::memory_order_relaxed);
-}
+uint64_t BinlogClient::GetCRCErrors() const { return crc_errors_.load(std::memory_order_relaxed); }
 
 }  // namespace mes

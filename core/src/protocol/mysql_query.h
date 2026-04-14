@@ -56,9 +56,8 @@ struct QueryResult {
  *                       true)
  * @return MES_OK on success, MES_ERR_STREAM on protocol or MySQL error
  */
-mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
-                         QueryResult* result, std::string* error_msg,
-                         bool deprecate_eof = true);
+mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResult* result,
+                         std::string* error_msg, bool deprecate_eof = true);
 
 }  // namespace mes::protocol
 

@@ -1,22 +1,20 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "state_machine.h"
+#include <gtest/gtest.h>
 
 #include <cstring>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "crc32.h"
+#include "state_machine.h"
 #include "test_helpers.h"
 
 namespace mes {
 namespace {
 
 // Convenience wrapper matching the old local signature (server_id=1, next_position=0)
-std::vector<uint8_t> BuildEvent(uint8_t type_code,
-                                const std::vector<uint8_t>& body) {
+std::vector<uint8_t> BuildEvent(uint8_t type_code, const std::vector<uint8_t>& body) {
   return test::BuildEvent(type_code, 1000, 0, body);
 }
 
@@ -218,7 +216,7 @@ TEST(StateMachineTest, HeaderParseFailure) {
   uint8_t bad_header[19];
   memset(bad_header, 0, sizeof(bad_header));
   // Set event_length to a too-small value (e.g., 10)
-  bad_header[9] = 10;   // event_length LE byte 0
+  bad_header[9] = 10;  // event_length LE byte 0
   bad_header[10] = 0;
   bad_header[11] = 0;
   bad_header[12] = 0;
@@ -276,8 +274,8 @@ TEST(StateMachineTest, ErrorRecoveryViaResetThenFeedValid) {
   // Feed invalid header to trigger kError
   uint8_t bad_header[kEventHeaderSize];
   memset(bad_header, 0, sizeof(bad_header));
-  bad_header[4] = 30;   // type_code
-  bad_header[9] = 5;    // event_length too small (< 23)
+  bad_header[4] = 30;  // type_code
+  bad_header[9] = 5;   // event_length too small (< 23)
   parser.Feed(bad_header, kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
 
@@ -400,8 +398,7 @@ TEST(StateMachineTest, CorruptedChecksumDetected) {
   uint32_t computed = ComputeCRC32(event.data(), data_len);
   uint32_t stored = 0;
   std::memcpy(&stored, event.data() + data_len, sizeof(stored));
-  EXPECT_NE(computed, stored)
-      << "Corrupted event should have mismatched checksum";
+  EXPECT_NE(computed, stored) << "Corrupted event should have mismatched checksum";
 }
 
 }  // namespace

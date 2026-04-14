@@ -35,14 +35,13 @@ namespace {
 
 TEST(E2EEngine, EmptyResultSet) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult result;
   std::string err;
-  auto rc = mes::protocol::ExecuteQuery(
-      conn.Socket(), "SELECT * FROM mes_test.items WHERE 1=0", &result, &err);
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT * FROM mes_test.items WHERE 1=0",
+                                        &result, &err);
   ASSERT_EQ(rc, MES_OK) << err;
   EXPECT_EQ(result.rows.size(), 0u);
   EXPECT_EQ(result.column_names.size(), 3u);
@@ -53,27 +52,23 @@ TEST(E2EEngine, EmptyResultSet) {
 TEST(E2EEngine, ManyRowsResult) {
   // Insert 100 rows using a single INSERT with generated values
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult qr;
   std::string err;
 
   // Build a multi-row INSERT: INSERT INTO ... VALUES (...), (...), ...
-  std::string sql =
-      "INSERT INTO mes_test.items (name, value) VALUES ";
+  std::string sql = "INSERT INTO mes_test.items (name, value) VALUES ";
   for (int i = 0; i < 100; i++) {
     if (i > 0) sql += ", ";
     sql += "('many_rows_" + std::to_string(i) + "', " + std::to_string(i) + ")";
   }
-  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err), MES_OK)
-      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err), MES_OK) << err;
 
   // Verify via SELECT COUNT(*)
   ASSERT_EQ(mes::protocol::ExecuteQuery(
-                conn.Socket(),
-                "SELECT COUNT(*) FROM mes_test.items WHERE name LIKE 'many_rows_%'",
+                conn.Socket(), "SELECT COUNT(*) FROM mes_test.items WHERE name LIKE 'many_rows_%'",
                 &qr, &err),
             MES_OK)
       << err;
@@ -82,15 +77,13 @@ TEST(E2EEngine, ManyRowsResult) {
 
   // Cleanup
   mes::protocol::ExecuteQuery(
-      conn.Socket(),
-      "DELETE FROM mes_test.items WHERE name LIKE 'many_rows_%'", &qr, &err);
+      conn.Socket(), "DELETE FROM mes_test.items WHERE name LIKE 'many_rows_%'", &qr, &err);
   conn.Disconnect();
 }
 
 TEST(E2EEngine, LongQueryString) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   // Build a SELECT with a 32KB SQL comment to test multi-packet COM_QUERY
@@ -110,8 +103,7 @@ TEST(E2EEngine, LongQueryString) {
 
 TEST(E2EEngine, WideColumnQuery) {
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         0, "", "", ""),
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   // SELECT 1 AS c1, 2 AS c2, ... 50 AS c50
@@ -140,8 +132,7 @@ TEST(E2EEngine, WideColumnQuery) {
 TEST(E2EEngine, MultipleSequentialConnections) {
   for (int i = 0; i < 10; i++) {
     mes::protocol::MysqlConnection conn;
-    auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                           kTimeout, 0, "", "", "");
+    auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", "");
     ASSERT_EQ(rc, MES_OK) << "Connection " << i << " failed";
     EXPECT_TRUE(conn.IsConnected());
 
@@ -162,14 +153,11 @@ TEST(E2EEngine, ConcurrentConnections) {
   // Tests that multiple simultaneous connections do not interfere.
   mes::protocol::MysqlConnection conn1, conn2, conn3;
 
-  ASSERT_EQ(conn1.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                          kTimeout, 0, "", "", ""),
+  ASSERT_EQ(conn1.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
-  ASSERT_EQ(conn2.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                          kTimeout, 0, "", "", ""),
+  ASSERT_EQ(conn2.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
-  ASSERT_EQ(conn3.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                          kTimeout, 0, "", "", ""),
+  ASSERT_EQ(conn3.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
             MES_OK);
 
   EXPECT_TRUE(conn1.IsConnected());
@@ -177,17 +165,14 @@ TEST(E2EEngine, ConcurrentConnections) {
   EXPECT_TRUE(conn3.IsConnected());
 
   // Each connection should have a distinct connection_id
-  EXPECT_NE(conn1.GetServerInfo().connection_id,
-            conn2.GetServerInfo().connection_id);
-  EXPECT_NE(conn2.GetServerInfo().connection_id,
-            conn3.GetServerInfo().connection_id);
+  EXPECT_NE(conn1.GetServerInfo().connection_id, conn2.GetServerInfo().connection_id);
+  EXPECT_NE(conn2.GetServerInfo().connection_id, conn3.GetServerInfo().connection_id);
 
   // Query on each independently
   for (auto* conn : {&conn1, &conn2, &conn3}) {
     mes::protocol::QueryResult result;
     std::string err;
-    auto rc =
-        mes::protocol::ExecuteQuery(conn->Socket(), "SELECT 1", &result, &err);
+    auto rc = mes::protocol::ExecuteQuery(conn->Socket(), "SELECT 1", &result, &err);
     ASSERT_EQ(rc, MES_OK) << err;
     ASSERT_EQ(result.rows.size(), 1u);
   }
@@ -221,10 +206,8 @@ TEST(E2EEngine, StreamConnectAndPoll) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // Poll a few times; we expect either heartbeats or timeouts, no crash
   for (int i = 0; i < 3; i++) {
@@ -242,18 +225,16 @@ TEST(E2EEngine, StreamConnectAndPoll) {
 
 TEST(E2EEngine, EventOrderMatchesCommitOrder) {
   // Clean up any leftover rows
-  ASSERT_EQ(ExecuteDML("DELETE FROM mes_test.items WHERE name LIKE 'order_%'"),
-            MES_OK);
+  ASSERT_EQ(ExecuteDML("DELETE FROM mes_test.items WHERE name LIKE 'order_%'"), MES_OK);
 
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
   // INSERT 5 rows with distinct values in order
   for (int v : {10, 20, 30, 40, 50}) {
-    ASSERT_EQ(
-        ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('order_" +
-                   std::to_string(v) + "', " + std::to_string(v) + ")"),
-        MES_OK);
+    ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('order_" +
+                         std::to_string(v) + "', " + std::to_string(v) + ")"),
+              MES_OK);
   }
 
   auto events = CaptureTableEvents(gtid, 605, "items", 5);
@@ -262,14 +243,13 @@ TEST(E2EEngine, EventOrderMatchesCommitOrder) {
   // Filter to only our test rows
   std::vector<CapturedEvent> order_events;
   for (const auto& e : items_events) {
-    if (e.type == MES_EVENT_INSERT && !e.after.empty() &&
-        e.after.size() >= 2 && e.after[1].str_data.find("order_") == 0) {
+    if (e.type == MES_EVENT_INSERT && !e.after.empty() && e.after.size() >= 2 &&
+        e.after[1].str_data.find("order_") == 0) {
       order_events.push_back(e);
     }
   }
 
-  ASSERT_GE(order_events.size(), 5u)
-      << "Expected at least 5 order_* INSERT events";
+  ASSERT_GE(order_events.size(), 5u) << "Expected at least 5 order_* INSERT events";
 
   // Verify they arrive in commit order: values 10, 20, 30, 40, 50
   for (size_t i = 0; i < 5; i++) {
@@ -375,18 +355,16 @@ TEST(E2EEngine, TableFilterExclude) {
 
 TEST(E2EEngine, BackpressureMaxQueueSize) {
   // Clean up leftover rows
-  ASSERT_EQ(
-      ExecuteDML("DELETE FROM mes_test.items WHERE name LIKE 'bp_%'"), MES_OK);
+  ASSERT_EQ(ExecuteDML("DELETE FROM mes_test.items WHERE name LIKE 'bp_%'"), MES_OK);
 
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
   // INSERT 5 rows
   for (int i = 0; i < 5; i++) {
-    ASSERT_EQ(
-        ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('bp_" +
-                   std::to_string(i) + "', " + std::to_string(i) + ")"),
-        MES_OK);
+    ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('bp_" +
+                         std::to_string(i) + "', " + std::to_string(i) + ")"),
+              MES_OK);
   }
 
   // Create engine with max_queue_size=2
@@ -413,10 +391,8 @@ TEST(E2EEngine, BackpressureMaxQueueSize) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // Feed and drain loop: collect all events, verifying queue never exceeds limit
   std::vector<CapturedEvent> all_events;
@@ -487,10 +463,8 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   // Poll once to confirm stream is working
   auto result = mes_client_poll(client);
@@ -503,10 +477,8 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
   mes_client_destroy(client);
 
   // Second connection: reconnect with a new client and verify streaming works
-  ASSERT_EQ(
-      ExecuteDML(
-          "INSERT INTO mes_test.items (name, value) VALUES ('reconn_test', 77)"),
-      MES_OK);
+  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('reconn_test', 77)"),
+            MES_OK);
 
   std::string gtid2 = GetCurrentGtid();
 
@@ -525,10 +497,8 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
 
   config.server_id = 608;
   config.start_gtid = gtid_before.c_str();
-  ASSERT_EQ(mes_client_connect(client2, &config), MES_OK)
-      << mes_client_last_error(client2);
-  ASSERT_EQ(mes_client_start(client2), MES_OK)
-      << mes_client_last_error(client2);
+  ASSERT_EQ(mes_client_connect(client2, &config), MES_OK) << mes_client_last_error(client2);
+  ASSERT_EQ(mes_client_start(client2), MES_OK) << mes_client_last_error(client2);
 
   mes_engine_t* engine = mes_create();
   ASSERT_NE(engine, nullptr);
@@ -546,8 +516,7 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT &&
-          std::strcmp(event->table, "items") == 0) {
+      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
         found = true;
         break;
       }
@@ -573,10 +542,9 @@ TEST(E2EEngine, GtidTracking) {
 
   // INSERT 3 rows to generate binlog events
   for (int i = 0; i < 3; i++) {
-    ASSERT_EQ(
-        ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('gtid_" +
-                   std::to_string(i) + "', " + std::to_string(i) + ")"),
-        MES_OK);
+    ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('gtid_" +
+                         std::to_string(i) + "', " + std::to_string(i) + ")"),
+              MES_OK);
   }
 
   mes_client_t* client = mes_client_create();
@@ -597,10 +565,8 @@ TEST(E2EEngine, GtidTracking) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-      << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK)
-      << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
   mes_engine_t* engine = mes_create();
   ASSERT_NE(engine, nullptr);
@@ -619,8 +585,7 @@ TEST(E2EEngine, GtidTracking) {
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT &&
-          std::strcmp(event->table, "items") == 0) {
+      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
         items_count++;
       }
     }

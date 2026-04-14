@@ -34,8 +34,8 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
   ssl_cert_ = ssl_cert;
   ssl_key_ = ssl_key;
 
-  return conn_.Connect(host, port, user, password, connect_timeout_s,
-                       0 /* read_timeout */, ssl_mode, ssl_ca, ssl_cert, ssl_key);
+  return conn_.Connect(host, port, user, password, connect_timeout_s, 0 /* read_timeout */,
+                       ssl_mode, ssl_ca, ssl_cert, ssl_key);
 }
 
 void MetadataFetcher::Disconnect() {
@@ -72,9 +72,8 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     if (attempt == 0) {
       // Reconnect and retry
       conn_.Disconnect();
-      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_,
-                        0 /* read_timeout */, ssl_mode_, ssl_ca_, ssl_cert_,
-                        ssl_key_) == MES_OK) {
+      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, 0 /* read_timeout */,
+                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_) == MES_OK) {
         continue;
       }
     }

@@ -28,8 +28,7 @@ constexpr uint16_t kBinlogThroughGtid = 0x04;
 
 }  // namespace
 
-mes_error_t BinlogStream::Start(SocketHandle* sock,
-                                const BinlogStreamConfig& config) {
+mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& config) {
   // Build COM_BINLOG_DUMP_GTID payload:
   //   [1] command byte
   //   [2] flags (LE)
@@ -50,12 +49,10 @@ mes_error_t BinlogStream::Start(SocketHandle* sock,
   WriteFixedInt(&payload, flags, 2);
   WriteFixedInt(&payload, config.server_id, 4);
   WriteFixedInt(&payload, config.binlog_filename.size(), 4);
-  payload.insert(payload.end(), config.binlog_filename.begin(),
-                 config.binlog_filename.end());
+  payload.insert(payload.end(), config.binlog_filename.begin(), config.binlog_filename.end());
   WriteFixedInt(&payload, config.binlog_position, 8);
   WriteFixedInt(&payload, config.gtid_encoded.size(), 4);
-  payload.insert(payload.end(), config.gtid_encoded.begin(),
-                 config.gtid_encoded.end());
+  payload.insert(payload.end(), config.gtid_encoded.begin(), config.gtid_encoded.end());
 
   // Send as a single command packet with sequence_id = 0
   PacketBuffer pkt_buf;
@@ -65,8 +62,7 @@ mes_error_t BinlogStream::Start(SocketHandle* sock,
   return sock->WriteAll(pkt_buf.Data(), pkt_buf.Size());
 }
 
-mes_error_t BinlogStream::FetchEvent(SocketHandle* sock,
-                                     BinlogEventPacket* result) {
+mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, BinlogEventPacket* result) {
   uint8_t seq_id = 0;
   mes_error_t rc = ReadPacket(sock, &packet_buf_, &seq_id);
   if (rc != MES_OK) {
@@ -106,8 +102,7 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock,
     // Check event type at offset 4 within the binlog event header.
     // The binlog event header starts right after the OK byte (index 1).
     // Event type is at byte 4 of the event header, so index 1+4=5.
-    if (packet_buf_.size() > 5 &&
-        packet_buf_[5] == kHeartbeatLogEvent) {
+    if (packet_buf_.size() > 5 && packet_buf_[5] == kHeartbeatLogEvent) {
       result->data = packet_buf_.data() + 1;
       result->size = packet_buf_.size() - 1;
       result->is_heartbeat = true;
@@ -125,8 +120,7 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock,
   return MES_ERR_STREAM;
 }
 
-mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock,
-                                              const BinlogStreamConfig& config) {
+mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock, const BinlogStreamConfig& config) {
   // Build COM_BINLOG_DUMP payload:
   //   [1] command byte (0x12)
   //   [4] binlog position (LE)
@@ -139,8 +133,7 @@ mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock,
   WriteFixedInt(&payload, config.binlog_position, 4);
   WriteFixedInt(&payload, config.flags, 2);
   WriteFixedInt(&payload, config.server_id, 4);
-  payload.insert(payload.end(), config.binlog_filename.begin(),
-                 config.binlog_filename.end());
+  payload.insert(payload.end(), config.binlog_filename.begin(), config.binlog_filename.end());
 
   PacketBuffer pkt_buf;
   uint8_t seq_id = 0;

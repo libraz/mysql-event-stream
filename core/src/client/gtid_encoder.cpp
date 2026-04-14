@@ -16,8 +16,7 @@
 
 namespace mes {
 
-mes_error_t GtidEncoder::Encode(const char* gtid_set,
-                                  std::vector<uint8_t>* out) {
+mes_error_t GtidEncoder::Encode(const char* gtid_set, std::vector<uint8_t>* out) {
   if (out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -111,8 +110,7 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set,
     std::map<std::array<uint8_t, 16>, std::vector<Interval>> merged_map;
     for (auto& sid : sids) {
       auto& intervals = merged_map[sid.uuid];
-      intervals.insert(intervals.end(), sid.intervals.begin(),
-                       sid.intervals.end());
+      intervals.insert(intervals.end(), sid.intervals.begin(), sid.intervals.end());
     }
 
     sids.clear();
@@ -128,9 +126,9 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set,
   // Calculate total size
   size_t total_size = 8;  // n_sids
   for (const auto& sid : sids) {
-    total_size += 16;                              // UUID
-    total_size += 8;                               // n_intervals
-    total_size += 16 * sid.intervals.size();       // intervals (start+end)
+    total_size += 16;                         // UUID
+    total_size += 8;                          // n_intervals
+    total_size += 16 * sid.intervals.size();  // intervals (start+end)
   }
 
   // Encode to binary
@@ -309,9 +307,7 @@ mes_error_t GtidEncoder::ParseInterval(const char* str, Interval* out) {
 void GtidEncoder::MergeIntervals(std::vector<Interval>& intervals) {
   if (intervals.size() <= 1) return;
   std::sort(intervals.begin(), intervals.end(),
-            [](const Interval& a, const Interval& b) {
-              return a.start < b.start;
-            });
+            [](const Interval& a, const Interval& b) { return a.start < b.start; });
   std::vector<Interval> merged;
   merged.push_back(intervals[0]);
   for (size_t i = 1; i < intervals.size(); ++i) {

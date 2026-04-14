@@ -49,8 +49,7 @@ class MariaDBEventParser {
    * @param[out] out GTID string in "domain-server-seq" format.
    * @return MES_OK on success, MES_ERR_PARSE on error.
    */
-  static mes_error_t ExtractGtid(const uint8_t* buffer, size_t length,
-                                  std::string* out);
+  static mes_error_t ExtractGtid(const uint8_t* buffer, size_t length, std::string* out);
 
   /**
    * @brief Parse MARIADB_GTID_LIST_EVENT (type 163).
@@ -68,7 +67,7 @@ class MariaDBEventParser {
    * @return MES_OK on success, MES_ERR_PARSE on error.
    */
   static mes_error_t ParseGtidList(const uint8_t* buffer, size_t length,
-                                    std::vector<MariaDBGtid>* out);
+                                   std::vector<MariaDBGtid>* out);
 
   /**
    * @brief Extract SQL text from MARIADB_ANNOTATE_ROWS_EVENT (type 160).
@@ -82,8 +81,8 @@ class MariaDBEventParser {
    * @param[out] out SQL text string.
    * @return MES_OK on success, MES_ERR_PARSE on error.
    */
-  static mes_error_t ExtractAnnotateRows(const uint8_t* buffer, size_t length,
-                                          bool has_checksum, std::string* out);
+  static mes_error_t ExtractAnnotateRows(const uint8_t* buffer, size_t length, bool has_checksum,
+                                         std::string* out);
 };
 
 }  // namespace mes

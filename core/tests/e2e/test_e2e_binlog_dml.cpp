@@ -54,8 +54,7 @@ TEST(E2EBinlogDML, InsertAllColumnTypes) {
       " '2024-01-15 10:30:00.123456')");
   ASSERT_EQ(rc, MES_OK);
 
-  auto events = e2e::CaptureTableEvents(
-      gtid, e2e::server_ids::kDmlInsertAllColumns, "users", 1);
+  auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlInsertAllColumns, "users", 1);
   auto filtered = e2e::FilterByTable(events, "users");
   ASSERT_GE(filtered.size(), 1u);
 
@@ -79,8 +78,7 @@ TEST(E2EBinlogDML, InsertAllColumnTypes) {
   // 6: is_active (TINYINT)
   EXPECT_EQ(ev.after[6].type, MES_COL_INT);
   // 7: bio (TEXT — decoded as BYTES in binlog, TEXT uses BLOB column type)
-  EXPECT_TRUE(ev.after[7].type == MES_COL_STRING ||
-              ev.after[7].type == MES_COL_BYTES);
+  EXPECT_TRUE(ev.after[7].type == MES_COL_STRING || ev.after[7].type == MES_COL_BYTES);
   // 9: created_at (DATETIME(3))
   EXPECT_EQ(ev.after[9].type, MES_COL_STRING);
   // 10: updated_at (TIMESTAMP(6))
@@ -102,8 +100,7 @@ TEST(E2EBinlogDML, InsertWithNulls) {
       "VALUES (1001, 'NullUser', 1, NOW(3), NOW(6))");
   ASSERT_EQ(rc, MES_OK);
 
-  auto events = e2e::CaptureTableEvents(
-      gtid, e2e::server_ids::kDmlInsertWithNulls, "users", 1);
+  auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlInsertWithNulls, "users", 1);
   auto filtered = e2e::FilterByTable(events, "users");
   ASSERT_GE(filtered.size(), 1u);
 
@@ -140,8 +137,7 @@ TEST(E2EBinlogDML, InsertMultiRow) {
       "('multi_a', 1), ('multi_b', 2), ('multi_c', 3)");
   ASSERT_EQ(rc, MES_OK);
 
-  auto events = e2e::CaptureTableEvents(
-      gtid, e2e::server_ids::kDmlInsertMultiRow, "items", 3);
+  auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlInsertMultiRow, "items", 3);
   auto filtered = e2e::FilterByTable(events, "items");
   ASSERT_EQ(filtered.size(), 3u);
 
@@ -167,18 +163,15 @@ TEST(E2EBinlogDML, InsertMultiRow) {
 
 TEST(E2EBinlogDML, UpdateSubset) {
   // Insert a row first
-  e2e::ExecuteDML(
-      "INSERT INTO mes_test.items (name, value) VALUES ('upd_subset', 100)");
+  e2e::ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('upd_subset', 100)");
 
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc = e2e::ExecuteDML(
-      "UPDATE mes_test.items SET value = 999 WHERE name = 'upd_subset'");
+  auto rc = e2e::ExecuteDML("UPDATE mes_test.items SET value = 999 WHERE name = 'upd_subset'");
   ASSERT_EQ(rc, MES_OK);
 
-  auto events = e2e::CaptureTableEvents(
-      gtid, e2e::server_ids::kDmlUpdateSubset, "items", 1);
+  auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlUpdateSubset, "items", 1);
   auto filtered = e2e::FilterByTable(events, "items");
   ASSERT_GE(filtered.size(), 1u);
 
@@ -218,8 +211,7 @@ TEST(E2EBinlogDML, UpdateAllColumns) {
       "WHERE id = 1004");
   ASSERT_EQ(rc, MES_OK);
 
-  auto events = e2e::CaptureTableEvents(
-      gtid, e2e::server_ids::kDmlUpdateAllColumns, "users", 1);
+  auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlUpdateAllColumns, "users", 1);
   auto filtered = e2e::FilterByTable(events, "users");
   ASSERT_GE(filtered.size(), 1u);
 
@@ -245,14 +237,12 @@ TEST(E2EBinlogDML, UpdateAllColumns) {
 // ---- DeleteSingleRow ----
 
 TEST(E2EBinlogDML, DeleteSingleRow) {
-  e2e::ExecuteDML(
-      "INSERT INTO mes_test.items (name, value) VALUES ('del_single', 42)");
+  e2e::ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('del_single', 42)");
 
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc =
-      e2e::ExecuteDML("DELETE FROM mes_test.items WHERE name = 'del_single'");
+  auto rc = e2e::ExecuteDML("DELETE FROM mes_test.items WHERE name = 'del_single'");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 505, "items", 1);
@@ -295,8 +285,7 @@ TEST(E2EBinlogDML, MultiRowUpdate) {
   }
 
   // Cleanup
-  e2e::ExecuteDML(
-      "DELETE FROM mes_test.items WHERE name IN ('mru_a','mru_b','mru_c')");
+  e2e::ExecuteDML("DELETE FROM mes_test.items WHERE name IN ('mru_a','mru_b','mru_c')");
 }
 
 // ---- MultiRowDelete ----
@@ -309,8 +298,7 @@ TEST(E2EBinlogDML, MultiRowDelete) {
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc = e2e::ExecuteDML(
-      "DELETE FROM mes_test.items WHERE name IN ('mrd_a', 'mrd_b', 'mrd_c')");
+  auto rc = e2e::ExecuteDML("DELETE FROM mes_test.items WHERE name IN ('mrd_a', 'mrd_b', 'mrd_c')");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 507, "items", 3);
@@ -328,43 +316,33 @@ TEST(E2EBinlogDML, MultiRowDelete) {
 
 TEST(E2EBinlogDML, TransactionMultipleDml) {
   // Pre-insert a row for the UPDATE and DELETE within the transaction
-  e2e::ExecuteDML(
-      "INSERT INTO mes_test.items (name, value) VALUES ('txn_target', 50)");
+  e2e::ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('txn_target', 50)");
 
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
   // Use a single connection for the entire transaction
   mes::protocol::MysqlConnection conn;
-  ASSERT_EQ(conn.Connect(e2e::kHost, e2e::kPort, e2e::kRootUser,
-                          e2e::kRootPass, e2e::kTimeout, e2e::kTimeout, 0, "",
-                          "", ""),
+  ASSERT_EQ(conn.Connect(e2e::kHost, e2e::kPort, e2e::kRootUser, e2e::kRootPass, e2e::kTimeout,
+                         e2e::kTimeout, 0, "", "", ""),
             MES_OK);
 
   mes::protocol::QueryResult qr;
   std::string err;
 
-  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), "BEGIN", &qr, &err),
+  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), "BEGIN", &qr, &err), MES_OK);
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                conn.Socket(), "INSERT INTO mes_test.items (name, value) VALUES ('txn_insert', 60)",
+                &qr, &err),
             MES_OK);
-  ASSERT_EQ(
-      mes::protocol::ExecuteQuery(
-          conn.Socket(),
-          "INSERT INTO mes_test.items (name, value) VALUES ('txn_insert', 60)",
-          &qr, &err),
-      MES_OK);
-  ASSERT_EQ(
-      mes::protocol::ExecuteQuery(
-          conn.Socket(),
-          "UPDATE mes_test.items SET value = 55 WHERE name = 'txn_target'", &qr,
-          &err),
-      MES_OK);
-  ASSERT_EQ(
-      mes::protocol::ExecuteQuery(
-          conn.Socket(),
-          "DELETE FROM mes_test.items WHERE name = 'txn_insert'", &qr, &err),
-      MES_OK);
-  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), "COMMIT", &qr, &err),
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                conn.Socket(), "UPDATE mes_test.items SET value = 55 WHERE name = 'txn_target'",
+                &qr, &err),
             MES_OK);
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                conn.Socket(), "DELETE FROM mes_test.items WHERE name = 'txn_insert'", &qr, &err),
+            MES_OK);
+  ASSERT_EQ(mes::protocol::ExecuteQuery(conn.Socket(), "COMMIT", &qr, &err), MES_OK);
   conn.Disconnect();
 
   // Capture 3 events for "items": INSERT, UPDATE, DELETE
@@ -402,8 +380,7 @@ TEST(E2EBinlogDML, LargeTextValue) {
 
   // Index 1: big_text (LONGTEXT — decoded as BYTES in binlog, TEXT uses BLOB type)
   ASSERT_GT(ev.after.size(), 1u);
-  EXPECT_TRUE(ev.after[1].type == MES_COL_STRING ||
-              ev.after[1].type == MES_COL_BYTES);
+  EXPECT_TRUE(ev.after[1].type == MES_COL_STRING || ev.after[1].type == MES_COL_BYTES);
   EXPECT_GE(ev.after[1].str_data.size(), 100000u);
 
   // Cleanup
@@ -462,8 +439,7 @@ TEST(E2EBinlogDML, UnicodeAndEmoji) {
   EXPECT_EQ(ev.after[1].type, MES_COL_STRING);
 
   // The string should contain the Japanese characters and emoji
-  std::string expected =
-      u8"\u65E5\u672C\u8A9E\u30C6\u30B9\u30C8\xF0\x9F\x8E\x89";
+  std::string expected = u8"\u65E5\u672C\u8A9E\u30C6\u30B9\u30C8\xF0\x9F\x8E\x89";
   EXPECT_EQ(ev.after[1].str_data, expected);
 
   // Cleanup
@@ -546,8 +522,7 @@ TEST(E2EBinlogDML, NullToNonNullUpdate) {
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc = e2e::ExecuteDML(
-      "UPDATE mes_test.users SET email = 'new@test.com' WHERE id = 1014");
+  auto rc = e2e::ExecuteDML("UPDATE mes_test.users SET email = 'new@test.com' WHERE id = 1014");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 514, "users", 1);
@@ -580,8 +555,7 @@ TEST(E2EBinlogDML, NonNullToNullUpdate) {
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc = e2e::ExecuteDML(
-      "UPDATE mes_test.users SET email = NULL WHERE id = 1015");
+  auto rc = e2e::ExecuteDML("UPDATE mes_test.users SET email = NULL WHERE id = 1015");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 515, "users", 1);
@@ -608,8 +582,7 @@ TEST(E2EBinlogDML, EmptyStringVsNull) {
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  auto rc = e2e::ExecuteDML(
-      "INSERT INTO mes_test.items (name, value) VALUES ('', 0)");
+  auto rc = e2e::ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('', 0)");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 516, "items", 1);

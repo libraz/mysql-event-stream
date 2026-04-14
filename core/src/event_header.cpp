@@ -30,9 +30,7 @@ size_t EventBodySize(const EventHeader& header) {
   return header.event_length - min_size;
 }
 
-bool IsRowEvent(BinlogEventType type) {
-  return IsRowEvent(static_cast<uint8_t>(type));
-}
+bool IsRowEvent(BinlogEventType type) { return IsRowEvent(static_cast<uint8_t>(type)); }
 
 bool IsRowEvent(uint8_t type_code) {
   switch (type_code) {

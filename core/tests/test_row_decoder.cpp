@@ -1,15 +1,14 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "row_decoder.h"
+#include <gtest/gtest.h>
 
 #include <cmath>
 #include <cstring>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "binary_util.h"
+#include "row_decoder.h"
 #include "test_helpers.h"
 
 namespace mes {
@@ -65,8 +64,7 @@ TEST(DecodeColumnValueTest, ShortSigned) {
   BinaryWriter w;
   w.WriteU16Le(static_cast<uint16_t>(-32768));
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kShort, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kShort, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 2u);
   EXPECT_EQ(val.int_val, -32768);
 }
@@ -75,8 +73,7 @@ TEST(DecodeColumnValueTest, ShortUnsigned) {
   BinaryWriter w;
   w.WriteU16Le(65535);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kShort, 0, true, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kShort, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 2u);
   EXPECT_EQ(val.int_val, 65535);
 }
@@ -85,8 +82,7 @@ TEST(DecodeColumnValueTest, LongSigned) {
   BinaryWriter w;
   w.WriteU32Le(static_cast<uint32_t>(-100));
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kLong, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLong, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(val.int_val, -100);
 }
@@ -95,8 +91,7 @@ TEST(DecodeColumnValueTest, LongUnsigned) {
   BinaryWriter w;
   w.WriteU32Le(4000000000u);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kLong, 0, true, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLong, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(val.int_val, 4000000000);
 }
@@ -105,8 +100,7 @@ TEST(DecodeColumnValueTest, LongLongSigned) {
   BinaryWriter w;
   w.WriteU64Le(static_cast<uint64_t>(-1000LL));
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, false, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(val.int_val, -1000);
 }
@@ -115,8 +109,7 @@ TEST(DecodeColumnValueTest, LongLongUnsigned) {
   BinaryWriter w;
   w.WriteU64Le(9000000000000000000ULL);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(static_cast<uint64_t>(val.int_val), 9000000000000000000ULL);
 }
@@ -126,8 +119,7 @@ TEST(DecodeColumnValueTest, Int24SignedNegative) {
   // -1 in 24-bit: 0xFFFFFF
   w.WriteU24Le(0xFFFFFF);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kInt24, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kInt24, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(val.int_val, -1);
 }
@@ -136,8 +128,7 @@ TEST(DecodeColumnValueTest, Int24SignedPositive) {
   BinaryWriter w;
   w.WriteU24Le(100);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kInt24, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kInt24, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(val.int_val, 100);
 }
@@ -146,8 +137,7 @@ TEST(DecodeColumnValueTest, Int24Unsigned) {
   BinaryWriter w;
   w.WriteU24Le(0xFFFFFF);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kInt24, 0, true, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kInt24, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(val.int_val, 0xFFFFFF);
 }
@@ -156,8 +146,7 @@ TEST(DecodeColumnValueTest, FloatNormal) {
   BinaryWriter w;
   w.WriteFloat(3.14f);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_FALSE(val.is_null);
   EXPECT_NEAR(val.real_val, 3.14, 0.01);
@@ -167,8 +156,7 @@ TEST(DecodeColumnValueTest, FloatZero) {
   BinaryWriter w;
   w.WriteFloat(0.0f);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_DOUBLE_EQ(val.real_val, 0.0);
 }
@@ -177,8 +165,7 @@ TEST(DecodeColumnValueTest, FloatNegative) {
   BinaryWriter w;
   w.WriteFloat(-1.5f);
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kFloat, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_NEAR(val.real_val, -1.5, 0.01);
 }
@@ -187,8 +174,7 @@ TEST(DecodeColumnValueTest, DoubleNormal) {
   BinaryWriter w;
   w.WriteDouble(2.718281828);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_NEAR(val.real_val, 2.718281828, 0.000001);
 }
@@ -197,8 +183,7 @@ TEST(DecodeColumnValueTest, DoubleZero) {
   BinaryWriter w;
   w.WriteDouble(0.0);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_DOUBLE_EQ(val.real_val, 0.0);
 }
@@ -207,8 +192,7 @@ TEST(DecodeColumnValueTest, DoubleNegative) {
   BinaryWriter w;
   w.WriteDouble(-999.999);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kDouble, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_NEAR(val.real_val, -999.999, 0.001);
 }
@@ -245,8 +229,7 @@ TEST(DecodeColumnValueTest, Date) {
   BinaryWriter w;
   w.WriteU24Le(val);
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kDate, 0, false, w.Data(), w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDate, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "2024-03-15");
 }
@@ -257,8 +240,7 @@ TEST(DecodeColumnValueTest, Datetime2NoFrac) {
   test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
 
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45");
 }
@@ -275,8 +257,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac3) {
   w.WriteU16Be(frac);
 
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.123000");
 }
@@ -292,8 +273,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac6) {
   w.WriteU24Be(frac);
 
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 6, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 6, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.123456");
 }
@@ -303,8 +283,7 @@ TEST(DecodeColumnValueTest, Timestamp2NoFrac) {
   BinaryWriter w;
   w.WriteU32Be(kTimestamp20240315_103045);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.string_val, "1710502245");
 }
@@ -315,8 +294,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac6) {
   // fsp=6, frac_bytes=3, stored as 123456
   w.WriteU24Be(123456);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 6, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 6, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.string_val, "1710502245.123456");
 }
@@ -331,8 +309,7 @@ TEST(DecodeColumnValueTest, Time2NoFrac) {
   BinaryWriter w;
   w.WriteU24Be(packed);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "10:30:45");
 }
@@ -345,8 +322,7 @@ TEST(DecodeColumnValueTest, Time2Negative) {
   BinaryWriter w;
   w.WriteU24Be(packed);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "-05:15:30");
 }
@@ -363,8 +339,7 @@ TEST(DecodeColumnValueTest, Time2WithFrac3) {
   uint16_t frac = 5000;
   w.WriteU16Be(frac);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime2, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "10:30:45.500000");
 }
@@ -375,8 +350,7 @@ TEST(DecodeColumnValueTest, VarcharShort) {
   w.WriteU8(5);
   w.WriteString("hello");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kVarchar, 100, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kVarchar, 100, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "hello");
 }
@@ -387,8 +361,7 @@ TEST(DecodeColumnValueTest, VarcharLong) {
   w.WriteU16Le(3);
   w.WriteString("abc");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kVarchar, 500, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kVarchar, 500, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "abc");
 }
@@ -398,8 +371,7 @@ TEST(DecodeColumnValueTest, BlobPack1) {
   w.WriteU8(3);
   w.WriteString("abc");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kBlob, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
   EXPECT_EQ(result.bytes_val[0], 'a');
@@ -410,8 +382,7 @@ TEST(DecodeColumnValueTest, BlobPack2) {
   w.WriteU16Le(5);
   w.WriteString("hello");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.bytes_val.size(), 5u);
 }
@@ -421,8 +392,7 @@ TEST(DecodeColumnValueTest, BlobPack4) {
   w.WriteU32Le(4);
   w.WriteString("test");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kBlob, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.bytes_val.size(), 4u);
 }
@@ -432,8 +402,7 @@ TEST(DecodeColumnValueTest, JsonAsBlob) {
   w.WriteU32Le(2);
   w.WriteString("{}");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -461,8 +430,7 @@ TEST(DecodeColumnValueTest, NewDecimal) {
 
   uint16_t meta = (10 << 8) | 2;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 5, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 5, &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "12345678.90");
 }
@@ -473,8 +441,7 @@ TEST(DecodeColumnValueTest, BitSingle) {
   uint8_t data[] = {1};
   uint16_t meta = (0 << 8) | 1;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kBit, meta, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBit, meta, false, data, 1, &consumed);
   EXPECT_EQ(consumed, 1u);
   EXPECT_EQ(result.int_val, 1);
 }
@@ -484,8 +451,7 @@ TEST(DecodeColumnValueTest, BitMultipleBytes) {
   uint8_t data[] = {0x01, 0x02};
   uint16_t meta = (2 << 8) | 0;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kBit, meta, false, data, 2, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBit, meta, false, data, 2, &consumed);
   EXPECT_EQ(consumed, 2u);
   EXPECT_EQ(result.int_val, 0x0102);
 }
@@ -496,8 +462,7 @@ TEST(DecodeColumnValueTest, StringEnum1Byte) {
   uint8_t data[] = {3};
   uint16_t meta = (0xF7 << 8) | 1;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kString, meta, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, data, 1, &consumed);
   EXPECT_EQ(consumed, 1u);
   EXPECT_EQ(result.type, ColumnType::kEnum);
   EXPECT_EQ(result.int_val, 3);
@@ -509,8 +474,7 @@ TEST(DecodeColumnValueTest, StringEnum2Byte) {
   w.WriteU16Le(300);
   uint16_t meta = (0xF7 << 8) | 2;
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 2u);
   EXPECT_EQ(result.type, ColumnType::kEnum);
   EXPECT_EQ(result.int_val, 300);
@@ -523,8 +487,7 @@ TEST(DecodeColumnValueTest, StringSet) {
   w.WriteU16Le(0x0005);
   uint16_t meta = (0xF8 << 8) | 2;
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 2u);
   EXPECT_EQ(result.type, ColumnType::kSet);
   EXPECT_EQ(result.int_val, 5);
@@ -539,8 +502,7 @@ TEST(DecodeColumnValueTest, StringChar) {
   w.WriteString("hello");
   uint16_t meta = 0xFE0A;
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "hello");
 }
@@ -583,8 +545,7 @@ TEST(DecodeWriteRowsTest, SingleRowIntVarchar) {
   w.WriteString("Alice");
 
   std::vector<RowData> rows;
-  ASSERT_TRUE(
-      DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
   ASSERT_EQ(rows.size(), 1u);
   ASSERT_EQ(rows[0].columns.size(), 2u);
   EXPECT_EQ(rows[0].columns[0].int_val, 42);
@@ -831,8 +792,7 @@ TEST(DecodeColumnValueTest, DateInsufficientData) {
 TEST(DecodeColumnValueTest, TimestampInsufficientData) {
   uint8_t data[] = {0, 0, 0};
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kTimestamp, 0, false, data, 3, &consumed);
+  auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, data, 3, &consumed);
   EXPECT_TRUE(val.is_null);
 }
 
@@ -842,8 +802,7 @@ TEST(DecodeColumnValueTest, Timestamp) {
   BinaryWriter w;
   w.WriteU32Le(kTimestamp20240315_103045);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(val.int_val, static_cast<int64_t>(kTimestamp20240315_103045));
 }
@@ -856,8 +815,7 @@ TEST(DecodeColumnValueTest, Time) {
   BinaryWriter w;
   w.WriteU24Le(val);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "10:30:45");
 }
@@ -869,8 +827,7 @@ TEST(DecodeColumnValueTest, Datetime) {
   BinaryWriter w;
   w.WriteU64Le(20240315103045ULL);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45");
 }
@@ -882,8 +839,7 @@ TEST(DecodeColumnValueTest, BlobPack3) {
   w.WriteU24Le(3);
   w.WriteString("abc");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kBlob, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -893,8 +849,7 @@ TEST(DecodeColumnValueTest, BlobPackZeroDefaultsTo1) {
   w.WriteU8(2);
   w.WriteString("ab");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kBlob, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -902,8 +857,7 @@ TEST(DecodeColumnValueTest, BlobPackZeroDefaultsTo1) {
 TEST(DecodeColumnValueTest, BlobInvalidPackLength) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kBlob, 5, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBlob, 5, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -914,8 +868,7 @@ TEST(DecodeColumnValueTest, JsonPack1) {
   w.WriteU8(2);
   w.WriteString("{}");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kJson, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -925,8 +878,7 @@ TEST(DecodeColumnValueTest, JsonPack2) {
   w.WriteU16Le(2);
   w.WriteString("{}");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kJson, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -936,8 +888,7 @@ TEST(DecodeColumnValueTest, JsonPack3) {
   w.WriteU24Le(2);
   w.WriteString("{}");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kJson, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -947,8 +898,7 @@ TEST(DecodeColumnValueTest, JsonPackZeroDefaultsTo4) {
   w.WriteU32Le(2);
   w.WriteString("{}");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kJson, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -956,8 +906,7 @@ TEST(DecodeColumnValueTest, JsonPackZeroDefaultsTo4) {
 TEST(DecodeColumnValueTest, JsonInvalidPackLength) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kJson, 5, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kJson, 5, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -969,8 +918,7 @@ TEST(DecodeColumnValueTest, JsonInvalidPackLength) {
 TEST(DecodeColumnValueTest, Enum1Byte) {
   uint8_t data[] = {3};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kEnum, 1, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kEnum, 1, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -978,24 +926,21 @@ TEST(DecodeColumnValueTest, Enum2Byte) {
   BinaryWriter w;
   w.WriteU16Le(300);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kEnum, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kEnum, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
 TEST(DecodeColumnValueTest, EnumInvalidSize) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kEnum, 3, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kEnum, 3, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
 TEST(DecodeColumnValueTest, Set1Byte) {
   uint8_t data[] = {0x05};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kSet, 1, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kSet, 1, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -1003,24 +948,21 @@ TEST(DecodeColumnValueTest, Set4Bytes) {
   BinaryWriter w;
   w.WriteU32Le(0x12345678);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kSet, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kSet, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
 TEST(DecodeColumnValueTest, SetInvalidSize) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kSet, 0, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kSet, 0, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
 TEST(DecodeColumnValueTest, SetSizeTooLarge) {
   uint8_t data[9] = {};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kSet, 9, false, data, 9, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kSet, 9, false, data, 9, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -1032,8 +974,7 @@ TEST(DecodeColumnValueTest, GeometryPack4) {
   uint8_t geo_data[] = {1, 2, 3, 4, 5};
   w.WriteBytes(geo_data, 5);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kGeometry, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 9u);
   EXPECT_EQ(result.bytes_val.size(), 5u);
 }
@@ -1044,8 +985,7 @@ TEST(DecodeColumnValueTest, GeometryPack1) {
   uint8_t geo_data[] = {1, 2, 3};
   w.WriteBytes(geo_data, 3);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kGeometry, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -1056,8 +996,7 @@ TEST(DecodeColumnValueTest, GeometryPack2) {
   uint8_t geo_data[] = {1, 2, 3};
   w.WriteBytes(geo_data, 3);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kGeometry, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -1068,8 +1007,7 @@ TEST(DecodeColumnValueTest, GeometryPack3) {
   uint8_t geo_data[] = {1, 2, 3};
   w.WriteBytes(geo_data, 3);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kGeometry, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -1080,8 +1018,7 @@ TEST(DecodeColumnValueTest, GeometryPackZeroDefaultsTo4) {
   uint8_t geo_data[] = {1, 2, 3};
   w.WriteBytes(geo_data, 3);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kGeometry, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -1089,8 +1026,7 @@ TEST(DecodeColumnValueTest, GeometryPackZeroDefaultsTo4) {
 TEST(DecodeColumnValueTest, GeometryInvalidPackLength) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kGeometry, 5, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kGeometry, 5, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -1099,8 +1035,7 @@ TEST(DecodeColumnValueTest, GeometryInvalidPackLength) {
 TEST(DecodeColumnValueTest, UnknownType) {
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result = DecodeColumnValue(static_cast<ColumnType>(0xFF), 0, false, data,
-                                  1, &consumed);
+  auto result = DecodeColumnValue(static_cast<ColumnType>(0xFF), 0, false, data, 1, &consumed);
   EXPECT_TRUE(result.is_null);
 }
 
@@ -1111,8 +1046,8 @@ TEST(DecodeColumnValueTest, VarStringShort) {
   w.WriteU8(3);
   w.WriteString("abc");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kVarString, 100, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result =
+      DecodeColumnValue(ColumnType::kVarString, 100, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.string_val, "abc");
 }
@@ -1126,8 +1061,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac1) {
   // usec = (50/10)*100000 = 500000
   w.WriteU8(50);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.500000");
 }
@@ -1139,8 +1073,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
   // usec = 12 * 10000 = 120000
   w.WriteU8(12);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.120000");
 }
@@ -1152,8 +1085,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac1) {
   w.WriteU32Be(kTimestamp20240315_103045);
   w.WriteU8(50);  // fsp=1: (50/10)*100000 = 500000
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "1710502245.500000");
 }
@@ -1163,8 +1095,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac4) {
   w.WriteU32Be(kTimestamp20240315_103045);
   w.WriteU16Be(1234);  // fsp=4: 1234 * 100 = 123400
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTimestamp2, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "1710502245.123400");
 }
@@ -1226,8 +1157,7 @@ TEST(DecodeColumnValueTest, TinyBlobPack1) {
   w.WriteU8(2);
   w.WriteString("ab");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTinyBlob, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTinyBlob, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.bytes_val.size(), 2u);
 }
@@ -1237,8 +1167,7 @@ TEST(DecodeColumnValueTest, MediumBlobPack3) {
   w.WriteU24Le(3);
   w.WriteString("abc");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kMediumBlob, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kMediumBlob, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_val.size(), 3u);
 }
@@ -1248,8 +1177,7 @@ TEST(DecodeColumnValueTest, LongBlobPack4) {
   w.WriteU32Le(4);
   w.WriteString("abcd");
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kLongBlob, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kLongBlob, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.bytes_val.size(), 4u);
 }
@@ -1268,8 +1196,7 @@ TEST(DecodeColumnValueTest, Datetime2IntpartZero) {
   w.WriteU8(static_cast<uint8_t>(packed));
 
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "0000-00-00 00:00:00");
 }
@@ -1280,8 +1207,7 @@ TEST(DecodeColumnValueTest, Datetime2NormalDate) {
   test::WriteDatetime2(w, 2024, 1, 15, 10, 30, 45);
 
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
   EXPECT_EQ(result.string_val, "2024-01-15 10:30:45");
 }
@@ -1310,8 +1236,7 @@ TEST(DecodeColumnValueTest, NewDecimalNegative) {
 
   uint16_t meta = (5 << 8) | 2;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "-123.45");
 }
@@ -1321,8 +1246,7 @@ TEST(DecodeColumnValueTest, NewDecimalPrecisionZero) {
   uint16_t meta = (0 << 8) | 0;
   uint8_t data[] = {0};
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 1, &consumed);
   EXPECT_EQ(consumed, 0u);
   EXPECT_EQ(result.string_val, "0");
 }
@@ -1342,8 +1266,7 @@ TEST(DecodeColumnValueTest, NewDecimalScaleZero) {
 
   uint16_t meta = (5 << 8) | 0;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kNewDecimal, meta, false, data, 3, &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "12345");
 }
@@ -1393,8 +1316,7 @@ TEST(DecodeColumnValueTest, StringCharMaxLen255) {
   w.WriteString("ABCDE");
   uint16_t meta = 0xFE3F;  // max_len = 63, 1-byte prefix
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_FALSE(result.is_null);
   EXPECT_EQ(result.string_val, "ABCDE");
@@ -1418,8 +1340,7 @@ TEST(DecodeColumnValueTest, StringCharMaxLen256TwoBytePrefix) {
   w.WriteString("testing");
   uint16_t meta = 0xEE90;
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 9u);
   EXPECT_FALSE(result.is_null);
   EXPECT_EQ(result.string_val, "testing");
@@ -1434,8 +1355,7 @@ TEST(DecodeColumnValueTest, BitExtraBitsZero) {
   uint8_t data[] = {0xAB};
   uint16_t meta = 0x0100;
   size_t consumed = 0;
-  auto result =
-      DecodeColumnValue(ColumnType::kBit, meta, false, data, 1, &consumed);
+  auto result = DecodeColumnValue(ColumnType::kBit, meta, false, data, 1, &consumed);
   EXPECT_EQ(consumed, 1u);
   EXPECT_FALSE(result.is_null);
   EXPECT_EQ(result.int_val, 0xAB);
@@ -1449,8 +1369,7 @@ TEST(DecodeColumnValueTest, TruncatedDecimalReturnsNull) {
   // Only provide 2 bytes - should return null due to bounds check
   uint8_t data[] = {0x80, 0x00};
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kNewDecimal, 0x0A02, false, data, 2,
-                               &consumed);
+  auto val = DecodeColumnValue(ColumnType::kNewDecimal, 0x0A02, false, data, 2, &consumed);
   EXPECT_TRUE(val.is_null);
   EXPECT_EQ(consumed, 0u);
 }
@@ -1466,8 +1385,8 @@ TEST(DecodeColumnValueTest, NegativeDecimal) {
   // Negative: XOR all with 0xFF => 0x7F, 0xFE, 0xCD
   uint8_t data[] = {0x7F, 0xFE, 0xCD};
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kNewDecimal, 0x0502, false, data,
-                               sizeof(data), &consumed);
+  auto val =
+      DecodeColumnValue(ColumnType::kNewDecimal, 0x0502, false, data, sizeof(data), &consumed);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(val.string_val, "-1.50");
@@ -1480,8 +1399,7 @@ TEST(DecodeColumnValueTest, UnsupportedTypeSkipsCorrectBytes) {
   // CalcFieldSize returns 0 for type 0x06, so bytes_consumed should be 0.
   uint8_t data[] = {0xAA};
   size_t consumed = 0;
-  auto val = DecodeColumnValue(static_cast<ColumnType>(0x06), 0, false, data, 1,
-                               &consumed);
+  auto val = DecodeColumnValue(static_cast<ColumnType>(0x06), 0, false, data, 1, &consumed);
   EXPECT_TRUE(val.is_null);
   // CalcFieldSize returns 0 for unknown types, so consumed is 0
   EXPECT_EQ(consumed, 0u);
@@ -1542,8 +1460,7 @@ TEST(DecodeColumnValueTest, UnsupportedTypeInMultiColumnRow) {
   // the fix doesn't crash and returns Null with consumed=0 for unknown types.
   uint8_t data[] = {0xAA, 0xBB};
   size_t consumed = 0;
-  auto val = DecodeColumnValue(static_cast<ColumnType>(0x0E), 0, false, data, 2,
-                               &consumed);
+  auto val = DecodeColumnValue(static_cast<ColumnType>(0x0E), 0, false, data, 2, &consumed);
   EXPECT_TRUE(val.is_null);
   EXPECT_EQ(consumed, 0u);
 }
@@ -1557,8 +1474,7 @@ TEST(DecodeColumnValueTest, BlobCalcFieldSizeUsesBufferLength) {
   w.WriteU16Le(3);  // 2-byte length prefix: content length = 3
   w.WriteString("abc");
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(), w.Size(),
-                               &consumed);
+  auto val = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 5u);  // 2 + 3
   EXPECT_EQ(val.bytes_val.size(), 3u);
@@ -1570,8 +1486,7 @@ TEST(DecodeColumnValueTest, JsonCalcFieldSizeUsesBufferLength) {
   w.WriteU32Le(5);
   w.WriteString("abcde");
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 9u);  // 4 + 5
   EXPECT_EQ(val.bytes_val.size(), 5u);
@@ -1581,8 +1496,7 @@ TEST(DecodeColumnValueTest, BlobTruncatedPrefix) {
   // BLOB with pack_length=4, but only 2 bytes available
   uint8_t data[] = {0x05, 0x00};
   size_t consumed = 0;
-  auto val =
-      DecodeColumnValue(ColumnType::kBlob, 4, false, data, 2, &consumed);
+  auto val = DecodeColumnValue(ColumnType::kBlob, 4, false, data, 2, &consumed);
   EXPECT_TRUE(val.is_null);
   EXPECT_EQ(consumed, 0u);
 }
@@ -1596,8 +1510,7 @@ TEST(FracToMicrosecondsTest, Meta1) {
   test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   w.WriteU8(50);  // stored=50 for fsp=1
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.500000");
 }
@@ -1607,8 +1520,7 @@ TEST(FracToMicrosecondsTest, Meta2) {
   test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   w.WriteU8(99);  // stored=99 for fsp=2, usec=99*10000=990000
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.990000");
 }
@@ -1619,8 +1531,7 @@ TEST(FracToMicrosecondsTest, Meta3) {
   // fsp=3: 2 bytes, stored=1230 (odd, extra digit), usec=(1230/10)*1000=123000
   w.WriteU16Be(1230);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.123000");
 }
@@ -1631,8 +1542,7 @@ TEST(FracToMicrosecondsTest, Meta4) {
   // fsp=4: 2 bytes, stored=5678, usec=5678*100=567800
   w.WriteU16Be(5678);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 4, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.567800");
 }
@@ -1643,8 +1553,7 @@ TEST(FracToMicrosecondsTest, Meta5) {
   // fsp=5: 3 bytes, stored=123450 (odd, extra digit), usec=(123450/10)*10=123450
   w.WriteU24Be(123450);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 5, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 5, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.123450");
 }
@@ -1655,8 +1564,7 @@ TEST(FracToMicrosecondsTest, Meta6) {
   // fsp=6: 3 bytes, stored=999999, usec=999999
   w.WriteU24Be(999999);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kDatetime2, 6, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 6, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.999999");
 }
@@ -1673,8 +1581,8 @@ TEST(DecodeColumnValueTest, UnknownTypeReturnsNullWithZeroConsumed) {
   // Verify the precondition: unknown types return Null with consumed=0.
   uint8_t data[] = {0xAA, 0xBB, 0xCC, 0xDD};
   size_t consumed = 99;
-  auto val = DecodeColumnValue(static_cast<ColumnType>(0x06), 0, false, data,
-                               sizeof(data), &consumed);
+  auto val =
+      DecodeColumnValue(static_cast<ColumnType>(0x06), 0, false, data, sizeof(data), &consumed);
   EXPECT_TRUE(val.is_null);
   EXPECT_EQ(consumed, 0u);
 }
@@ -1685,8 +1593,7 @@ TEST(DecodeColumnValueTest, LongLongUnsignedOverflow) {
   BinaryWriter w;
   w.WriteU64Le(UINT64_MAX);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(val.string_val, "18446744073709551615");
@@ -1697,8 +1604,7 @@ TEST(DecodeColumnValueTest, LongLongUnsignedJustOverInt64Max) {
   uint64_t val_raw = static_cast<uint64_t>(INT64_MAX) + 1;
   w.WriteU64Le(val_raw);
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(val.string_val, "9223372036854775808");
@@ -1708,8 +1614,7 @@ TEST(DecodeColumnValueTest, LongLongUnsignedAtInt64Max) {
   BinaryWriter w;
   w.WriteU64Le(static_cast<uint64_t>(INT64_MAX));
   size_t consumed = 0;
-  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
-                               w.Size(), &consumed);
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(val.int_val, INT64_MAX);
@@ -1724,8 +1629,7 @@ TEST(DecodeColumnValueTest, TimeNegative) {
   BinaryWriter w;
   w.WriteU24Le(raw);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "-01:30:00");
 }
@@ -1737,8 +1641,7 @@ TEST(DecodeColumnValueTest, TimeNegativeSmall) {
   BinaryWriter w;
   w.WriteU24Le(raw);
   size_t consumed = 0;
-  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
-                                  w.Size(), &consumed);
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
   EXPECT_EQ(result.string_val, "-00:05:30");
 }

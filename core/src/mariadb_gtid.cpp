@@ -18,12 +18,12 @@ namespace {
 
 /** @brief Trim whitespace from both ends of a string_view. */
 std::string_view Trim(std::string_view sv) {
-  while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' ||
-                         sv.front() == '\n' || sv.front() == '\r')) {
+  while (!sv.empty() &&
+         (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\n' || sv.front() == '\r')) {
     sv.remove_prefix(1);
   }
-  while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
-                         sv.back() == '\n' || sv.back() == '\r')) {
+  while (!sv.empty() &&
+         (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\n' || sv.back() == '\r')) {
     sv.remove_suffix(1);
   }
   return sv;
@@ -43,14 +43,12 @@ size_t CountChar(std::string_view sv, char ch) {
 /** @brief Check if all characters in a string_view are digits. */
 bool AllDigits(std::string_view sv) {
   return !sv.empty() &&
-         std::all_of(sv.begin(), sv.end(),
-                     [](char c) { return c >= '0' && c <= '9'; });
+         std::all_of(sv.begin(), sv.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
 }  // namespace
 
-mes_error_t MariaDBGtid::Parse(const std::string& gtid_str,
-                                MariaDBGtid* out) {
+mes_error_t MariaDBGtid::Parse(const std::string& gtid_str, MariaDBGtid* out) {
   if (out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -72,37 +70,33 @@ mes_error_t MariaDBGtid::Parse(const std::string& gtid_str,
   auto second_dash = sv.find('-', first_dash + 1);
 
   std::string_view domain_str = sv.substr(0, first_dash);
-  std::string_view server_str =
-      sv.substr(first_dash + 1, second_dash - first_dash - 1);
+  std::string_view server_str = sv.substr(first_dash + 1, second_dash - first_dash - 1);
   std::string_view seq_str = sv.substr(second_dash + 1);
 
   // Validate all segments are numeric
-  if (!AllDigits(domain_str) || !AllDigits(server_str) ||
-      !AllDigits(seq_str)) {
+  if (!AllDigits(domain_str) || !AllDigits(server_str) || !AllDigits(seq_str)) {
     return MES_ERR_INVALID_ARG;
   }
 
   MariaDBGtid gtid;
 
   // Parse domain_id (uint32_t)
-  auto [ptr1, ec1] = std::from_chars(
-      domain_str.data(), domain_str.data() + domain_str.size(),
-      gtid.domain_id);
+  auto [ptr1, ec1] =
+      std::from_chars(domain_str.data(), domain_str.data() + domain_str.size(), gtid.domain_id);
   if (ec1 != std::errc{}) {
     return MES_ERR_INVALID_ARG;
   }
 
   // Parse server_id (uint32_t)
-  auto [ptr2, ec2] = std::from_chars(
-      server_str.data(), server_str.data() + server_str.size(),
-      gtid.server_id);
+  auto [ptr2, ec2] =
+      std::from_chars(server_str.data(), server_str.data() + server_str.size(), gtid.server_id);
   if (ec2 != std::errc{}) {
     return MES_ERR_INVALID_ARG;
   }
 
   // Parse sequence_no (uint64_t)
-  auto [ptr3, ec3] = std::from_chars(
-      seq_str.data(), seq_str.data() + seq_str.size(), gtid.sequence_no);
+  auto [ptr3, ec3] =
+      std::from_chars(seq_str.data(), seq_str.data() + seq_str.size(), gtid.sequence_no);
   if (ec3 != std::errc{}) {
     return MES_ERR_INVALID_ARG;
   }
@@ -111,8 +105,7 @@ mes_error_t MariaDBGtid::Parse(const std::string& gtid_str,
   return MES_OK;
 }
 
-mes_error_t MariaDBGtid::ParseSet(const std::string& gtid_set_str,
-                                   std::vector<MariaDBGtid>* out) {
+mes_error_t MariaDBGtid::ParseSet(const std::string& gtid_set_str, std::vector<MariaDBGtid>* out) {
   if (out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -188,8 +181,7 @@ bool MariaDBGtid::IsMariaDBGtidFormat(const std::string& gtid_str) {
   auto second_dash = sv.find('-', first_dash + 1);
 
   std::string_view domain_str = sv.substr(0, first_dash);
-  std::string_view server_str =
-      sv.substr(first_dash + 1, second_dash - first_dash - 1);
+  std::string_view server_str = sv.substr(first_dash + 1, second_dash - first_dash - 1);
   std::string_view seq_str = sv.substr(second_dash + 1);
 
   return AllDigits(domain_str) && AllDigits(server_str) && AllDigits(seq_str);

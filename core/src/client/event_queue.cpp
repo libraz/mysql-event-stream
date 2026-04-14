@@ -7,14 +7,11 @@
 
 namespace mes {
 
-EventQueue::EventQueue(size_t max_size)
-    : max_size_(max_size == 0 ? 10000 : max_size) {}
+EventQueue::EventQueue(size_t max_size) : max_size_(max_size == 0 ? 10000 : max_size) {}
 
 bool EventQueue::Push(QueuedEvent event) {
   std::unique_lock<std::mutex> lock(mu_);
-  not_full_cv_.wait(lock, [this] {
-    return closed_ || queue_.size() < max_size_;
-  });
+  not_full_cv_.wait(lock, [this] { return closed_ || queue_.size() < max_size_; });
   if (closed_) return false;
   queue_.push(std::move(event));
   not_empty_cv_.notify_one();
@@ -23,9 +20,7 @@ bool EventQueue::Push(QueuedEvent event) {
 
 bool EventQueue::Pop(QueuedEvent* event) {
   std::unique_lock<std::mutex> lock(mu_);
-  not_empty_cv_.wait(lock, [this] {
-    return closed_ || !queue_.empty();
-  });
+  not_empty_cv_.wait(lock, [this] { return closed_ || !queue_.empty(); });
   if (queue_.empty()) return false;  // closed and drained
   *event = std::move(queue_.front());
   queue_.pop();

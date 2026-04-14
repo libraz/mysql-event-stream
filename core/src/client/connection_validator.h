@@ -41,15 +41,13 @@ class ConnectionValidator {
    * @return ValidationResult with error/message/uuid
    */
   static ValidationResult Validate(protocol::MysqlConnection* conn,
-                                    ServerFlavor flavor = ServerFlavor::kMySQL);
+                                   ServerFlavor flavor = ServerFlavor::kMySQL);
 
  private:
-  static bool CheckVariable(protocol::MysqlConnection* conn,
-                             const char* var_name, const char* expected,
-                             ValidationResult* result);
-  static bool CheckVariableNot(protocol::MysqlConnection* conn,
-                                const char* var_name, const char* rejected,
-                                ValidationResult* result);
+  static bool CheckVariable(protocol::MysqlConnection* conn, const char* var_name,
+                            const char* expected, ValidationResult* result);
+  static bool CheckVariableNot(protocol::MysqlConnection* conn, const char* var_name,
+                               const char* rejected, ValidationResult* result);
 };
 
 }  // namespace mes

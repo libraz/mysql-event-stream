@@ -17,14 +17,11 @@ struct mes_client {
 
 extern "C" {
 
-MES_API mes_client_t* mes_client_create(void) {
-  return new (std::nothrow) mes_client();
-}
+MES_API mes_client_t* mes_client_create(void) { return new (std::nothrow) mes_client(); }
 
 MES_API void mes_client_destroy(mes_client_t* c) { delete c; }
 
-MES_API mes_error_t mes_client_connect(
-    mes_client_t* c, const mes_client_config_t* config) {
+MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_t* config) {
   if (c == nullptr || config == nullptr) {
     return MES_ERR_NULL_ARG;
   }

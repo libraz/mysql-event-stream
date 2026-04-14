@@ -6,14 +6,14 @@
  * @brief Unit tests for the EventQueue bounded blocking queue
  */
 
-#include "client/event_queue.h"
-
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
 #include <thread>
 #include <vector>
+
+#include "client/event_queue.h"
 
 namespace {
 

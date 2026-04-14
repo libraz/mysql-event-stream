@@ -211,11 +211,11 @@ TEST(FixedIntTest, WidthGreaterThan8ReturnsZero) {
 TEST(ParseErrPacketPayloadTest, StandardErrPacketWithSqlState) {
   // Build: 0xFF + error_code(2 LE) + '#' + sql_state(5) + message
   std::vector<uint8_t> packet = {
-      0xFF,                    // marker
-      0xE8, 0x03,              // error_code = 1000 (LE)
-      '#',                     // sql_state_marker
-      'H', 'Y', '0', '0', '0',  // sql_state
-      'T', 'e', 's', 't',     // message
+      0xFF,                       // marker
+      0xE8, 0x03,                 // error_code = 1000 (LE)
+      '#',                        // sql_state_marker
+      'H',  'Y',  '0', '0', '0',  // sql_state
+      'T',  'e',  's', 't',       // message
   };
   uint16_t code = 0;
   std::string msg;
@@ -227,9 +227,8 @@ TEST(ParseErrPacketPayloadTest, StandardErrPacketWithSqlState) {
 TEST(ParseErrPacketPayloadTest, ErrPacketWithoutSqlState) {
   // Build: 0xFF + error_code(2 LE) + message (no '#' marker)
   std::vector<uint8_t> packet = {
-      0xFF,
-      0x15, 0x04,  // error_code = 1045 (LE)
-      'A', 'c', 'c', 'e', 's', 's',
+      0xFF, 0x15, 0x04,  // error_code = 1045 (LE)
+      'A',  'c',  'c',  'e', 's', 's',
   };
   uint16_t code = 0;
   std::string msg;
@@ -261,10 +260,7 @@ TEST(ParseErrPacketPayloadTest, MinimalErrPacketNoMessage) {
 TEST(ParseErrPacketPayloadTest, ErrPacketWithSqlStateNoMessage) {
   // 0xFF + error_code + '#' + sql_state, but no message after
   std::vector<uint8_t> packet = {
-      0xFF,
-      0x01, 0x00,
-      '#',
-      'H', 'Y', '0', '0', '0',
+      0xFF, 0x01, 0x00, '#', 'H', 'Y', '0', '0', '0',
   };
   uint16_t code = 0;
   std::string msg;

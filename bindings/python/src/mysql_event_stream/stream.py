@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import warnings
 
 from .client import BinlogClient
@@ -145,6 +146,10 @@ class CdcStream:
             setattr(self, attr, value)
 
     async def __anext__(self) -> ChangeEvent:
+        # NOTE(review): close() is safe to call during iteration. It sets
+        # _closed=True and calls client.stop(), which unblocks the worker
+        # thread inside poll(). The next __anext__ iteration will then
+        # observe _closed and return StopAsyncIteration cleanly.
         if self._closed:
             raise StopAsyncIteration
 
@@ -162,6 +167,14 @@ class CdcStream:
 
             try:
                 result = await asyncio.to_thread(self._client.poll)
+            except asyncio.CancelledError:
+                # The Future returned by to_thread is cancelled, but the
+                # underlying C poll() call keeps blocking. Signal the C
+                # layer to unblock it so the worker thread can exit and
+                # the thread pool slot is released promptly.
+                if self._client is not None:
+                    self._client.stop()
+                raise
             except (RuntimeError, ConnectionError) as err:
                 if self._closed:
                     raise StopAsyncIteration from err
@@ -172,7 +185,10 @@ class CdcStream:
                 self._reconnect_attempts += 1
                 if self._reconnect_attempts > self._max_reconnect_attempts:
                     await self.close()
-                    raise StopAsyncIteration from err
+                    raise RuntimeError(
+                        f"Max reconnect attempts "
+                        f"({self._max_reconnect_attempts}) exceeded"
+                    ) from err
 
                 try:
                     await self._reconnect()
@@ -207,6 +223,8 @@ class CdcStream:
 
     async def _reconnect(self) -> None:
         """Reconnect with linear backoff using last known GTID."""
+        if self._closed:
+            return
         gtid = self.current_gtid
         if self._client is not None:
             # close() internally calls stop() and disconnect()
@@ -216,6 +234,10 @@ class CdcStream:
         max_delay_s = 10.0
         delay = min(float(self._reconnect_attempts), max_delay_s)
         await asyncio.sleep(delay)
+
+        # Re-check after sleep: close() may have been called while we slept.
+        if self._closed:
+            return
 
         if gtid:
             self._start_gtid = gtid
@@ -238,20 +260,20 @@ class CdcStream:
         )
         assert self._engine is not None
         self._engine.reset()
-        try:
+        # Metadata is optional; column names fall back to indices
+        with contextlib.suppress(RuntimeError):
             self._engine.enable_metadata(
                 host=self._host,
                 port=self._port,
                 user=self._user,
                 password=self._password,
+                server_id=self._server_id,
                 connect_timeout_s=self._connect_timeout_s,
                 ssl_mode=self._ssl_mode,
                 ssl_ca=self._ssl_ca,
                 ssl_cert=self._ssl_cert,
                 ssl_key=self._ssl_key,
             )
-        except RuntimeError:
-            pass  # Metadata is optional; column names fall back to indices
         await asyncio.to_thread(self._client.connect)
         await asyncio.to_thread(self._client.start)
         # Do NOT reset _reconnect_attempts here. The counter should only
@@ -286,6 +308,7 @@ class CdcStream:
                     port=self._port,
                     user=self._user,
                     password=self._password,
+                    server_id=self._server_id,
                     connect_timeout_s=self._connect_timeout_s,
                     ssl_mode=self._ssl_mode,
                     ssl_ca=self._ssl_ca,

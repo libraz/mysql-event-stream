@@ -48,8 +48,7 @@ struct MariaDBGtid {
    * @param[out] out Parsed GTIDs output.
    * @return MES_OK on success, MES_ERR_INVALID_ARG on parse failure.
    */
-  static mes_error_t ParseSet(const std::string& gtid_set_str,
-                               std::vector<MariaDBGtid>* out);
+  static mes_error_t ParseSet(const std::string& gtid_set_str, std::vector<MariaDBGtid>* out);
 
   /**
    * @brief Convert to string format.
@@ -80,9 +79,7 @@ struct MariaDBGtid {
            sequence_no == other.sequence_no;
   }
 
-  bool operator!=(const MariaDBGtid& other) const {
-    return !(*this == other);
-  }
+  bool operator!=(const MariaDBGtid& other) const { return !(*this == other); }
 };
 
 }  // namespace mes

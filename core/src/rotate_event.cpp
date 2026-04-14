@@ -25,8 +25,7 @@ bool ParseRotateEvent(const uint8_t* data, size_t len, RotateEventData* result) 
     if (fname_len > 0 && data[8 + fname_len - 1] == '\0') {
       --fname_len;
     }
-    result->new_log_file =
-        std::string(reinterpret_cast<const char*>(data + 8), fname_len);
+    result->new_log_file = std::string(reinterpret_cast<const char*>(data + 8), fname_len);
   } else {
     result->new_log_file.clear();
   }

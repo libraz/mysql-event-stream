@@ -111,10 +111,7 @@ SocketHandle::SocketHandle() = default;
 SocketHandle::~SocketHandle() { Close(); }
 
 SocketHandle::SocketHandle(SocketHandle&& other) noexcept
-    : fd_(other.fd_),
-      ssl_ctx_(other.ssl_ctx_),
-      ssl_(other.ssl_),
-      tls_active_(other.tls_active_) {
+    : fd_(other.fd_), ssl_ctx_(other.ssl_ctx_), ssl_(other.ssl_), tls_active_(other.tls_active_) {
   other.fd_ = -1;
   other.ssl_ctx_ = nullptr;
   other.ssl_ = nullptr;
@@ -138,8 +135,7 @@ SocketHandle& SocketHandle::operator=(SocketHandle&& other) noexcept {
 
 // --- Connect ---
 
-mes_error_t SocketHandle::Connect(const char* host, uint16_t port,
-                                  uint32_t timeout_s) {
+mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t timeout_s) {
   if (host == nullptr) return MES_ERR_NULL_ARG;
 
 #ifdef _WIN32
@@ -173,8 +169,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port,
   // Try each resolved address until one succeeds.
   mes_error_t connect_err = MES_ERR_CONNECT;
   for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
-    fd_ = static_cast<int>(
-        socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+    fd_ = static_cast<int>(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
     if (fd_ < 0) continue;
 
     if (timeout_s > 0) {
@@ -285,10 +280,8 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port,
 
 // --- TLS ---
 
-mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
-                                       const char* ssl_cert,
-                                       const char* ssl_key,
-                                       const char* hostname) {
+mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, const char* ssl_cert,
+                                       const char* ssl_key, const char* hostname) {
   // Mode 0 = disabled: nothing to do.
   if (ssl_mode == 0) return MES_OK;
 
@@ -297,10 +290,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
   // Create SSL context.
   ssl_ctx_ = SSL_CTX_new(TLS_client_method());
   if (ssl_ctx_ == nullptr) {
-    StructuredLog()
-        .Event("ssl_ctx_create_failed")
-        .Field("error", GetOpenSSLError())
-        .Error();
+    StructuredLog().Event("ssl_ctx_create_failed").Field("error", GetOpenSSLError()).Error();
     return MES_ERR_CONNECT;
   }
 
@@ -323,8 +313,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
 
   // Load client certificate if provided.
   if (ssl_cert != nullptr && ssl_cert[0] != '\0') {
-    if (SSL_CTX_use_certificate_file(ssl_ctx_, ssl_cert, SSL_FILETYPE_PEM) !=
-        1) {
+    if (SSL_CTX_use_certificate_file(ssl_ctx_, ssl_cert, SSL_FILETYPE_PEM) != 1) {
       StructuredLog()
           .Event("ssl_cert_load_failed")
           .Field("path", ssl_cert)
@@ -338,8 +327,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
 
   // Load client private key if provided.
   if (ssl_key != nullptr && ssl_key[0] != '\0') {
-    if (SSL_CTX_use_PrivateKey_file(ssl_ctx_, ssl_key, SSL_FILETYPE_PEM) !=
-        1) {
+    if (SSL_CTX_use_PrivateKey_file(ssl_ctx_, ssl_key, SSL_FILETYPE_PEM) != 1) {
       StructuredLog()
           .Event("ssl_key_load_failed")
           .Field("path", ssl_key)
@@ -364,10 +352,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
   // Create SSL session.
   ssl_ = SSL_new(ssl_ctx_);
   if (ssl_ == nullptr) {
-    StructuredLog()
-        .Event("ssl_new_failed")
-        .Field("error", GetOpenSSLError())
-        .Error();
+    StructuredLog().Event("ssl_new_failed").Field("error", GetOpenSSLError()).Error();
     SSL_CTX_free(ssl_ctx_);
     ssl_ctx_ = nullptr;
     return MES_ERR_CONNECT;
@@ -415,10 +400,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
   }
 
   tls_active_ = true;
-  StructuredLog()
-      .Event("ssl_handshake_complete")
-      .Field("protocol", SSL_get_version(ssl_))
-      .Debug();
+  StructuredLog().Event("ssl_handshake_complete").Field("protocol", SSL_get_version(ssl_)).Debug();
 
   return MES_OK;
 }
@@ -430,8 +412,8 @@ mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
 
 #ifdef _WIN32
   DWORD tv = static_cast<DWORD>(timeout_s) * 1000;
-  if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv),
-                 sizeof(tv)) != 0) {
+  if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv)) !=
+      0) {
     return MES_ERR_CONNECT;
   }
 #else
@@ -457,12 +439,10 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
     int n;
     if (tls_active_) {
       n = SSL_read(ssl_, buf + total,
-                   static_cast<int>(std::min(len - total,
-                                             static_cast<size_t>(INT_MAX))));
+                   static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
-        if (ssl_err == SSL_ERROR_WANT_READ ||
-            ssl_err == SSL_ERROR_WANT_WRITE) {
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
           continue;  // Retry after transient SSL renegotiation
         }
         // SSL_ERROR_ZERO_RETURN means clean shutdown (EOF).
@@ -480,11 +460,9 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
     } else {
 #ifdef _WIN32
       n = recv(fd_, reinterpret_cast<char*>(buf + total),
-               static_cast<int>(std::min(len - total,
-                                         static_cast<size_t>(INT_MAX))), 0);
+               static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))), 0);
 #else
-      n = static_cast<int>(
-          recv(fd_, buf + total, len - total, 0));
+      n = static_cast<int>(recv(fd_, buf + total, len - total, 0));
 #endif
       if (n <= 0) {
         if (n == 0) {
@@ -514,12 +492,10 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
     int n;
     if (tls_active_) {
       n = SSL_write(ssl_, buf + total,
-                    static_cast<int>(std::min(len - total,
-                                              static_cast<size_t>(INT_MAX))));
+                    static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
-        if (ssl_err == SSL_ERROR_WANT_READ ||
-            ssl_err == SSL_ERROR_WANT_WRITE) {
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
           continue;  // Retry after transient SSL renegotiation
         }
         StructuredLog()
@@ -532,14 +508,11 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
     } else {
 #ifdef _WIN32
       n = send(fd_, reinterpret_cast<const char*>(buf + total),
-               static_cast<int>(std::min(len - total,
-                                         static_cast<size_t>(INT_MAX))), 0);
+               static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))), 0);
 #elif defined(__linux__)
-      n = static_cast<int>(
-          send(fd_, buf + total, len - total, MSG_NOSIGNAL));
+      n = static_cast<int>(send(fd_, buf + total, len - total, MSG_NOSIGNAL));
 #else
-      n = static_cast<int>(
-          send(fd_, buf + total, len - total, 0));
+      n = static_cast<int>(send(fd_, buf + total, len - total, 0));
 #endif
       if (n <= 0) {
         StructuredLog()

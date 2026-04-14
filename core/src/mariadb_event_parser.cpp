@@ -21,9 +21,8 @@ static constexpr size_t kGtidListEntrySize = 16;
 /// Mask for extracting entry count from GTID_LIST count_and_flags field (lower 28 bits)
 static constexpr uint32_t kGtidListCountMask = 0x0FFFFFFFu;
 
-mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer,
-                                             size_t length,
-                                             std::string* out) {
+mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer, size_t length,
+                                            std::string* out) {
   if (buffer == nullptr || out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -54,9 +53,8 @@ mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer,
   return MES_OK;
 }
 
-mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
-                                               size_t length,
-                                               std::vector<MariaDBGtid>* out) {
+mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer, size_t length,
+                                              std::vector<MariaDBGtid>* out) {
   if (buffer == nullptr || out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -80,8 +78,7 @@ mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
 
   // Validate we have enough data for all entries
   size_t entries_offset = kEventHeaderSize + 4;
-  size_t required_size =
-      entries_offset + (static_cast<size_t>(count) * kGtidListEntrySize);
+  size_t required_size = entries_offset + (static_cast<size_t>(count) * kGtidListEntrySize);
   if (length < required_size) {
     return MES_ERR_PARSE;
   }
@@ -103,10 +100,8 @@ mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
   return MES_OK;
 }
 
-mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer,
-                                                     size_t length,
-                                                     bool has_checksum,
-                                                     std::string* out) {
+mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer, size_t length,
+                                                    bool has_checksum, std::string* out) {
   if (buffer == nullptr || out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -124,8 +119,12 @@ mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer,
     return MES_ERR_PARSE;
   }
 
-  *out = std::string(reinterpret_cast<const char*>(buffer + kEventHeaderSize),
-                     text_length);
+  // NOTE(review): ANNOTATE_ROWS payload is the original SQL text in the
+  // server's character set (typically UTF-8 on modern MariaDB). Storing
+  // it as a std::string preserves the raw bytes verbatim; downstream
+  // consumers must handle potential non-UTF-8 bytes if the server
+  // character_set_client differs.
+  *out = std::string(reinterpret_cast<const char*>(buffer + kEventHeaderSize), text_length);
   return MES_OK;
 }
 

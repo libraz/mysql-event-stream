@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,7 +15,22 @@
 
 namespace mes {
 
-/** @brief Global log configuration that dispatches to the registered callback. */
+/** @brief Immutable snapshot of the global log configuration. */
+struct LogConfigSnapshot {
+  mes_log_callback_t callback = nullptr;
+  mes_log_level_t level = MES_LOG_ERROR;
+  void* userdata = nullptr;
+};
+
+/**
+ * @brief Global log configuration that dispatches to the registered callback.
+ *
+ * Internally stores an immutable snapshot as a shared_ptr so that readers
+ * always observe a consistent triple of (callback, level, userdata). The
+ * previous per-field std::atomic layout permitted a reader to observe a
+ * torn configuration where, for example, the old callback was paired with
+ * the new userdata.
+ */
 class LogConfig {
  public:
   static void SetCallback(mes_log_callback_t callback, mes_log_level_t log_level, void* userdata);
@@ -22,10 +38,13 @@ class LogConfig {
   static mes_log_level_t GetLogLevel();
   static void* GetUserdata();
 
+  /** @brief Get a consistent snapshot of the current configuration. */
+  static std::shared_ptr<const LogConfigSnapshot> GetSnapshot();
+
  private:
-  static std::atomic<mes_log_callback_t> callback_;
-  static std::atomic<mes_log_level_t> log_level_;
-  static std::atomic<void*> userdata_;
+  // Owned snapshot. Accessed via std::atomic<std::shared_ptr> free functions
+  // so that updates and reads are race-free without exposing the lock.
+  static std::shared_ptr<const LogConfigSnapshot> snapshot_;
 };
 
 /** @brief Structured log entry builder with fluent API.
@@ -108,7 +127,7 @@ class StructuredLog {
 
 /** @brief Log MySQL connection error. */
 inline void LogMySQLConnectionError(const std::string& host, int port,
-                                     const std::string& error_msg) {
+                                    const std::string& error_msg) {
   StructuredLog()
       .Event("mysql_connection_error")
       .Field("host", host)
@@ -119,7 +138,7 @@ inline void LogMySQLConnectionError(const std::string& host, int port,
 
 /** @brief Log binlog streaming error. */
 inline void LogBinlogError(const char* error_type, const std::string& gtid,
-                            const std::string& error_msg, int retry_count = 0) {
+                           const std::string& error_msg, int retry_count = 0) {
   StructuredLog()
       .Event("binlog_error")
       .Field("type", error_type)

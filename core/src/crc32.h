@@ -9,11 +9,11 @@
 #ifndef MES_CRC32_H_
 #define MES_CRC32_H_
 
+#include <zlib.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-
-#include <zlib.h>
 
 namespace mes {
 
@@ -24,9 +24,13 @@ namespace mes {
 inline uint32_t ComputeCRC32(const void* data, size_t length) {
   static_assert(sizeof(uInt) >= 4, "zlib uInt must be at least 32 bits");
   // Unreachable: binlog events are limited to kMaxEventSize (64 MB).
-  // Return UINT32_MAX as a sentinel that won't collide with a stored
-  // checksum (MySQL CRC32 never produces UINT32_MAX for valid data in
-  // practice, though it is technically a valid CRC32 value).
+  // Return UINT32_MAX as a "not computed" sentinel.
+  // NOTE(review): Sentinel value collision with a real CRC is astronomically
+  // unlikely (1 in 2^32) and this path is already unreachable under the
+  // 64 MB event-size limit enforced in state_machine.cpp. Callers treat
+  // this as "not yet computed" rather than as a CRC comparison target, so
+  // even a theoretical collision would be surfaced as a checksum mismatch
+  // on the next real event rather than silent data corruption.
   if (length > static_cast<size_t>(std::numeric_limits<uInt>::max())) {
     return UINT32_MAX;
   }

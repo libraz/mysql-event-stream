@@ -75,9 +75,8 @@ class SocketHandle {
    *                  (NULL to skip).
    * @return MES_OK on success, MES_ERR_CONNECT on TLS handshake failure.
    */
-  mes_error_t UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca,
-                           const char* ssl_cert, const char* ssl_key,
-                           const char* hostname);
+  mes_error_t UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, const char* ssl_cert,
+                           const char* ssl_key, const char* hostname);
 
   /**
    * @brief Set the read timeout on the underlying socket.

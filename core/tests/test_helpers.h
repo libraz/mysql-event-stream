@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "event_header.h"
 #include "crc32.h"
+#include "event_header.h"
 
 namespace mes {
 namespace test {
@@ -75,15 +75,9 @@ class EventBuilder {
     std::memcpy(tmp, &v, 8);
     buf_.insert(buf_.end(), tmp, tmp + 8);
   }
-  void WriteString(const std::string& s) {
-    buf_.insert(buf_.end(), s.begin(), s.end());
-  }
-  void WriteBytes(const std::vector<uint8_t>& b) {
-    buf_.insert(buf_.end(), b.begin(), b.end());
-  }
-  void WriteBytes(const uint8_t* d, size_t n) {
-    buf_.insert(buf_.end(), d, d + n);
-  }
+  void WriteString(const std::string& s) { buf_.insert(buf_.end(), s.begin(), s.end()); }
+  void WriteBytes(const std::vector<uint8_t>& b) { buf_.insert(buf_.end(), b.begin(), b.end()); }
+  void WriteBytes(const uint8_t* d, size_t n) { buf_.insert(buf_.end(), d, d + n); }
 
   const std::vector<uint8_t>& Data() const { return buf_; }
   const uint8_t* DataPtr() const { return buf_.data(); }
@@ -97,11 +91,9 @@ class EventBuilder {
 
 // Build a complete binlog event with header, body, and checksum.
 inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
-                                       uint32_t next_position,
-                                       const std::vector<uint8_t>& body) {
+                                       uint32_t next_position, const std::vector<uint8_t>& body) {
   EventBuilder b;
-  uint32_t event_length =
-      static_cast<uint32_t>(kEventHeaderSize + body.size() + kChecksumSize);
+  uint32_t event_length = static_cast<uint32_t>(kEventHeaderSize + body.size() + kChecksumSize);
 
   // 19-byte header
   b.WriteU32Le(timestamp);
@@ -121,8 +113,7 @@ inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
 }
 
 // Build a TABLE_MAP_EVENT body for a simple schema: single INT column.
-inline std::vector<uint8_t> BuildTableMapBody(uint64_t table_id,
-                                              const std::string& db,
+inline std::vector<uint8_t> BuildTableMapBody(uint64_t table_id, const std::string& db,
                                               const std::string& table) {
   EventBuilder b;
   // table_id: 6 bytes
@@ -149,8 +140,7 @@ inline std::vector<uint8_t> BuildTableMapBody(uint64_t table_id,
 }
 
 // Build a WRITE_ROWS_EVENT V2 body for a single INT row.
-inline std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id,
-                                               int32_t value) {
+inline std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id, int32_t value) {
   EventBuilder b;
   // table_id
   b.WriteU48Le(table_id);
@@ -170,8 +160,7 @@ inline std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id,
 }
 
 // Build an UPDATE_ROWS_EVENT V2 body for a single INT row.
-inline std::vector<uint8_t> BuildUpdateRowsBody(uint64_t table_id,
-                                                int32_t before_val,
+inline std::vector<uint8_t> BuildUpdateRowsBody(uint64_t table_id, int32_t before_val,
                                                 int32_t after_val) {
   EventBuilder b;
   b.WriteU48Le(table_id);
@@ -190,8 +179,7 @@ inline std::vector<uint8_t> BuildUpdateRowsBody(uint64_t table_id,
 }
 
 // Build a DELETE_ROWS_EVENT V2 body for a single INT row.
-inline std::vector<uint8_t> BuildDeleteRowsBody(uint64_t table_id,
-                                                int32_t value) {
+inline std::vector<uint8_t> BuildDeleteRowsBody(uint64_t table_id, int32_t value) {
   EventBuilder b;
   b.WriteU48Le(table_id);
   b.WriteU16Le(0);
@@ -204,8 +192,7 @@ inline std::vector<uint8_t> BuildDeleteRowsBody(uint64_t table_id,
 }
 
 // Build a ROTATE_EVENT body.
-inline std::vector<uint8_t> BuildRotateBody(uint64_t position,
-                                            const std::string& filename) {
+inline std::vector<uint8_t> BuildRotateBody(uint64_t position, const std::string& filename) {
   EventBuilder b;
   b.WriteU64Le(position);
   b.WriteString(filename);
@@ -224,10 +211,8 @@ inline void FixChecksum(std::vector<uint8_t>& buf) {
 }
 
 /// @brief Build a complete binlog event with a valid CRC32 checksum.
-inline std::vector<uint8_t> BuildValidEvent(uint8_t type_code,
-                                            const std::vector<uint8_t>& body,
-                                            uint32_t timestamp = 0,
-                                            uint32_t server_id = 1) {
+inline std::vector<uint8_t> BuildValidEvent(uint8_t type_code, const std::vector<uint8_t>& body,
+                                            uint32_t timestamp = 0, uint32_t server_id = 1) {
   auto event = BuildEvent(type_code, timestamp, 0, body);
   // Patch server_id into the header (bytes 5-8, little-endian)
   event[5] = static_cast<uint8_t>(server_id);
@@ -245,8 +230,7 @@ inline std::vector<uint8_t> BuildValidEvent(uint8_t type_code,
 ///   packed  = intpart + 0x8000000000
 ///   Written as 5 bytes big-endian.
 template <typename Writer>
-inline void WriteDatetime2(Writer& w, int year, int month, int day,
-                           int hour, int min, int sec) {
+inline void WriteDatetime2(Writer& w, int year, int month, int day, int hour, int min, int sec) {
   int64_t ym = year * 13 + month;
   int64_t ymd = (ym << 5) | day;
   int64_t hms = (static_cast<int64_t>(hour) << 12) | (min << 6) | sec;

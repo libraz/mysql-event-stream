@@ -94,8 +94,7 @@ inline uint32_t ReadU32Be(const uint8_t* data) {
  *   Callers MUST check bytes_consumed to distinguish error (0) from NULL (1).
  * @return The decoded integer value (0 on error or NULL, check bytes_consumed)
  */
-[[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len,
-                                     size_t& bytes_consumed);
+[[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
 
 // --- Bitmap utilities ---
 
@@ -149,8 +148,8 @@ uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
  * @param bytes_consumed Set to the number of bytes consumed
  * @return String representation of the decimal value
  */
-std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision,
-                          uint8_t scale, size_t& bytes_consumed);
+std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision, uint8_t scale,
+                          size_t& bytes_consumed);
 
 /**
  * @brief Calculate the size (in bytes) of a field value in binlog row data
@@ -163,8 +162,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
  * @param metadata Type-specific metadata from TABLE_MAP event
  * @return Size of the field in bytes, or 0 for unsupported types
  */
-uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
-                       uint16_t metadata);
+uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint16_t metadata);
 
 }  // namespace mes::binary
 

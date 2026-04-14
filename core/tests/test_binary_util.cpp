@@ -1,9 +1,9 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "binary_util.h"
-
 #include <gtest/gtest.h>
+
+#include "binary_util.h"
 
 namespace mes::binary {
 namespace {
@@ -292,30 +292,30 @@ TEST(DecodeDecimalTest, SmallPositive) {
 
 TEST(CalcFieldSizeTest, FixedSizeTypes) {
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0x01, dummy, sizeof(dummy), 0), 1u);   // TINY
-  EXPECT_EQ(CalcFieldSize(0x02, dummy, sizeof(dummy), 0), 2u);   // SHORT
-  EXPECT_EQ(CalcFieldSize(0x03, dummy, sizeof(dummy), 0), 4u);   // LONG
-  EXPECT_EQ(CalcFieldSize(0x04, dummy, sizeof(dummy), 0), 4u);   // FLOAT
-  EXPECT_EQ(CalcFieldSize(0x05, dummy, sizeof(dummy), 0), 8u);   // DOUBLE
-  EXPECT_EQ(CalcFieldSize(0x08, dummy, sizeof(dummy), 0), 8u);   // LONGLONG
-  EXPECT_EQ(CalcFieldSize(0x09, dummy, sizeof(dummy), 0), 3u);   // INT24
-  EXPECT_EQ(CalcFieldSize(0x0D, dummy, sizeof(dummy), 0), 1u);   // YEAR
+  EXPECT_EQ(CalcFieldSize(0x01, dummy, sizeof(dummy), 0), 1u);  // TINY
+  EXPECT_EQ(CalcFieldSize(0x02, dummy, sizeof(dummy), 0), 2u);  // SHORT
+  EXPECT_EQ(CalcFieldSize(0x03, dummy, sizeof(dummy), 0), 4u);  // LONG
+  EXPECT_EQ(CalcFieldSize(0x04, dummy, sizeof(dummy), 0), 4u);  // FLOAT
+  EXPECT_EQ(CalcFieldSize(0x05, dummy, sizeof(dummy), 0), 8u);  // DOUBLE
+  EXPECT_EQ(CalcFieldSize(0x08, dummy, sizeof(dummy), 0), 8u);  // LONGLONG
+  EXPECT_EQ(CalcFieldSize(0x09, dummy, sizeof(dummy), 0), 3u);  // INT24
+  EXPECT_EQ(CalcFieldSize(0x0D, dummy, sizeof(dummy), 0), 1u);  // YEAR
 }
 
 TEST(CalcFieldSizeTest, DateTimeTypes) {
   uint8_t dummy[8] = {};
-  EXPECT_EQ(CalcFieldSize(0x0A, dummy, sizeof(dummy), 0), 3u);   // DATE
-  EXPECT_EQ(CalcFieldSize(0x0B, dummy, sizeof(dummy), 0), 3u);   // TIME
-  EXPECT_EQ(CalcFieldSize(0x07, dummy, sizeof(dummy), 0), 4u);   // TIMESTAMP
-  EXPECT_EQ(CalcFieldSize(0x0C, dummy, sizeof(dummy), 0), 8u);   // DATETIME
+  EXPECT_EQ(CalcFieldSize(0x0A, dummy, sizeof(dummy), 0), 3u);  // DATE
+  EXPECT_EQ(CalcFieldSize(0x0B, dummy, sizeof(dummy), 0), 3u);  // TIME
+  EXPECT_EQ(CalcFieldSize(0x07, dummy, sizeof(dummy), 0), 4u);  // TIMESTAMP
+  EXPECT_EQ(CalcFieldSize(0x0C, dummy, sizeof(dummy), 0), 8u);  // DATETIME
 }
 
 TEST(CalcFieldSizeTest, DateTimeWithFractionalSeconds) {
   uint8_t dummy[8] = {};
   // TIMESTAMP2: 4 + (metadata+1)/2
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 0), 4u);   // fsp=0
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 3), 6u);   // fsp=3
-  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 6), 7u);   // fsp=6
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 0), 4u);  // fsp=0
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 3), 6u);  // fsp=3
+  EXPECT_EQ(CalcFieldSize(0x11, dummy, sizeof(dummy), 6), 7u);  // fsp=6
 
   // DATETIME2: 5 + (metadata+1)/2
   EXPECT_EQ(CalcFieldSize(0x12, dummy, sizeof(dummy), 0), 5u);
@@ -334,8 +334,8 @@ TEST(CalcFieldSizeTest, Varchar) {
   EXPECT_EQ(CalcFieldSize(0x0F, data_short, sizeof(data_short), 100), 6u);  // 1 + 5
 
   // metadata > 255: 2 byte length prefix
-  uint8_t data_long[] = {0x03, 0x00, 'a', 'b', 'c'};  // length = 3
-  EXPECT_EQ(CalcFieldSize(0x0F, data_long, sizeof(data_long), 500), 5u);   // 2 + 3
+  uint8_t data_long[] = {0x03, 0x00, 'a', 'b', 'c'};                      // length = 3
+  EXPECT_EQ(CalcFieldSize(0x0F, data_long, sizeof(data_long), 500), 5u);  // 2 + 3
 }
 
 TEST(CalcFieldSizeTest, Blob) {
@@ -374,7 +374,7 @@ TEST(CalcFieldSizeTest, StringChar) {
   // For max_len > 255 (2-byte length prefix): metadata = 0x0105
   // (0x0105 >> 4) = 0x10, 0x10 & 0x300 = 0, 0 ^ 0x300 = 0x300, 0x300 + 5 = 773
   // max_len = 773 > 255, so uses 2-byte length prefix
-  uint8_t data2[] = {0x03, 0x00, 'a', 'b', 'c'};  // length = 3 (LE)
+  uint8_t data2[] = {0x03, 0x00, 'a', 'b', 'c'};                     // length = 3 (LE)
   EXPECT_EQ(CalcFieldSize(0xFE, data2, sizeof(data2), 0x0105), 5u);  // 2 + 3
 }
 
@@ -401,7 +401,7 @@ TEST(CalcFieldSizeTest, Bit) {
 TEST(CalcFieldSizeTest, Json) {
   // JSON with metadata=4: 4 bytes length prefix
   uint8_t data[] = {0x0A, 0x00, 0x00, 0x00, /* 10 bytes of JSON data */
-                    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'};
+                    'a',  'b',  'c',  'd',  'e', 'f', 'g', 'h', 'i', 'j'};
   EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 4), 14u);  // 4 + 10
 }
 

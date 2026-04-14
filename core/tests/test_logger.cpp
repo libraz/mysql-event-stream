@@ -41,9 +41,7 @@ class LoggerTest : public ::testing::Test {
     LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr);
   }
 
-  void TearDown() override {
-    LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr);
-  }
+  void TearDown() override { LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr); }
 };
 
 TEST_F(LoggerTest, NoCallbackDoesNotCrash) {

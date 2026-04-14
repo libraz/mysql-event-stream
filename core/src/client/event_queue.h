@@ -15,6 +15,20 @@
 
 namespace mes {
 
+// NOTE(review): this queue intentionally uses std::queue + mutex + condition
+// variables rather than a lock-free SPSC ring buffer. Rationale:
+//   * Each QueuedEvent owns a std::vector<uint8_t> payload; the per-event
+//     heap allocation for that payload dominates any queue-structure cost,
+//     so switching to a ring buffer would not meaningfully reduce latency
+//     without also addressing the payload allocation (tracked separately as
+//     a cross-cutting protocol-layer refactor).
+//   * std::queue gives us bounded blocking Push/Pop and a single, simple
+//     shutdown notification path (Close() + notify_all) that cleanly
+//     unblocks both producer (reader thread) and consumer (Poll()).
+//   * Lock-free SPSC adds complexity (memory ordering, shutdown handshake)
+//     that is hard to audit. We will revisit if profiling shows the mutex
+//     as a real bottleneck.
+
 /** @brief An event buffered in the EventQueue. */
 struct QueuedEvent {
   std::vector<uint8_t> data;   ///< Owned copy of binlog event bytes

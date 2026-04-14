@@ -1,14 +1,13 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-#include "crc32.h"
+#include <gtest/gtest.h>
+#include <zlib.h>
 
 #include <cstring>
 #include <vector>
 
-#include <gtest/gtest.h>
-#include <zlib.h>
-
+#include "crc32.h"
 #include "event_header.h"
 #include "test_helpers.h"
 
@@ -17,15 +16,13 @@ namespace {
 
 TEST(CRC32, ComputeMatchesZlib) {
   const char* data = "hello";
-  uint32_t expected = static_cast<uint32_t>(
-      crc32(0L, reinterpret_cast<const Bytef*>(data), 5));
+  uint32_t expected = static_cast<uint32_t>(crc32(0L, reinterpret_cast<const Bytef*>(data), 5));
   EXPECT_EQ(ComputeCRC32(data, 5), expected);
   EXPECT_EQ(expected, 0x3610A686u);
 }
 
 TEST(CRC32, EmptyData) {
-  EXPECT_EQ(ComputeCRC32(nullptr, 0),
-            static_cast<uint32_t>(crc32(0L, Z_NULL, 0)));
+  EXPECT_EQ(ComputeCRC32(nullptr, 0), static_cast<uint32_t>(crc32(0L, Z_NULL, 0)));
 }
 
 TEST(CRC32, Deterministic) {
@@ -36,8 +33,8 @@ TEST(CRC32, Deterministic) {
 }
 
 TEST(CRC32, ValidChecksumPasses) {
-  auto event = test::BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
+  auto event =
+      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
   test::FixChecksum(event);
 
   size_t data_len = event.size() - kChecksumSize;
@@ -48,8 +45,8 @@ TEST(CRC32, ValidChecksumPasses) {
 }
 
 TEST(CRC32, CorruptedDataFails) {
-  auto event = test::BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
+  auto event =
+      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
   test::FixChecksum(event);
 
   // Corrupt a byte in the payload
@@ -63,8 +60,8 @@ TEST(CRC32, CorruptedDataFails) {
 }
 
 TEST(CRC32, CorruptedChecksumFails) {
-  auto event = test::BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
+  auto event =
+      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 100, {0x42});
   test::FixChecksum(event);
 
   // Corrupt the checksum itself
@@ -78,8 +75,7 @@ TEST(CRC32, CorruptedChecksumFails) {
 }
 
 TEST(CRC32, MinimalEventWithChecksum) {
-  auto event = test::BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+  auto event = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
   test::FixChecksum(event);
   EXPECT_EQ(event.size(), kEventHeaderSize + kChecksumSize);
 

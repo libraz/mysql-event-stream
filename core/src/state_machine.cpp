@@ -72,6 +72,15 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
 
       bytes_needed_ = current_header_.event_length;
 
+      // Reserve the full event size up front so the subsequent
+      // buffer_.insert() calls append in amortized O(1) instead of
+      // triggering geometric reallocation. Zero-copy ring-buffer redesign
+      // is out of scope; reserving is a targeted micro-optimization that
+      // eliminates the observed O(N^2) behavior for large BLOB events.
+      if (bytes_needed_ > buffer_.capacity()) {
+        buffer_.reserve(bytes_needed_);
+      }
+
       if (buffer_.size() >= bytes_needed_) {
         // Entire event already in buffer (unlikely but possible for tiny events)
         state_ = ParserState::kEventReady;
@@ -86,13 +95,9 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
   return total_consumed;
 }
 
-bool EventStreamParser::HasEvent() const {
-  return state_ == ParserState::kEventReady;
-}
+bool EventStreamParser::HasEvent() const { return state_ == ParserState::kEventReady; }
 
-const EventHeader& EventStreamParser::CurrentHeader() const {
-  return current_header_;
-}
+const EventHeader& EventStreamParser::CurrentHeader() const { return current_header_; }
 
 void EventStreamParser::CurrentBody(const uint8_t** body_data, size_t* body_len) const {
   if (body_data != nullptr) {

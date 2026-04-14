@@ -26,8 +26,7 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   void SetExcludeTables(const Napi::CallbackInfo& info);
   void Destroy(const Napi::CallbackInfo& info);
 
-  Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols,
-                          uint32_t count);
+  Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count);
 
   mes_engine_t* engine_;
 

@@ -31,11 +31,9 @@ void AppendZeroPadded(std::string& out, int val, int width) {
 // Parse the common ROWS_EVENT post-header and return a pointer to row data.
 // Sets column_count, columns_present, and optionally columns_present_update.
 // Returns nullptr on error.
-const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2,
-                                   bool is_update, size_t* column_count,
-                                   const uint8_t** columns_present,
-                                   const uint8_t** columns_present_update,
-                                   size_t* remaining) {
+const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2, bool is_update,
+                                   size_t* column_count, const uint8_t** columns_present,
+                                   const uint8_t** columns_present_update, size_t* remaining) {
   // Minimum: 6 (table_id) + 2 (flags) = 8
   if (len < 8) return nullptr;
 
@@ -88,9 +86,8 @@ size_t CountPresentColumns(const uint8_t* bitmap, size_t column_count) {
 }
 
 // Decode a single row from the data pointer. Advances ptr and remaining.
-bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
-                  const TableMetadata& metadata, size_t column_count,
-                  const uint8_t* columns_present, RowData* row) {
+bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& metadata,
+                  size_t column_count, const uint8_t* columns_present, RowData* row) {
   size_t present_count = CountPresentColumns(columns_present, column_count);
 
   // Null bitmap
@@ -102,19 +99,19 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
 
   row->columns.resize(column_count);
   size_t null_bit_index = 0;
+  const size_t meta_col_count = metadata.columns.size();
 
   for (size_t i = 0; i < column_count; i++) {
+    // Cache the column info pointer once per iteration; this avoids three
+    // bounds checks and three indexed loads into metadata.columns[i].
+    const ColumnMetadata* col_info = (i < meta_col_count) ? &metadata.columns[i] : nullptr;
+    const ColumnType col_type = col_info ? col_info->type : ColumnType::kLong;
+
     if (!binary::BitmapIsSet(columns_present, i)) {
       // Column not present in this event
-      row->columns[i] = ColumnValue::Null(
-          i < metadata.columns.size() ? metadata.columns[i].type
-                                      : ColumnType::kLong);
+      row->columns[i] = ColumnValue::Null(col_type);
       continue;
     }
-
-    ColumnType col_type =
-        i < metadata.columns.size() ? metadata.columns[i].type
-                                    : ColumnType::kLong;
 
     if (binary::BitmapIsSet(null_bitmap, null_bit_index)) {
       row->columns[i] = ColumnValue::Null(col_type);
@@ -123,29 +120,28 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
     }
     null_bit_index++;
 
-    uint16_t meta =
-        i < metadata.columns.size() ? metadata.columns[i].metadata : 0;
-    bool is_unsigned =
-        i < metadata.columns.size() ? metadata.columns[i].is_unsigned : false;
+    const uint16_t meta = col_info ? col_info->metadata : 0;
+    const bool is_unsigned = col_info ? col_info->is_unsigned : false;
 
     size_t consumed = 0;
-    row->columns[i] =
-        DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
+    row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
     if (consumed == 0) {
-      // consumed=0 is valid ONLY for DECIMAL(0,0): DecodeDecimal returns
-      // is_null=false, string_val="0", bytes_consumed=0. All other types
-      // that return consumed=0 indicate an error (unknown type or
-      // insufficient data). The guards below enforce this invariant:
-      //   - is_null=true → error (no type should produce null with 0 bytes)
-      //   - string_val empty → error (not the DECIMAL(0,0) special case)
-      // Without these checks, the data pointer would not advance and all
-      // subsequent columns would decode from wrong offsets.
-      if (row->columns[i].is_null) {
+      // consumed=0 is valid ONLY for NEWDECIMAL with precision==0, where
+      // DecodeDecimal returns is_null=false and string_val="0". For any
+      // other column type, consumed==0 signals an error (unknown type or
+      // insufficient data) and must fail the decode to avoid an infinite
+      // loop where the data pointer never advances.
+      if (col_type != ColumnType::kNewDecimal) {
         return false;
       }
-      if (row->columns[i].string_val.empty()) {
+      const uint8_t precision = static_cast<uint8_t>(meta >> 8);
+      if (precision != 0) {
         return false;
       }
+      if (row->columns[i].is_null || row->columns[i].string_val.empty()) {
+        return false;
+      }
+      // Legitimate DECIMAL(0, 0): fall through (no pointer advance needed).
     }
     if (consumed > remaining) return false;
     ptr += consumed;
@@ -156,19 +152,24 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
 
 // Compute fractional seconds microseconds from stored frac value.
 int FracToMicroseconds(int frac, uint16_t meta) {
+  // MySQL packs fractional seconds in pairs that share the same byte width:
+  //   fsp 1,2 -> 1 byte, value = microseconds / 10000  (range 0..99)
+  //   fsp 3,4 -> 2 bytes, value = microseconds / 100   (range 0..9999)
+  //   fsp 5,6 -> 3 bytes, value = microseconds         (range 0..999999)
+  // Within each pair the encoder (my_datetime_packed_to_binary in MySQL)
+  // stores the same scaled value regardless of fsp; the lower precisions
+  // simply produce values whose trailing low digit(s) are always zero.
+  // Decoding multipliers must therefore be identical within each pair.
   switch (meta) {
     case 1:
-      return frac * 100000;   // tenths → microseconds
     case 2:
-      return frac * 10000;    // hundredths → microseconds
+      return frac * 10000;
     case 3:
-      return frac * 1000;     // milliseconds → microseconds
     case 4:
-      return frac * 100;      // 10-microseconds → microseconds (unchanged)
+      return frac * 100;
     case 5:
-      return frac * 10;       // 100-microseconds → microseconds
     case 6:
-      return frac;            // microseconds (unchanged)
+      return frac;
     default:
       return 0;
   }
@@ -189,22 +190,20 @@ struct RowsContext {
   const uint8_t* columns_present_update;
 };
 
-bool ParseRowsContext(const uint8_t* data, size_t len,
-                      const TableMetadata& metadata, bool is_v2,
+bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                       bool is_update, RowsContext* ctx) {
   if (!data || !ctx) return false;
   ctx->columns_present_update = nullptr;
-  ctx->ptr = ParseRowsPostHeader(data, len, is_v2, is_update,
-                                  &ctx->column_count, &ctx->columns_present,
-                                  &ctx->columns_present_update, &ctx->remaining);
+  ctx->ptr =
+      ParseRowsPostHeader(data, len, is_v2, is_update, &ctx->column_count, &ctx->columns_present,
+                          &ctx->columns_present_update, &ctx->remaining);
   return ctx->ptr != nullptr;
 }
 
 }  // namespace
 
-ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
-                              const uint8_t* data, size_t len,
-                              size_t* bytes_consumed) {
+ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, const uint8_t* data,
+                              size_t len, size_t* bytes_consumed) {
   *bytes_consumed = 0;
 
   switch (type) {
@@ -212,11 +211,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (len < 1) return ColumnValue::Null(type);
       *bytes_consumed = 1;
       if (is_unsigned) {
-        return ColumnValue::Int(type,
-                                static_cast<int64_t>(binary::ReadU8(data)));
+        return ColumnValue::Int(type, static_cast<int64_t>(binary::ReadU8(data)));
       }
-      return ColumnValue::Int(type,
-                              static_cast<int64_t>(static_cast<int8_t>(data[0])));
+      return ColumnValue::Int(type, static_cast<int64_t>(static_cast<int8_t>(data[0])));
     }
 
     case ColumnType::kShort: {
@@ -226,8 +223,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (is_unsigned) {
         return ColumnValue::Int(type, static_cast<int64_t>(raw));
       }
-      return ColumnValue::Int(type,
-                              static_cast<int64_t>(static_cast<int16_t>(raw)));
+      return ColumnValue::Int(type, static_cast<int64_t>(static_cast<int16_t>(raw)));
     }
 
     case ColumnType::kLong: {
@@ -237,8 +233,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (is_unsigned) {
         return ColumnValue::Int(type, static_cast<int64_t>(raw));
       }
-      return ColumnValue::Int(type,
-                              static_cast<int64_t>(static_cast<int32_t>(raw)));
+      return ColumnValue::Int(type, static_cast<int64_t>(static_cast<int32_t>(raw)));
     }
 
     case ColumnType::kLongLong: {
@@ -266,8 +261,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (raw & kInt24SignBit) {
         raw |= 0xFF000000;
       }
-      return ColumnValue::Int(type,
-                              static_cast<int64_t>(static_cast<int32_t>(raw)));
+      return ColumnValue::Int(type, static_cast<int64_t>(static_cast<int32_t>(raw)));
     }
 
     case ColumnType::kYear: {
@@ -312,8 +306,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
       return ColumnValue::String(
-          type,
-          std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
+          type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
     }
 
     case ColumnType::kBlob:
@@ -321,19 +314,23 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
     case ColumnType::kMediumBlob:
     case ColumnType::kLongBlob:
     case ColumnType::kVector: {
+      // NOTE(review): MySQL TABLE_MAP should always record a valid
+      // pack_length in the metadata low byte (1 for TINY_BLOB,
+      // 2 for BLOB/TEXT, 3 for MEDIUM_BLOB, 4 for LONG_BLOB). A value
+      // of 0 is not expected from a correct server; this legacy
+      // fallback to 1 is preserved for defensive compatibility. The
+      // prefix_consumed/blob_len bounds checks below reject the row
+      // before a mismatched fallback can desynchronize later columns.
       uint8_t pack_length = static_cast<uint8_t>(meta);
       if (pack_length == 0) pack_length = 1;
       if (pack_length > 4) return ColumnValue::Null(type);
       size_t prefix_consumed = 0;
-      uint32_t blob_len =
-          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      uint32_t blob_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
       if (len < prefix_consumed + blob_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + blob_len;
       return ColumnValue::Bytes(
-          type,
-          std::vector<uint8_t>(data + prefix_consumed,
-                               data + prefix_consumed + blob_len));
+          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + blob_len));
     }
 
     case ColumnType::kJson: {
@@ -341,16 +338,13 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (pack_length == 0) pack_length = 4;
       if (pack_length > 4) return ColumnValue::Null(type);
       size_t prefix_consumed = 0;
-      uint32_t json_len =
-          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      uint32_t json_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
       if (len < prefix_consumed + json_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + json_len;
       // Store JSON as bytes (binary JSON format, not text)
       return ColumnValue::Bytes(
-          type,
-          std::vector<uint8_t>(data + prefix_consumed,
-                               data + prefix_consumed + json_len));
+          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + json_len));
     }
 
     case ColumnType::kString: {
@@ -362,14 +356,12 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
         if (size == 1) {
           if (len < 1) return ColumnValue::Null(ColumnType::kEnum);
           *bytes_consumed = 1;
-          return ColumnValue::Int(ColumnType::kEnum,
-                                  static_cast<int64_t>(binary::ReadU8(data)));
+          return ColumnValue::Int(ColumnType::kEnum, static_cast<int64_t>(binary::ReadU8(data)));
         }
         if (size == 2) {
           if (len < 2) return ColumnValue::Null(ColumnType::kEnum);
           *bytes_consumed = 2;
-          return ColumnValue::Int(ColumnType::kEnum,
-                                  static_cast<int64_t>(binary::ReadU16Le(data)));
+          return ColumnValue::Int(ColumnType::kEnum, static_cast<int64_t>(binary::ReadU16Le(data)));
         }
         return ColumnValue::Null(ColumnType::kEnum);
       }
@@ -388,8 +380,13 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       }
 
       // CHAR type
-      uint32_t max_len =
-          (((meta >> 4) & 0x300) ^ 0x300) + (meta & 0xFF);
+      // NOTE(review): Formula matches MySQL server source (log_event.cc
+      // Rows_log_event::print_verbose_one_row). The `^ 0x300` is
+      // intentional: it decodes the field length when real_type was
+      // upgraded from CHAR to STRING, where the upper 2 bits of meta[0]
+      // carry the high bits of max_len XORed with 0x3. Do not replace
+      // with `| 0x300`.
+      uint32_t max_len = (((meta >> 4) & 0x300) ^ 0x300) + (meta & 0xFF);
       size_t prefix_size;
       size_t str_len;
       if (max_len > 255) {
@@ -404,8 +401,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
       return ColumnValue::String(
-          type,
-          std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
+          type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
     }
 
     case ColumnType::kDate: {
@@ -425,9 +421,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       *bytes_consumed = 3;
       uint32_t raw = binary::ReadU24Le(data);
       // Sign-extend 24-bit to 32-bit
-      int32_t val = (raw & 0x800000)
-                        ? static_cast<int32_t>(raw | 0xFF000000)
-                        : static_cast<int32_t>(raw);
+      int32_t val =
+          (raw & 0x800000) ? static_cast<int32_t>(raw | 0xFF000000) : static_cast<int32_t>(raw);
       bool negative = val < 0;
       if (negative) val = -val;
       int sec = val % 100;
@@ -466,8 +461,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       sval /= 100;
       int year = static_cast<int>(sval);
       char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year,
-                    month, day, hour, min, sec);
+      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, min,
+                    sec);
       return ColumnValue::String(type, std::string(buf));
     }
 
@@ -479,8 +474,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
 
       // 5 bytes big-endian
       int64_t packed = static_cast<int64_t>(ReadBigEndian(data, 5));
-      static constexpr int64_t kDatetimefIntOfs = 0x8000000000LL;
-      int64_t intpart = packed - kDatetimefIntOfs;
+      static constexpr int64_t kDatetime2IntOfs = 0x8000000000LL;
+      int64_t intpart = packed - kDatetime2IntOfs;
       bool negative = intpart < 0;
       if (negative) intpart = -intpart;
 
@@ -497,8 +492,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       std::string result;
       if (negative) result += "-";
       char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year,
-                    month, day, hour, minute, second);
+      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour,
+                    minute, second);
       result += buf;
 
       if (meta > 0 && frac_bytes > 0) {
@@ -565,8 +560,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       uint8_t precision = static_cast<uint8_t>(meta >> 8);
       uint8_t scale = static_cast<uint8_t>(meta & 0xFF);
       size_t consumed = 0;
-      std::string val =
-          binary::DecodeDecimal(data, len, precision, scale, consumed);
+      std::string val = binary::DecodeDecimal(data, len, precision, scale, consumed);
       if (consumed == 0 && !val.empty()) {
         // precision==0 returns "0" with consumed==0, which is valid
       } else if (consumed == 0 && val.empty()) {
@@ -592,40 +586,39 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       if (pack_length == 0) pack_length = 4;
       if (pack_length > 4) return ColumnValue::Null(type);
       size_t prefix_consumed = 0;
-      uint32_t geo_len =
-          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      uint32_t geo_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
       if (len < prefix_consumed + geo_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + geo_len;
       return ColumnValue::Bytes(
-          type,
-          std::vector<uint8_t>(data + prefix_consumed,
-                               data + prefix_consumed + geo_len));
+          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + geo_len));
     }
 
     // Note: kEnum (0xF7) and kSet (0xF8) are handled within the kString case
     // above, as MySQL binlog always transmits them as MYSQL_TYPE_STRING.
     default: {
-      uint32_t field_size = binary::CalcFieldSize(
-          static_cast<uint8_t>(type), data, len, meta);
+      uint32_t field_size = binary::CalcFieldSize(static_cast<uint8_t>(type), data, len, meta);
       *bytes_consumed = field_size;
       return ColumnValue::Null(type);
     }
   }
 }
 
-static bool DecodeSimpleRows(const uint8_t* data, size_t len,
-                             const TableMetadata& metadata, bool is_v2,
-                             std::vector<RowData>* rows) {
+static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadata& metadata,
+                             bool is_v2, std::vector<RowData>* rows) {
   if (!rows) return false;
   RowsContext ctx{};
   if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
 
   rows->clear();
+  // Typical multi-row events contain a handful of rows. Reserving avoids
+  // the first few reallocations without over-committing for single-row
+  // events (vector capacity grows geometrically after this).
+  rows->reserve(8);
   while (ctx.remaining > 0) {
     RowData row;
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
-                      ctx.columns_present, &row)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
+                      &row)) {
       return false;
     }
     rows->push_back(std::move(row));
@@ -633,24 +626,23 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len,
   return true;
 }
 
-bool DecodeWriteRows(const uint8_t* data, size_t len,
-                     const TableMetadata& metadata, bool is_v2,
+bool DecodeWriteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                      std::vector<RowData>* rows) {
   return DecodeSimpleRows(data, len, metadata, is_v2, rows);
 }
 
-bool DecodeUpdateRows(const uint8_t* data, size_t len,
-                      const TableMetadata& metadata, bool is_v2,
+bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                       std::vector<UpdatePair>* pairs) {
   if (!pairs) return false;
   RowsContext ctx{};
   if (!ParseRowsContext(data, len, metadata, is_v2, true, &ctx)) return false;
 
   pairs->clear();
+  pairs->reserve(8);
   while (ctx.remaining > 0) {
     UpdatePair pair;
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
-                      ctx.columns_present, &pair.before)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
+                      &pair.before)) {
       return false;
     }
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
@@ -662,8 +654,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len,
   return true;
 }
 
-bool DecodeDeleteRows(const uint8_t* data, size_t len,
-                      const TableMetadata& metadata, bool is_v2,
+bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
                       std::vector<RowData>* rows) {
   return DecodeSimpleRows(data, len, metadata, is_v2, rows);
 }

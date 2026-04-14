@@ -128,12 +128,12 @@ class TestReconnectAttempts:
         with (
             patch.object(CdcStream, "_reconnect", fake_reconnect),
             patch("asyncio.to_thread", side_effect=RuntimeError("connection lost")),
-            pytest.raises(StopAsyncIteration),
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
         ):
             await stream.__anext__()
 
         # First failure: attempts=1, 1 > 1 false -> reconnect
-        # Second failure: attempts=2, 2 > 1 true -> stop
+        # Second failure: attempts=2, 2 > 1 true -> raise RuntimeError
         assert reconnect_count == 1
 
     @pytest.mark.asyncio
@@ -161,13 +161,13 @@ class TestReconnectAttempts:
         with (
             patch.object(CdcStream, "_reconnect", fake_reconnect),
             patch("asyncio.to_thread", side_effect=RuntimeError("connection lost")),
-            pytest.raises(StopAsyncIteration),
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
         ):
             await stream.__anext__()
 
         # First failure: attempts=1, 1 > 2 false -> reconnect
         # Second failure: attempts=2, 2 > 2 false -> reconnect
-        # Third failure: attempts=3, 3 > 2 true -> stop
+        # Third failure: attempts=3, 3 > 2 true -> raise RuntimeError
         assert reconnect_count == 2
 
     @pytest.mark.asyncio

@@ -10,8 +10,20 @@
 
 namespace mes::protocol {
 
-mes_error_t AuthNativePassword(const std::string& password,
-                               const uint8_t* salt, size_t salt_len,
+namespace {
+
+// RAII helper: guarantees OPENSSL_cleanse of sensitive buffers on every exit
+// path (including early returns on SHA failures). Without this, intermediate
+// password-derived hashes could remain in stack memory after an error return.
+struct SecureCleanse {
+  void* buf;
+  size_t n;
+  ~SecureCleanse() { OPENSSL_cleanse(buf, n); }
+};
+
+}  // namespace
+
+mes_error_t AuthNativePassword(const std::string& password, const uint8_t* salt, size_t salt_len,
                                std::vector<uint8_t>* response) {
   response->clear();
 
@@ -22,13 +34,15 @@ mes_error_t AuthNativePassword(const std::string& password,
 
   // Step 1: hash_stage1 = SHA1(password)
   uint8_t hash_stage1[SHA_DIGEST_LENGTH];
-  if (SHA1(reinterpret_cast<const uint8_t*>(password.data()), password.size(),
-           hash_stage1) == nullptr) {
+  SecureCleanse cleanse_stage1{hash_stage1, sizeof(hash_stage1)};
+  if (SHA1(reinterpret_cast<const uint8_t*>(password.data()), password.size(), hash_stage1) ==
+      nullptr) {
     return MES_ERR_AUTH;
   }
 
   // Step 2: hash_stage2 = SHA1(hash_stage1)
   uint8_t hash_stage2[SHA_DIGEST_LENGTH];
+  SecureCleanse cleanse_stage2{hash_stage2, sizeof(hash_stage2)};
   if (SHA1(hash_stage1, SHA_DIGEST_LENGTH, hash_stage2) == nullptr) {
     return MES_ERR_AUTH;
   }
@@ -55,14 +69,12 @@ mes_error_t AuthNativePassword(const std::string& password,
     (*response)[i] = hash_stage1[i] ^ scramble[i];
   }
 
-  OPENSSL_cleanse(hash_stage1, sizeof(hash_stage1));
-  OPENSSL_cleanse(hash_stage2, sizeof(hash_stage2));
+  // hash_stage1 / hash_stage2 cleansed by SecureCleanse destructors.
   return MES_OK;
 }
 
-mes_error_t AuthCachingSha2Password(const std::string& password,
-                                    const uint8_t* salt, size_t salt_len,
-                                    std::vector<uint8_t>* response) {
+mes_error_t AuthCachingSha2Password(const std::string& password, const uint8_t* salt,
+                                    size_t salt_len, std::vector<uint8_t>* response) {
   response->clear();
 
   // Empty password produces empty auth response
@@ -72,13 +84,15 @@ mes_error_t AuthCachingSha2Password(const std::string& password,
 
   // Step 1: hash1 = SHA256(password)
   uint8_t hash1[SHA256_DIGEST_LENGTH];
-  if (SHA256(reinterpret_cast<const uint8_t*>(password.data()), password.size(),
-             hash1) == nullptr) {
+  SecureCleanse cleanse_hash1{hash1, sizeof(hash1)};
+  if (SHA256(reinterpret_cast<const uint8_t*>(password.data()), password.size(), hash1) ==
+      nullptr) {
     return MES_ERR_AUTH;
   }
 
   // Step 2: hash2 = SHA256(hash1)
   uint8_t hash2[SHA256_DIGEST_LENGTH];
+  SecureCleanse cleanse_hash2{hash2, sizeof(hash2)};
   if (SHA256(hash1, SHA256_DIGEST_LENGTH, hash2) == nullptr) {
     return MES_ERR_AUTH;
   }
@@ -105,8 +119,7 @@ mes_error_t AuthCachingSha2Password(const std::string& password,
     (*response)[i] = hash1[i] ^ hash3[i];
   }
 
-  OPENSSL_cleanse(hash1, sizeof(hash1));
-  OPENSSL_cleanse(hash2, sizeof(hash2));
+  // hash1 / hash2 cleansed by SecureCleanse destructors.
   return MES_OK;
 }
 

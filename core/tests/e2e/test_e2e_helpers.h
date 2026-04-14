@@ -68,9 +68,7 @@ inline mes::ServerFlavor GetDbFlavor() {
   return mes::ServerFlavor::kMySQL;
 }
 
-inline bool IsMariaDB() {
-  return GetDbFlavor() == mes::ServerFlavor::kMariaDB;
-}
+inline bool IsMariaDB() { return GetDbFlavor() == mes::ServerFlavor::kMariaDB; }
 
 // MariaDB uses mysql_native_password (no TLS required for auth).
 // MySQL 8.4+ uses caching_sha2_password (TLS needed for full auth).
@@ -93,9 +91,7 @@ inline std::string ClientCert() { return CertDir() + "/client-cert.pem"; }
 inline std::string ClientKey() { return CertDir() + "/client-key.pem"; }
 inline std::string WrongCa() { return CertDir() + "/wrong-ca.pem"; }
 
-inline std::string DefaultCa() {
-  return IsMariaDB() ? "" : CaCert();
-}
+inline std::string DefaultCa() { return IsMariaDB() ? "" : CaCert(); }
 
 // Captured column value (deep-copied from transient mes_column_t)
 struct CapturedColumn {
@@ -146,17 +142,15 @@ inline CapturedEvent CopyEvent(const mes_event_t* e) {
 // Get current GTID executed from server (flavor-aware)
 inline std::string GetCurrentGtid() {
   mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                   DefaultSslMode(), DefaultCa(), "", "") != MES_OK)
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                   DefaultCa(), "", "") != MES_OK)
     return "";
   mes::protocol::QueryResult qr;
   std::string err;
   // MariaDB: @@GLOBAL.gtid_current_pos; MySQL: @@GLOBAL.gtid_executed
-  const char* query = IsMariaDB()
-                          ? "SELECT @@GLOBAL.gtid_current_pos"
-                          : "SELECT @@GLOBAL.gtid_executed";
-  if (mes::protocol::ExecuteQuery(conn.Socket(), query, &qr, &err) != MES_OK)
-    return "";
+  const char* query =
+      IsMariaDB() ? "SELECT @@GLOBAL.gtid_current_pos" : "SELECT @@GLOBAL.gtid_executed";
+  if (mes::protocol::ExecuteQuery(conn.Socket(), query, &qr, &err) != MES_OK) return "";
   if (qr.rows.empty()) return "";
   return qr.rows[0].values[0];
 }
@@ -164,8 +158,8 @@ inline std::string GetCurrentGtid() {
 // Execute a DML/DDL statement as root (flavor-aware TLS)
 inline mes_error_t ExecuteDML(const std::string& sql) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         DefaultSslMode(), DefaultCa(), "", "");
+  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                         DefaultCa(), "", "");
   if (rc != MES_OK) return rc;
   mes::protocol::QueryResult qr;
   std::string err;
@@ -176,10 +170,10 @@ inline mes_error_t ExecuteDML(const std::string& sql) {
 // Returns captured events. Stops when predicate returns true or max_polls reached.
 using EventPredicate = std::function<bool(const std::vector<CapturedEvent>&)>;
 
-inline std::vector<CapturedEvent> CaptureEvents(
-    const std::string& start_gtid, uint32_t server_id,
-    const EventPredicate& done_pred, int max_polls = 100,
-    mes_engine_t* external_engine = nullptr) {
+inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, uint32_t server_id,
+                                                const EventPredicate& done_pred,
+                                                int max_polls = 100,
+                                                mes_engine_t* external_engine = nullptr) {
   std::vector<CapturedEvent> events;
 
   mes_client_t* client = mes_client_create();
@@ -243,10 +237,10 @@ inline std::vector<CapturedEvent> CaptureEvents(
 }
 
 // Convenience: capture events for a specific table, wait for N events
-inline std::vector<CapturedEvent> CaptureTableEvents(
-    const std::string& start_gtid, uint32_t server_id,
-    const std::string& table_name, size_t count,
-    mes_engine_t* engine = nullptr) {
+inline std::vector<CapturedEvent> CaptureTableEvents(const std::string& start_gtid,
+                                                     uint32_t server_id,
+                                                     const std::string& table_name, size_t count,
+                                                     mes_engine_t* engine = nullptr) {
   return CaptureEvents(
       start_gtid, server_id,
       [&](const std::vector<CapturedEvent>& evts) {
@@ -262,26 +256,22 @@ inline std::vector<CapturedEvent> CaptureTableEvents(
 // Get MySQL/MariaDB major version from server
 inline int GetMysqlMajorVersion() {
   mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                   DefaultSslMode(), DefaultCa(), "", "") != MES_OK)
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                   DefaultCa(), "", "") != MES_OK)
     return 0;
   mes::protocol::QueryResult qr;
   std::string err;
-  if (mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@version", &qr,
-                                  &err) != MES_OK)
-    return 0;
+  if (mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@version", &qr, &err) != MES_OK) return 0;
   if (qr.rows.empty()) return 0;
   const std::string& ver = qr.rows[0].values[0];
   return std::atoi(ver.c_str());
 }
 
-inline bool IsMysql9OrLater() {
-  return !IsMariaDB() && GetMysqlMajorVersion() >= 9;
-}
+inline bool IsMysql9OrLater() { return !IsMariaDB() && GetMysqlMajorVersion() >= 9; }
 
 // Filter events by table name
-inline std::vector<CapturedEvent> FilterByTable(
-    const std::vector<CapturedEvent>& events, const std::string& table) {
+inline std::vector<CapturedEvent> FilterByTable(const std::vector<CapturedEvent>& events,
+                                                const std::string& table) {
   std::vector<CapturedEvent> filtered;
   for (const auto& e : events) {
     if (e.table == table) filtered.push_back(e);

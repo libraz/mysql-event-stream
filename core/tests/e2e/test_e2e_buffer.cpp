@@ -38,9 +38,8 @@ TEST(E2EBuffer, SlowConsumerDoesNotKillStream) {
 
   // Insert 3 rows
   for (int i = 0; i < 3; i++) {
-    auto rc = ExecuteDML(
-        "INSERT INTO mes_test.items (name, value) VALUES ('slow_" +
-        std::to_string(i) + "', " + std::to_string(i) + ")");
+    auto rc = ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('slow_" +
+                         std::to_string(i) + "', " + std::to_string(i) + ")");
     ASSERT_EQ(rc, MES_OK);
   }
 
@@ -98,8 +97,8 @@ TEST(E2EBuffer, SlowConsumerExceedsReadTimeout) {
   // Insert rows before starting stream
   for (int i = 0; i < 3; i++) {
     ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
-                         "('exceed_" + std::to_string(i) + "', " +
-                         std::to_string(i) + ")"),
+                         "('exceed_" +
+                         std::to_string(i) + "', " + std::to_string(i) + ")"),
               MES_OK);
   }
 
@@ -137,8 +136,7 @@ TEST(E2EBuffer, SlowConsumerExceedsReadTimeout) {
     if (r.data != nullptr) events_after++;
     if (events_after >= 2) break;
   }
-  EXPECT_GE(events_after, 2)
-      << "Stream died despite reader thread (consumer slept > read_timeout)";
+  EXPECT_GE(events_after, 2) << "Stream died despite reader thread (consumer slept > read_timeout)";
 
   mes_client_stop(client);
   mes_client_disconnect(client);
@@ -174,9 +172,10 @@ TEST(E2EBuffer, EventsBufferedDuringConsumerSleep) {
   std::thread inserter([&]() {
     // Stagger inserts over 3 seconds
     for (int i = 0; i < 5; i++) {
-      ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
-                 "('during_sleep_" + std::to_string(i) + "', " +
-                 std::to_string(i) + ")");
+      ExecuteDML(
+          "INSERT INTO mes_test.items (name, value) VALUES "
+          "('during_sleep_" +
+          std::to_string(i) + "', " + std::to_string(i) + ")");
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
   });
@@ -208,8 +207,7 @@ TEST(E2EBuffer, EventsBufferedDuringConsumerSleep) {
     if (item_count >= 5) break;
   }
 
-  EXPECT_GE(item_count, 5)
-      << "Events inserted during consumer sleep were not buffered";
+  EXPECT_GE(item_count, 5) << "Events inserted during consumer sleep were not buffered";
 
   mes_client_stop(client);
   mes_client_disconnect(client);
@@ -254,8 +252,7 @@ TEST(E2EBuffer, StopUnblocksPoll) {
   poller.join();
 
   auto elapsed = std::chrono::steady_clock::now() - start;
-  auto elapsed_s =
-      std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+  auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
   EXPECT_LT(elapsed_s, 5) << "Stop did not unblock poll quickly enough";
 
   mes_client_disconnect(client);
@@ -269,18 +266,16 @@ TEST(E2EBuffer, HighThroughputBurst) {
   // Insert 50 rows via a single connection for speed
   {
     mes::protocol::MysqlConnection conn;
-    ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
-                           kTimeout, 0, "", "", ""),
+    ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
               MES_OK);
     for (int i = 0; i < 50; i++) {
       mes::protocol::QueryResult qr;
       std::string err;
       ASSERT_EQ(
-          mes::protocol::ExecuteQuery(
-              conn.Socket(),
-              "INSERT INTO mes_test.items (name, value) VALUES ('burst_" +
-                  std::to_string(i) + "', " + std::to_string(i) + ")",
-              &qr, &err),
+          mes::protocol::ExecuteQuery(conn.Socket(),
+                                      "INSERT INTO mes_test.items (name, value) VALUES ('burst_" +
+                                          std::to_string(i) + "', " + std::to_string(i) + ")",
+                                      &qr, &err),
           MES_OK)
           << err;
     }
@@ -307,9 +302,8 @@ TEST(E2EBuffer, QueueSizeConfigurable) {
 
   // Insert 10 rows
   for (int i = 0; i < 10; i++) {
-    auto rc = ExecuteDML(
-        "INSERT INTO mes_test.items (name, value) VALUES ('qsize_" +
-        std::to_string(i) + "', " + std::to_string(i) + ")");
+    auto rc = ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('qsize_" +
+                         std::to_string(i) + "', " + std::to_string(i) + ")");
     ASSERT_EQ(rc, MES_OK);
   }
 
@@ -352,8 +346,7 @@ TEST(E2EBuffer, QueueSizeConfigurable) {
     if (events_received >= 10) break;
   }
 
-  EXPECT_GE(events_received, 10)
-      << "Small queue size should not lose events";
+  EXPECT_GE(events_received, 10) << "Small queue size should not lose events";
 
   mes_client_stop(client);
   mes_client_disconnect(client);
@@ -368,9 +361,8 @@ TEST(E2EBuffer, GracefulShutdownNoLeak) {
     auto gtid = GetCurrentGtid();
     ASSERT_FALSE(gtid.empty()) << "Round " << round << ": no GTID";
 
-    ExecuteDML(
-        "INSERT INTO mes_test.items (name, value) VALUES ('shutdown_" +
-        std::to_string(round) + "', " + std::to_string(round) + ")");
+    ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('shutdown_" +
+               std::to_string(round) + "', " + std::to_string(round) + ")");
 
     mes_client_t* client = mes_client_create();
     ASSERT_NE(client, nullptr);
@@ -388,8 +380,7 @@ TEST(E2EBuffer, GracefulShutdownNoLeak) {
     std::string shutdown_ca = DefaultCa();
     config.ssl_ca = shutdown_ca.empty() ? nullptr : shutdown_ca.c_str();
 
-    ASSERT_EQ(mes_client_connect(client, &config), MES_OK)
-        << "Round " << round;
+    ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << "Round " << round;
     ASSERT_EQ(mes_client_start(client), MES_OK) << "Round " << round;
 
     // Poll a few events
