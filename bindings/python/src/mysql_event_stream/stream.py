@@ -65,6 +65,9 @@ class CdcStream:
             max_reconnect_attempts: Maximum reconnection attempts
                 (default 10, 0 = disabled).
         """
+        if not (1 <= port <= 65535):
+            raise ValueError(f"port must be 1-65535, got {port}")
+
         self._host = host
         self._port = port
         self._user = user
@@ -137,6 +140,8 @@ class CdcStream:
             attr = field_map.get(key)
             if attr is None:
                 raise TypeError(f"Unknown config key: {key!r}")
+            if key == "port" and isinstance(value, int) and not (1 <= value <= 65535):
+                raise ValueError(f"port must be 1-65535, got {value}")
             setattr(self, attr, value)
 
     async def __anext__(self) -> ChangeEvent:
@@ -144,7 +149,7 @@ class CdcStream:
             raise StopAsyncIteration
 
         if not self._started:
-            self._start()
+            await self._start()
 
         assert self._client is not None
         assert self._engine is not None
@@ -161,15 +166,11 @@ class CdcStream:
                 if self._closed:
                     raise StopAsyncIteration from err
                 if self._max_reconnect_attempts == 0:
-                    warnings.warn(
-                        f"Stream stopped due to error: {err}",
-                        stacklevel=2,
-                    )
                     await self.close()
-                    raise StopAsyncIteration from err
+                    raise
 
                 self._reconnect_attempts += 1
-                if self._reconnect_attempts >= self._max_reconnect_attempts:
+                if self._reconnect_attempts > self._max_reconnect_attempts:
                     await self.close()
                     raise StopAsyncIteration from err
 
@@ -184,6 +185,7 @@ class CdcStream:
         if self._closed:
             return
         self._closed = True
+        self._started = False
         if self._client is not None:
             self._client.stop()
             self._client.disconnect()
@@ -209,7 +211,8 @@ class CdcStream:
             self._client.close()
             self._client = None
 
-        delay = 1.0 * min(self._reconnect_attempts, 10)
+        max_delay_s = 10.0
+        delay = min(float(self._reconnect_attempts), max_delay_s)
         await asyncio.sleep(delay)
 
         if gtid:
@@ -233,10 +236,15 @@ class CdcStream:
         )
         assert self._engine is not None
         self._engine.reset()
-        self._client.connect()
-        self._client.start()
+        await asyncio.to_thread(self._client.connect)
+        await asyncio.to_thread(self._client.start)
+        # Do NOT reset _reconnect_attempts here. The counter should only
+        # reset when a real event is successfully received (in __anext__),
+        # not when a reconnection completes. Otherwise, a server that
+        # accepts connections but immediately drops the stream would
+        # trigger infinite reconnections regardless of max_reconnect_attempts.
 
-    def _start(self) -> None:
+    async def _start(self) -> None:
         """Create client and engine, connect and start streaming."""
         self._client = BinlogClient(
             host=self._host,
@@ -274,8 +282,8 @@ class CdcStream:
                     "Column names will use numeric indices.",
                     stacklevel=2,
                 )
-            self._client.connect()
-            self._client.start()
+            await asyncio.to_thread(self._client.connect)
+            await asyncio.to_thread(self._client.start)
             self._started = True
         except Exception:
             if self._engine is not None:

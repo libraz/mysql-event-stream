@@ -287,8 +287,10 @@ mes_error_t MysqlConnection::ParseServerHandshake(
       return MES_ERR_AUTH;
     }
 
-    // Only use the meaningful bytes (exclude trailing NUL at position 13)
-    size_t part2_use_len = 12;
+    // Only use the meaningful bytes (exclude trailing NUL at position 13).
+    // When auth_plugin_data_len <= 8, the server sent no extra auth data
+    // beyond the first 8 bytes; the 13 bytes here are filler.
+    size_t part2_use_len = 0;
     if (auth_plugin_data_len > 8) {
       part2_use_len =
           std::min(static_cast<size_t>(auth_plugin_data_len - 8),
@@ -335,10 +337,12 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     uint32_t ssl_mode, const std::string& ssl_ca,
     const std::string& ssl_cert, const std::string& ssl_key,
     const std::string& host) {
-  // Build client capabilities
+  // Build client capabilities.
+  // CLIENT_DEPRECATE_EOF is intentionally not requested: ExecuteQuery()
+  // relies on traditional EOF packets for result set framing.
   uint32_t client_caps = kClientProtocol41 | kClientSecureConnection |
                          kClientPluginAuth | kClientPluginAuthLenencData |
-                         kClientTransactions | kClientDeprecateEOF;
+                         kClientTransactions;
 
   // Intersect with server capabilities
   client_caps &= server_info_.server_capabilities;

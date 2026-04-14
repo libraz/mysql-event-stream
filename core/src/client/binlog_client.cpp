@@ -37,6 +37,9 @@ bool IsValidMariaDBGtidSet(const std::string& gtid) {
 /// MySQL GTID_LOG_EVENT post-header body size: commit_flag(1) + UUID(16) + GNO(8)
 constexpr size_t kMySQLGtidBodySize = 25;
 
+/// Heartbeat period in nanoseconds (3 seconds)
+constexpr uint64_t kHeartbeatPeriodNs = 3'000'000'000ULL;
+
 }  // namespace
 
 BinlogClient::BinlogClient() = default;
@@ -135,12 +138,14 @@ mes_error_t BinlogClient::StartStreamMySQL() {
     }
   }
 
-  // Set heartbeat period (3 seconds = 3000000000 nanoseconds)
+  // Set heartbeat period
   {
     protocol::QueryResult qr;
     std::string err;
-    mes_error_t hb_rc = protocol::ExecuteQuery(
-        conn_.Socket(), "SET @master_heartbeat_period = 3000000000", &qr, &err);
+    std::string hb_query =
+        "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+    mes_error_t hb_rc =
+        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
     if (hb_rc != MES_OK) {
       StructuredLog()
           .Event("heartbeat_setup_failed")
@@ -213,10 +218,12 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
     }
   }
 
-  // Heartbeat period (3 seconds = 3000000000 nanoseconds)
+  // Heartbeat period
   {
-    mes_error_t rc = protocol::ExecuteQuery(
-        conn_.Socket(), "SET @master_heartbeat_period = 3000000000", &qr, &err);
+    std::string hb_query =
+        "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+    mes_error_t rc =
+        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
     if (rc != MES_OK) {
       StructuredLog()
           .Event("heartbeat_setup_failed")
@@ -311,7 +318,11 @@ void BinlogClient::ReaderLoop() {
             .Field("stored_crc", static_cast<uint64_t>(stored_crc))
             .Field("event_length", static_cast<uint64_t>(event_pkt.size))
             .Error();
-        continue;  // Skip corrupted event
+        // Push error event so the consumer can detect the corrupted event
+        QueuedEvent crc_err;
+        crc_err.error = MES_ERR_CHECKSUM;
+        event_queue_->Push(std::move(crc_err));
+        continue;
       }
     }
 
@@ -399,9 +410,8 @@ const char* BinlogClient::GetLastError() const { return last_error_.c_str(); }
 
 const char* BinlogClient::GetCurrentGtid() const {
   std::lock_guard<std::mutex> lock(gtid_mutex_);
-  thread_local std::string tl_snapshot;
-  tl_snapshot = current_gtid_;
-  return tl_snapshot.c_str();
+  gtid_snapshot_ = current_gtid_;
+  return gtid_snapshot_.c_str();
 }
 
 void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {

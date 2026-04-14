@@ -318,7 +318,11 @@ TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
   // Drain and re-feed iteratively until all events consumed
   size_t total_consumed = consumed;
   size_t events_seen = 0;
-  while (total_consumed < combined.size() || engine.HasEvents()) {
+  int iterations = 0;
+  constexpr int kMaxIterations = 10000;
+  while ((total_consumed < combined.size() || engine.HasEvents()) &&
+         iterations < kMaxIterations) {
+    ++iterations;
     ChangeEvent event;
     while (engine.NextEvent(&event)) {
       events_seen++;
@@ -329,6 +333,7 @@ TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
       total_consumed += c;
     }
   }
+  ASSERT_LT(iterations, kMaxIterations) << "Feed/drain loop did not terminate";
   // Drain any remaining
   ChangeEvent event;
   while (engine.NextEvent(&event)) {

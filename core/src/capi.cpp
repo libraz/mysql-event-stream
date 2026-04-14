@@ -36,6 +36,10 @@ struct mes_engine {
 // Convert a single internal ColumnValue to its C ABI representation.
 static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
   mes_column_t c{};
+  // Set col_name before the is_null early return. The mes.h contract states
+  // col_name is never NULL ("" if unknown), so it must be set for all columns
+  // including NULL-valued ones.
+  c.col_name = col.name.c_str();
   if (col.is_null) {
     c.type = MES_COL_NULL;
     return c;
@@ -79,7 +83,6 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       c.str_len = static_cast<uint32_t>(col.string_val.size());
       break;
   }
-  c.col_name = col.name.c_str();
   return c;
 }
 
@@ -118,6 +121,9 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
   }
   *consumed = engine->engine.Feed(data, len);
   if (engine->engine.IsError()) {
+    // Reset consumed to 0 to signal that no bytes should be considered
+    // successfully processed. The engine's internal state is now in error;
+    // call mes_reset() before feeding more data.
     *consumed = 0;
     return MES_ERR_PARSE;
   }
@@ -229,9 +235,9 @@ MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** ta
   return MES_OK;
 }
 
-MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
+MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t log_level,
                                   void* userdata) {
-  mes::LogConfig::SetCallback(callback, min_level, userdata);
+  mes::LogConfig::SetCallback(callback, log_level, userdata);
 }
 
 MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
@@ -251,6 +257,9 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   if (rc != MES_OK) {
     return rc;
   }
+  // Clear the engine's pointer before replacing the unique_ptr to avoid a
+  // dangling pointer if the old MetadataFetcher is destroyed first.
+  engine->engine.SetMetadataFetcher(nullptr);
   engine->metadata_fetcher = std::move(fetcher);
   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());
   return MES_OK;

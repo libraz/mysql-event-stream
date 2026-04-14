@@ -22,6 +22,34 @@
 
 namespace e2e {
 
+// Each E2E test uses a unique server_id to avoid binlog session conflicts.
+// Ranges: Protocol 100-199, SSL 200-299, Auth 300-399,
+//         DML 500-599, Engine 600-699, Buffer 700-799
+namespace server_ids {
+// test_e2e_binlog_dml.cpp
+constexpr uint32_t kDmlInsertAllColumns = 500;
+constexpr uint32_t kDmlInsertWithNulls = 501;
+constexpr uint32_t kDmlInsertMultiRow = 502;
+constexpr uint32_t kDmlUpdateSubset = 503;
+constexpr uint32_t kDmlUpdateAllColumns = 504;
+constexpr uint32_t kDmlDeleteSingleRow = 505;
+constexpr uint32_t kDmlMultiRowUpdate = 506;
+constexpr uint32_t kDmlMultiRowDelete = 507;
+constexpr uint32_t kDmlTransactionMultipleDml = 508;
+constexpr uint32_t kDmlLargeTextValue = 509;
+constexpr uint32_t kDmlLargeBlobValue = 510;
+constexpr uint32_t kDmlUnicodeAndEmoji = 511;
+constexpr uint32_t kDmlDecimalMaxPrecision = 512;
+constexpr uint32_t kDmlDecimalNegative = 513;
+constexpr uint32_t kDmlNullToNonNullUpdate = 514;
+constexpr uint32_t kDmlNonNullToNullUpdate = 515;
+constexpr uint32_t kDmlEmptyStringVsNull = 516;
+constexpr uint32_t kDmlBooleanValues = 517;
+constexpr uint32_t kDmlVectorInsert = 520;
+constexpr uint32_t kDmlVectorUpdate = 521;
+constexpr uint32_t kDmlVectorDelete = 522;
+}  // namespace server_ids
+
 // Connection defaults
 constexpr const char* kHost = "127.0.0.1";
 constexpr uint16_t kPort = 13308;
@@ -260,6 +288,22 @@ inline std::vector<CapturedEvent> FilterByTable(
   }
   return filtered;
 }
+
+/// @brief RAII helper that executes a cleanup SQL statement on destruction.
+///
+/// Ensures cleanup DML runs even when a test assertion fails mid-test.
+/// Errors during cleanup are silently ignored.
+class ScopedCleanup {
+ public:
+  ScopedCleanup(std::string sql) : sql_(std::move(sql)) {}
+  ~ScopedCleanup() { ExecuteDML(sql_); }
+
+  ScopedCleanup(const ScopedCleanup&) = delete;
+  ScopedCleanup& operator=(const ScopedCleanup&) = delete;
+
+ private:
+  std::string sql_;
+};
 
 }  // namespace e2e
 

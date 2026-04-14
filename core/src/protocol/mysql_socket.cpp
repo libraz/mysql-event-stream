@@ -458,6 +458,10 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
       n = SSL_read(ssl_, buf + total, static_cast<int>(len - total));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
+        if (ssl_err == SSL_ERROR_WANT_READ ||
+            ssl_err == SSL_ERROR_WANT_WRITE) {
+          continue;  // Retry after transient SSL renegotiation
+        }
         // SSL_ERROR_ZERO_RETURN means clean shutdown (EOF).
         if (ssl_err == SSL_ERROR_ZERO_RETURN) {
           StructuredLog().Event("socket_read_eof").Debug();
@@ -508,6 +512,10 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
       n = SSL_write(ssl_, buf + total, static_cast<int>(len - total));
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
+        if (ssl_err == SSL_ERROR_WANT_READ ||
+            ssl_err == SSL_ERROR_WANT_WRITE) {
+          continue;  // Retry after transient SSL renegotiation
+        }
         StructuredLog()
             .Event("ssl_write_error")
             .Field("ssl_error", ssl_err)

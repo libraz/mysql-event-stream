@@ -33,6 +33,9 @@ export class BinlogClient {
     if (!addon.hasClient || !addon.BinlogClient) {
       throw new Error("BinlogClient native addon not loaded");
     }
+    if (config.port !== undefined && (config.port < 1 || config.port > 65535)) {
+      throw new Error(`port must be 1-65535, got ${config.port}`);
+    }
     this.client = new addon.BinlogClient();
     try {
       this.client.connect(config);

@@ -60,9 +60,9 @@ TEST_F(LoggerTest, CallbackReceivesMessage) {
   EXPECT_NE(g_capture.last_message.find("key=val"), std::string::npos);
 }
 
-TEST_F(LoggerTest, MinLevelFilters) {
+TEST_F(LoggerTest, LogLevelFilters) {
   LogConfig::SetCallback(TestCallback, MES_LOG_WARN, nullptr);
-  // INFO should be filtered (INFO > WARN in log levels)
+  // INFO should be filtered (INFO > WARN in verbosity)
   StructuredLog().Event("info_msg").Info();
   EXPECT_EQ(g_capture.call_count.load(), 0);
 
@@ -84,33 +84,25 @@ TEST_F(LoggerTest, UserdataPassedThrough) {
 
 TEST_F(LoggerTest, SetCallbackUsesReleaseAcquireOrdering) {
   // Verify that stores done before SetCallback are visible after
-  // GetCallback returns non-null. This tests the release/acquire
-  // ordering on callback_ as the synchronization point.
-  std::atomic<bool> writer_done{false};
-  std::atomic<bool> reader_passed{false};
+  // GetCallback returns non-null. The release store in SetCallback
+  // should synchronize with the acquire load in GetCallback, making
+  // shared_data and log_level visible to the reader thread.
+  //
+  // Deterministic: write on main thread, then read on a separate thread.
   int shared_data = 0;
 
-  std::thread writer([&] {
-    shared_data = 12345;
-    LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
-    writer_done.store(true, std::memory_order_release);
-  });
+  shared_data = 12345;
+  LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
 
+  std::atomic<bool> reader_passed{false};
   std::thread reader([&] {
-    // Spin until writer is done
-    while (!writer_done.load(std::memory_order_acquire)) {
-    }
-    // The acquire load of callback_ should synchronize with the
-    // release store, making shared_data and min_level visible
     auto* cb = LogConfig::GetCallback();
-    if (cb != nullptr) {
-      EXPECT_EQ(shared_data, 12345);
-      EXPECT_EQ(LogConfig::GetMinLevel(), MES_LOG_DEBUG);
-      reader_passed.store(true, std::memory_order_relaxed);
-    }
+    ASSERT_NE(cb, nullptr);
+    EXPECT_EQ(shared_data, 12345);
+    EXPECT_EQ(LogConfig::GetLogLevel(), MES_LOG_DEBUG);
+    reader_passed.store(true, std::memory_order_relaxed);
   });
 
-  writer.join();
   reader.join();
   EXPECT_TRUE(reader_passed.load());
 }

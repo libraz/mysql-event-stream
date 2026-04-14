@@ -109,6 +109,8 @@ class CdcEngine {
   std::set<std::string> exclude_tables_;
   std::set<uint64_t> blocked_table_ids_;
 
+  // Non-owning pointer. Caller must ensure the MetadataFetcher outlives this CdcEngine.
+  // Set via SetMetadataFetcher(). May be null if metadata resolution is not configured.
   MetadataFetcher* metadata_fetcher_ = nullptr;
 };
 

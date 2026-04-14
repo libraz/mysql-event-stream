@@ -131,8 +131,18 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
     size_t consumed = 0;
     row->columns[i] =
         DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
-    if (consumed == 0 && !row->columns[i].is_null) {
-      return false;
+    if (consumed == 0) {
+      // consumed=0 is valid only for DECIMAL(0,0), which returns is_null=false
+      // with string_val="0". In all other cases — unknown column type
+      // (CalcFieldSize returns 0) or insufficient data — the data pointer
+      // won't advance and subsequent columns would decode from wrong offsets.
+      if (row->columns[i].is_null) {
+        return false;
+      }
+      // Non-null with consumed=0: valid only for DECIMAL(0,0) returning "0".
+      if (row->columns[i].string_val.empty()) {
+        return false;
+      }
     }
     if (consumed > remaining) return false;
     ptr += consumed;
@@ -233,6 +243,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       *bytes_consumed = 8;
       uint64_t raw = binary::ReadU64Le(data);
       if (is_unsigned) {
+        if (raw > static_cast<uint64_t>(INT64_MAX)) {
+          return ColumnValue::String(type, std::to_string(raw));
+        }
         return ColumnValue::Int(type, static_cast<int64_t>(raw));
       }
       return ColumnValue::Int(type, static_cast<int64_t>(raw));
@@ -407,12 +420,22 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
     case ColumnType::kTime: {
       if (len < 3) return ColumnValue::Null(type);
       *bytes_consumed = 3;
-      uint32_t val = binary::ReadU24Le(data);
+      uint32_t raw = binary::ReadU24Le(data);
+      // Sign-extend 24-bit to 32-bit
+      int32_t val = (raw & 0x800000)
+                        ? static_cast<int32_t>(raw | 0xFF000000)
+                        : static_cast<int32_t>(raw);
+      bool negative = val < 0;
+      if (negative) val = -val;
       int sec = val % 100;
       int min = (val / 100) % 100;
       int hour = val / 10000;
-      char buf[16];
-      std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour, min, sec);
+      char buf[32];
+      if (negative) {
+        std::snprintf(buf, sizeof(buf), "-%02d:%02d:%02d", hour, min, sec);
+      } else {
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour, min, sec);
+      }
       return ColumnValue::String(type, std::string(buf));
     }
 
@@ -469,10 +492,11 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
       int hour = static_cast<int>(hms >> 12);
 
       std::string result;
+      if (negative) result += "-";
       char buf[32];
       std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year,
                     month, day, hour, minute, second);
-      result = buf;
+      result += buf;
 
       if (meta > 0 && frac_bytes > 0) {
         int frac = static_cast<int>(ReadBigEndian(data + 5, frac_bytes));
@@ -587,9 +611,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned,
   }
 }
 
-bool DecodeWriteRows(const uint8_t* data, size_t len,
-                     const TableMetadata& metadata, bool is_v2,
-                     std::vector<RowData>* rows) {
+static bool DecodeSimpleRows(const uint8_t* data, size_t len,
+                             const TableMetadata& metadata, bool is_v2,
+                             std::vector<RowData>* rows) {
   if (!rows) return false;
   RowsContext ctx{};
   if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
@@ -604,6 +628,12 @@ bool DecodeWriteRows(const uint8_t* data, size_t len,
     rows->push_back(std::move(row));
   }
   return true;
+}
+
+bool DecodeWriteRows(const uint8_t* data, size_t len,
+                     const TableMetadata& metadata, bool is_v2,
+                     std::vector<RowData>* rows) {
+  return DecodeSimpleRows(data, len, metadata, is_v2, rows);
 }
 
 bool DecodeUpdateRows(const uint8_t* data, size_t len,
@@ -632,20 +662,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len,
 bool DecodeDeleteRows(const uint8_t* data, size_t len,
                       const TableMetadata& metadata, bool is_v2,
                       std::vector<RowData>* rows) {
-  if (!rows) return false;
-  RowsContext ctx{};
-  if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
-
-  rows->clear();
-  while (ctx.remaining > 0) {
-    RowData row;
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
-                      ctx.columns_present, &row)) {
-      return false;
-    }
-    rows->push_back(std::move(row));
-  }
-  return true;
+  return DecodeSimpleRows(data, len, metadata, is_v2, rows);
 }
 
 }  // namespace mes

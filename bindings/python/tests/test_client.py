@@ -11,7 +11,7 @@ class TestClientClose:
     """Verify that close() calls stop, disconnect, and destroy in order."""
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
-    @patch("mysql_event_stream.client.load_library")
+    @patch("mysql_event_stream.client.get_library")
     def test_close_calls_stop_disconnect_destroy(
         self, mock_load: MagicMock, mock_load_client: MagicMock
     ) -> None:
@@ -36,7 +36,7 @@ class TestClientClose:
         assert client._handle is None
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
-    @patch("mysql_event_stream.client.load_library")
+    @patch("mysql_event_stream.client.get_library")
     def test_close_idempotent(
         self, mock_load: MagicMock, mock_load_client: MagicMock
     ) -> None:
@@ -51,7 +51,7 @@ class TestClientClose:
         lib.mes_client_destroy.assert_called_once()
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
-    @patch("mysql_event_stream.client.load_library")
+    @patch("mysql_event_stream.client.get_library")
     def test_context_manager_calls_close(
         self, mock_load: MagicMock, mock_load_client: MagicMock
     ) -> None:

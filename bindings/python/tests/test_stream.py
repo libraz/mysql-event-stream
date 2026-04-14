@@ -45,9 +45,10 @@ class TestStreamClose:
 class TestStreamStartFailure:
     """Verify that _start() cleans up on failure."""
 
+    @pytest.mark.asyncio
     @patch("mysql_event_stream.stream.CdcEngine")
     @patch("mysql_event_stream.stream.BinlogClient")
-    def test_start_cleanup_on_connect_failure(
+    async def test_start_cleanup_on_connect_failure(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         mock_client = MagicMock()
@@ -60,7 +61,7 @@ class TestStreamStartFailure:
         stream = CdcStream(host="127.0.0.1")
 
         with pytest.raises(ConnectionError, match="refused"):
-            stream._start()
+            await stream._start()
 
         # Resources should be cleaned up
         mock_engine.close.assert_called_once()
@@ -69,9 +70,10 @@ class TestStreamStartFailure:
         assert stream._engine is None
         assert not stream._started
 
+    @pytest.mark.asyncio
     @patch("mysql_event_stream.stream.CdcEngine")
     @patch("mysql_event_stream.stream.BinlogClient")
-    def test_start_cleanup_on_start_failure(
+    async def test_start_cleanup_on_start_failure(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         mock_client = MagicMock()
@@ -85,7 +87,7 @@ class TestStreamStartFailure:
         stream = CdcStream(host="127.0.0.1")
 
         with pytest.raises(RuntimeError, match="stream failed"):
-            stream._start()
+            await stream._start()
 
         mock_engine.close.assert_called_once()
         mock_client.close.assert_called_once()
@@ -94,16 +96,15 @@ class TestStreamStartFailure:
 
 
 class TestReconnectAttempts:
-    """Verify off-by-one fix for reconnect attempts.
+    """Verify reconnect attempt counting.
 
-    With the >= check, max_reconnect_attempts=N allows N-1 reconnects before
-    giving up on the Nth failure. max_reconnect_attempts=1 means give up on
-    the first failure (no reconnects).
+    With the > check, max_reconnect_attempts=N allows N reconnect attempts.
+    max_reconnect_attempts=1 means try one reconnect, then give up.
     """
 
     @pytest.mark.asyncio
-    async def test_max_reconnect_attempts_one_means_no_retry(self) -> None:
-        """max_reconnect_attempts=1 should give up on the first failure."""
+    async def test_max_reconnect_attempts_one_allows_one_retry(self) -> None:
+        """max_reconnect_attempts=1 allows exactly 1 reconnect attempt."""
         stream = CdcStream.__new__(CdcStream)
         stream._closed = False
         stream._started = True
@@ -131,12 +132,13 @@ class TestReconnectAttempts:
         ):
             await stream.__anext__()
 
-        # With max_reconnect_attempts=1 and >= check, no reconnect happens
-        assert reconnect_count == 0
+        # First failure: attempts=1, 1 > 1 false -> reconnect
+        # Second failure: attempts=2, 2 > 1 true -> stop
+        assert reconnect_count == 1
 
     @pytest.mark.asyncio
-    async def test_max_reconnect_attempts_two_allows_one_retry(self) -> None:
-        """max_reconnect_attempts=2 should allow exactly 1 reconnect."""
+    async def test_max_reconnect_attempts_two_allows_two_retries(self) -> None:
+        """max_reconnect_attempts=2 should allow exactly 2 reconnects."""
         stream = CdcStream.__new__(CdcStream)
         stream._closed = False
         stream._started = True
@@ -163,13 +165,17 @@ class TestReconnectAttempts:
         ):
             await stream.__anext__()
 
-        # First failure: attempts=1, 1 >= 2 false -> reconnect
-        # Second failure: attempts=2, 2 >= 2 true -> stop
-        assert reconnect_count == 1
+        # First failure: attempts=1, 1 > 2 false -> reconnect
+        # Second failure: attempts=2, 2 > 2 false -> reconnect
+        # Third failure: attempts=3, 3 > 2 true -> stop
+        assert reconnect_count == 2
 
     @pytest.mark.asyncio
     async def test_zero_reconnect_attempts_no_retry(self) -> None:
-        """max_reconnect_attempts=0 disables reconnection entirely."""
+        """max_reconnect_attempts=0 disables reconnection entirely.
+
+        The original error is re-raised after close() is called.
+        """
         stream = CdcStream.__new__(CdcStream)
         stream._closed = False
         stream._started = True
@@ -184,9 +190,9 @@ class TestReconnectAttempts:
 
         with (
             patch("asyncio.to_thread", side_effect=RuntimeError("connection lost")),
-            pytest.raises(StopAsyncIteration),
+            pytest.raises(RuntimeError, match="connection lost"),
         ):
             await stream.__anext__()
 
-        # No reconnect should be attempted
+        # No reconnect should be attempted; stream should be closed
         assert stream._closed

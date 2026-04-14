@@ -62,8 +62,9 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     }
 
     let reconnectAttempts = 0;
-    const maxAttempts = this.config.maxReconnectAttempts ?? 10;
+    const maxAttempts = Math.max(0, this.config.maxReconnectAttempts ?? 10);
 
+    try {
     while (!this.closed) {
       this.client = new BinlogClient(this.config);
       try {
@@ -88,7 +89,9 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         reconnectAttempts++;
         if (reconnectAttempts > maxAttempts) throw err;
 
-        const delay = 1000 * Math.min(reconnectAttempts, 10);
+        const maxDelayS = 10;
+        const baseDelay = 1000 * Math.min(reconnectAttempts, maxDelayS);
+        const delay = baseDelay * (0.5 + Math.random() * 0.5);
         await new Promise((resolve) => setTimeout(resolve, delay));
 
         this.engine!.reset();
@@ -97,11 +100,16 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         }
       }
     }
-    this.cleanup();
+    } finally {
+      // Ensure resources are released whether the generator exits normally,
+      // via .return() (break in for-await), or via .throw().
+      this.cleanup();
+    }
   }
 
   private cleanupClient(): void {
     if (this.client) {
+      this.client.stop();
       this.client.disconnect();
       this.client.destroy();
       this.client = null;

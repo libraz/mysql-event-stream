@@ -77,9 +77,14 @@ export class MysqlClient {
     return rows[0] as unknown as BinlogStatus;
   }
 
-  /** Get current GTID executed position. */
+  /** Get current GTID executed position (flavor-aware). */
   async getCurrentGtid(): Promise<string> {
-    const [rows] = await this.pool.query("SELECT @@GLOBAL.gtid_executed AS gtid");
+    // MariaDB uses @@GLOBAL.gtid_current_pos; MySQL uses @@GLOBAL.gtid_executed
+    const query =
+      process.env.DB_FLAVOR === "mariadb"
+        ? "SELECT @@GLOBAL.gtid_current_pos AS gtid"
+        : "SELECT @@GLOBAL.gtid_executed AS gtid";
+    const [rows] = await this.pool.query(query);
     return (rows as any)[0].gtid;
   }
 

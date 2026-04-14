@@ -15,6 +15,9 @@
 namespace mes {
 namespace {
 
+// 2024-03-15 10:30:45 UTC
+constexpr uint32_t kTimestamp20240315_103045 = 1710502245;
+
 // Thin wrapper over test::EventBuilder with Data() returning const uint8_t*
 // (DecodeColumnValue tests pass raw pointers, not vectors).
 class BinaryWriter : public test::EventBuilder {
@@ -250,24 +253,8 @@ TEST(DecodeColumnValueTest, Date) {
 
 TEST(DecodeColumnValueTest, Datetime2NoFrac) {
   // Encode 2024-03-15 10:30:45 with fsp=0
-  // ym = year*13 + month = 2024*13 + 3 = 26315
-  // ymd = (ym << 5) | day = (26315 << 5) | 15 = 842095
-  // hms = (hour << 12) | (minute << 6) | second = (10<<12)|(30<<6)|45
-  //     = 40960 + 1920 + 45 = 42925
-  // intpart = (ymd << 17) | hms = (842095 << 17) | 42925
-  int64_t ym = 2024 * 13 + 3;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
-
   BinaryWriter w;
-  // Write 5 bytes big-endian
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
 
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
@@ -278,18 +265,8 @@ TEST(DecodeColumnValueTest, Datetime2NoFrac) {
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac3) {
   // 2024-03-15 10:30:45.123 with fsp=3
-  int64_t ym = 2024 * 13 + 3;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
-
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
 
   // frac for fsp=3: frac_bytes = (3+1)/2 = 2 bytes
   // For odd precision (3), stored value = actual * 10 = 123 * 10 = 1230
@@ -306,18 +283,8 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac3) {
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac6) {
   // 2024-03-15 10:30:45.123456 with fsp=6
-  int64_t ym = 2024 * 13 + 3;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
-
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
 
   // frac for fsp=6: frac_bytes = 3 bytes big-endian
   // For even precision (6): stored = 123456
@@ -334,7 +301,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac6) {
 TEST(DecodeColumnValueTest, Timestamp2NoFrac) {
   // Unix timestamp 1710502245 (2024-03-15 10:30:45 UTC)
   BinaryWriter w;
-  w.WriteU32Be(1710502245);
+  w.WriteU32Be(kTimestamp20240315_103045);
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTimestamp2, 0, false, w.Data(),
                                   w.Size(), &consumed);
@@ -344,7 +311,7 @@ TEST(DecodeColumnValueTest, Timestamp2NoFrac) {
 
 TEST(DecodeColumnValueTest, Timestamp2WithFrac6) {
   BinaryWriter w;
-  w.WriteU32Be(1710502245);
+  w.WriteU32Be(kTimestamp20240315_103045);
   // fsp=6, frac_bytes=3, stored as 123456
   w.WriteU24Be(123456);
   size_t consumed = 0;
@@ -711,6 +678,53 @@ TEST(DecodeDeleteRowsTest, SingleRow) {
   EXPECT_EQ(rows[0].columns[0].int_val, 999);
 }
 
+TEST(DecodeWriteRowsTest, PartialColumnPresent) {
+  // 3-column table where only the first 2 columns are present in the bitmap.
+  // Schema: INT + VARCHAR(100) + INT
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.database_name = "db";
+  metadata.table_name = "t";
+  metadata.columns.resize(3);
+  metadata.columns[0].type = ColumnType::kLong;
+  metadata.columns[0].metadata = 0;
+  metadata.columns[0].is_unsigned = false;
+  metadata.columns[1].type = ColumnType::kVarchar;
+  metadata.columns[1].metadata = 100;
+  metadata.columns[1].is_unsigned = false;
+  metadata.columns[2].type = ColumnType::kLong;
+  metadata.columns[2].metadata = 0;
+  metadata.columns[2].is_unsigned = false;
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(3);     // column_count = 3
+  // columns_present = 0x03 (bits 0 and 1 set, bit 2 clear)
+  // Only first 2 of 3 columns present
+  w.WriteU8(0x03);
+  // null_bitmap for 2 present columns: 1 byte, no nulls
+  w.WriteU8(0x00);
+  // INT value (column 0)
+  w.WriteU32Le(42);
+  // VARCHAR value (column 1): "hi"
+  w.WriteU8(2);
+  w.WriteString("hi");
+
+  std::vector<RowData> rows;
+  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+  ASSERT_EQ(rows.size(), 1u);
+  // Should have 3 columns: 2 present + 1 absent (null)
+  ASSERT_EQ(rows[0].columns.size(), 3u);
+  EXPECT_FALSE(rows[0].columns[0].is_null);
+  EXPECT_EQ(rows[0].columns[0].int_val, 42);
+  EXPECT_FALSE(rows[0].columns[1].is_null);
+  EXPECT_EQ(rows[0].columns[1].string_val, "hi");
+  // Column 2 is absent from the bitmap, should be null
+  EXPECT_TRUE(rows[0].columns[2].is_null);
+}
+
 TEST(DecodeWriteRowsTest, NullColumn) {
   TableMetadata metadata;
   metadata.table_id = 10;
@@ -826,12 +840,12 @@ TEST(DecodeColumnValueTest, TimestampInsufficientData) {
 
 TEST(DecodeColumnValueTest, Timestamp) {
   BinaryWriter w;
-  w.WriteU32Le(1710502245);
+  w.WriteU32Le(kTimestamp20240315_103045);
   size_t consumed = 0;
   auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, w.Data(),
                                w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(val.int_val, 1710502245);
+  EXPECT_EQ(val.int_val, static_cast<int64_t>(kTimestamp20240315_103045));
 }
 
 // --- Time test ---
@@ -1106,17 +1120,8 @@ TEST(DecodeColumnValueTest, VarStringShort) {
 // --- Datetime2 with fsp=1 and fsp=2 ---
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac1) {
-  int64_t ym = 2024 * 13 + 3;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
   // fsp=1: frac_bytes = 1, stored=50
   // usec = (50/10)*100000 = 500000
   w.WriteU8(50);
@@ -1128,17 +1133,8 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac1) {
 }
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
-  int64_t ym = 2024 * 13 + 3;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 3, 15, 10, 30, 45);
   // fsp=2: frac_bytes = 1, stored=12
   // usec = 12 * 10000 = 120000
   w.WriteU8(12);
@@ -1153,7 +1149,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
 
 TEST(DecodeColumnValueTest, Timestamp2WithFrac1) {
   BinaryWriter w;
-  w.WriteU32Be(1710502245);
+  w.WriteU32Be(kTimestamp20240315_103045);
   w.WriteU8(50);  // fsp=1: (50/10)*100000 = 500000
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTimestamp2, 1, false, w.Data(),
@@ -1164,7 +1160,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac1) {
 
 TEST(DecodeColumnValueTest, Timestamp2WithFrac4) {
   BinaryWriter w;
-  w.WriteU32Be(1710502245);
+  w.WriteU32Be(kTimestamp20240315_103045);
   w.WriteU16Be(1234);  // fsp=4: 1234 * 100 = 123400
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTimestamp2, 4, false, w.Data(),
@@ -1280,18 +1276,8 @@ TEST(DecodeColumnValueTest, Datetime2IntpartZero) {
 
 TEST(DecodeColumnValueTest, Datetime2NormalDate) {
   // 2024-01-15 10:30:45 with fsp=0
-  int64_t ym = 2024 * 13 + 1;
-  int64_t ymd = (ym << 5) | 15;
-  int64_t hms = (10LL << 12) | (30 << 6) | 45;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
-
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 1, 15, 10, 30, 45);
 
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 0, false, w.Data(),
@@ -1606,17 +1592,8 @@ TEST(DecodeColumnValueTest, BlobTruncatedPrefix) {
 TEST(FracToMicrosecondsTest, Meta1) {
   // fsp=1: 1 byte, stored value has extra digit for odd precision.
   // Stored=50, expected usec=500000 (digit 5 * 100000)
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   w.WriteU8(50);  // stored=50 for fsp=1
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(),
@@ -1626,17 +1603,8 @@ TEST(FracToMicrosecondsTest, Meta1) {
 }
 
 TEST(FracToMicrosecondsTest, Meta2) {
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   w.WriteU8(99);  // stored=99 for fsp=2, usec=99*10000=990000
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(),
@@ -1646,17 +1614,8 @@ TEST(FracToMicrosecondsTest, Meta2) {
 }
 
 TEST(FracToMicrosecondsTest, Meta3) {
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   // fsp=3: 2 bytes, stored=1230 (odd, extra digit), usec=(1230/10)*1000=123000
   w.WriteU16Be(1230);
   size_t consumed = 0;
@@ -1667,17 +1626,8 @@ TEST(FracToMicrosecondsTest, Meta3) {
 }
 
 TEST(FracToMicrosecondsTest, Meta4) {
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   // fsp=4: 2 bytes, stored=5678, usec=5678*100=567800
   w.WriteU16Be(5678);
   size_t consumed = 0;
@@ -1688,17 +1638,8 @@ TEST(FracToMicrosecondsTest, Meta4) {
 }
 
 TEST(FracToMicrosecondsTest, Meta5) {
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   // fsp=5: 3 bytes, stored=123450 (odd, extra digit), usec=(123450/10)*10=123450
   w.WriteU24Be(123450);
   size_t consumed = 0;
@@ -1709,17 +1650,8 @@ TEST(FracToMicrosecondsTest, Meta5) {
 }
 
 TEST(FracToMicrosecondsTest, Meta6) {
-  int64_t ym = 2024 * 13 + 6;
-  int64_t ymd = (ym << 5) | 1;
-  int64_t hms = (0LL << 12) | (0 << 6) | 0;
-  int64_t intpart = (ymd << 17) | hms;
-  int64_t packed = intpart + 0x8000000000LL;
   BinaryWriter w;
-  w.WriteU8(static_cast<uint8_t>(packed >> 32));
-  w.WriteU8(static_cast<uint8_t>(packed >> 24));
-  w.WriteU8(static_cast<uint8_t>(packed >> 16));
-  w.WriteU8(static_cast<uint8_t>(packed >> 8));
-  w.WriteU8(static_cast<uint8_t>(packed));
+  test::WriteDatetime2(w, 2024, 6, 1, 0, 0, 0);
   // fsp=6: 3 bytes, stored=999999, usec=999999
   w.WriteU24Be(999999);
   size_t consumed = 0;
@@ -1745,6 +1677,104 @@ TEST(DecodeColumnValueTest, UnknownTypeReturnsNullWithZeroConsumed) {
                                sizeof(data), &consumed);
   EXPECT_TRUE(val.is_null);
   EXPECT_EQ(consumed, 0u);
+}
+
+// --- Unsigned BIGINT > INT64_MAX uses string representation ---
+
+TEST(DecodeColumnValueTest, LongLongUnsignedOverflow) {
+  BinaryWriter w;
+  w.WriteU64Le(UINT64_MAX);
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
+                               w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_FALSE(val.is_null);
+  EXPECT_EQ(val.string_val, "18446744073709551615");
+}
+
+TEST(DecodeColumnValueTest, LongLongUnsignedJustOverInt64Max) {
+  BinaryWriter w;
+  uint64_t val_raw = static_cast<uint64_t>(INT64_MAX) + 1;
+  w.WriteU64Le(val_raw);
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
+                               w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_FALSE(val.is_null);
+  EXPECT_EQ(val.string_val, "9223372036854775808");
+}
+
+TEST(DecodeColumnValueTest, LongLongUnsignedAtInt64Max) {
+  BinaryWriter w;
+  w.WriteU64Le(static_cast<uint64_t>(INT64_MAX));
+  size_t consumed = 0;
+  auto val = DecodeColumnValue(ColumnType::kLongLong, 0, true, w.Data(),
+                               w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_FALSE(val.is_null);
+  EXPECT_EQ(val.int_val, INT64_MAX);
+}
+
+// --- TIME v1 negative value ---
+
+TEST(DecodeColumnValueTest, TimeNegative) {
+  // -01:30:00 encoded as -13000 in 24-bit two's complement
+  int32_t neg_val = -13000;
+  uint32_t raw = static_cast<uint32_t>(neg_val) & 0xFFFFFF;
+  BinaryWriter w;
+  w.WriteU24Le(raw);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.string_val, "-01:30:00");
+}
+
+TEST(DecodeColumnValueTest, TimeNegativeSmall) {
+  // -00:05:30 encoded as -530
+  int32_t neg_val = -530;
+  uint32_t raw = static_cast<uint32_t>(neg_val) & 0xFFFFFF;
+  BinaryWriter w;
+  w.WriteU24Le(raw);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime, 0, false, w.Data(),
+                                  w.Size(), &consumed);
+  EXPECT_EQ(consumed, 3u);
+  EXPECT_EQ(result.string_val, "-00:05:30");
+}
+
+// --- DECIMAL precision==0 should not cause parse error in row decode ---
+
+TEST(DecodeColumnValueTest, NewDecimalPrecisionZeroInRow) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.database_name = "db";
+  metadata.table_name = "t";
+  metadata.columns.resize(2);
+  metadata.columns[0].type = ColumnType::kNewDecimal;
+  metadata.columns[0].metadata = (0 << 8) | 0;  // precision=0, scale=0
+  metadata.columns[0].is_unsigned = false;
+  metadata.columns[1].type = ColumnType::kLong;
+  metadata.columns[1].metadata = 0;
+  metadata.columns[1].is_unsigned = false;
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(2);     // column_count
+  w.WriteU8(0x03);  // columns_present: both
+  w.WriteU8(0x00);  // null_bitmap: no nulls
+  // DECIMAL precision=0 consumes 0 bytes
+  // INT value: 42
+  w.WriteU32Le(42);
+
+  std::vector<RowData> rows;
+  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+  ASSERT_EQ(rows.size(), 1u);
+  ASSERT_EQ(rows[0].columns.size(), 2u);
+  EXPECT_EQ(rows[0].columns[0].string_val, "0");
+  EXPECT_EQ(rows[0].columns[1].int_val, 42);
 }
 
 }  // namespace

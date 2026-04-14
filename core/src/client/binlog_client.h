@@ -150,6 +150,7 @@ class BinlogClient {
 
   // GTID tracking (reader thread writes, GetCurrentGtid reads)
   std::string current_gtid_;
+  mutable std::string gtid_snapshot_;  // protected by gtid_mutex_
   mutable std::mutex gtid_mutex_;
 
   // CRC error tracking (reader thread writes, GetCRCErrors reads)

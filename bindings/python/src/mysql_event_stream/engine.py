@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import warnings
 from typing import Any
 
 from ._ffi import (
@@ -11,13 +12,14 @@ from ._ffi import (
     MES_COL_INT,
     MES_COL_NULL,
     MES_COL_STRING,
+    MES_ERR_CHECKSUM,
     MES_ERR_NO_EVENT,
     MES_OK,
     MESClientConfig,
     MESColumn,
     MESEvent,
+    get_library,
     load_client_library,
-    load_library,
 )
 from .types import BinlogPosition, ChangeEvent, EventType
 
@@ -44,7 +46,8 @@ class CdcEngine:
             RuntimeError: If the engine cannot be created.
             OSError: If the shared library cannot be found.
         """
-        self._lib = load_library(lib_path)
+        self._lib = get_library(lib_path)
+        self._client_lib_loaded = False
         self._handle: int | None = self._lib.mes_create()
         if self._handle is None:
             raise RuntimeError("Failed to create CDC engine")
@@ -88,6 +91,8 @@ class CdcEngine:
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         consumed = ctypes.c_size_t(0)
         rc = self._lib.mes_feed(self._handle, buf, len(data), ctypes.byref(consumed))
+        if rc == MES_ERR_CHECKSUM:
+            raise RuntimeError("mes_feed failed: checksum mismatch")
         if rc != MES_OK:
             raise RuntimeError(f"mes_feed failed with error code {rc}")
         return consumed.value
@@ -107,6 +112,8 @@ class CdcEngine:
         rc = self._lib.mes_next_event(self._handle, ctypes.byref(event_ptr))
         if rc == MES_ERR_NO_EVENT:
             return None
+        if rc == MES_ERR_CHECKSUM:
+            raise RuntimeError("mes_next_event failed: checksum mismatch")
         if rc != MES_OK:
             raise RuntimeError(f"mes_next_event failed with error code {rc}")
         return _convert_event(event_ptr.contents)
@@ -122,7 +129,7 @@ class CdcEngine:
         """
         self._check_open()
         result: int = self._lib.mes_has_events(self._handle)
-        return result == 1
+        return result != 0
 
     def get_position(self) -> BinlogPosition:
         """Get current binlog position.
@@ -275,8 +282,10 @@ class CdcEngine:
                 or the metadata connection fails.
         """
         self._check_open()
-        if not load_client_library(self._lib):
-            raise RuntimeError("Client API not available (built without MySQL support)")
+        if not self._client_lib_loaded:
+            if not load_client_library(self._lib):
+                raise RuntimeError("Client API not available (built without MySQL support)")
+            self._client_lib_loaded = True
 
         cfg = MESClientConfig()
         cfg.host = host.encode("utf-8")
@@ -315,13 +324,14 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
             result[key] = col.double_val
         elif col_type == MES_COL_STRING:
             if col.str_data and col.str_len > 0:
-                raw = ctypes.string_at(col.str_data, col.str_len)
-                result[key] = raw.decode("utf-8", errors="surrogateescape")
+                raw = (ctypes.c_char * col.str_len).from_address(col.str_data)
+                result[key] = bytes(raw).decode("utf-8", errors="surrogateescape")
             else:
                 result[key] = ""
         elif col_type == MES_COL_BYTES:
             if col.str_data and col.str_len > 0:
-                result[key] = ctypes.string_at(col.str_data, col.str_len)
+                raw = (ctypes.c_char * col.str_len).from_address(col.str_data)
+                result[key] = bytes(raw)
             else:
                 result[key] = b""
         else:
@@ -330,9 +340,16 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
     return result
 
 
-def _convert_event(raw: MESEvent) -> ChangeEvent:
-    """Convert C mes_event_t to Python ChangeEvent."""
-    event_type = EventType(raw.type)
+def _convert_event(raw: MESEvent) -> ChangeEvent | None:
+    """Convert C mes_event_t to Python ChangeEvent, or None for unknown types."""
+    try:
+        event_type = EventType(raw.type)
+    except ValueError:
+        warnings.warn(
+            f"Unknown event type {raw.type}; skipping event",
+            stacklevel=2,
+        )
+        return None
 
     before: dict[str, Any] | None = None
     if raw.before_count > 0 and raw.before_columns:

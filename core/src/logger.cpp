@@ -6,27 +6,27 @@
 namespace mes {
 
 std::atomic<mes_log_callback_t> LogConfig::callback_{nullptr};
-std::atomic<mes_log_level_t> LogConfig::min_level_{MES_LOG_ERROR};
+std::atomic<mes_log_level_t> LogConfig::log_level_{MES_LOG_ERROR};
 std::atomic<void*> LogConfig::userdata_{nullptr};
 
-void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t min_level,
+void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t log_level,
                              void* userdata) {
-  userdata_.store(userdata, std::memory_order_relaxed);
-  min_level_.store(min_level, std::memory_order_relaxed);
+  userdata_.store(userdata, std::memory_order_release);
+  log_level_.store(log_level, std::memory_order_release);
   callback_.store(callback, std::memory_order_release);
 }
 
 mes_log_callback_t LogConfig::GetCallback() {
   return callback_.load(std::memory_order_acquire);
 }
-mes_log_level_t LogConfig::GetMinLevel() {
-  return min_level_.load(std::memory_order_relaxed);
+mes_log_level_t LogConfig::GetLogLevel() {
+  return log_level_.load(std::memory_order_acquire);
 }
-void* LogConfig::GetUserdata() { return userdata_.load(std::memory_order_relaxed); }
+void* LogConfig::GetUserdata() { return userdata_.load(std::memory_order_acquire); }
 
 void StructuredLog::Emit(mes_log_level_t level) {
   auto* callback = LogConfig::GetCallback();
-  if (callback == nullptr || level > LogConfig::GetMinLevel()) {
+  if (callback == nullptr || level > LogConfig::GetLogLevel()) {
     return;
   }
 

@@ -223,6 +223,42 @@ inline void FixChecksum(std::vector<uint8_t>& buf) {
   std::memcpy(buf.data() + data_len, &crc, sizeof(crc));
 }
 
+/// @brief Build a complete binlog event with a valid CRC32 checksum.
+inline std::vector<uint8_t> BuildValidEvent(uint8_t type_code,
+                                            const std::vector<uint8_t>& body,
+                                            uint32_t timestamp = 0,
+                                            uint32_t server_id = 1) {
+  auto event = BuildEvent(type_code, timestamp, 0, body);
+  // Patch server_id into the header (bytes 5-8, little-endian)
+  event[5] = static_cast<uint8_t>(server_id);
+  event[6] = static_cast<uint8_t>(server_id >> 8);
+  event[7] = static_cast<uint8_t>(server_id >> 16);
+  event[8] = static_cast<uint8_t>(server_id >> 24);
+  FixChecksum(event);
+  return event;
+}
+
+/// @brief Pack a DATETIME2 value into a BinaryWriter (5 bytes, no frac).
+///
+/// Encodes the date/time as MySQL's internal DATETIME2 packed format:
+///   intpart = ((year*13 + month) << 5 | day) << 17 | (hour << 12 | min << 6 | sec)
+///   packed  = intpart + 0x8000000000
+///   Written as 5 bytes big-endian.
+template <typename Writer>
+inline void WriteDatetime2(Writer& w, int year, int month, int day,
+                           int hour, int min, int sec) {
+  int64_t ym = year * 13 + month;
+  int64_t ymd = (ym << 5) | day;
+  int64_t hms = (static_cast<int64_t>(hour) << 12) | (min << 6) | sec;
+  int64_t intpart = (ymd << 17) | hms;
+  int64_t packed = intpart + 0x8000000000LL;
+  w.WriteU8(static_cast<uint8_t>((packed >> 32) & 0xFF));
+  w.WriteU8(static_cast<uint8_t>((packed >> 24) & 0xFF));
+  w.WriteU8(static_cast<uint8_t>((packed >> 16) & 0xFF));
+  w.WriteU8(static_cast<uint8_t>((packed >> 8) & 0xFF));
+  w.WriteU8(static_cast<uint8_t>(packed & 0xFF));
+}
+
 }  // namespace test
 }  // namespace mes
 

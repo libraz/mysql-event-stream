@@ -584,8 +584,63 @@ TEST(DecodeDecimalTest, ScaleGreaterThanPrecision) {
   uint8_t data[] = {0x80, 0x00};
   size_t consumed = 99;
   auto result = DecodeDecimal(data, sizeof(data), 3, 5, consumed);
-  EXPECT_EQ(result, "0");
+  EXPECT_EQ(result, "");
   EXPECT_EQ(consumed, 0u);
+}
+
+// --- DECIMAL negative value decoding (verify correct digits) ---
+
+TEST(DecodeDecimalTest, NegativeSmallValue) {
+  // DECIMAL(3,1) = "-1.5"
+  // intg=2, intg_rem=2, intg0=0, frac_rem=1
+  // dig2bytes[2]=1, dig2bytes[1]=1 => total 2 bytes
+  // Positive raw: intg=1 (1 byte = 0x01), frac=5 (1 byte = 0x05)
+  // Positive encoding: XOR first byte with 0x80 => 0x81, 0x05
+  // Negative: XOR all with 0xFF => 0x7E, 0xFA
+  uint8_t data[] = {0x7E, 0xFA};
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, sizeof(data), 3, 1, consumed);
+  EXPECT_EQ(result, "-1.5");
+  EXPECT_EQ(consumed, 2u);
+}
+
+TEST(DecodeDecimalTest, NegativeLargeValue) {
+  // DECIMAL(10,2) = "-12345678.12"
+  // intg=8, intg_rem=8, intg0=0, frac_rem=2
+  // dig2bytes[8]=4, dig2bytes[2]=1 => total 5 bytes
+  // Positive raw: 12345678 in 4 bytes BE = 0x00,0xBC,0x61,0x4E; frac=12 = 0x0C
+  // Positive encoding: XOR first byte with 0x80 => 0x80,0xBC,0x61,0x4E,0x0C
+  // Negative: XOR all with 0xFF => 0x7F,0x43,0x9E,0xB1,0xF3
+  uint8_t data[] = {0x7F, 0x43, 0x9E, 0xB1, 0xF3};
+  size_t consumed = 0;
+  auto result = DecodeDecimal(data, sizeof(data), 10, 2, consumed);
+  EXPECT_EQ(result, "-12345678.12");
+  EXPECT_EQ(consumed, 5u);
+}
+
+// --- CalcFieldSize with buf_len=0 for VARCHAR ---
+
+TEST(CalcFieldSizeTest, VarcharEmptyBuffer) {
+  EXPECT_EQ(CalcFieldSize(0x0F, nullptr, 0, 100), 0u);
+  EXPECT_EQ(CalcFieldSize(0x0F, nullptr, 0, 500), 0u);
+}
+
+TEST(CalcFieldSizeTest, VarcharShortBuffer) {
+  uint8_t data[] = {0x05};
+  // metadata > 255 requires 2 bytes, but buf_len is only 1
+  EXPECT_EQ(CalcFieldSize(0x0F, data, 1, 500), 0u);
+}
+
+TEST(CalcFieldSizeTest, StringCharEmptyBuffer) {
+  // STRING (CHAR) with max_len > 255, empty buffer
+  EXPECT_EQ(CalcFieldSize(0xFE, nullptr, 0, 0x0105), 0u);
+  // STRING (CHAR) with max_len <= 255, empty buffer
+  EXPECT_EQ(CalcFieldSize(0xFE, nullptr, 0, 0x3005), 0u);
+}
+
+TEST(CalcFieldSizeTest, VarStringEmptyBuffer) {
+  EXPECT_EQ(CalcFieldSize(0xFD, nullptr, 0, 100), 0u);
+  EXPECT_EQ(CalcFieldSize(0xFD, nullptr, 0, 500), 0u);
 }
 
 }  // namespace

@@ -11,6 +11,17 @@ namespace mes::binary {
 // Bytes needed for 1-9 remaining digits (used for NEWDECIMAL)
 static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
 
+/** @brief Calculate the binary size in bytes for a DECIMAL(precision, scale). */
+inline size_t DecimalBinarySize(uint8_t precision, uint8_t scale) {
+  if (scale > precision) return 0;
+  int intg = precision - scale;
+  int frac = scale;
+  int intg0 = intg / 9, intg_rem = intg % 9;
+  int frac0 = frac / 9, frac_rem = frac % 9;
+  return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 +
+                             kDig2Bytes[frac_rem]);
+}
+
 uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
   bytes_consumed = 0;
   if (len < 1) return 0;
@@ -55,7 +66,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
 
   if (scale > precision) {
     bytes_consumed = 0;
-    return "0";
+    return "";
   }
 
   int intg = precision - scale;
@@ -64,7 +75,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   int frac0 = scale / 9;       // Full 4-byte groups in fractional part
   int frac_rem = scale % 9;    // Remaining digits in fractional part
 
-  int total_size = kDig2Bytes[intg_rem] + intg0 * 4 + frac0 * 4 + kDig2Bytes[frac_rem];
+  int total_size = static_cast<int>(DecimalBinarySize(precision, scale));
   bytes_consumed = static_cast<size_t>(total_size);
 
   if (total_size == 0) {
@@ -82,7 +93,10 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   // MSB of first byte: set (>= 0x80) = positive, clear (< 0x80) = negative
   bool is_negative = (buf[0] & 0x80) == 0;
 
-  // Reverse the sign bit toggle
+  // Toggle the sign bit first, then complement all bytes for negative values.
+  // This matches MySQL's bin2decimal(): *from ^= 0x80, then apply mask per group.
+  // For negative, buf[0] is XORed with both 0x80 and 0xFF (net 0x7F), which
+  // correctly reverses the encoding of sign-bit-set + full complement.
   buf[0] ^= 0x80;
   if (is_negative) {
     for (auto& byte : buf) {
@@ -220,8 +234,10 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
     case 0xFD:  // MYSQL_TYPE_VAR_STRING
     case 0x0F: {  // MYSQL_TYPE_VARCHAR
       if (metadata > 255) {
+        if (buf_len < 2) return 0;
         return 2 + ReadU16Le(data);
       }
+      if (buf_len < 1) return 0;
       return 1 + ReadU8(data);
     }
 
@@ -236,13 +252,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
     case 0xF6: {  // MYSQL_TYPE_NEWDECIMAL
       uint8_t precision = static_cast<uint8_t>(metadata >> 8);
       uint8_t scale = static_cast<uint8_t>(metadata & 0xFF);
-      int intg = precision - scale;
-      int intg0 = intg / 9;
-      int intg_rem = intg % 9;
-      int frac0 = scale / 9;
-      int frac_rem = scale % 9;
-      return static_cast<uint32_t>(kDig2Bytes[intg_rem] + intg0 * 4 + frac0 * 4 +
-                                   kDig2Bytes[frac_rem]);
+      return static_cast<uint32_t>(DecimalBinarySize(precision, scale));
     }
 
     // JSON (stored like BLOB)
@@ -289,8 +299,10 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
       uint32_t max_len =
           (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xFF);
       if (max_len > 255) {
+        if (buf_len < 2) return 0;
         return 2 + ReadU16Le(data);
       }
+      if (buf_len < 1) return 0;
       return 1 + ReadU8(data);
     }
 

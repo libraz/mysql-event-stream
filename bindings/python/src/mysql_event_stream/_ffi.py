@@ -16,6 +16,9 @@ class MESColumn(ctypes.Structure):
         ("type", ctypes.c_int32),
         ("int_val", ctypes.c_int64),
         ("double_val", ctypes.c_double),
+        # Use c_void_p instead of c_char_p: c_char_p stops at the first null
+        # byte (\x00), which silently truncates BLOB/BINARY data that may
+        # contain embedded nulls. Slice manually using str_len instead.
         ("str_data", ctypes.c_void_p),
         ("str_len", ctypes.c_uint32),
         ("col_name", ctypes.c_char_p),
@@ -45,6 +48,7 @@ MES_ERR_NULL_ARG = 1
 MES_ERR_INVALID_ARG = 2
 MES_ERR_INTERNAL = 99
 MES_ERR_PARSE = 100
+MES_ERR_CHECKSUM = 101
 MES_ERR_DECODE = 200
 MES_ERR_DECODE_COLUMN = 201
 MES_ERR_DECODE_ROW = 202
@@ -230,6 +234,32 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     ]
 
     return lib
+
+
+_loaded_lib: ctypes.CDLL | None = None
+
+
+def get_library(lib_path: str | None = None) -> ctypes.CDLL:
+    """Return a cached library instance, loading it on first call.
+
+    When ``lib_path`` is provided, a fresh library is loaded (bypassing
+    the cache) to honour the caller's explicit path.  When ``lib_path``
+    is None, the module-level singleton is reused.
+
+    Args:
+        lib_path: Explicit path to the shared library.  If None, reuses
+            the cached instance (or searches standard locations on first
+            call).
+
+    Returns:
+        Loaded ctypes.CDLL with typed function signatures.
+    """
+    global _loaded_lib
+    if lib_path is not None:
+        return load_library(lib_path)
+    if _loaded_lib is None:
+        _loaded_lib = load_library()
+    return _loaded_lib
 
 
 def load_client_library(lib: ctypes.CDLL) -> bool:

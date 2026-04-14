@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "protocol/mysql_query.h"
 
@@ -29,9 +30,8 @@ bool EqualsIgnoreCase(const char* a, const char* b) {
 /** @brief Query a single MySQL variable value via SHOW VARIABLES */
 mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
                           std::string& out_value) {
-  char query[256];
-  std::snprintf(query, sizeof(query),
-                "SHOW VARIABLES WHERE Variable_name = '%s'", var_name);
+  std::string query =
+      "SHOW VARIABLES WHERE Variable_name = '" + std::string(var_name) + "'";
 
   protocol::QueryResult qr;
   std::string err;

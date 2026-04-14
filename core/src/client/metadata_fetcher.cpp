@@ -85,6 +85,9 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
 
   std::vector<ColumnInfo> infos;
   for (const auto& row : qr.rows) {
+    if (row.values.size() < 2 || row.is_null.size() < 2) {
+      continue;
+    }
     ColumnInfo info;
     // row.values[0] = Field (column name)
     info.name = (!row.is_null[0]) ? row.values[0] : "";

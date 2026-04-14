@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string>
 
-static constexpr int64_t kMaxSafeInteger = 9007199254740991LL;
+#include "addon_constants.h"
 
 static const char* const kEventTypeNames[] = {"INSERT", "UPDATE", "DELETE"};
 
@@ -169,7 +169,8 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
 
   // type
   int type_idx = static_cast<int>(event->type);
-  if (type_idx < 0 || type_idx > 2) {
+  constexpr int kEventTypeCount = static_cast<int>(sizeof(kEventTypeNames) / sizeof(kEventTypeNames[0]));
+  if (type_idx < 0 || type_idx >= kEventTypeCount) {
     Napi::Error::New(env, "Unknown event type: " + std::to_string(type_idx))
         .ThrowAsJavaScriptException();
     return env.Undefined();
@@ -425,7 +426,7 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
     cfg.port = static_cast<uint16_t>(
         config.Get("port").As<Napi::Number>().Uint32Value());
   } else {
-    cfg.port = 3306;
+    cfg.port = kDefaultPort;
   }
 
   if (config.Has("user") && config.Get("user").IsString()) {
@@ -438,12 +439,18 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   }
   cfg.password = password.c_str();
 
+  if (config.Has("serverId") && config.Get("serverId").IsNumber()) {
+    cfg.server_id = config.Get("serverId").As<Napi::Number>().Uint32Value();
+  } else {
+    cfg.server_id = kDefaultServerId;
+  }
+
   if (config.Has("connectTimeoutS") &&
       config.Get("connectTimeoutS").IsNumber()) {
     cfg.connect_timeout_s =
         config.Get("connectTimeoutS").As<Napi::Number>().Uint32Value();
   } else {
-    cfg.connect_timeout_s = 10;
+    cfg.connect_timeout_s = kDefaultConnectTimeoutS;
   }
 
   std::string ssl_ca;
@@ -529,12 +536,13 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env,
         break;
 
       case MES_COL_BYTES:
-        if (col.str_data && col.str_len > 0) {
+        if (col.str_data) {
           val = Napi::Buffer<uint8_t>::Copy(
               env, reinterpret_cast<const uint8_t*>(col.str_data),
               col.str_len);
         } else {
-          val = Napi::Buffer<uint8_t>::New(env, 0);
+          // str_data is null: the column value is semantically absent
+          val = env.Null();
         }
         break;
 

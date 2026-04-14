@@ -72,7 +72,7 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
   row->is_null.resize(column_count);
 
   for (size_t i = 0; i < column_count && pos < data_size; ++i) {
-    if (data[pos] == kPacketLocalInfile) {
+    if (data[pos] == kNullColumnMarker) {
       // NULL value
       row->is_null[i] = true;
       row->values[i].clear();

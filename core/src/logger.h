@@ -17,14 +17,14 @@ namespace mes {
 /** @brief Global log configuration that dispatches to the registered callback. */
 class LogConfig {
  public:
-  static void SetCallback(mes_log_callback_t callback, mes_log_level_t min_level, void* userdata);
+  static void SetCallback(mes_log_callback_t callback, mes_log_level_t log_level, void* userdata);
   static mes_log_callback_t GetCallback();
-  static mes_log_level_t GetMinLevel();
+  static mes_log_level_t GetLogLevel();
   static void* GetUserdata();
 
  private:
   static std::atomic<mes_log_callback_t> callback_;
-  static std::atomic<mes_log_level_t> min_level_;
+  static std::atomic<mes_log_level_t> log_level_;
   static std::atomic<void*> userdata_;
 };
 

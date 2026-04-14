@@ -81,8 +81,12 @@ typedef enum {
  */
 typedef void (*mes_log_callback_t)(mes_log_level_t level, const char* message, void* userdata);
 
-/** @brief Set log callback and minimum log level. Pass NULL to disable logging. */
-MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t min_level,
+/** @brief Set log callback and log verbosity level. Pass NULL to disable logging.
+ *
+ *  Messages with a level value greater than @p log_level are suppressed.
+ *  For example, MES_LOG_WARN (1) shows ERROR and WARN only.
+ */
+MES_API void mes_set_log_callback(mes_log_callback_t callback, mes_log_level_t log_level,
                                   void* userdata);
 
 /* ---- Event types ---- */
@@ -309,8 +313,9 @@ MES_API const char* mes_client_last_error(mes_client_t* client);
 
 /** @brief Get current GTID position. Returns empty string if unknown.
  *
- * @note The returned string is valid until the next call to this function.
- *       If called from multiple threads, the caller must copy the result.
+ * @note The returned pointer is valid until the next call to this function
+ *       on the same client instance. Callers must copy the result if they
+ *       need it to persist beyond the next call.
  */
 MES_API const char* mes_client_current_gtid(mes_client_t* client);
 

@@ -12,8 +12,8 @@ from ._ffi import (
     MES_ERR_VALIDATION,
     MES_OK,
     MESClientConfig,
+    get_library,
     load_client_library,
-    load_library,
 )
 from .types import ClientConfig, PollResult
 
@@ -89,7 +89,12 @@ class BinlogClient:
             RuntimeError: If client support is not available.
             OSError: If the shared library cannot be found.
         """
-        self._lib = load_library(lib_path)
+        if config is None and not (1 <= port <= 65535):
+            raise ValueError(f"port must be 1-65535, got {port}")
+        if config is not None and not (1 <= config.port <= 65535):
+            raise ValueError(f"port must be 1-65535, got {config.port}")
+
+        self._lib = get_library(lib_path)
         if not load_client_library(self._lib):
             raise RuntimeError(
                 "BinlogClient is not available. Rebuild libmes with OpenSSL installed"

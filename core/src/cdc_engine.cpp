@@ -32,6 +32,10 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
     total_consumed += consumed;
 
     while (stream_parser_.HasEvent()) {
+      // Note: the queue size check is per binlog event, not per row.
+      // A single multi-row WRITE_ROWS/UPDATE_ROWS/DELETE_ROWS event may
+      // push all its rows before the limit is rechecked. The queue can
+      // temporarily exceed max_queue_size_ by (rows_per_event - 1) items.
       if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
         break;
       }
@@ -124,10 +128,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
 
   switch (header.type_code) {
     case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
+      if (body_len < 6) break;
+      uint64_t table_id = binary::ReadU48Le(body);
       if (!table_registry_.ProcessTableMapEvent(body, body_len)) {
         break;
       }
-      uint64_t table_id = binary::ReadU48Le(body);
       auto* meta = table_registry_.MutableLookup(table_id);
       if (meta) {
         if (!IsTableAllowed(meta->database_name, meta->table_name)) {

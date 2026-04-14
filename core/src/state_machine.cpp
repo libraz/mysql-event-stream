@@ -10,6 +10,13 @@
 
 namespace mes {
 
+// Maximum binlog event size (64 MB). This matches MySQL's default
+// max_allowed_packet for binlog events. Servers with larger
+// max_allowed_packet (up to 1 GB) and very large BLOB columns may
+// produce events that exceed this limit, causing a parse error.
+// Increase this value if your workload requires larger events.
+constexpr uint32_t kMaxEventSize = 64 * 1024 * 1024;
+
 size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
   if (state_ == ParserState::kEventReady || state_ == ParserState::kError) {
     return 0;
@@ -53,7 +60,6 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
         break;
       }
 
-      constexpr uint32_t kMaxEventSize = 64 * 1024 * 1024;  // 64 MB
       if (current_header_.event_length > kMaxEventSize) {
         state_ = ParserState::kError;
         StructuredLog()

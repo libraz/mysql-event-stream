@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include "crc32.h"
 #include "test_helpers.h"
 
 namespace mes {
@@ -365,6 +366,42 @@ TEST(StateMachineTest, ErrorOnEventTooLargeBoundary) {
   EXPECT_EQ(consumed, kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
   EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, ValidChecksumRoundTrip) {
+  // Build an event with a valid CRC32 checksum
+  std::vector<uint8_t> body = {0xDE, 0xAD, 0xBE, 0xEF};
+  auto event = test::BuildValidEvent(30, body, 1000);
+
+  // Verify the checksum is correct
+  size_t data_len = event.size() - kChecksumSize;
+  uint32_t computed = ComputeCRC32(event.data(), data_len);
+  uint32_t stored = 0;
+  std::memcpy(&stored, event.data() + data_len, sizeof(stored));
+  EXPECT_EQ(computed, stored);
+
+  // Parser should accept the event normally
+  EventStreamParser parser;
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_TRUE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, CorruptedChecksumDetected) {
+  // Build an event with a valid CRC32 checksum
+  std::vector<uint8_t> body = {0xDE, 0xAD, 0xBE, 0xEF};
+  auto event = test::BuildValidEvent(30, body, 1000);
+
+  // Corrupt one body byte
+  event[kEventHeaderSize + 1] ^= 0xFF;
+
+  // Verify the checksum is now invalid
+  size_t data_len = event.size() - kChecksumSize;
+  uint32_t computed = ComputeCRC32(event.data(), data_len);
+  uint32_t stored = 0;
+  std::memcpy(&stored, event.data() + data_len, sizeof(stored));
+  EXPECT_NE(computed, stored)
+      << "Corrupted event should have mismatched checksum";
 }
 
 }  // namespace

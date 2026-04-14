@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "addon_constants.h"
+
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
 class PollWorker : public Napi::AsyncWorker {
  public:
@@ -42,9 +44,14 @@ class PollWorker : public Napi::AsyncWorker {
       Napi::Object result = Napi::Object::New(env);
 
       if (!data_.empty()) {
-        result.Set(
-            "data",
-            Napi::Buffer<uint8_t>::Copy(env, data_.data(), data_.size()));
+        auto* moved = new std::vector<uint8_t>(std::move(data_));
+        auto buffer = Napi::Buffer<uint8_t>::New(
+            env, moved->data(), moved->size(),
+            [](Napi::Env, uint8_t*, std::vector<uint8_t>* hint) {
+              delete hint;
+            },
+            moved);
+        result.Set("data", buffer);
       } else {
         result.Set("data", env.Null());
       }
@@ -123,13 +130,13 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
   // Extract config values with defaults
   std::string host = "127.0.0.1";
-  uint16_t port = 3306;
+  uint16_t port = kDefaultPort;
   std::string user = "root";
   std::string password;
-  uint32_t server_id = 1;
+  uint32_t server_id = kDefaultServerId;
   std::string start_gtid;
-  uint32_t connect_timeout_s = 10;
-  uint32_t read_timeout_s = 30;
+  uint32_t connect_timeout_s = kDefaultConnectTimeoutS;
+  uint32_t read_timeout_s = kDefaultReadTimeoutS;
 
   if (config.Has("host") && config.Get("host").IsString()) {
     host = config.Get("host").As<Napi::String>().Utf8Value();
@@ -240,6 +247,16 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
     return deferred.Promise();
   }
 
+  // Only one poll() may be in flight at a time. The C ABI contract states
+  // that the data pointer from mes_client_poll() is valid only until the
+  // next call to mes_client_poll() on the same client.
+  if (pending_workers_.load(std::memory_order_acquire) > 0) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Reject(
+        Napi::Error::New(env, "A poll() is already in progress").Value());
+    return deferred.Promise();
+  }
+
   auto deferred = Napi::Promise::Deferred::New(env);
   pending_workers_.fetch_add(1, std::memory_order_relaxed);
   Ref();  // prevent GC while worker is in flight
@@ -270,6 +287,10 @@ void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
     mes_client_stop(client_);
     destroy_pending_ = true;
   } else {
+    // Ensure the reader thread is stopped before destroying the client.
+    // Without stop(), destroy() may block waiting for the thread to finish
+    // a blocking network read.
+    mes_client_stop(client_);
     mes_client_destroy(client_);
     client_ = nullptr;
   }

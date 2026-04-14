@@ -26,6 +26,7 @@ constexpr uint8_t kPacketOk = 0x00;
 constexpr uint8_t kPacketErr = 0xFF;
 constexpr uint8_t kPacketEOF = 0xFE;
 constexpr uint8_t kPacketLocalInfile = 0xFB;
+constexpr uint8_t kNullColumnMarker = 0xFB;  ///< NULL value marker in text result rows
 constexpr uint8_t kComQuery = 0x03;
 
 // Forward declaration; defined in protocol/mysql_socket.h
