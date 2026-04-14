@@ -197,5 +197,81 @@ TEST(PacketBufferTest, ClearResetsSizeToZero) {
   EXPECT_EQ(pb.Size(), 0u);
 }
 
+// --- ReadFixedInt width guard ---
+
+TEST(FixedIntTest, WidthGreaterThan8ReturnsZero) {
+  uint8_t data[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  EXPECT_EQ(ReadFixedInt(data, 9), 0u);
+  EXPECT_EQ(ReadFixedInt(data, 16), 0u);
+  EXPECT_EQ(ReadFixedInt(data, 100), 0u);
+}
+
+// --- ParseErrPacketPayload ---
+
+TEST(ParseErrPacketPayloadTest, StandardErrPacketWithSqlState) {
+  // Build: 0xFF + error_code(2 LE) + '#' + sql_state(5) + message
+  std::vector<uint8_t> packet = {
+      0xFF,                    // marker
+      0xE8, 0x03,              // error_code = 1000 (LE)
+      '#',                     // sql_state_marker
+      'H', 'Y', '0', '0', '0',  // sql_state
+      'T', 'e', 's', 't',     // message
+  };
+  uint16_t code = 0;
+  std::string msg;
+  ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
+  EXPECT_EQ(code, 1000u);
+  EXPECT_EQ(msg, "Test");
+}
+
+TEST(ParseErrPacketPayloadTest, ErrPacketWithoutSqlState) {
+  // Build: 0xFF + error_code(2 LE) + message (no '#' marker)
+  std::vector<uint8_t> packet = {
+      0xFF,
+      0x15, 0x04,  // error_code = 1045 (LE)
+      'A', 'c', 'c', 'e', 's', 's',
+  };
+  uint16_t code = 0;
+  std::string msg;
+  ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
+  EXPECT_EQ(code, 1045u);
+  EXPECT_EQ(msg, "Access");
+}
+
+TEST(ParseErrPacketPayloadTest, TruncatedPacketTooShort) {
+  // Only 2 bytes, less than minimum 3
+  std::vector<uint8_t> packet = {0xFF, 0x01};
+  uint16_t code = 0;
+  std::string msg;
+  ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
+  EXPECT_EQ(code, 0u);
+  EXPECT_EQ(msg, "Unknown MySQL error");
+}
+
+TEST(ParseErrPacketPayloadTest, MinimalErrPacketNoMessage) {
+  // 0xFF + error_code only, no message
+  std::vector<uint8_t> packet = {0xFF, 0x01, 0x00};
+  uint16_t code = 0;
+  std::string msg;
+  ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
+  EXPECT_EQ(code, 1u);
+  EXPECT_TRUE(msg.empty());
+}
+
+TEST(ParseErrPacketPayloadTest, ErrPacketWithSqlStateNoMessage) {
+  // 0xFF + error_code + '#' + sql_state, but no message after
+  std::vector<uint8_t> packet = {
+      0xFF,
+      0x01, 0x00,
+      '#',
+      'H', 'Y', '0', '0', '0',
+  };
+  uint16_t code = 0;
+  std::string msg;
+  ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
+  EXPECT_EQ(code, 1u);
+  EXPECT_TRUE(msg.empty());
+}
+
 }  // namespace
 }  // namespace mes::protocol

@@ -3,6 +3,7 @@
 
 #include "protocol/mysql_auth.h"
 
+#include <openssl/crypto.h>
 #include <openssl/sha.h>
 
 #include <cstring>
@@ -54,6 +55,8 @@ mes_error_t AuthNativePassword(const std::string& password,
     (*response)[i] = hash_stage1[i] ^ scramble[i];
   }
 
+  OPENSSL_cleanse(hash_stage1, sizeof(hash_stage1));
+  OPENSSL_cleanse(hash_stage2, sizeof(hash_stage2));
   return MES_OK;
 }
 
@@ -102,6 +105,8 @@ mes_error_t AuthCachingSha2Password(const std::string& password,
     (*response)[i] = hash1[i] ^ hash3[i];
   }
 
+  OPENSSL_cleanse(hash1, sizeof(hash1));
+  OPENSSL_cleanse(hash2, sizeof(hash2));
   return MES_OK;
 }
 

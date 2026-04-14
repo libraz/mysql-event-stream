@@ -28,6 +28,9 @@ using namespace e2e;
 // -- SSL mode 1: preferred --
 
 TEST(E2ESSL, SslPreferredConnects) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          1, CaCert(), "", "");
@@ -40,6 +43,9 @@ TEST(E2ESSL, SslPreferredConnects) {
 // -- SSL mode 2: required --
 
 TEST(E2ESSL, SslRequiredConnects) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          2, CaCert(), "", "");
@@ -52,6 +58,9 @@ TEST(E2ESSL, SslRequiredConnects) {
 // -- SSL mode 3: verify_ca with valid CA --
 
 TEST(E2ESSL, SslVerifyCaValid) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          3, CaCert(), "", "");
@@ -64,6 +73,9 @@ TEST(E2ESSL, SslVerifyCaValid) {
 // -- SSL mode 3: verify_ca with wrong CA --
 
 TEST(E2ESSL, SslVerifyCaWrongCa) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          3, WrongCa(), "", "");
@@ -76,6 +88,9 @@ TEST(E2ESSL, SslVerifyCaWrongCa) {
 // -- SSL mode 3: verify_ca with nonexistent CA path --
 
 TEST(E2ESSL, SslVerifyCaBadPath) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          3, "/nonexistent/ca.pem", "", "");
@@ -86,6 +101,9 @@ TEST(E2ESSL, SslVerifyCaBadPath) {
 // -- SSL mode 4: verify_identity --
 
 TEST(E2ESSL, SslVerifyIdentityValid) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          4, CaCert(), "", "");
@@ -98,6 +116,9 @@ TEST(E2ESSL, SslVerifyIdentityValid) {
 // -- SSL mode 2 with client certificate and key --
 
 TEST(E2ESSL, SslClientCert) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          2, CaCert(), ClientCert(), ClientKey());
@@ -110,6 +131,9 @@ TEST(E2ESSL, SslClientCert) {
 // -- Query execution over TLS --
 
 TEST(E2ESSL, SslQueryAfterUpgrade) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          2, CaCert(), "", ""),
@@ -131,6 +155,9 @@ TEST(E2ESSL, SslQueryAfterUpgrade) {
 // -- Multiple queries over TLS --
 
 TEST(E2ESSL, SslMultipleQueries) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   mes::protocol::MysqlConnection conn;
   ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          2, CaCert(), "", ""),
@@ -154,6 +181,9 @@ TEST(E2ESSL, SslMultipleQueries) {
 // -- Binlog streaming over TLS with caching_sha2_password --
 
 TEST(E2ESSL, SslBinlogStreamCapture) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
   // Get current GTID position before inserting data
   std::string gtid_before = GetCurrentGtid();
   ASSERT_FALSE(gtid_before.empty()) << "Failed to fetch current GTID";

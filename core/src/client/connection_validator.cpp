@@ -53,7 +53,7 @@ mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
 }  // namespace
 
 ValidationResult ConnectionValidator::Validate(
-    protocol::MysqlConnection* conn) {
+    protocol::MysqlConnection* conn, ServerFlavor flavor) {
   ValidationResult result;
 
   if (conn == nullptr) {
@@ -68,9 +68,11 @@ ValidationResult ConnectionValidator::Validate(
     return result;
   }
 
-  // 2. gtid_mode must be ON
-  if (!CheckVariable(conn, "gtid_mode", "ON", &result)) {
-    return result;
+  // 2. gtid_mode must be ON (MySQL only; MariaDB GTID is always active)
+  if (flavor != ServerFlavor::kMariaDB) {
+    if (!CheckVariable(conn, "gtid_mode", "ON", &result)) {
+      return result;
+    }
   }
 
   // 3. binlog_format must be ROW
@@ -83,10 +85,13 @@ ValidationResult ConnectionValidator::Validate(
     return result;
   }
 
-  // 5. binlog_transaction_compression must NOT be ON (may not exist)
-  CheckVariableNot(conn, "binlog_transaction_compression", "ON", &result);
-  if (result.error != MES_OK) {
-    return result;
+  // 5. binlog_transaction_compression must NOT be ON
+  // (MariaDB doesn't have this variable)
+  if (flavor != ServerFlavor::kMariaDB) {
+    CheckVariableNot(conn, "binlog_transaction_compression", "ON", &result);
+    if (result.error != MES_OK) {
+      return result;
+    }
   }
 
   return result;
@@ -113,8 +118,9 @@ bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn,
   bool match = EqualsIgnoreCase(value.c_str(), expected);
   if (!match) {
     result->error = MES_ERR_VALIDATION;
-    std::snprintf(result->message, sizeof(result->message),
-                  "%s must be %s, got %s", var_name, expected, value.c_str());
+    std::string msg = std::string(var_name) + " must be " + expected + ", got " + value;
+    std::strncpy(result->message, msg.c_str(), sizeof(result->message) - 1);
+    result->message[sizeof(result->message) - 1] = '\0';
   }
 
   return match;

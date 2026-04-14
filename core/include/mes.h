@@ -266,9 +266,16 @@ typedef struct {
   size_t max_queue_size; /**< Max internal event queue size (0 = default 10000) */
 } mes_client_config_t;
 
+/**
+ * @brief Result of a single poll operation.
+ *
+ * @note The `data` pointer is valid only until the next call to
+ *       mes_client_poll(). Callers must copy the data if they need
+ *       to retain it beyond that point.
+ */
 typedef struct {
   mes_error_t error;
-  const uint8_t* data;
+  const uint8_t* data;  /**< Event data, valid until next poll. NULL on error. */
   size_t size;
   int is_heartbeat;
 } mes_poll_result_t;

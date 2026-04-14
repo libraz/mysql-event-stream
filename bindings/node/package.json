@@ -28,7 +28,14 @@
   },
   "homepage": "https://github.com/libraz/mysql-event-stream",
   "bugs": "https://github.com/libraz/mysql-event-stream/issues",
-  "keywords": ["mysql", "cdc", "binlog", "replication", "change-data-capture", "napi"],
+  "keywords": [
+    "mysql",
+    "cdc",
+    "binlog",
+    "replication",
+    "change-data-capture",
+    "napi"
+  ],
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22"

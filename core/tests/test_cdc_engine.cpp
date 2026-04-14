@@ -285,6 +285,58 @@ TEST(CdcEngineTest, BackpressureStopsFeedingWhenQueueFull) {
   EXPECT_FALSE(engine.HasEvents());
 }
 
+TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
+  CdcEngine engine;
+  engine.SetMaxQueueSize(1);
+
+  // Register table map
+  auto table_map_body = BuildTableMapBody(1, "db", "t");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+
+  // Build 3 write events and combine them into one buffer.
+  // When the stream parser processes this buffer in a single Feed call,
+  // the inner loop should stop after 1 event due to backpressure.
+  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                           BuildWriteRowsBody(1, 10));
+  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                           BuildWriteRowsBody(1, 20));
+  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+                           BuildWriteRowsBody(1, 30));
+
+  std::vector<uint8_t> combined;
+  combined.insert(combined.end(), table_map_event.begin(), table_map_event.end());
+  combined.insert(combined.end(), write1.begin(), write1.end());
+  combined.insert(combined.end(), write2.begin(), write2.end());
+  combined.insert(combined.end(), write3.begin(), write3.end());
+
+  // Feed entire buffer; inner loop should stop after 1 event
+  size_t consumed = engine.Feed(combined.data(), combined.size());
+  EXPECT_LT(consumed, combined.size());
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
+
+  // Drain and re-feed iteratively until all events consumed
+  size_t total_consumed = consumed;
+  size_t events_seen = 0;
+  while (total_consumed < combined.size() || engine.HasEvents()) {
+    ChangeEvent event;
+    while (engine.NextEvent(&event)) {
+      events_seen++;
+    }
+    if (total_consumed < combined.size()) {
+      size_t c = engine.Feed(combined.data() + total_consumed,
+                             combined.size() - total_consumed);
+      total_consumed += c;
+    }
+  }
+  // Drain any remaining
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) {
+    events_seen++;
+  }
+  EXPECT_EQ(events_seen, 3u);
+}
+
 TEST(CdcEngineTest, BackpressureUnlimitedByDefault) {
   CdcEngine engine;
 

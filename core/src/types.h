@@ -79,7 +79,7 @@ struct ColumnValue {
   std::string name;  ///< Column name (empty = unknown)
 
   int64_t int_val = 0;             ///< kTiny, kShort, kLong, kLongLong, kInt24, kYear
-  double float_val = 0.0;          ///< kFloat, kDouble
+  double real_val = 0.0;          ///< kFloat, kDouble
   std::string string_val;          ///< STRING, BLOB, JSON, DECIMAL, DATETIME, etc.
   std::vector<uint8_t> bytes_val;  ///< Binary data
 
@@ -105,7 +105,7 @@ struct ColumnValue {
     ColumnValue v;
     v.type = ColumnType::kFloat;
     v.is_null = false;
-    v.float_val = val;
+    v.real_val = val;
     return v;
   }
 
@@ -114,7 +114,7 @@ struct ColumnValue {
     ColumnValue v;
     v.type = ColumnType::kDouble;
     v.is_null = false;
-    v.float_val = val;
+    v.real_val = val;
     return v;
   }
 

@@ -104,4 +104,22 @@ target_link_libraries(test_crc32 PRIVATE mes-core ZLIB::ZLIB GTest::gtest_main)
 target_compile_options(test_crc32 PRIVATE -fno-exceptions -fno-rtti)
 gtest_discover_tests(test_crc32)
 
+# test_logger
+add_executable(test_logger test_logger.cpp)
+target_link_libraries(test_logger PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_logger PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_logger)
+
+# test_mariadb_gtid
+add_executable(test_mariadb_gtid test_mariadb_gtid.cpp)
+target_link_libraries(test_mariadb_gtid PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mariadb_gtid PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mariadb_gtid)
+
+# test_mariadb_event_parser
+add_executable(test_mariadb_event_parser test_mariadb_event_parser.cpp)
+target_link_libraries(test_mariadb_event_parser PRIVATE mes-core GTest::gtest_main)
+target_compile_options(test_mariadb_event_parser PRIVATE -fno-exceptions -fno-rtti)
+gtest_discover_tests(test_mariadb_event_parser)
+
 add_subdirectory(e2e)

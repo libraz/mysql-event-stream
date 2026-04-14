@@ -74,6 +74,16 @@ const char* BinlogEventTypeName(uint8_t type_code) {
       return "GTID_LOG_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kAnonymousGtidLogEvent):
       return "ANONYMOUS_GTID_LOG_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
+      return "MARIADB_ANNOTATE_ROWS_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
+      return "MARIADB_BINLOG_CHECKPOINT_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent):
+      return "MARIADB_GTID_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent):
+      return "MARIADB_GTID_LIST_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBStartEncryptionEvent):
+      return "MARIADB_START_ENCRYPTION_EVENT";
     default:
       return "UNKNOWN";
   }

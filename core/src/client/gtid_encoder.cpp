@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "mariadb_gtid.h"
+
 namespace mes {
 
 mes_error_t GtidEncoder::Encode(const char* gtid_set,
@@ -157,6 +159,12 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set,
 
 std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {
   if (gtid.empty()) {
+    return gtid;
+  }
+
+  // MariaDB GTIDs (domain-server-seq) are used as-is in session variables.
+  // They don't need range conversion (that's a MySQL COM_BINLOG_DUMP_GTID concept).
+  if (MariaDBGtid::IsMariaDBGtidFormat(gtid)) {
     return gtid;
   }
 

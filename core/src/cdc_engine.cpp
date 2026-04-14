@@ -32,6 +32,9 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
     total_consumed += consumed;
 
     while (stream_parser_.HasEvent()) {
+      if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
+        break;
+      }
       const EventHeader& header = stream_parser_.CurrentHeader();
       const uint8_t* body = nullptr;
       size_t body_len = 0;
@@ -162,6 +165,14 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       }
       break;
     }
+
+    // MariaDB-specific events: skip (CDC uses standard row events)
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBStartEncryptionEvent):
+      break;
 
     default:
       // Skip unhandled event types

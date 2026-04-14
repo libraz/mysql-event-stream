@@ -43,17 +43,22 @@ struct QueryResult {
  * For commands with no result set (SET, USE, etc.), returns an empty
  * QueryResult with MES_OK.
  *
- * Assumes the connection uses CLIENT_DEPRECATE_EOF (MySQL 8.4 default),
- * meaning EOF packets are replaced by OK packets.
+ * When @p deprecate_eof is true (default), the connection is assumed to use
+ * CLIENT_DEPRECATE_EOF (MySQL 8.4 default) where EOF packets are replaced
+ * by OK packets. When false, traditional EOF packets are expected between
+ * column definitions and row data, and after the last row.
  *
- * @param sock       Connected socket handle
- * @param query      SQL query string
- * @param result     Output: populated with column names and row data
- * @param error_msg  Output: MySQL error message on failure
+ * @param sock           Connected socket handle
+ * @param query          SQL query string
+ * @param result         Output: populated with column names and row data
+ * @param error_msg      Output: MySQL error message on failure
+ * @param deprecate_eof  Whether CLIENT_DEPRECATE_EOF is negotiated (default:
+ *                       true)
  * @return MES_OK on success, MES_ERR_STREAM on protocol or MySQL error
  */
 mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
-                         QueryResult* result, std::string* error_msg);
+                         QueryResult* result, std::string* error_msg,
+                         bool deprecate_eof = true);
 
 }  // namespace mes::protocol
 

@@ -84,14 +84,14 @@ TEST(ColumnValueTest, FloatValue) {
   auto v = ColumnValue::Float(3.14);
   EXPECT_EQ(v.type, ColumnType::kFloat);
   EXPECT_FALSE(v.is_null);
-  EXPECT_DOUBLE_EQ(v.float_val, 3.14);
+  EXPECT_DOUBLE_EQ(v.real_val, 3.14);
 }
 
 TEST(ColumnValueTest, DoubleValue) {
   auto v = ColumnValue::Double(2.718281828);
   EXPECT_EQ(v.type, ColumnType::kDouble);
   EXPECT_FALSE(v.is_null);
-  EXPECT_DOUBLE_EQ(v.float_val, 2.718281828);
+  EXPECT_DOUBLE_EQ(v.real_val, 2.718281828);
 }
 
 TEST(ColumnValueTest, StringValue) {

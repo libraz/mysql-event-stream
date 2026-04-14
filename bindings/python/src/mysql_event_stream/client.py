@@ -184,6 +184,9 @@ class BinlogClient:
         if result.is_heartbeat or result.size == 0:
             return PollResult(data=None, is_heartbeat=bool(result.is_heartbeat))
 
+        if not result.data:
+            return PollResult(data=None, is_heartbeat=False)
+
         # Copy data from C buffer to Python bytes
         data = ctypes.string_at(result.data, result.size)
         return PollResult(data=data, is_heartbeat=False)

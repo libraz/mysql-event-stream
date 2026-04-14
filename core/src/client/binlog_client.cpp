@@ -11,10 +11,33 @@
 #include "client/gtid_encoder.h"
 #include "event_header.h"
 #include "logger.h"
+#include "mariadb_event_parser.h"
 #include "protocol/mysql_query.h"
 #include "crc32.h"
 
 namespace mes {
+
+namespace {
+
+/** @brief Validate MariaDB GTID set format to prevent SQL injection.
+ *
+ * A valid MariaDB GTID set contains only digits, hyphens, commas, and spaces
+ * (e.g., "0-1-42" or "0-1-42,1-2-100").
+ */
+bool IsValidMariaDBGtidSet(const std::string& gtid) {
+  if (gtid.empty()) return true;
+  for (char c : gtid) {
+    if (c != '-' && c != ',' && c != ' ' && (c < '0' || c > '9')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/// MySQL GTID_LOG_EVENT post-header body size: commit_flag(1) + UUID(16) + GNO(8)
+constexpr size_t kMySQLGtidBodySize = 25;
+
+}  // namespace
 
 BinlogClient::BinlogClient() = default;
 
@@ -42,8 +65,12 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
     return rc;
   }
 
+  // Detect server flavor (MySQL vs MariaDB)
+  server_flavor_ = conn_.GetServerFlavor();
+
   // Validate server configuration
-  ValidationResult validation = ConnectionValidator::Validate(&conn_);
+  ValidationResult validation =
+      ConnectionValidator::Validate(&conn_, server_flavor_);
   if (validation.error != MES_OK) {
     last_error_ = validation.message;
     conn_.Disconnect();
@@ -54,6 +81,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
       .Event("mysql_connected")
       .Field("host", config.host)
       .Field("port", static_cast<int>(config.port))
+      .Field("flavor", GetServerFlavorName(server_flavor_))
       .Info();
   config_ = config;
   return MES_OK;
@@ -69,7 +97,33 @@ mes_error_t BinlogClient::StartStream() {
     return MES_OK;
   }
 
-  // Enable CRC32 checksums for data integrity verification
+  mes_error_t rc = MES_OK;
+
+  if (server_flavor_ == ServerFlavor::kMariaDB) {
+    rc = StartStreamMariaDB();
+  } else {
+    rc = StartStreamMySQL();
+  }
+
+  if (rc != MES_OK) {
+    return rc;
+  }
+
+  streaming_ = true;
+
+  // Create bounded event queue and launch reader thread
+  size_t queue_size =
+      config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
+  event_queue_ = std::make_unique<EventQueue>(queue_size);
+  reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
+
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::StartStreamMySQL() {
+  // Enable CRC32 checksums for data integrity verification.
+  // MySQL always uses CRC32 after this SET succeeds.
+  checksum_enabled_ = true;
   {
     protocol::QueryResult qr;
     std::string err;
@@ -82,7 +136,6 @@ mes_error_t BinlogClient::StartStream() {
   }
 
   // Set heartbeat period (3 seconds = 3000000000 nanoseconds)
-  // Shorter than read_timeout to keep connection alive in the reader thread
   {
     protocol::QueryResult qr;
     std::string err;
@@ -108,7 +161,7 @@ mes_error_t BinlogClient::StartStream() {
     }
   }
 
-  // Start binlog stream
+  // Start binlog stream via COM_BINLOG_DUMP_GTID
   protocol::BinlogStreamConfig stream_config;
   stream_config.server_id = config_.server_id;
   stream_config.binlog_position = 4;
@@ -120,13 +173,100 @@ mes_error_t BinlogClient::StartStream() {
     return MES_ERR_STREAM;
   }
 
-  streaming_ = true;
+  return MES_OK;
+}
 
-  // Create bounded event queue and launch reader thread
-  size_t queue_size =
-      config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
-  event_queue_ = std::make_unique<EventQueue>(queue_size);
-  reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
+mes_error_t BinlogClient::StartStreamMariaDB() {
+  protocol::QueryResult qr;
+  std::string err;
+
+  // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
+  if (protocol::ExecuteQuery(
+          conn_.Socket(),
+          "SET @master_binlog_checksum = @@global.binlog_checksum", &qr,
+          &err) != MES_OK) {
+    last_error_ = "Failed to set MariaDB binlog checksum: " + err;
+    return MES_ERR_STREAM;
+  }
+
+  // Strict GTID mode: fail on GTID gap rather than silently skipping
+  {
+    mes_error_t rc = protocol::ExecuteQuery(
+        conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr, &err);
+    if (rc != MES_OK) {
+      StructuredLog()
+          .Event("mariadb_strict_mode_failed")
+          .Field("error", err)
+          .Warn();
+    }
+  }
+
+  // Don't skip duplicate GTIDs
+  {
+    mes_error_t rc = protocol::ExecuteQuery(
+        conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0", &qr, &err);
+    if (rc != MES_OK) {
+      StructuredLog()
+          .Event("mariadb_ignore_duplicates_failed")
+          .Field("error", err)
+          .Warn();
+    }
+  }
+
+  // Heartbeat period (3 seconds = 3000000000 nanoseconds)
+  {
+    mes_error_t rc = protocol::ExecuteQuery(
+        conn_.Socket(), "SET @master_heartbeat_period = 3000000000", &qr, &err);
+    if (rc != MES_OK) {
+      StructuredLog()
+          .Event("heartbeat_setup_failed")
+          .Field("error", err)
+          .Warn();
+    }
+  }
+
+  // Detect whether checksum is actually enabled
+  {
+    protocol::QueryResult checksum_qr;
+    std::string checksum_err;
+    if (protocol::ExecuteQuery(conn_.Socket(),
+                               "SELECT @@global.binlog_checksum",
+                               &checksum_qr, &checksum_err) == MES_OK &&
+        !checksum_qr.rows.empty() && !checksum_qr.rows[0].values.empty()) {
+      std::string val = checksum_qr.rows[0].values[0];
+      checksum_enabled_ = (val != "NONE" && val != "none");
+    }
+  }
+
+  // Set MariaDB GTID position via session variable.
+  // MariaDB reads @slave_connect_state to know which GTIDs the replica has.
+  // Empty string means "start from current binlog position".
+  std::string gtid = config_.start_gtid;
+  if (!IsValidMariaDBGtidSet(gtid)) {
+    last_error_ = "Invalid MariaDB GTID format: contains disallowed characters";
+    return MES_ERR_INVALID_ARG;
+  }
+  std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
+  if (protocol::ExecuteQuery(conn_.Socket(), gtid_query, &qr, &err) != MES_OK) {
+    last_error_ = "Failed to set slave_connect_state: " + err;
+    return MES_ERR_STREAM;
+  }
+
+  StructuredLog()
+      .Event("mariadb_gtid_state_set")
+      .Field("gtid", gtid)
+      .Debug();
+
+  // Start binlog stream via COM_BINLOG_DUMP (not COM_BINLOG_DUMP_GTID)
+  protocol::BinlogStreamConfig stream_config;
+  stream_config.server_id = config_.server_id;
+  stream_config.binlog_position = 4;
+
+  auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
+  if (rc != MES_OK) {
+    last_error_ = "Failed to start MariaDB binlog stream";
+    return MES_ERR_STREAM;
+  }
 
   return MES_OK;
 }
@@ -156,8 +296,8 @@ void BinlogClient::ReaderLoop() {
 
     // Verify CRC32 checksum for data integrity.
     // MySQL appends a 4-byte CRC32 to every event when @source_binlog_checksum='CRC32'.
-    // The checksum covers all bytes except the trailing 4-byte CRC itself.
-    if (event_pkt.size >= kEventHeaderSize + kChecksumSize) {
+    // MariaDB may have binlog_checksum=NONE, in which case we skip verification.
+    if (checksum_enabled_ && event_pkt.size >= kEventHeaderSize + kChecksumSize) {
       const size_t data_length = event_pkt.size - kChecksumSize;
       uint32_t computed_crc = ComputeCRC32(event_pkt.data, data_length);
       uint32_t stored_crc = 0;
@@ -244,7 +384,10 @@ void BinlogClient::StopReaderThread() {
 }
 
 void BinlogClient::Disconnect() {
-  StopReaderThread();
+  {
+    std::lock_guard<std::mutex> lock(stop_mutex_);
+    StopReaderThread();
+  }
   streaming_ = false;
   conn_.Disconnect();
   StructuredLog().Event("mysql_disconnected").Info();
@@ -262,25 +405,36 @@ const char* BinlogClient::GetCurrentGtid() const {
 }
 
 void BinlogClient::UpdateGtidFromEvent(const uint8_t* data, size_t size) {
-  // Need at least the event header (19 bytes)
-  if (size < 19) {
+  // Need at least the event header
+  if (size < kEventHeaderSize) {
     return;
   }
 
   // Event type is at offset 4 in the header
   uint8_t event_type = data[4];
 
+  // MariaDB GTID event (type 162)
+  if (event_type ==
+      static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent)) {
+    std::string gtid_str;
+    if (MariaDBEventParser::ExtractGtid(data, size, &gtid_str) == MES_OK) {
+      std::lock_guard<std::mutex> lock(gtid_mutex_);
+      current_gtid_ = gtid_str;
+    }
+    return;
+  }
+
   if (event_type != static_cast<uint8_t>(BinlogEventType::kGtidLogEvent)) {
     return;
   }
 
-  // Body starts at offset 19 (after header)
+  // Body starts after header
   // Need: 1 (commit_flag) + 16 (UUID) + 8 (GNO) = 25 bytes after header
-  if (size < 19 + 25) {
+  if (size < kEventHeaderSize + kMySQLGtidBodySize) {
     return;
   }
 
-  const uint8_t* body = data + 19;
+  const uint8_t* body = data + kEventHeaderSize;
   const uint8_t* uuid = body + 1;  // Skip commit_flag
 
   // Read GNO (little-endian int64 at body+17)

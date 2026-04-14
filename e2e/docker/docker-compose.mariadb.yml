@@ -1,0 +1,31 @@
+# MariaDB test container for E2E tests
+# Uses the same port (13308) and DB name as MySQL so that
+# C++ E2E tests work unchanged (just swap the container).
+services:
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.4}
+    container_name: mes_test_mariadb
+    ports:
+      - "13308:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: test_root_password
+      MARIADB_DATABASE: mes_test
+    command:
+      - --server-id=2
+      - --log-bin=mariadb-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mes_test_mariadb_data:/var/lib/mysql
+      - ./mariadb-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  mes_test_mariadb_data:

@@ -79,6 +79,20 @@ class BinlogStream {
    */
   mes_error_t FetchEvent(SocketHandle* sock, BinlogEventPacket* result);
 
+  /**
+   * @brief Send COM_BINLOG_DUMP to start binlog streaming (MariaDB)
+   *
+   * Unlike COM_BINLOG_DUMP_GTID, MariaDB negotiates GTID position via
+   * session variables before this command. The command only specifies
+   * the binlog position and filename.
+   *
+   * @param sock    Connected and authenticated socket handle
+   * @param config  Binlog stream configuration (server_id, position, filename)
+   * @return MES_OK on success, MES_ERR_STREAM on failure
+   */
+  mes_error_t StartComBinlogDump(SocketHandle* sock,
+                                  const BinlogStreamConfig& config);
+
  private:
   std::vector<uint8_t> packet_buf_;
 };

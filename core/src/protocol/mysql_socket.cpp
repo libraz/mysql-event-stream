@@ -8,6 +8,7 @@
 #include <openssl/x509v3.h>
 
 #include <cerrno>
+#include <climits>
 #include <cstring>
 
 #ifdef _WIN32
@@ -84,13 +85,20 @@ inline int GetSocketError(int fd) {
 
 #endif
 
-/** @brief Collect the last OpenSSL error string. */
+/** @brief Collect all OpenSSL error strings from the error queue. */
 std::string GetOpenSSLError() {
   unsigned long err = ERR_get_error();
   if (err == 0) return "unknown SSL error";
   char buf[256];
   ERR_error_string_n(err, buf, sizeof(buf));
-  return std::string(buf);
+  std::string result(buf);
+  // Drain remaining errors from the queue
+  while ((err = ERR_get_error()) != 0) {
+    ERR_error_string_n(err, buf, sizeof(buf));
+    result += "; ";
+    result += buf;
+  }
+  return result;
 }
 
 }  // namespace
@@ -196,9 +204,15 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port,
         pfd.events = POLLOUT;
 
 #ifdef _WIN32
-        rc = WSAPoll(&pfd, 1, static_cast<int>(timeout_s) * 1000);
+        int timeout_ms = (timeout_s > static_cast<uint32_t>(INT_MAX / 1000))
+                             ? INT_MAX
+                             : static_cast<int>(timeout_s) * 1000;
+        rc = WSAPoll(&pfd, 1, timeout_ms);
 #else
-        rc = poll(&pfd, 1, static_cast<int>(timeout_s) * 1000);
+        int timeout_ms = (timeout_s > static_cast<uint32_t>(INT_MAX / 1000))
+                             ? INT_MAX
+                             : static_cast<int>(timeout_s) * 1000;
+        rc = poll(&pfd, 1, timeout_ms);
 #endif
         if (rc <= 0) {
           // Timeout or poll error.
@@ -505,6 +519,9 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
 #ifdef _WIN32
       n = send(fd_, reinterpret_cast<const char*>(buf + total),
                static_cast<int>(len - total), 0);
+#elif defined(__linux__)
+      n = static_cast<int>(
+          send(fd_, buf + total, len - total, MSG_NOSIGNAL));
 #else
       n = static_cast<int>(
           send(fd_, buf + total, len - total, 0));

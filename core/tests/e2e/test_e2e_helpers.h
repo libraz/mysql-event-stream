@@ -9,6 +9,7 @@
 #ifndef MES_TEST_E2E_HELPERS_H_
 #define MES_TEST_E2E_HELPERS_H_
 
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -17,6 +18,7 @@
 #include "mes.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
+#include "server_flavor.h"
 
 namespace e2e {
 
@@ -28,6 +30,25 @@ constexpr const char* kRootPass = "test_root_password";
 constexpr const char* kReplUser = "repl_user";
 constexpr const char* kReplPass = "test_password";
 constexpr uint32_t kTimeout = 5;
+
+// Detect DB flavor from environment (set by run-matrix.sh)
+inline mes::ServerFlavor GetDbFlavor() {
+  const char* env = std::getenv("DB_FLAVOR");
+  if (env && std::string(env) == "mariadb") {
+    return mes::ServerFlavor::kMariaDB;
+  }
+  return mes::ServerFlavor::kMySQL;
+}
+
+inline bool IsMariaDB() {
+  return GetDbFlavor() == mes::ServerFlavor::kMariaDB;
+}
+
+// MariaDB uses mysql_native_password (no TLS required for auth).
+// MySQL 8.4+ uses caching_sha2_password (TLS needed for full auth).
+inline uint32_t DefaultSslMode() {
+  return IsMariaDB() ? MES_SSL_DISABLED : 2;  // 2 = MES_SSL_REQUIRED
+}
 
 // SSL cert paths (relative to project root)
 // Use absolute paths derived at compile time or pass from environment
@@ -43,6 +64,10 @@ inline std::string CaCert() { return CertDir() + "/ca.pem"; }
 inline std::string ClientCert() { return CertDir() + "/client-cert.pem"; }
 inline std::string ClientKey() { return CertDir() + "/client-key.pem"; }
 inline std::string WrongCa() { return CertDir() + "/wrong-ca.pem"; }
+
+inline std::string DefaultCa() {
+  return IsMariaDB() ? "" : CaCert();
+}
 
 // Captured column value (deep-copied from transient mes_column_t)
 struct CapturedColumn {
@@ -90,27 +115,29 @@ inline CapturedEvent CopyEvent(const mes_event_t* e) {
   return ce;
 }
 
-// Get current GTID executed from server (uses TLS for caching_sha2_password)
+// Get current GTID executed from server (flavor-aware)
 inline std::string GetCurrentGtid() {
   mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2,
-                   CaCert(), "", "") != MES_OK)
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                   DefaultSslMode(), DefaultCa(), "", "") != MES_OK)
     return "";
   mes::protocol::QueryResult qr;
   std::string err;
-  if (mes::protocol::ExecuteQuery(conn.Socket(),
-                                  "SELECT @@GLOBAL.gtid_executed", &qr,
-                                  &err) != MES_OK)
+  // MariaDB: @@GLOBAL.gtid_current_pos; MySQL: @@GLOBAL.gtid_executed
+  const char* query = IsMariaDB()
+                          ? "SELECT @@GLOBAL.gtid_current_pos"
+                          : "SELECT @@GLOBAL.gtid_executed";
+  if (mes::protocol::ExecuteQuery(conn.Socket(), query, &qr, &err) != MES_OK)
     return "";
   if (qr.rows.empty()) return "";
   return qr.rows[0].values[0];
 }
 
-// Execute a DML/DDL statement as root (uses TLS for caching_sha2_password)
+// Execute a DML/DDL statement as root (flavor-aware TLS)
 inline mes_error_t ExecuteDML(const std::string& sql) {
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
-                         2, CaCert(), "", "");
+                         DefaultSslMode(), DefaultCa(), "", "");
   if (rc != MES_OK) return rc;
   mes::protocol::QueryResult qr;
   std::string err;
@@ -139,8 +166,9 @@ inline std::vector<CapturedEvent> CaptureEvents(
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
+  std::string ca_path = DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
@@ -203,11 +231,11 @@ inline std::vector<CapturedEvent> CaptureTableEvents(
       200, engine);
 }
 
-// Get MySQL major version from server
+// Get MySQL/MariaDB major version from server
 inline int GetMysqlMajorVersion() {
   mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 2,
-                   CaCert(), "", "") != MES_OK)
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                   DefaultSslMode(), DefaultCa(), "", "") != MES_OK)
     return 0;
   mes::protocol::QueryResult qr;
   std::string err;
@@ -219,7 +247,9 @@ inline int GetMysqlMajorVersion() {
   return std::atoi(ver.c_str());
 }
 
-inline bool IsMysql9OrLater() { return GetMysqlMajorVersion() >= 9; }
+inline bool IsMysql9OrLater() {
+  return !IsMariaDB() && GetMysqlMajorVersion() >= 9;
+}
 
 // Filter events by table name
 inline std::vector<CapturedEvent> FilterByTable(

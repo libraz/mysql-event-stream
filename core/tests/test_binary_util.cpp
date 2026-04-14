@@ -547,5 +547,46 @@ TEST(DecodeDecimalTest, ScaleOnly) {
   EXPECT_EQ(result, "0.99");
 }
 
+// --- CalcFieldSize for TINY_BLOB, MEDIUM_BLOB, LONG_BLOB ---
+
+TEST(CalcFieldSizeTest, TinyBlob) {
+  uint8_t data[] = {0x03, 'a', 'b', 'c'};
+  EXPECT_EQ(CalcFieldSize(0xF9, data, sizeof(data), 1), 4u);  // 1 + 3
+}
+
+TEST(CalcFieldSizeTest, MediumBlob) {
+  uint8_t data[] = {0x03, 0x00, 0x00, 'a', 'b', 'c'};
+  EXPECT_EQ(CalcFieldSize(0xFA, data, sizeof(data), 3), 6u);  // 3 + 3
+}
+
+TEST(CalcFieldSizeTest, LongBlob) {
+  uint8_t data[] = {0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c'};
+  EXPECT_EQ(CalcFieldSize(0xFB, data, sizeof(data), 4), 7u);  // 4 + 3
+}
+
+// --- CalcFieldSize for VAR_STRING ---
+
+TEST(CalcFieldSizeTest, VarStringShortMeta) {
+  // metadata <= 255: 1-byte length prefix
+  uint8_t data[] = {5, 'h', 'e', 'l', 'l', 'o'};
+  EXPECT_EQ(CalcFieldSize(0xFD, data, sizeof(data), 100), 6u);  // 1 + 5
+}
+
+TEST(CalcFieldSizeTest, VarStringLongMeta) {
+  // metadata > 255: 2-byte length prefix
+  uint8_t data[] = {0x03, 0x00, 'a', 'b', 'c'};
+  EXPECT_EQ(CalcFieldSize(0xFD, data, sizeof(data), 500), 5u);  // 2 + 3
+}
+
+// --- DecodeDecimal with scale > precision ---
+
+TEST(DecodeDecimalTest, ScaleGreaterThanPrecision) {
+  uint8_t data[] = {0x80, 0x00};
+  size_t consumed = 99;
+  auto result = DecodeDecimal(data, sizeof(data), 3, 5, consumed);
+  EXPECT_EQ(result, "0");
+  EXPECT_EQ(consumed, 0u);
+}
+
 }  // namespace
 }  // namespace mes::binary

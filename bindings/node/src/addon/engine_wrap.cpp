@@ -6,7 +6,50 @@
 #include <cstdint>
 #include <string>
 
+static constexpr int64_t kMaxSafeInteger = 9007199254740991LL;
+
 static const char* const kEventTypeNames[] = {"INSERT", "UPDATE", "DELETE"};
+
+namespace {
+const char* MesErrorString(mes_error_t err) {
+  switch (err) {
+    case MES_OK:
+      return "success";
+    case MES_ERR_NULL_ARG:
+      return "null argument";
+    case MES_ERR_INVALID_ARG:
+      return "invalid argument";
+    case MES_ERR_INTERNAL:
+      return "internal error";
+    case MES_ERR_PARSE:
+      return "parse error";
+    case MES_ERR_CHECKSUM:
+      return "checksum mismatch";
+    case MES_ERR_DECODE:
+      return "decode error";
+    case MES_ERR_DECODE_COLUMN:
+      return "column decode error";
+    case MES_ERR_DECODE_ROW:
+      return "row decode error";
+    case MES_ERR_NO_EVENT:
+      return "no event available";
+    case MES_ERR_QUEUE_FULL:
+      return "queue full";
+    case MES_ERR_CONNECT:
+      return "connection error";
+    case MES_ERR_AUTH:
+      return "authentication error";
+    case MES_ERR_VALIDATION:
+      return "validation error";
+    case MES_ERR_STREAM:
+      return "stream error";
+    case MES_ERR_DISCONNECTED:
+      return "disconnected";
+    default:
+      return "unknown error";
+  }
+}
+}  // namespace
 
 Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(
@@ -90,8 +133,8 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   size_t consumed = 0;
   mes_error_t err = mes_feed(engine_, data, len, &consumed);
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_feed failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_feed failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -115,8 +158,8 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
     return env.Null();
   }
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_next_event failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_next_event failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -161,7 +204,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   pos.Set("file",
           Napi::String::New(env, event->binlog_file ? event->binlog_file : ""));
   uint64_t evt_offset = event->binlog_offset;
-  if (evt_offset > 9007199254740991ULL) {
+  if (evt_offset > static_cast<uint64_t>(kMaxSafeInteger)) {
     pos.Set("offset", Napi::BigInt::New(env, evt_offset));
   } else {
     pos.Set("offset",
@@ -197,15 +240,15 @@ Napi::Value EngineWrap::GetPosition(const Napi::CallbackInfo& info) {
   uint64_t offset = 0;
   mes_error_t err = mes_get_position(engine_, &file, &offset);
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_get_position failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_get_position failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
 
   Napi::Object pos = Napi::Object::New(env);
   pos.Set("file", Napi::String::New(env, file ? file : ""));
-  if (offset > 9007199254740991ULL) {
+  if (offset > static_cast<uint64_t>(kMaxSafeInteger)) {
     pos.Set("offset", Napi::BigInt::New(env, offset));
   } else {
     pos.Set("offset", Napi::Number::New(env, static_cast<double>(offset)));
@@ -224,8 +267,8 @@ void EngineWrap::Reset(const Napi::CallbackInfo& info) {
 
   mes_error_t err = mes_reset(engine_);
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_reset failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_reset failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
 }
@@ -245,12 +288,17 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
     return;
   }
 
-  size_t max_size =
-      static_cast<size_t>(info[0].As<Napi::Number>().Uint32Value());
-  mes_error_t err = mes_set_max_queue_size(engine_, max_size);
+  int64_t max_size = info[0].As<Napi::Number>().Int64Value();
+  if (max_size < 0) {
+    Napi::TypeError::New(env, "maxQueueSize must be non-negative")
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  mes_error_t err =
+      mes_set_max_queue_size(engine_, static_cast<size_t>(max_size));
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_set_max_queue_size failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_set_max_queue_size failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
 }
@@ -287,8 +335,8 @@ void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
   for (const auto& s : dbs) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_include_databases(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_set_include_databases failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_set_include_databases failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
 }
@@ -310,8 +358,8 @@ void EngineWrap::SetIncludeTables(const Napi::CallbackInfo& info) {
   for (const auto& s : tables) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_include_tables(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_set_include_tables failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_set_include_tables failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
 }
@@ -333,8 +381,8 @@ void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
   for (const auto& s : tables) ptrs.push_back(s.c_str());
   mes_error_t err = mes_set_exclude_tables(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
-    Napi::Error::New(env, "mes_set_exclude_tables failed with error code " +
-                              std::to_string(err))
+    Napi::Error::New(env, std::string("mes_set_exclude_tables failed: ") +
+                              MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
 }
@@ -403,7 +451,14 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   std::string ssl_key;
 
   if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
-    cfg.ssl_mode = static_cast<mes_ssl_mode_t>(config.Get("sslMode").As<Napi::Number>().Uint32Value());
+    uint32_t ssl_mode_val =
+        config.Get("sslMode").As<Napi::Number>().Uint32Value();
+    if (ssl_mode_val > 4) {
+      Napi::TypeError::New(env, "sslMode must be 0-4")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    cfg.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode_val);
   }
   if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
     ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();
@@ -420,8 +475,8 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
 
   mes_error_t rc = mes_engine_set_metadata_conn(engine_, &cfg);
   if (rc != MES_OK) {
-    Napi::Error::New(env, "Failed to connect metadata (error " +
-                              std::to_string(rc) + ")")
+    Napi::Error::New(env, std::string("Failed to connect metadata: ") +
+                              MesErrorString(rc))
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -453,7 +508,7 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env,
 
       case MES_COL_INT: {
         int64_t v = col.int_val;
-        if (v > 9007199254740991LL || v < -9007199254740991LL) {
+        if (v > kMaxSafeInteger || v < -kMaxSafeInteger) {
           val = Napi::BigInt::New(env, v);
         } else {
           val = Napi::Number::New(env, static_cast<double>(v));

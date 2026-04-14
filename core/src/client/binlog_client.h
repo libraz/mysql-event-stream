@@ -25,6 +25,7 @@
 #include "mes.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
+#include "server_flavor.h"
 
 namespace mes {
 
@@ -133,10 +134,12 @@ class BinlogClient {
  private:
   protocol::MysqlConnection conn_;
   protocol::BinlogStream binlog_stream_;
+  ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
   BinlogClientConfig config_;
   std::vector<uint8_t> gtid_encoded_;
   std::string last_error_;
   bool streaming_ = false;
+  bool checksum_enabled_ = true;  // Whether server uses CRC32 binlog checksum
   std::atomic<bool> stop_requested_{false};
 
   // Reader thread infrastructure
@@ -158,7 +161,13 @@ class BinlogClient {
   /** @brief Stop reader thread, join, clear queue */
   void StopReaderThread();
 
-  /** @brief Update current_gtid_ from GTID_LOG_EVENT (thread-safe) */
+  /** @brief MySQL-specific stream setup (COM_BINLOG_DUMP_GTID) */
+  mes_error_t StartStreamMySQL();
+
+  /** @brief MariaDB-specific stream setup (COM_BINLOG_DUMP) */
+  mes_error_t StartStreamMariaDB();
+
+  /** @brief Update current_gtid_ from GTID_LOG_EVENT or MariaDB GTID (thread-safe) */
   void UpdateGtidFromEvent(const uint8_t* event_data, size_t event_size);
 };
 

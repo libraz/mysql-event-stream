@@ -167,6 +167,11 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
   if (config.Has("sslMode") && config.Get("sslMode").IsNumber()) {
     ssl_mode = config.Get("sslMode").As<Napi::Number>().Uint32Value();
+    if (ssl_mode > 4) {
+      Napi::TypeError::New(env, "sslMode must be 0-4")
+          .ThrowAsJavaScriptException();
+      return;
+    }
   }
   if (config.Has("sslCa") && config.Get("sslCa").IsString()) {
     ssl_ca = config.Get("sslCa").As<Napi::String>().Utf8Value();

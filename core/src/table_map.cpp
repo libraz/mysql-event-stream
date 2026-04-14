@@ -160,6 +160,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   std::vector<uint16_t> col_metadata(column_count, 0);
   size_t meta_offset = 0;
   for (size_t i = 0; i < column_count; i++) {
+    if (meta_offset > metadata_length) return false;
     uint16_t meta_val = 0;
     size_t consumed = ReadColumnMetadataValue(col_types[i], data + offset + meta_offset,
                                               metadata_length - meta_offset, &meta_val);

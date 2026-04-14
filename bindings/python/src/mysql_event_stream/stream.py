@@ -161,6 +161,10 @@ class CdcStream:
                 if self._closed:
                     raise StopAsyncIteration from err
                 if self._max_reconnect_attempts == 0:
+                    warnings.warn(
+                        f"Stream stopped due to error: {err}",
+                        stacklevel=2,
+                    )
                     await self.close()
                     raise StopAsyncIteration from err
 

@@ -18,7 +18,7 @@ class MESColumn(ctypes.Structure):
         ("double_val", ctypes.c_double),
         ("str_data", ctypes.c_void_p),
         ("str_len", ctypes.c_uint32),
-        ("col_name", ctypes.c_void_p),
+        ("col_name", ctypes.c_char_p),
     ]
 
 
@@ -63,6 +63,7 @@ MES_LOG_INFO = 2
 MES_LOG_DEBUG = 3
 
 # Log callback function type: void (*)(int level, const char* message, void* userdata)
+# In the Python binding, userdata is always passed as None (null pointer).
 MES_LOG_CALLBACK = ctypes.CFUNCTYPE(None, ctypes.c_int32, ctypes.c_char_p, ctypes.c_void_p)
 
 # Column types

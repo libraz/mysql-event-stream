@@ -19,6 +19,7 @@
 
 #include "mes.h"
 #include "protocol/mysql_socket.h"
+#include "server_flavor.h"
 
 namespace mes::protocol {
 
@@ -99,12 +100,21 @@ class MysqlConnection {
   /** @brief Get parsed server handshake information */
   const ServerHandshake& GetServerInfo() const;
 
+  /** @brief Get the capability flags negotiated during handshake */
+  uint32_t GetNegotiatedCaps() const;
+
+  /** @brief Get the detected server flavor (MySQL or MariaDB) */
+  ServerFlavor GetServerFlavor() const;
+
  private:
   SocketHandle socket_;
   ServerHandshake server_info_;
   std::string last_error_;
   bool connected_ = false;
   uint8_t sequence_id_ = 0;
+  uint32_t negotiated_caps_ = 0;
+  ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
+  int auth_switch_count_ = 0;
 
   /**
    * @brief Parse the server's Initial Handshake Packet (protocol v10)

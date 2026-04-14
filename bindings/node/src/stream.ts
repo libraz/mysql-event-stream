@@ -55,8 +55,10 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     this.engine = new CdcEngine();
     try {
       this.engine.enableMetadata(this.config);
-    } catch {
-      // Metadata connection is optional -- column names will be empty
+    } catch (e) {
+      // Metadata connection is optional -- column names will be indices
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[mysql-event-stream] Metadata connection failed: ${msg}`);
     }
 
     let reconnectAttempts = 0;

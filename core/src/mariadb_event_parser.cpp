@@ -1,0 +1,136 @@
+// Copyright 2024 mysql-event-stream Authors
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * @file mariadb_event_parser.cpp
+ * @brief MariaDB-specific binlog event parsing implementation
+ */
+
+#include "mariadb_event_parser.h"
+
+#include <cstring>
+
+namespace mes {
+
+/// Minimum size of MARIADB_GTID_EVENT post-header: seq_no(8) + domain_id(4) + flags(1)
+static constexpr size_t kMariaDBGtidEventMinPostHeader = 13;
+
+/// Size of each entry in GTID_LIST_EVENT: domain_id(4) + server_id(4) + seq_no(8)
+static constexpr size_t kGtidListEntrySize = 16;
+
+/// Mask for extracting entry count from GTID_LIST count_and_flags field (lower 28 bits)
+static constexpr uint32_t kGtidListCountMask = 0x0FFFFFFFu;
+
+mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer,
+                                             size_t length,
+                                             std::string* out) {
+  if (buffer == nullptr || out == nullptr) {
+    return MES_ERR_NULL_ARG;
+  }
+
+  // Need at least header + seq_no(8) + domain_id(4) + flags(1)
+  if (length < kEventHeaderSize + kMariaDBGtidEventMinPostHeader) {
+    return MES_ERR_PARSE;
+  }
+
+  // Extract server_id from event header (bytes 5-8, little-endian)
+  uint32_t server_id = 0;
+  std::memcpy(&server_id, buffer + 5, sizeof(server_id));
+
+  // Post-header starts after 19-byte event header
+  const uint8_t* post_header = buffer + kEventHeaderSize;
+
+  // seq_no: 8 bytes at offset 0 (little-endian uint64)
+  uint64_t seq_no = 0;
+  std::memcpy(&seq_no, post_header, sizeof(seq_no));
+
+  // domain_id: 4 bytes at offset 8 (little-endian uint32)
+  uint32_t domain_id = 0;
+  std::memcpy(&domain_id, post_header + 8, sizeof(domain_id));
+
+  // Construct "domain-server-seq" format
+  MariaDBGtid gtid;
+  gtid.domain_id = domain_id;
+  gtid.server_id = server_id;
+  gtid.sequence_no = seq_no;
+  *out = gtid.ToString();
+  return MES_OK;
+}
+
+mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer,
+                                               size_t length,
+                                               std::vector<MariaDBGtid>* out) {
+  if (buffer == nullptr || out == nullptr) {
+    return MES_ERR_NULL_ARG;
+  }
+
+  // Need at least header + count_and_flags(4)
+  if (length < kEventHeaderSize + 4) {
+    return MES_ERR_PARSE;
+  }
+
+  const uint8_t* post_header = buffer + kEventHeaderSize;
+
+  // count_and_flags: 4 bytes (lower 28 bits = count)
+  uint32_t count_and_flags = 0;
+  std::memcpy(&count_and_flags, post_header, sizeof(count_and_flags));
+  uint32_t count = count_and_flags & kGtidListCountMask;
+
+  // Guard against size_t overflow on 32-bit platforms (e.g., WASM)
+  static constexpr uint32_t kMaxGtidListCount = 1000000;
+  if (count > kMaxGtidListCount) {
+    return MES_ERR_PARSE;
+  }
+
+  // Validate we have enough data for all entries
+  size_t entries_offset = kEventHeaderSize + 4;
+  size_t required_size =
+      entries_offset + (static_cast<size_t>(count) * kGtidListEntrySize);
+  if (length < required_size) {
+    return MES_ERR_PARSE;
+  }
+
+  std::vector<MariaDBGtid> result;
+  result.reserve(count);
+
+  const uint8_t* entry_ptr = buffer + entries_offset;
+  for (uint32_t i = 0; i < count; ++i) {
+    MariaDBGtid gtid;
+    std::memcpy(&gtid.domain_id, entry_ptr, sizeof(gtid.domain_id));
+    std::memcpy(&gtid.server_id, entry_ptr + 4, sizeof(gtid.server_id));
+    std::memcpy(&gtid.sequence_no, entry_ptr + 8, sizeof(gtid.sequence_no));
+    result.push_back(gtid);
+    entry_ptr += kGtidListEntrySize;
+  }
+
+  *out = std::move(result);
+  return MES_OK;
+}
+
+mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer,
+                                                     size_t length,
+                                                     bool has_checksum,
+                                                     std::string* out) {
+  if (buffer == nullptr || out == nullptr) {
+    return MES_ERR_NULL_ARG;
+  }
+
+  size_t tail_size = has_checksum ? kChecksumSize : 0;
+
+  // Need at least header + 1 byte of text + optional CRC32
+  if (length <= kEventHeaderSize + tail_size) {
+    return MES_ERR_PARSE;
+  }
+
+  size_t text_length = length - kEventHeaderSize - tail_size;
+
+  if (text_length == 0) {
+    return MES_ERR_PARSE;
+  }
+
+  *out = std::string(reinterpret_cast<const char*>(buffer + kEventHeaderSize),
+                     text_length);
+  return MES_OK;
+}
+
+}  // namespace mes

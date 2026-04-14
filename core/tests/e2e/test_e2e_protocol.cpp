@@ -24,6 +24,7 @@
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
+#include "test_e2e_helpers.h"
 
 namespace {
 
@@ -99,6 +100,9 @@ TEST(E2EProtocol, SimpleSelect) {
 }
 
 TEST(E2EProtocol, ShowVariables) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "gtid_mode variable is MySQL-specific";
+  }
   mes::protocol::MysqlConnection conn;
   ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          0, "", "", ""),
@@ -118,6 +122,9 @@ TEST(E2EProtocol, ShowVariables) {
 }
 
 TEST(E2EProtocol, SelectServerUuid) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "@@server_uuid is MySQL-specific";
+  }
   mes::protocol::MysqlConnection conn;
   ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          0, "", "", ""),
@@ -136,6 +143,9 @@ TEST(E2EProtocol, SelectServerUuid) {
 }
 
 TEST(E2EProtocol, SetCommand) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "@source_binlog_checksum is MySQL-specific";
+  }
   mes::protocol::MysqlConnection conn;
   ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
                          0, "", "", ""),
@@ -226,8 +236,10 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
   config.start_gtid = "";
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = kTimeout;
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  config.ssl_mode =
+      static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  std::string validator_ca = e2e::DefaultCa();
+  config.ssl_ca = validator_ca.empty() ? nullptr : validator_ca.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
@@ -244,6 +256,9 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
 // -- BinlogStream via C ABI --
 
 TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "Uses MySQL-specific GTID queries and SSL setup";
+  }
   // 1. Insert a row via a separate connection to generate a binlog event
   mes::protocol::MysqlConnection data_conn;
   ASSERT_EQ(data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout,
@@ -343,6 +358,9 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
 // -- MetadataFetcher via C ABI --
 
 TEST(E2EProtocol, MetadataFetcherColumnNames) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "Uses MySQL-specific GTID queries and SSL setup";
+  }
   // Use the engine + metadata connection to verify column names are resolved
   mes_engine_t* engine = mes_create();
   ASSERT_NE(engine, nullptr);
@@ -449,6 +467,9 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
 // -- Stop() interrupts blocking Poll() --
 
 TEST(E2EProtocol, StopInterruptsPoll) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "Uses MySQL-specific GTID queries and SSL setup";
+  }
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
 

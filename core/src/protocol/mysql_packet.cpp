@@ -175,11 +175,32 @@ void WriteFixedInt(std::vector<uint8_t>* buf, uint64_t val, size_t width) {
 }
 
 uint64_t ReadFixedInt(const uint8_t* data, size_t width) {
+  // Width must be 1-8 to avoid undefined behavior from shift overflow
+  if (width > 8) return 0;
   uint64_t val = 0;
   for (size_t i = 0; i < width; ++i) {
     val |= static_cast<uint64_t>(data[i]) << (i * 8);
   }
   return val;
+}
+
+void ParseErrPacketPayload(const uint8_t* data, size_t len,
+                           uint16_t* error_code, std::string* message) {
+  *error_code = 0;
+  if (len < 3) {
+    *message = "Unknown MySQL error";
+    return;
+  }
+  // Skip 0xFF marker, read error code
+  *error_code = static_cast<uint16_t>(ReadFixedInt(data + 1, 2));
+  size_t pos = 3;
+  // Skip SQL state if present ('#' + 5 bytes)
+  if (pos < len && data[pos] == '#') {
+    pos += 6;
+  }
+  if (pos < len) {
+    message->assign(reinterpret_cast<const char*>(data + pos), len - pos);
+  }
 }
 
 }  // namespace mes::protocol

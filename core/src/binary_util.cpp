@@ -53,6 +53,11 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
     return "0";
   }
 
+  if (scale > precision) {
+    bytes_consumed = 0;
+    return "0";
+  }
+
   int intg = precision - scale;
   int intg0 = intg / 9;        // Full 4-byte groups in integer part
   int intg_rem = intg % 9;     // Remaining digits in integer part
@@ -211,7 +216,8 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
     case 0x13:  // MYSQL_TYPE_TIME2
       return 3 + (metadata + 1) / 2;
 
-    // VARCHAR
+    // VARCHAR / VAR_STRING
+    case 0xFD:  // MYSQL_TYPE_VAR_STRING
     case 0x0F: {  // MYSQL_TYPE_VARCHAR
       if (metadata > 255) {
         return 2 + ReadU16Le(data);
@@ -259,7 +265,10 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len,
       return static_cast<uint32_t>(consumed) + vec_len;
     }
 
-    // BLOB (includes TEXT)
+    // BLOB (includes TEXT, TINY_BLOB, MEDIUM_BLOB, LONG_BLOB)
+    case 0xF9:  // MYSQL_TYPE_TINY_BLOB
+    case 0xFA:  // MYSQL_TYPE_MEDIUM_BLOB
+    case 0xFB:  // MYSQL_TYPE_LONG_BLOB
     case 0xFC: {  // MYSQL_TYPE_BLOB
       uint8_t pack_len = static_cast<uint8_t>(metadata);
       if (pack_len == 0 || pack_len > 4) return 0;

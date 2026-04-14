@@ -21,6 +21,13 @@
 
 namespace mes::protocol {
 
+/// MySQL packet marker bytes
+constexpr uint8_t kPacketOk = 0x00;
+constexpr uint8_t kPacketErr = 0xFF;
+constexpr uint8_t kPacketEOF = 0xFE;
+constexpr uint8_t kPacketLocalInfile = 0xFB;
+constexpr uint8_t kComQuery = 0x03;
+
 // Forward declaration; defined in protocol/mysql_socket.h
 class SocketHandle;
 
@@ -126,6 +133,16 @@ void WriteFixedInt(std::vector<uint8_t>* buf, uint64_t val, size_t width);
  * @return Decoded value
  */
 uint64_t ReadFixedInt(const uint8_t* data, size_t width);
+
+/**
+ * @brief Parse MySQL ERR packet into error code and message string.
+ * @param data Packet payload (starting with 0xFF marker)
+ * @param len Length of the payload
+ * @param[out] error_code Extracted MySQL error code
+ * @param[out] message Extracted error message
+ */
+void ParseErrPacketPayload(const uint8_t* data, size_t len,
+                           uint16_t* error_code, std::string* message);
 
 }  // namespace mes::protocol
 

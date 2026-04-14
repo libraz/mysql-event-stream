@@ -34,7 +34,12 @@ export class BinlogClient {
       throw new Error("BinlogClient native addon not loaded");
     }
     this.client = new addon.BinlogClient();
-    this.client.connect(config);
+    try {
+      this.client.connect(config);
+    } catch (e) {
+      this.client.destroy();
+      throw e;
+    }
   }
 
   /** Start binlog streaming. */

@@ -4,6 +4,7 @@
 #include "protocol/mysql_connection.h"
 
 #include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
@@ -15,6 +16,7 @@
 #include "protocol/mysql_auth.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
+#include "server_flavor.h"
 
 namespace mes::protocol {
 
@@ -33,10 +35,8 @@ constexpr uint32_t kMaxPacketSize = 0x01000000;
 // Default charset: utf8mb4_general_ci
 constexpr uint8_t kCharsetUtf8mb4 = 45;
 
-// MySQL protocol markers
-constexpr uint8_t kPacketOk = 0x00;
+// Auth-specific protocol markers (kPacketOk, kPacketErr defined in mysql_packet.h)
 constexpr uint8_t kPacketAuthMoreData = 0x01;
-constexpr uint8_t kPacketErr = 0xFF;
 constexpr uint8_t kPacketAuthSwitchRequest = 0xFE;
 
 // caching_sha2_password status bytes
@@ -95,6 +95,7 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
   }
 
   // Step 4: Send handshake response (with optional TLS upgrade)
+  auth_switch_count_ = 0;
   rc = SendHandshakeResponse(user, password, server_info_.auth_plugin_name,
                              server_info_.auth_data, ssl_mode, ssl_ca,
                              ssl_cert, ssl_key, host);
@@ -136,6 +137,9 @@ void MysqlConnection::Disconnect() {
     connected_ = false;
   }
 
+  negotiated_caps_ = 0;
+  server_flavor_ = ServerFlavor::kMySQL;
+
   // Close socket by replacing with a default-constructed one
   socket_ = SocketHandle();
 }
@@ -150,6 +154,14 @@ const std::string& MysqlConnection::GetLastError() const {
 
 const ServerHandshake& MysqlConnection::GetServerInfo() const {
   return server_info_;
+}
+
+uint32_t MysqlConnection::GetNegotiatedCaps() const {
+  return negotiated_caps_;
+}
+
+ServerFlavor MysqlConnection::GetServerFlavor() const {
+  return server_flavor_;
 }
 
 mes_error_t MysqlConnection::ParseServerHandshake(
@@ -312,6 +324,8 @@ mes_error_t MysqlConnection::ParseServerHandshake(
     server_info_.auth_plugin_name = kPluginCachingSha2Password;
   }
 
+  server_flavor_ = DetectServerFlavor(server_info_.server_version);
+
   return MES_OK;
 }
 
@@ -421,6 +435,7 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     payload.push_back(0);
   }
 
+  negotiated_caps_ = client_caps;
   return SendPacket(payload);
 }
 
@@ -588,6 +603,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
 
           EVP_PKEY_CTX_free(ctx);
           EVP_PKEY_free(pkey);
+          OPENSSL_cleanse(xored.data(), xored.size());
 
           if (encrypt_rc != MES_OK) {
             return encrypt_rc;
@@ -620,6 +636,11 @@ mes_error_t MysqlConnection::HandleAuthSwitchRequest(
     const std::vector<uint8_t>& packet, const std::string& password) {
   if (packet.size() < 2) {
     last_error_ = "Truncated auth switch request";
+    return MES_ERR_AUTH;
+  }
+
+  if (++auth_switch_count_ > 3) {
+    last_error_ = "Too many auth switch requests";
     return MES_ERR_AUTH;
   }
 
@@ -679,29 +700,15 @@ mes_error_t MysqlConnection::ProcessOkOrError(
   }
 
   if (packet[0] == kPacketErr) {
-    if (packet.size() < 3) {
-      last_error_ = "Unknown error (truncated ERR packet)";
-      return MES_ERR_AUTH;
-    }
-
-    uint16_t error_code =
-        static_cast<uint16_t>(ReadFixedInt(packet.data() + 1, 2));
-    size_t msg_start = 3;
-
-    // CLIENT_PROTOCOL_41: skip '#' marker + 5-byte SQL state
-    if (packet.size() > 3 && packet[3] == '#') {
-      msg_start = 9;  // 1(marker) + 2(error_code) + 1('#') + 5(sql_state)
-    }
-
-    if (msg_start < packet.size()) {
-      last_error_ =
-          "MySQL error " + std::to_string(error_code) + ": " +
-          std::string(reinterpret_cast<const char*>(packet.data() + msg_start),
-                      packet.size() - msg_start);
-    } else {
+    uint16_t error_code = 0;
+    std::string msg;
+    ParseErrPacketPayload(packet.data(), packet.size(), &error_code, &msg);
+    if (msg.empty()) {
       last_error_ = "MySQL error " + std::to_string(error_code);
+    } else {
+      last_error_ =
+          "MySQL error " + std::to_string(error_code) + ": " + msg;
     }
-
     return MES_ERR_AUTH;
   }
 
@@ -718,11 +725,22 @@ mes_error_t MysqlConnection::ComputeAuthResponse(
     return MES_OK;
   }
 
+  static constexpr size_t kMinNativeSaltLen = 20;
+  static constexpr size_t kMinCachingSha2SaltLen = 20;
+
   if (plugin == kPluginNativePassword) {
+    if (salt.size() < kMinNativeSaltLen) {
+      last_error_ = "Auth salt too short for mysql_native_password";
+      return MES_ERR_AUTH;
+    }
     return AuthNativePassword(password, salt.data(), salt.size(), response);
   }
 
   if (plugin == kPluginCachingSha2Password) {
+    if (salt.size() < kMinCachingSha2SaltLen) {
+      last_error_ = "Auth salt too short for caching_sha2_password";
+      return MES_ERR_AUTH;
+    }
     return AuthCachingSha2Password(password, salt.data(), salt.size(), response);
   }
 

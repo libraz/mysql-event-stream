@@ -17,6 +17,10 @@ namespace {
 /** @brief Skip a length-encoded string at the current position */
 void SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
   uint64_t str_len = ReadLenEncInt(data, len, pos);
+  if (*pos + str_len > len) {
+    *pos = len;
+    return;
+  }
   *pos += str_len;
 }
 
@@ -35,31 +39,10 @@ std::string ReadLenEncString(const uint8_t* data, size_t len, size_t* pos) {
 /** @brief Extract error message from an ERR packet payload */
 void ParseErrPacket(const std::vector<uint8_t>& payload,
                     std::string* error_msg) {
-  // ERR packet: [0xFF] [error_code: 2] [sql_state_marker: 1] [sql_state: 5]
-  // [message: rest]
-  if (payload.size() < 4) {
-    *error_msg = "Unknown MySQL error";
-    return;
-  }
-  // Skip 0xFF marker byte, read error code
-  size_t pos = 1;
-  uint16_t error_code =
-      static_cast<uint16_t>(ReadFixedInt(payload.data() + pos, 2));
-  pos += 2;
-
-  // Check for SQL state marker '#'
-  if (pos < payload.size() && payload[pos] == '#') {
-    pos += 1;  // '#'
-    pos += 5;  // SQL state (5 bytes)
-  }
-
+  uint16_t error_code = 0;
   std::string msg;
-  if (pos < payload.size()) {
-    msg.assign(reinterpret_cast<const char*>(payload.data() + pos),
-               payload.size() - pos);
-  }
-  *error_msg =
-      "MySQL error " + std::to_string(error_code) + ": " + msg;
+  ParseErrPacketPayload(payload.data(), payload.size(), &error_code, &msg);
+  *error_msg = "MySQL error " + std::to_string(error_code) + ": " + msg;
 }
 
 /** @brief Parse column name from a column definition packet */
@@ -89,7 +72,7 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
   row->is_null.resize(column_count);
 
   for (size_t i = 0; i < column_count && pos < data_size; ++i) {
-    if (data[pos] == 0xFB) {
+    if (data[pos] == kPacketLocalInfile) {
       // NULL value
       row->is_null[i] = true;
       row->values[i].clear();
@@ -109,11 +92,12 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count,
 }  // namespace
 
 mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
-                         QueryResult* result, std::string* error_msg) {
-  // Build COM_QUERY payload: [0x03] + query bytes
+                         QueryResult* result, std::string* error_msg,
+                         bool deprecate_eof) {
+  // Build COM_QUERY payload: command byte + query bytes
   std::vector<uint8_t> cmd_payload;
   cmd_payload.reserve(1 + query.size());
-  cmd_payload.push_back(0x03);  // COM_QUERY
+  cmd_payload.push_back(kComQuery);
   cmd_payload.insert(cmd_payload.end(), query.begin(), query.end());
 
   // Send with sequence_id = 0
@@ -143,20 +127,26 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
   uint8_t first_byte = payload[0];
 
   // OK packet (no result set) - for SET, USE, INSERT, etc.
-  if (first_byte == 0x00) {
+  if (first_byte == kPacketOk) {
     *result = QueryResult{};
     return MES_OK;
   }
 
   // ERR packet (MySQL server rejected the query)
-  if (first_byte == 0xFF) {
+  if (first_byte == kPacketErr) {
     ParseErrPacket(payload, error_msg);
     return MES_ERR_VALIDATION;
   }
 
   // Result set: first packet contains column_count as len-enc-int
+  static constexpr uint64_t kMaxColumnCount = 4096;
   size_t pos = 0;
   uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
+  if (column_count > kMaxColumnCount) {
+    *error_msg = "Column count exceeds maximum (" +
+                 std::to_string(column_count) + ")";
+    return MES_ERR_PARSE;
+  }
 
   // Read column definition packets
   result->column_names.resize(column_count);
@@ -169,8 +159,21 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
     result->column_names[i] = ParseColumnName(payload);
   }
 
-  // With CLIENT_DEPRECATE_EOF, no intermediate EOF packet.
-  // Read row data packets until OK packet (0xFE with >= 7 bytes).
+  // Without CLIENT_DEPRECATE_EOF, read intermediate EOF packet after column defs
+  if (!deprecate_eof) {
+    rc = ReadPacket(sock, &payload, &seq_id);
+    if (rc != MES_OK) {
+      *error_msg = "Failed to read intermediate EOF packet";
+      return rc;
+    }
+    // Verify it's actually an EOF packet (0xFE with < 9 bytes)
+    if (payload.empty() || payload[0] != kPacketEOF || payload.size() >= 9) {
+      *error_msg = "Expected intermediate EOF packet";
+      return MES_ERR_STREAM;
+    }
+  }
+
+  // Read row data packets until end-of-rows marker.
   result->rows.clear();
   for (;;) {
     rc = ReadPacket(sock, &payload, &seq_id);
@@ -183,13 +186,19 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query,
       continue;
     }
 
-    // OK packet replacing EOF: starts with 0xFE and has >= 7 bytes
-    if (payload[0] == 0xFE && payload.size() >= 7) {
-      break;
+    // End-of-rows detection depends on CLIENT_DEPRECATE_EOF negotiation
+    if (payload[0] == kPacketEOF) {
+      if (deprecate_eof) {
+        // OK-replacing-EOF: 0xFE with >= 7 bytes
+        if (payload.size() >= 7) break;
+      } else {
+        // Traditional EOF: 0xFE with < 9 bytes (typically 5)
+        if (payload.size() < 9) break;
+      }
     }
 
     // ERR packet during row reading
-    if (payload[0] == 0xFF) {
+    if (payload[0] == kPacketErr) {
       ParseErrPacket(payload, error_msg);
       return MES_ERR_STREAM;
     }

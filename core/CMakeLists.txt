@@ -42,6 +42,8 @@ set(CLIENT_SOURCES
 add_library(mes-objects OBJECT
   src/binary_util.cpp
   src/event_header.cpp
+  src/mariadb_gtid.cpp
+  src/mariadb_event_parser.cpp
   src/table_map.cpp
   src/rotate_event.cpp
   src/state_machine.cpp

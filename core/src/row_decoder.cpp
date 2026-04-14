@@ -132,8 +132,7 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining,
     row->columns[i] =
         DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
     if (consumed == 0 && !row->columns[i].is_null) {
-      // Zero bytes consumed for a non-null value is suspicious, but some
-      // fixed-size types consume known amounts. Only fail if consumed > remaining.
+      return false;
     }
     if (consumed > remaining) return false;
     ptr += consumed;

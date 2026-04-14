@@ -12,6 +12,9 @@
 
 namespace mes::protocol {
 
+/// COM_BINLOG_DUMP command byte
+constexpr uint8_t kComBinlogDump = 0x12;
+
 namespace {
 
 /// HEARTBEAT_LOG_EVENT type ID in the binlog event header
@@ -120,6 +123,30 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock,
 
   // Unexpected status byte - treat as error
   return MES_ERR_STREAM;
+}
+
+mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock,
+                                              const BinlogStreamConfig& config) {
+  // Build COM_BINLOG_DUMP payload:
+  //   [1] command byte (0x12)
+  //   [4] binlog position (LE)
+  //   [2] flags (LE)
+  //   [4] server_id (LE)
+  //   [N] binlog filename
+  std::vector<uint8_t> payload;
+
+  payload.push_back(kComBinlogDump);
+  WriteFixedInt(&payload, config.binlog_position, 4);
+  WriteFixedInt(&payload, config.flags, 2);
+  WriteFixedInt(&payload, config.server_id, 4);
+  payload.insert(payload.end(), config.binlog_filename.begin(),
+                 config.binlog_filename.end());
+
+  PacketBuffer pkt_buf;
+  uint8_t seq_id = 0;
+  pkt_buf.WritePacket(payload.data(), payload.size(), &seq_id);
+
+  return sock->WriteAll(pkt_buf.Data(), pkt_buf.Size());
 }
 
 }  // namespace mes::protocol

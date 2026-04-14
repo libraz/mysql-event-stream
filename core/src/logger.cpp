@@ -11,13 +11,13 @@ std::atomic<void*> LogConfig::userdata_{nullptr};
 
 void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t min_level,
                              void* userdata) {
-  callback_.store(callback, std::memory_order_relaxed);
-  min_level_.store(min_level, std::memory_order_relaxed);
   userdata_.store(userdata, std::memory_order_relaxed);
+  min_level_.store(min_level, std::memory_order_relaxed);
+  callback_.store(callback, std::memory_order_release);
 }
 
 mes_log_callback_t LogConfig::GetCallback() {
-  return callback_.load(std::memory_order_relaxed);
+  return callback_.load(std::memory_order_acquire);
 }
 mes_log_level_t LogConfig::GetMinLevel() {
   return min_level_.load(std::memory_order_relaxed);

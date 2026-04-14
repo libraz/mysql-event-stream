@@ -35,6 +35,9 @@ namespace {
 // -- caching_sha2_password tests --
 
 TEST(E2EAuth, CachingSha2OverTls) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout,
                          kTimeout, 2, CaCert(), "", "");
@@ -44,6 +47,9 @@ TEST(E2EAuth, CachingSha2OverTls) {
 }
 
 TEST(E2EAuth, CachingSha2FastAuth) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
   // First connection: full auth over TLS to populate server's auth cache
   {
     mes::protocol::MysqlConnection conn;
@@ -66,6 +72,9 @@ TEST(E2EAuth, CachingSha2FastAuth) {
 }
 
 TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
   // Create a temporary caching_sha2_password user to ensure cold cache
   const std::string temp_user = "sha2_cold_cache_test_user";
   const std::string temp_pass = "cold_cache_pwd_123";
@@ -97,6 +106,9 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
 // -- Auth switch tests --
 
 TEST(E2EAuth, CachingSha2DefaultPlugin) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
   // All users use caching_sha2_password (default in 8.4+, only option in 9.x).
   // repl_user uses caching_sha2_password, so no auth switch is needed.
   mes::protocol::MysqlConnection conn;
@@ -114,6 +126,9 @@ TEST(E2EAuth, CachingSha2DefaultPlugin) {
 // -- Password edge cases --
 
 TEST(E2EAuth, EmptyPassword) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "empty_pass_user is only provisioned in the MySQL container";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "empty_pass_user", "", kTimeout,
                          kTimeout, 0, "", "", "");
@@ -140,10 +155,11 @@ TEST(E2EAuth, LongPassword) {
   ASSERT_EQ(dml_rc, MES_OK) << "Failed to create long password user";
   ExecuteDML("GRANT SELECT ON *.* TO '" + user + "'@'%'");
 
-  // Connect with the long password over TLS
+  // Connect with the long password
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, user.c_str(), long_pass.c_str(),
-                         kTimeout, kTimeout, 2, CaCert(), "", "");
+                         kTimeout, kTimeout, DefaultSslMode(), DefaultCa(), "",
+                         "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -153,6 +169,9 @@ TEST(E2EAuth, LongPassword) {
 }
 
 TEST(E2EAuth, SpecialCharsInPassword) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "special_user is only provisioned in the MySQL container";
+  }
   // Connect over TLS since caching_sha2_password may need full auth
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "special_user", "p@ss'w\\ord\"!",
@@ -173,6 +192,9 @@ TEST(E2EAuth, NonExistentUser) {
 }
 
 TEST(E2EAuth, WrongPasswordSha2) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "sha2_user is only provisioned in the MySQL container";
+  }
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "sha2_user", "wrong_password", kTimeout,
                          kTimeout, 2, CaCert(), "", "");
@@ -184,6 +206,9 @@ TEST(E2EAuth, WrongPasswordSha2) {
 // -- Privilege tests --
 
 TEST(E2EAuth, NoReplPrivilegesConnect) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "no_repl_user is only provisioned in the MySQL container";
+  }
   // Connection itself should succeed (SELECT privilege is enough for auth)
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, "no_repl_user", "no_repl_pass",
@@ -194,6 +219,9 @@ TEST(E2EAuth, NoReplPrivilegesConnect) {
 }
 
 TEST(E2EAuth, NoReplPrivilegesStreamFails) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "no_repl_user is only provisioned in the MySQL container";
+  }
   // Connect as no_repl_user via the mes_client C API.
   // The connection should succeed, but mes_client_start() (which sends
   // COM_BINLOG_DUMP_GTID) should fail because the user lacks REPLICATION SLAVE.
@@ -245,13 +273,13 @@ TEST(E2EAuth, ReconnectAfterFailure) {
 
   // First attempt: bad password, should fail
   auto rc = conn.Connect(kHost, kPort, kReplUser, "wrong_password", kTimeout,
-                         kTimeout, 2, CaCert(), "", "");
+                         kTimeout, DefaultSslMode(), DefaultCa(), "", "");
   EXPECT_EQ(rc, MES_ERR_AUTH);
   EXPECT_FALSE(conn.IsConnected());
 
   // Second attempt: correct password on the same connection object
-  rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 2,
-                    CaCert(), "", "");
+  rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout,
+                    DefaultSslMode(), DefaultCa(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
 

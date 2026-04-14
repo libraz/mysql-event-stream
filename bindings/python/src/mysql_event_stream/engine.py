@@ -303,7 +303,7 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
         col = cols[i]
 
         # Key: column name if available, otherwise string index
-        name = ctypes.string_at(col.col_name).decode("utf-8") if col.col_name else ""
+        name = col.col_name.decode("utf-8") if col.col_name else ""
         key = name if name else str(i)
 
         col_type = col.type

@@ -57,7 +57,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     case mes::ColumnType::kFloat:
     case mes::ColumnType::kDouble:
       c.type = MES_COL_DOUBLE;
-      c.double_val = col.float_val;
+      c.double_val = col.real_val;
       break;
     case mes::ColumnType::kJson:
     case mes::ColumnType::kBlob:
@@ -118,6 +118,7 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
   }
   *consumed = engine->engine.Feed(data, len);
   if (engine->engine.IsError()) {
+    *consumed = 0;
     return MES_ERR_PARSE;
   }
   return MES_OK;

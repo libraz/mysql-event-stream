@@ -11,6 +11,7 @@
 
 #include "mes.h"
 #include "protocol/mysql_connection.h"
+#include "server_flavor.h"
 
 namespace mes {
 
@@ -39,7 +40,8 @@ class ConnectionValidator {
    * @param conn Active MySQL connection
    * @return ValidationResult with error/message/uuid
    */
-  static ValidationResult Validate(protocol::MysqlConnection* conn);
+  static ValidationResult Validate(protocol::MysqlConnection* conn,
+                                    ServerFlavor flavor = ServerFlavor::kMySQL);
 
  private:
   static bool CheckVariable(protocol::MysqlConnection* conn,
