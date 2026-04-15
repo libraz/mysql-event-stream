@@ -31,8 +31,9 @@ namespace mes {
 
 /** @brief An event buffered in the EventQueue. */
 struct QueuedEvent {
-  std::vector<uint8_t> data;   ///< Owned copy of binlog event bytes
+  std::vector<uint8_t> data;   ///< Owned copy of binlog event bytes (empty for heartbeat)
   mes_error_t error = MES_OK;  ///< MES_OK for real events; error code for poison pill
+  bool is_heartbeat = false;   ///< true for silent heartbeats from the server
 };
 
 /**

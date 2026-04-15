@@ -75,6 +75,15 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   int frac0 = scale / 9;     // Full 4-byte groups in fractional part
   int frac_rem = scale % 9;  // Remaining digits in fractional part
 
+  // Upper bound for the decimal text: precision digits + optional sign +
+  // decimal point. Reserving up front avoids the one-or-two heap
+  // reallocations that otherwise occur as we append integer/fractional
+  // chunks, and makes the final insert(0,"-") O(1) because we still have
+  // slack at the front of the allocated buffer when std::string's growth
+  // policy leaves headroom (the insert itself stays O(N) in the worst case
+  // but is a single memmove rather than a full copy into a new buffer).
+  // +3 covers '-', '.', and a null terminator.
+
   int total_size = static_cast<int>(DecimalBinarySize(precision, scale));
 
   if (total_size == 0) {
@@ -119,6 +128,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
 
   const uint8_t* ptr = buf.data();
   std::string result;
+  result.reserve(static_cast<size_t>(precision) + 3);
 
   // Process integer remainder (leading partial group)
   if (intg_rem > 0) {
@@ -176,7 +186,10 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   }
 
   if (is_negative) {
-    result = "-" + result;
+    // Prefer insert(0, ...) over "-" + result: the latter allocates a new
+    // string and copies the entire body, whereas insert is a single
+    // memmove within the already-reserved buffer.
+    result.insert(result.begin(), '-');
   }
 
   return result;

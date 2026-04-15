@@ -12,7 +12,11 @@ from ._ffi import (
     MES_COL_NULL,
     MES_COL_STRING,
     MES_ERR_CHECKSUM,
+    MES_ERR_DECODE,
+    MES_ERR_DECODE_COLUMN,
+    MES_ERR_DECODE_ROW,
     MES_ERR_NO_EVENT,
+    MES_ERR_PARSE,
     MES_OK,
     MESClientConfig,
     MESColumn,
@@ -20,7 +24,24 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
-from .types import BinlogPosition, ChangeEvent, EventType
+from .types import BinlogPosition, ChangeEvent, ChecksumError, DecodeError, EventType, ParseError
+
+
+def _raise_for_rc(rc: int, op: str) -> None:
+    """Translate a C-ABI error code into the best-fitting Python exception.
+
+    Keeps backward compatibility: every exception raised here is still a
+    subclass of ``RuntimeError``, so code that catches ``RuntimeError``
+    continues to work.  Callers that want to distinguish categories can
+    catch ``ChecksumError`` / ``DecodeError`` / ``ParseError`` directly.
+    """
+    if rc == MES_ERR_CHECKSUM:
+        raise ChecksumError(f"{op} failed: checksum mismatch (code {rc})")
+    if rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+        raise DecodeError(f"{op} failed: row decode error (code {rc})")
+    if rc == MES_ERR_PARSE:
+        raise ParseError(f"{op} failed: binlog parse error (code {rc})")
+    raise RuntimeError(f"{op} failed with error code {rc}")
 
 
 class CdcEngine:
@@ -95,10 +116,8 @@ class CdcEngine:
             buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         consumed = ctypes.c_size_t(0)
         rc = self._lib.mes_feed(self._handle, buf, len(data), ctypes.byref(consumed))
-        if rc == MES_ERR_CHECKSUM:
-            raise RuntimeError("mes_feed failed: checksum mismatch")
         if rc != MES_OK:
-            raise RuntimeError(f"mes_feed failed with error code {rc}")
+            _raise_for_rc(rc, "mes_feed")
         return consumed.value
 
     def next_event(self) -> ChangeEvent | None:
@@ -117,10 +136,8 @@ class CdcEngine:
             rc = self._lib.mes_next_event(self._handle, ctypes.byref(event_ptr))
             if rc == MES_ERR_NO_EVENT:
                 return None
-            if rc == MES_ERR_CHECKSUM:
-                raise RuntimeError("mes_next_event failed: checksum mismatch")
             if rc != MES_OK:
-                raise RuntimeError(f"mes_next_event failed with error code {rc}")
+                _raise_for_rc(rc, "mes_next_event")
             result = _convert_event(event_ptr.contents)
             if result is not None:
                 return result
@@ -363,11 +380,19 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
             else:
                 result[key] = ""
         elif col_type == MES_COL_BYTES:
+            # A column whose C-side type is MES_COL_BYTES is by definition
+            # a bytes value. Zero-length (str_len == 0) is a legitimate
+            # empty payload and maps to b"", not None -- truly-null values
+            # arrive with type == MES_COL_NULL and are handled above, so
+            # conflating empty bytes with null here would lose information.
+            # ctypes.string_at requires a non-null pointer, so fall back to
+            # the explicit empty-bytes literal when the pointer is null
+            # (which should only happen in defensive tests; real C output
+            # always passes a valid pointer, even for empty vectors).
             if col.str_data and col.str_len > 0:
                 result[key] = ctypes.string_at(col.str_data, col.str_len)
             else:
-                # Absent value: None matches Node.js binding and C ABI semantics
-                result[key] = None
+                result[key] = b""
         else:
             result[key] = None
 

@@ -638,6 +638,13 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
                       std::vector<UpdatePair>* pairs) {
   if (!pairs) return false;
   RowsContext ctx{};
+  // NOTE(review): When ParseRowsContext returns true with is_update=true,
+  // ParseRowsPostHeader guarantees that ctx.columns_present_update is
+  // non-null -- the is_update branch inside ParseRowsPostHeader either
+  // assigns *columns_present_update and returns a non-null pointer, or
+  // returns nullptr (in which case ParseRowsContext returns false and we
+  // bail out here). A previous review flagged this as a potential NULL
+  // deref; it is not reachable. Keep the control flow intact.
   if (!ParseRowsContext(data, len, metadata, is_v2, true, &ctx)) return false;
 
   pairs->clear();

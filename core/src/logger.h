@@ -55,10 +55,17 @@ class LogConfig {
  *
  * Usage:
  *   StructuredLog().Event("binlog_error").Field("gtid", gtid).Error();
+ *
+ * NOTE(perf): The constructor takes a single snapshot of the global log
+ * configuration and caches it for the lifetime of the builder. Each
+ * Field() therefore performs no synchronization and costs only the
+ * emplace_back. Previously every Field() acquired SnapshotMutex via
+ * LogConfig::GetCallback(), which dominated hot-path logging cost when
+ * many fields were attached in a reader-thread loop.
  */
 class StructuredLog {
  public:
-  StructuredLog() = default;
+  StructuredLog() : snap_(LogConfig::GetSnapshot()) {}
 
   /** @brief Set event name (required). */
   StructuredLog& Event(const char* event_name) {
@@ -68,43 +75,43 @@ class StructuredLog {
 
   /** @brief Add a string field. */
   StructuredLog& Field(const char* key, const std::string& value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, value);
+    if (Enabled()) fields_.emplace_back(key, value);
     return *this;
   }
 
   /** @brief Add a string literal field. */
   StructuredLog& Field(const char* key, const char* value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::string(value));
+    if (Enabled()) fields_.emplace_back(key, std::string(value));
     return *this;
   }
 
   /** @brief Add an int64 field. */
   StructuredLog& Field(const char* key, int64_t value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
+    if (Enabled()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a uint64 field. */
   StructuredLog& Field(const char* key, uint64_t value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
+    if (Enabled()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add an int field. */
   StructuredLog& Field(const char* key, int value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
+    if (Enabled()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a double field. */
   StructuredLog& Field(const char* key, double value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, std::to_string(value));
+    if (Enabled()) fields_.emplace_back(key, std::to_string(value));
     return *this;
   }
 
   /** @brief Add a bool field. */
   StructuredLog& Field(const char* key, bool value) {
-    if (LogConfig::GetCallback()) fields_.emplace_back(key, value ? "true" : "false");
+    if (Enabled()) fields_.emplace_back(key, value ? "true" : "false");
     return *this;
   }
 
@@ -123,6 +130,12 @@ class StructuredLog {
  private:
   void Emit(mes_log_level_t level);
 
+  bool Enabled() const { return snap_ && snap_->callback != nullptr; }
+
+  // Snapshot captured at construction: guarantees all Field() calls and
+  // the final Emit() see the same (callback, level, userdata) triple,
+  // eliminating per-Field mutex traffic.
+  std::shared_ptr<const LogConfigSnapshot> snap_;
   std::string event_;
   std::vector<std::pair<std::string, std::string>> fields_;
 };

@@ -44,10 +44,11 @@ mes_log_level_t LogConfig::GetLogLevel() { return GetSnapshot()->level; }
 void* LogConfig::GetUserdata() { return GetSnapshot()->userdata; }
 
 void StructuredLog::Emit(mes_log_level_t level) {
-  // Single atomic read ensures the callback, level, and userdata we use
-  // below are all from the same configuration generation.
-  auto snap = LogConfig::GetSnapshot();
-  if (snap->callback == nullptr || level > snap->level) {
+  // Reuse the snapshot captured in the StructuredLog constructor so that
+  // every Field()/Emit() within this builder observes the same
+  // configuration generation. This avoids an extra SnapshotMutex acquisition
+  // per log line.
+  if (!snap_ || snap_->callback == nullptr || level > snap_->level) {
     return;
   }
 
@@ -64,7 +65,7 @@ void StructuredLog::Emit(mes_log_level_t level) {
     message += value;
   }
 
-  snap->callback(level, message.c_str(), snap->userdata);
+  snap_->callback(level, message.c_str(), snap_->userdata);
 }
 
 }  // namespace mes

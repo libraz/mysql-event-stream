@@ -280,8 +280,19 @@ void BinlogClient::ReaderLoop() {
       return;
     }
 
-    // Heartbeat: consume silently
+    // Heartbeat: surface to the consumer as an empty event with
+    // is_heartbeat=true. The public mes_poll_result_t contract (see mes.h)
+    // documents is_heartbeat as a first-class signal; dropping heartbeats
+    // here would make that field unreachable. Consumers that do not care
+    // about heartbeats can filter on `data == nullptr` (matches the Node
+    // and Python high-level streams, which already skip null-data results).
     if (event_pkt.is_heartbeat) {
+      QueuedEvent hb;
+      hb.is_heartbeat = true;
+      hb.error = MES_OK;
+      if (!event_queue_->Push(std::move(hb))) {
+        return;  // queue closed
+      }
       continue;
     }
 
@@ -342,11 +353,32 @@ PollResult BinlogClient::Poll() {
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
+  // Heartbeat: empty data, is_heartbeat=true. No current_event_ buffer
+  // update because there is no data to retain.
+  if (event.is_heartbeat) {
+    return {MES_OK, nullptr, 0, true};
+  }
+
   if (event.error != MES_OK) {
-    // Error from reader thread
+    // Error from reader thread. Snapshot the current GTID under the mutex
+    // directly (instead of routing through GetCurrentGtid() which returns
+    // a pointer into a shared buffer) so the log line's GTID remains valid
+    // for the duration of the structured log build-up, and so we avoid the
+    // "valid-until-next-call" contract that GetCurrentGtid() carries.
+    std::string gtid_snap;
+    {
+      std::lock_guard<std::mutex> lock(gtid_mutex_);
+      gtid_snap = current_gtid_;
+    }
     const std::string err_msg = "Binlog stream read error";
     SetLastError(err_msg);
-    LogBinlogError("poll_error", GetCurrentGtid(), err_msg);
+    StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "poll_error")
+        .Field("gtid", gtid_snap)
+        .Field("error", err_msg)
+        .Field("error_code", static_cast<int64_t>(event.error))
+        .Error();
     streaming_.store(false, std::memory_order_release);
     return {event.error, nullptr, 0, false};
   }

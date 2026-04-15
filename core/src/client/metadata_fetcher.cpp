@@ -6,6 +6,7 @@
 #include <cstring>
 #include <string>
 
+#include "logger.h"
 #include "protocol/mysql_query.h"
 
 namespace mes {
@@ -58,9 +59,22 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return it->second;
   }
 
-  // Cache miss or count mismatch -- query MySQL
-  std::string query =
-      "SHOW COLUMNS FROM " + EscapeIdentifier(database) + "." + EscapeIdentifier(table);
+  // Cache miss or count mismatch -- query MySQL.
+  // EscapeIdentifier returns "" when it detects an invalid identifier
+  // (e.g. embedded NUL byte). Reject the fetch early instead of emitting a
+  // malformed `SHOW COLUMNS FROM .` query. In practice MySQL never sends
+  // such identifiers, so this is a defensive guard only.
+  const std::string db_esc = EscapeIdentifier(database);
+  const std::string tbl_esc = EscapeIdentifier(table);
+  if (db_esc.empty() || tbl_esc.empty()) {
+    StructuredLog()
+        .Event("metadata_fetch_invalid_identifier")
+        .Field("db", database)
+        .Field("table", table)
+        .Warn();
+    return {};
+  }
+  std::string query = "SHOW COLUMNS FROM " + db_esc + "." + tbl_esc;
 
   // Try query, retry once on connection loss
   protocol::QueryResult qr;
@@ -82,6 +96,12 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
   }
   if (!query_ok) {
     cache_.erase(key);
+    StructuredLog()
+        .Event("metadata_fetch_failed")
+        .Field("db", database)
+        .Field("table", table)
+        .Field("error", err)
+        .Warn();
     return {};
   }
 
@@ -106,6 +126,13 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
   // Verify column count matches expectation
   if (infos.size() != expected_count) {
     cache_.erase(key);
+    StructuredLog()
+        .Event("metadata_fetch_column_count_mismatch")
+        .Field("db", database)
+        .Field("table", table)
+        .Field("expected", static_cast<uint64_t>(expected_count))
+        .Field("got", static_cast<uint64_t>(infos.size()))
+        .Warn();
     return {};
   }
 

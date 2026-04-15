@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "event_header.h"
+#include "mes.h"
 #include "row_decoder.h"
 #include "state_machine.h"
 #include "table_map.h"
@@ -85,6 +86,16 @@ class CdcEngine {
   /** @brief Check if the engine is in an error state (e.g., parse error). */
   bool IsError() const;
 
+  /**
+   * @brief Return a specific error code describing the current error state.
+   *
+   * Returns MES_OK when the engine is not in an error state. Otherwise maps
+   * internal parser/decoder failures to the canonical mes_error_t value so
+   * the C ABI layer can surface the precise cause rather than collapsing
+   * everything into MES_ERR_PARSE.
+   */
+  mes_error_t ErrorCode() const;
+
   /** @brief Set database filter. Only events from these databases are processed. Empty = all. */
   void SetIncludeDatabases(const std::vector<std::string>& databases);
 
@@ -102,12 +113,27 @@ class CdcEngine {
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
+  void LogRowDecodeFailure(const char* kind, const TableMetadata& meta);
 
   EventStreamParser stream_parser_;
   TableMapRegistry table_registry_;
   BinlogPosition position_;
   std::queue<ChangeEvent> event_queue_;
   size_t max_queue_size_ = 0;
+
+  // Scratch buffers reused across ProcessRowEvent calls to avoid a
+  // per-event heap allocation in the hot decode path. clear() preserves
+  // the allocated capacity, so after a warm-up the row decoder runs
+  // allocation-free (apart from the per-row ColumnValue payloads
+  // themselves). Not thread-safe; reuse matches the engine's single-
+  // owner-thread contract.
+  std::vector<RowData> row_buf_;
+  std::vector<UpdatePair> update_buf_;
+
+  // Last specific error code, set alongside ParserState::kError transitions
+  // inside ProcessRowEvent / stream_parser_. MES_OK until an error is
+  // observed.
+  mes_error_t last_error_ = MES_OK;
 
   bool IsTableAllowed(const std::string& database, const std::string& table) const;
 

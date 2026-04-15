@@ -149,9 +149,17 @@ class BinlogClient {
   mutable std::mutex last_error_mutex_;
   std::string last_error_;
   mutable std::string last_error_snapshot_;  // stable buffer for c_str()
-  // streaming_ is written by Poll() on error/drain and by StopReaderThread()
-  // under stop_mutex_. It is also read from Poll() before taking any lock,
-  // so make it atomic to avoid torn reads / data races.
+  // streaming_ is "reader thread is alive and Poll() may dequeue events".
+  // Written by Poll() on error/drain and by StopReaderThread() under
+  // stop_mutex_. It is also read from Poll() before taking any lock, so
+  // make it atomic to avoid torn reads / data races.
+  //
+  // NOTE(review): Poll() reads event_queue_ without a lock. The thread
+  // contract (see class-level Doxygen) requires that Poll(), Connect(),
+  // and StartStream() be serialised on the single owner thread, so the
+  // event_queue_ unique_ptr cannot be reassigned by StartStream() while
+  // a Poll() on the same thread is in progress. Stop() may run from any
+  // thread but does not reassign event_queue_; it only Close()s it.
   std::atomic<bool> streaming_{false};
   bool checksum_enabled_ = true;  // Whether server uses CRC32 binlog checksum
   std::atomic<bool> stop_requested_{false};

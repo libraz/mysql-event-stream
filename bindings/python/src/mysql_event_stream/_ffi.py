@@ -7,6 +7,7 @@ import ctypes.util
 import os
 import platform
 import threading
+import weakref
 from pathlib import Path
 
 
@@ -169,6 +170,18 @@ def _verify_struct_sizes() -> None:
                 f"MESClientConfig size mismatch: got {ctypes.sizeof(MESClientConfig)}, "
                 f"expected {expected_config}. ABI incompatibility detected."
             )
+        # mes_column_t on 64-bit: enum w/pad (8) + int64 (8) + double (8) +
+        # ptr (8) + uint32 w/pad (8) + ptr (8) = 48.
+        # A mismatch here corrupts every per-column read, so treat as a
+        # hard error. On platforms where this layout differs (none among
+        # supported ones), bump the major ABI and widen this check.
+        expected_column = 48
+        column_size = ctypes.sizeof(MESColumn)
+        if column_size != expected_column:
+            raise RuntimeError(
+                f"MESColumn size mismatch: got {column_size}, "
+                f"expected {expected_column}. ABI incompatibility detected."
+            )
         # mes_event_t: uint8 w/pad (4) + 2x uint32 (8) + ptr (8) + 2x ptr (16)
         # + 2x uint32 (8) + ptr (8) + uint32 w/pad (8) = 60 -> padded to 64
         # Verify by checking it's within a reasonable range.
@@ -326,8 +339,20 @@ _CLIENT_SYMBOLS = [
 ]
 
 
-_client_configured = False
 _client_lock = threading.Lock()
+# Track which CDLL instances have already had their client-API signatures
+# configured. Using a WeakValueDictionary keyed by id() lets different
+# ctypes.CDLL objects (e.g. for different lib_path in tests) each get
+# configured independently without leaking references once the CDLL is
+# garbage-collected.
+#
+# NOTE(review): a previous implementation used a single module-level
+# _client_configured boolean, which incorrectly treated the second lib
+# passed to load_client_library as already configured. That broke tests
+# that loaded two different libmes builds side-by-side.
+_client_configured_libs: "weakref.WeakValueDictionary[int, ctypes.CDLL]" = (
+    weakref.WeakValueDictionary()
+)
 
 
 def load_client_library(lib: ctypes.CDLL) -> bool:
@@ -336,7 +361,9 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
     All required symbols are verified to exist before any signature is
     configured, preventing partial configuration on incomplete builds.
     Thread-safe: uses double-checked locking to prevent concurrent
-    partial configuration.
+    partial configuration.  Configuration is tracked per-CDLL so that
+    multiple independent libraries (different ``lib_path``) each get
+    properly configured.
 
     Args:
         lib: Already-loaded ctypes.CDLL instance.
@@ -344,11 +371,11 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
     Returns:
         True if client functions are available, False otherwise.
     """
-    global _client_configured
-    if _client_configured:
+    lib_id = id(lib)
+    if lib_id in _client_configured_libs:
         return True
     with _client_lock:
-        if _client_configured:
+        if lib_id in _client_configured_libs:
             return True
         if not all(hasattr(lib, sym) for sym in _CLIENT_SYMBOLS):
             return False
@@ -392,5 +419,5 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
             ctypes.POINTER(MESClientConfig),
         ]
 
-        _client_configured = True
+        _client_configured_libs[lib_id] = lib
         return True

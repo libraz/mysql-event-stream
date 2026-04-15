@@ -157,8 +157,12 @@ class CdcStream:
         if not self._started:
             await self._start()
 
-        assert self._client is not None
-        assert self._engine is not None
+        # Explicit checks over `assert`: _start() guarantees both are set
+        # when it returns normally, but assertions vanish under `python -O`
+        # and we want a clear error if an internal invariant is ever
+        # violated (e.g. a subclass override of _start()).
+        if self._client is None or self._engine is None:
+            raise RuntimeError("Internal error: stream not properly started")
 
         while True:
             ev = self._engine.next_event()
@@ -261,7 +265,12 @@ class CdcStream:
             max_queue_size=self._max_queue_size,
             lib_path=self._lib_path,
         )
-        assert self._engine is not None
+        # Explicit check instead of `assert`: assertions are stripped when
+        # Python is run with -O and we would then silently call .reset() on
+        # None and crash with AttributeError. A RuntimeError here gives a
+        # useful diagnostic even in optimised builds.
+        if self._engine is None:
+            raise RuntimeError("Internal error: engine missing during reconnect")
         self._engine.reset()
         # Metadata is optional; column names fall back to indices
         with contextlib.suppress(RuntimeError):

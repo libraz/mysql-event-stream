@@ -149,3 +149,27 @@ class PollResult:
 
     data: bytes | None
     is_heartbeat: bool
+
+
+# --- Typed exceptions -----------------------------------------------------
+#
+# These subclass RuntimeError to preserve backward compatibility: code
+# that catches ``RuntimeError`` continues to work, while callers who want
+# to distinguish checksum failures from decode errors from parse errors
+# can now do so without parsing error-message strings.
+#
+# ConnectionError is intentionally not re-exported here; it is a Python
+# built-in (subclass of OSError) and is raised by ``BinlogClient.connect``
+# to match OS/socket conventions.
+
+
+class ParseError(RuntimeError):
+    """Raised when a binlog event fails to parse (e.g. truncated header)."""
+
+
+class DecodeError(RuntimeError):
+    """Raised when row or column decoding fails for a well-formed event."""
+
+
+class ChecksumError(RuntimeError):
+    """Raised when a CRC32 mismatch is detected on a binlog event."""

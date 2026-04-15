@@ -62,15 +62,21 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     return this.client?.currentGtid ?? "";
   }
 
+  private enableMetadataSafe(): void {
+    // Metadata connection is optional -- column names will be numeric
+    // string indices if it fails. The library does not write to stderr
+    // on its own; the embedder receives failures via onMetadataError.
+    try {
+      this.engine!.enableMetadata(this.config);
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.config.onMetadataError?.(err);
+    }
+  }
+
   private async *generate(): AsyncGenerator<ChangeEvent> {
     this.engine = new CdcEngine();
-    try {
-      this.engine.enableMetadata(this.config);
-    } catch (e) {
-      // Metadata connection is optional -- column names will be indices
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[mysql-event-stream] Metadata connection failed: ${msg}`);
-    }
+    this.enableMetadataSafe();
 
     let reconnectAttempts = 0;
     const maxAttempts = Math.max(0, this.config.maxReconnectAttempts ?? 10);
@@ -113,6 +119,10 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           if (gtid) {
             this.config = { ...this.config, startGtid: gtid };
           }
+          // Re-enable metadata after engine reset. Keeps the Node binding
+          // consistent with the Python binding, which re-runs
+          // enable_metadata on every reconnect.
+          this.enableMetadataSafe();
         }
       }
     } finally {

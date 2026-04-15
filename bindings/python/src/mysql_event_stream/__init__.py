@@ -6,10 +6,13 @@ from .stream import CdcStream
 from .types import (
     BinlogPosition,
     ChangeEvent,
+    ChecksumError,
     ClientConfig,
     ColumnType,
     ColumnValue,
+    DecodeError,
     EventType,
+    ParseError,
     PollResult,
     SslMode,
 )
@@ -20,10 +23,13 @@ __all__ = [
     "CdcEngine",
     "CdcStream",
     "ChangeEvent",
+    "ChecksumError",
     "ClientConfig",
     "ColumnType",
     "ColumnValue",
+    "DecodeError",
     "EventType",
+    "ParseError",
     "PollResult",
     "SslMode",
 ]

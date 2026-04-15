@@ -151,6 +151,11 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   if (packed_bytes == 0) return false;
   offset += packed_bytes;
 
+  // NOTE(review): column_count == 0 is rejected. MySQL does not allow
+  // zero-column tables, so a TABLE_MAP with column_count == 0 indicates
+  // a corrupt or truncated event. Rejecting here also simplifies the
+  // downstream allocation math (null bitmap bytes = 0 would pass the
+  // size check trivially and then cause a zero-length decode loop).
   if (column_count == 0 || column_count > kMaxColumns) {
     return false;
   }
@@ -216,10 +221,14 @@ bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len) {
   // ROWS event is always preceded by a TABLE_MAP event that re-registers the
   // table; after a flush, the first subsequent ROWS event for any table will
   // see a fresh TABLE_MAP before decoding begins.
-  if (entries_.size() >= kMaxTableMapEntries && entries_.find(table_id) == entries_.end()) {
+  auto it = entries_.find(table_id);
+  if (entries_.size() >= kMaxTableMapEntries && it == entries_.end()) {
     entries_.clear();
+    it = entries_.end();  // invalidated by clear(), but we'll insert below
   }
-  entries_[table_id] = std::move(metadata);
+  // insert_or_assign avoids the second hash lookup that operator[] would
+  // perform when the key is absent.
+  entries_.insert_or_assign(table_id, std::move(metadata));
   return true;
 }
 

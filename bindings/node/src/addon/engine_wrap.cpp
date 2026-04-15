@@ -419,16 +419,21 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
         break;
 
       case MES_COL_BYTES:
+        // MES_COL_BYTES is by definition a bytes value; str_len == 0 is a
+        // legitimate empty payload and maps to an empty Buffer. Truly-null
+        // columns arrive with type == MES_COL_NULL (handled separately).
+        // If str_data is null here (defensive; the C ABI always passes a
+        // valid pointer even for empty vectors) we still return an empty
+        // Buffer so the consumer's type expectation is preserved.
+        // TODO(perf): future optimization -- Buffer::New with external
+        // memory would avoid this copy, but requires careful lifetime
+        // management tied to mes_event_t (valid only until the next
+        // mes_next_event() call). Skipped due to crash risk.
         if (col.str_data) {
-          // TODO(perf): future optimization — Buffer::New with external
-          // memory would avoid this copy, but requires careful lifetime
-          // management tied to mes_event_t (valid only until the next
-          // mes_next_event() call). Skipped due to crash risk.
           val = Napi::Buffer<uint8_t>::Copy(env, reinterpret_cast<const uint8_t*>(col.str_data),
                                             col.str_len);
         } else {
-          // str_data is null: the column value is semantically absent
-          val = env.Null();
+          val = Napi::Buffer<uint8_t>::New(env, static_cast<size_t>(0));
         }
         break;
 

@@ -49,14 +49,23 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
       // Parse the header
       if (!ParseEventHeader(buffer_.data(), buffer_.size(), &current_header_)) {
         state_ = ParserState::kError;
-        StructuredLog().Event("parse_error").Field("reason", "invalid_header").Error();
+        StructuredLog()
+            .Event("parse_error")
+            .Field("reason", "invalid_header")
+            .Field("buffer_size", static_cast<uint64_t>(buffer_.size()))
+            .Error();
         break;
       }
 
       // Validate event_length
       if (current_header_.event_length < kEventHeaderSize + kChecksumSize) {
         state_ = ParserState::kError;
-        StructuredLog().Event("parse_error").Field("reason", "invalid_event_length").Error();
+        StructuredLog()
+            .Event("parse_error")
+            .Field("reason", "invalid_event_length")
+            .Field("event_length", static_cast<uint64_t>(current_header_.event_length))
+            .Field("event_type", static_cast<int64_t>(current_header_.type_code))
+            .Error();
         break;
       }
 
@@ -66,6 +75,8 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
             .Event("parse_error")
             .Field("reason", "event_too_large")
             .Field("size", static_cast<uint64_t>(current_header_.event_length))
+            .Field("max_size", static_cast<uint64_t>(kMaxEventSize))
+            .Field("event_type", static_cast<int64_t>(current_header_.type_code))
             .Error();
         break;
       }

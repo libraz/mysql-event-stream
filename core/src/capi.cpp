@@ -104,6 +104,13 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
 }
 
 // Map internal EventType to C ABI event type.
+//
+// NOTE(review): mes::EventType currently has exactly three values (see
+// types.h). The switch below is exhaustive for the current enum. The
+// fallback path exists only to satisfy compilers that do not treat the
+// switch as total when the argument is an enum class; it logs at ERROR
+// (not WARN) because reaching it implies an engine state corruption or a
+// forward-incompatible enum addition that was not reflected here.
 static mes_event_type_t ConvertEventType(mes::EventType t) {
   switch (t) {
     case mes::EventType::kInsert:
@@ -113,11 +120,10 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
     case mes::EventType::kDelete:
       return MES_EVENT_DELETE;
   }
-  // Unknown EventType — should not happen; log for diagnosis.
   mes::StructuredLog()
       .Event("capi_unknown_event_type")
       .Field("value", static_cast<uint64_t>(static_cast<uint8_t>(t)))
-      .Warn();
+      .Error();
   return MES_EVENT_INSERT;
 }
 
@@ -148,11 +154,8 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
     // the caller keeps their full input buffer intact. After mes_reset()
     // clears all internal state (including any buffered bytes), the caller
     // can re-feed from the start or seek to a known-good stream position.
-    // TODO(error-granularity): CdcEngine currently only exposes IsError()
-    // without a specific error code. All feed errors are mapped to
-    // MES_ERR_PARSE. See cdc_engine.h for the internal error state.
     *consumed = 0;
-    return MES_ERR_PARSE;
+    return engine->engine.ErrorCode();
   }
   return MES_OK;
 }
@@ -287,8 +290,17 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   if (rc != MES_OK) {
     return rc;
   }
-  // Clear the engine's pointer before replacing the unique_ptr to avoid a
-  // dangling pointer if the old MetadataFetcher is destroyed first.
+  // NOTE(review): the three-step swap below (null -> move -> set) is
+  // intentional and MUST NOT be collapsed into
+  //   engine->metadata_fetcher = std::move(fetcher);
+  //   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());
+  // The unique_ptr assignment destroys the previous MetadataFetcher
+  // BEFORE the new raw pointer is published, which would briefly leave
+  // CdcEngine holding a dangling pointer to freed memory. Clearing the
+  // engine's raw pointer first guarantees the CdcEngine never observes
+  // a freed fetcher, even if a stray callback fires on the engine during
+  // the swap (we do not hold any lock here; CdcEngine's single-owner
+  // contract is the caller's responsibility).
   engine->engine.SetMetadataFetcher(nullptr);
   engine->metadata_fetcher = std::move(fetcher);
   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());

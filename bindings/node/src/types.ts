@@ -75,6 +75,14 @@ export interface ClientConfig {
 export interface StreamConfig extends ClientConfig {
   /** Maximum number of automatic reconnection attempts (default 10, 0 = disabled). */
   maxReconnectAttempts?: number;
+  /**
+   * Optional callback fired when the optional metadata connection fails.
+   * If unset, metadata failures are silently tolerated (column names fall
+   * back to numeric string indices). The library intentionally does NOT
+   * write to stderr on its own; embedding applications should wire this
+   * into their logger if they care about the failure.
+   */
+  onMetadataError?: (error: Error) => void;
 }
 
 /** Result from a BinlogClient poll() call. */

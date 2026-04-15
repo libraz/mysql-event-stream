@@ -73,14 +73,31 @@ void CdcEngine::Reset() {
   table_registry_.Clear();
   position_ = BinlogPosition{};
   blocked_table_ids_.clear();
+  last_error_ = MES_OK;
   // Clear the queue
   std::queue<ChangeEvent> empty;
   event_queue_.swap(empty);
+  // NOTE(review): metadata_fetcher_ is intentionally NOT cleared. Reset()
+  // is used on reconnect paths; the metadata connection is long-lived and
+  // reusing it avoids a SHOW COLUMNS round-trip storm right after a
+  // reconnect. The caller owns the fetcher's lifetime via
+  // SetMetadataFetcher().
 }
 
 size_t CdcEngine::PendingEventCount() const { return event_queue_.size(); }
 
 bool CdcEngine::IsError() const { return stream_parser_.GetState() == ParserState::kError; }
+
+mes_error_t CdcEngine::ErrorCode() const {
+  if (stream_parser_.GetState() != ParserState::kError) {
+    return MES_OK;
+  }
+  // ProcessRowEvent refines last_error_ to a decode-specific code when it
+  // can; otherwise the parser entered kError on its own and we report the
+  // generic parse error. MES_OK is never surfaced from this branch because
+  // the outer state check above already filtered non-error states.
+  return last_error_ != MES_OK ? last_error_ : MES_ERR_PARSE;
+}
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
   include_databases_ = std::unordered_set<std::string>(databases.begin(), databases.end());
@@ -222,9 +239,9 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
                     type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEventV1));
 
   if (is_write) {
-    std::vector<RowData> rows;
-    if (DecodeWriteRows(body, body_len, *meta, is_v2, &rows)) {
-      for (auto& row : rows) {
+    row_buf_.clear();
+    if (DecodeWriteRows(body, body_len, *meta, is_v2, &row_buf_)) {
+      for (auto& row : row_buf_) {
         ChangeEvent event;
         event.type = EventType::kInsert;
         event.database = meta->database_name;
@@ -235,11 +252,13 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event_queue_.push(std::move(event));
       }
+    } else {
+      LogRowDecodeFailure("write_rows", *meta);
     }
   } else if (is_update) {
-    std::vector<UpdatePair> pairs;
-    if (DecodeUpdateRows(body, body_len, *meta, is_v2, &pairs)) {
-      for (auto& pair : pairs) {
+    update_buf_.clear();
+    if (DecodeUpdateRows(body, body_len, *meta, is_v2, &update_buf_)) {
+      for (auto& pair : update_buf_) {
         ChangeEvent event;
         event.type = EventType::kUpdate;
         event.database = meta->database_name;
@@ -252,12 +271,14 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event_queue_.push(std::move(event));
       }
+    } else {
+      LogRowDecodeFailure("update_rows", *meta);
     }
   } else {
     // DELETE
-    std::vector<RowData> rows;
-    if (DecodeDeleteRows(body, body_len, *meta, is_v2, &rows)) {
-      for (auto& row : rows) {
+    row_buf_.clear();
+    if (DecodeDeleteRows(body, body_len, *meta, is_v2, &row_buf_)) {
+      for (auto& row : row_buf_) {
         ChangeEvent event;
         event.type = EventType::kDelete;
         event.database = meta->database_name;
@@ -268,8 +289,24 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event_queue_.push(std::move(event));
       }
+    } else {
+      LogRowDecodeFailure("delete_rows", *meta);
     }
   }
+}
+
+void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta) {
+  // Record a decode-specific error so ErrorCode() can distinguish from
+  // pure parser errors. Row-event decode failures indicate per-row column
+  // corruption, not a stream-level framing issue.
+  last_error_ = MES_ERR_DECODE_ROW;
+  StructuredLog()
+      .Event("row_decode_failed")
+      .Field("kind", kind)
+      .Field("db", meta.database_name)
+      .Field("table", meta.table_name)
+      .Field("binlog_offset", static_cast<uint64_t>(position_.offset))
+      .Warn();
 }
 
 }  // namespace mes
