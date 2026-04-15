@@ -23,6 +23,8 @@ interface NativeEngine {
   getPosition(): { file: string; offset: number | bigint };
   reset(): void;
   setMaxQueueSize(maxSize: number): void;
+  setMaxEventSize(maxEventSize: number): void;
+  getMaxEventSize(): number;
   setIncludeDatabases(databases: string[]): void;
   setIncludeTables(tables: string[]): void;
   setExcludeTables(tables: string[]): void;
@@ -80,6 +82,24 @@ export class CdcEngine {
   setMaxQueueSize(maxSize: number): void {
     this.ensureNotDestroyed();
     this.engine!.setMaxQueueSize(maxSize);
+  }
+
+  /**
+   * Override the maximum per-event size accepted by the parser (bytes).
+   * Default is 64 MiB. Values are clamped at the C layer to the range
+   * [header+checksum, 1 GiB]. Raise this when the server's
+   * max_allowed_packet is raised to accommodate very large BLOB/JSON
+   * payloads.
+   */
+  setMaxEventSize(maxEventSize: number): void {
+    this.ensureNotDestroyed();
+    this.engine!.setMaxEventSize(maxEventSize);
+  }
+
+  /** Return the currently configured maximum event size (bytes). */
+  getMaxEventSize(): number {
+    this.ensureNotDestroyed();
+    return this.engine!.getMaxEventSize();
   }
 
   /** Set database include filter. Only events from these databases are processed. Empty array = all. */

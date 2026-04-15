@@ -401,5 +401,57 @@ TEST(StateMachineTest, CorruptedChecksumDetected) {
   EXPECT_NE(computed, stored) << "Corrupted event should have mismatched checksum";
 }
 
+TEST(StateMachineTest, MaxEventSizeDefaultIs64MiB) {
+  EventStreamParser parser;
+  EXPECT_EQ(parser.MaxEventSize(), kDefaultMaxEventSize);
+}
+
+TEST(StateMachineTest, SetMaxEventSizeClampsToMinimum) {
+  EventStreamParser parser;
+  parser.SetMaxEventSize(0);
+  // Must still accept at least an empty event (header + checksum).
+  EXPECT_EQ(parser.MaxEventSize(), static_cast<uint32_t>(kEventHeaderSize + kChecksumSize));
+}
+
+TEST(StateMachineTest, SetMaxEventSizeClampsToAbsoluteMax) {
+  EventStreamParser parser;
+  parser.SetMaxEventSize(UINT32_MAX);
+  EXPECT_EQ(parser.MaxEventSize(), kAbsoluteMaxEventSize);
+}
+
+TEST(StateMachineTest, SetMaxEventSizeRejectsOversizedEvent) {
+  // Build a header whose event_length is just beyond the configured cap.
+  EventStreamParser parser;
+  const uint32_t cap = 1024;  // 1 KiB cap
+  parser.SetMaxEventSize(cap);
+
+  // Craft a header claiming event_length = cap + 1; body content doesn't
+  // matter because the parser should reject based on event_length alone.
+  std::vector<uint8_t> body(cap + 1 - kEventHeaderSize - kChecksumSize, 0);
+  auto event = test::BuildEvent(30, 1000, 0, body);
+  // BuildEvent fills event_length correctly, so size == cap + 1.
+  ASSERT_EQ(event.size(), cap + 1);
+
+  size_t consumed = parser.Feed(event.data(), event.size());
+  // Parser stops at header-size bytes because the size check fires
+  // immediately after the header is parsed.
+  EXPECT_EQ(consumed, kEventHeaderSize);
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+}
+
+TEST(StateMachineTest, SetMaxEventSizeAcceptsEventAtLimit) {
+  EventStreamParser parser;
+  const uint32_t cap = kEventHeaderSize + kChecksumSize + 32;
+  parser.SetMaxEventSize(cap);
+
+  std::vector<uint8_t> body(32, 0xAB);
+  auto event = test::BuildEvent(30, 1000, 0, body);
+  ASSERT_EQ(event.size(), cap);
+
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
+}
+
 }  // namespace
 }  // namespace mes

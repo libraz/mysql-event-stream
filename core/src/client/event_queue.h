@@ -31,7 +31,12 @@ namespace mes {
 
 /** @brief An event buffered in the EventQueue. */
 struct QueuedEvent {
-  std::vector<uint8_t> data;   ///< Owned copy of binlog event bytes (empty for heartbeat)
+  std::vector<uint8_t> data;   ///< Owned binlog packet bytes (empty for heartbeat/error)
+  size_t data_offset = 0;      ///< Offset of the event payload within `data`
+                               ///< (used to skip the MySQL OK byte without
+                               ///< copying). Consumers read from
+                               ///< `data.data() + data_offset` with size
+                               ///< `data.size() - data_offset`.
   mes_error_t error = MES_OK;  ///< MES_OK for real events; error code for poison pill
   bool is_heartbeat = false;   ///< true for silent heartbeats from the server
 };

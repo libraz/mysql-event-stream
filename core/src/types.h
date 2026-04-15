@@ -67,21 +67,37 @@ enum class EventType : uint8_t {
 };
 
 /**
- * @brief Type-safe column value storage
+ * @brief Type-safe column value storage.
  *
  * Uses a tagged union approach with explicit type and null tracking,
  * compatible with -fno-exceptions builds. Different value fields are
  * used depending on the column type.
+ *
+ * @note `string_val` holds both textual (e.g. VARCHAR, DECIMAL) and
+ *       binary (BLOB, JSON, GEOMETRY) payloads. std::string is used
+ *       uniformly as the backing container because its storage layout
+ *       is byte-addressable and permits embedded NULs, so it is a
+ *       strict superset of what a std::vector<uint8_t> would offer.
+ *       Keeping a single buffer instead of separate string/bytes
+ *       members saves ~24 bytes per ColumnValue (see H-6 in review
+ *       notes) without any loss of fidelity. Callers that need byte
+ *       access can use `bytes_data()` / `bytes_size()` below; the
+ *       returned pointer is unmodified from `string_val.data()`.
  */
 struct ColumnValue {
   ColumnType type = ColumnType::kLong;
   bool is_null = true;
   std::string name;  ///< Column name (empty = unknown)
 
-  int64_t int_val = 0;             ///< kTiny, kShort, kLong, kLongLong, kInt24, kYear
-  double real_val = 0.0;           ///< kFloat, kDouble
-  std::string string_val;          ///< STRING, BLOB, JSON, DECIMAL, DATETIME, etc.
-  std::vector<uint8_t> bytes_val;  ///< Binary data
+  int64_t int_val = 0;     ///< kTiny, kShort, kLong, kLongLong, kInt24, kYear
+  double real_val = 0.0;   ///< kFloat, kDouble
+  std::string string_val;  ///< STRING, BLOB, JSON, DECIMAL, DATETIME, etc. (binary-safe)
+
+  /** @brief Raw byte pointer for binary payloads (BLOB/JSON/GEOMETRY). */
+  const uint8_t* bytes_data() const { return reinterpret_cast<const uint8_t*>(string_val.data()); }
+
+  /** @brief Size of the byte payload (same as `string_val.size()`). */
+  size_t bytes_size() const { return string_val.size(); }
 
   /** @brief Create a NULL value of the given type */
   static ColumnValue Null(ColumnType t) {
@@ -127,13 +143,18 @@ struct ColumnValue {
     return v;
   }
 
-  /** @brief Create a binary value */
-  static ColumnValue Bytes(ColumnType t, std::vector<uint8_t> val) {
+  /** @brief Create a binary value from a contiguous byte range. */
+  static ColumnValue Bytes(ColumnType t, const uint8_t* data, size_t len) {
     ColumnValue v;
     v.type = t;
     v.is_null = false;
-    v.bytes_val = std::move(val);
+    v.string_val.assign(reinterpret_cast<const char*>(data), len);
     return v;
+  }
+
+  /** @brief Create a binary value from a std::vector<uint8_t>. */
+  static ColumnValue Bytes(ColumnType t, const std::vector<uint8_t>& val) {
+    return Bytes(t, val.data(), val.size());
   }
 };
 

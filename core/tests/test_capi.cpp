@@ -650,4 +650,34 @@ TEST(CApi, SetMaxQueueSizeZeroUnlimited) {
   mes_destroy(engine);
 }
 
+// ---- mes_set_max_event_size / mes_get_max_event_size ----
+
+TEST(CApi, MaxEventSizeDefault) {
+  auto* engine = mes_create();
+  // Default is 64 MiB per the header documentation.
+  EXPECT_EQ(mes_get_max_event_size(engine), 64u * 1024u * 1024u);
+  mes_destroy(engine);
+}
+
+TEST(CApi, MaxEventSizeGetNull) { EXPECT_EQ(mes_get_max_event_size(nullptr), 0u); }
+
+TEST(CApi, MaxEventSizeSetNull) {
+  EXPECT_EQ(mes_set_max_event_size(nullptr, 1024), MES_ERR_NULL_ARG);
+}
+
+TEST(CApi, MaxEventSizeRoundTrip) {
+  auto* engine = mes_create();
+  EXPECT_EQ(mes_set_max_event_size(engine, 2u * 1024u * 1024u), MES_OK);
+  EXPECT_EQ(mes_get_max_event_size(engine), 2u * 1024u * 1024u);
+  mes_destroy(engine);
+}
+
+TEST(CApi, MaxEventSizeClampsToAbsoluteMax) {
+  auto* engine = mes_create();
+  // Any value above 1 GiB is clamped to 1 GiB.
+  EXPECT_EQ(mes_set_max_event_size(engine, UINT32_MAX), MES_OK);
+  EXPECT_EQ(mes_get_max_event_size(engine), 1024u * 1024u * 1024u);
+  mes_destroy(engine);
+}
+
 }  // namespace

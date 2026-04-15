@@ -194,6 +194,40 @@ class CdcEngine:
         if rc != MES_OK:
             raise RuntimeError(f"mes_set_max_queue_size failed with error code {rc}")
 
+    def set_max_event_size(self, max_event_size: int) -> None:
+        """Override the maximum per-event size accepted by the parser.
+
+        The default is 64 MiB, matching MySQL's default max_allowed_packet
+        for binlog events. Workloads with very large BLOB/JSON columns
+        and a raised max_allowed_packet on the server may need a larger
+        ceiling. Values are clamped at the C layer to the range
+        [header+checksum, 1 GiB].
+
+        Args:
+            max_event_size: Desired ceiling in bytes.
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        if max_event_size < 0 or max_event_size > 0xFFFFFFFF:
+            raise ValueError(
+                f"max_event_size must fit in uint32, got {max_event_size}"
+            )
+        rc = self._lib.mes_set_max_event_size(self._handle, max_event_size)
+        if rc != MES_OK:
+            raise RuntimeError(f"mes_set_max_event_size failed with error code {rc}")
+
+    def get_max_event_size(self) -> int:
+        """Return the currently configured maximum event size (bytes).
+
+        Raises:
+            RuntimeError: If the engine is closed.
+        """
+        self._check_open()
+        result: int = self._lib.mes_get_max_event_size(self._handle)
+        return result
+
     def reset(self) -> None:
         """Reset the engine, clearing all state.
 

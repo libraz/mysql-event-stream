@@ -36,12 +36,17 @@ struct BinlogStreamConfig {
 /**
  * @brief A single binlog event received from the replication stream
  *
- * The data pointer is valid only until the next call to FetchEvent().
- * It points past the OK byte into the raw binlog event header + body.
+ * The data pointer is valid only as long as the caller-provided buffer
+ * passed to FetchEvent() is not modified. It points past the OK byte
+ * into the raw binlog event header + body. `data_offset` is the offset
+ * of `data` from the start of that buffer, enabling callers to move
+ * the buffer into downstream owners without copying; the downstream
+ * owner can recover the event bytes via `buffer.data() + data_offset`.
  */
 struct BinlogEventPacket {
   const uint8_t* data = nullptr;  ///< Event data (after OK byte)
   size_t size = 0;                ///< Size of event data in bytes
+  size_t data_offset = 0;         ///< Offset of `data` within the caller's buffer
   bool is_heartbeat = false;      ///< True if this is a heartbeat event
 };
 
@@ -49,8 +54,9 @@ struct BinlogEventPacket {
  * @brief Binlog replication stream reader
  *
  * Sends COM_BINLOG_DUMP_GTID to initiate streaming, then provides
- * blocking reads of individual binlog events. The internal buffer
- * is reused across calls to FetchEvent() for efficiency.
+ * blocking reads of individual binlog events. FetchEvent() reads into
+ * a caller-provided buffer so the caller can either reuse the buffer
+ * across calls or move its ownership downstream without copying.
  */
 class BinlogStream {
  public:
@@ -69,15 +75,22 @@ class BinlogStream {
   /**
    * @brief Read the next binlog event from the stream (blocking)
    *
-   * Blocks until a complete event packet is received. The returned
-   * BinlogEventPacket's data pointer is valid until the next call
-   * to FetchEvent().
+   * Blocks until a complete event packet is received. The packet bytes
+   * are written into *buffer (which is resized as needed). The returned
+   * BinlogEventPacket's `data` points into *buffer and remains valid
+   * until the caller mutates *buffer or passes it to another FetchEvent().
+   *
+   * On heartbeat or error, `data` is nullptr and `size` is 0; *buffer
+   * may still have been resized and its contents are implementation-
+   * defined (callers should treat it as scratch in that case).
    *
    * @param sock    Socket handle used in Start()
+   * @param buffer  Caller-owned scratch buffer reused across calls
    * @param result  Output: populated with event data or heartbeat flag
    * @return MES_OK on success, MES_ERR_STREAM on error or stream end
    */
-  mes_error_t FetchEvent(SocketHandle* sock, BinlogEventPacket* result);
+  mes_error_t FetchEvent(SocketHandle* sock, std::vector<uint8_t>* buffer,
+                         BinlogEventPacket* result);
 
   /**
    * @brief Send COM_BINLOG_DUMP to start binlog streaming (MariaDB)
@@ -91,9 +104,6 @@ class BinlogStream {
    * @return MES_OK on success, MES_ERR_STREAM on failure
    */
   mes_error_t StartComBinlogDump(SocketHandle* sock, const BinlogStreamConfig& config);
-
- private:
-  std::vector<uint8_t> packet_buf_;
 };
 
 }  // namespace mes::protocol

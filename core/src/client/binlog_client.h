@@ -170,6 +170,13 @@ class BinlogClient {
   QueuedEvent current_event_;  // Holds data for current Poll() result
   std::mutex stop_mutex_;      // Serializes Stop() calls
 
+  // Reusable scratch buffer for FetchEvent() packet reads. Lives on the
+  // reader thread: after a successful non-heartbeat read, the buffer is
+  // moved into the QueuedEvent and a fresh (moved-from, empty) vector
+  // takes its place on the next iteration. This avoids the per-event
+  // copy that a thread-local buffer would otherwise require.
+  std::vector<uint8_t> reader_scratch_;
+
   // GTID tracking (reader thread writes, GetCurrentGtid reads)
   std::string current_gtid_;
   // NOTE(review): gtid_snapshot_ is written under gtid_mutex_ every call.

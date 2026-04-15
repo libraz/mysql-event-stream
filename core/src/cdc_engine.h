@@ -110,6 +110,19 @@ class CdcEngine {
   /** @brief Set metadata fetcher for column name resolution */
   void SetMetadataFetcher(MetadataFetcher* fetcher);
 
+  /**
+   * @brief Override the maximum per-event size accepted by the parser.
+   *
+   * See EventStreamParser::SetMaxEventSize() for semantics. Intended for
+   * workloads that produce binlog events larger than the 64 MiB default
+   * (e.g. very large BLOB/JSON columns with max_allowed_packet raised).
+   * Out-of-range values are clamped.
+   */
+  void SetMaxEventSize(uint32_t max_event_size);
+
+  /** @brief Get the currently configured maximum event size (bytes). */
+  uint32_t MaxEventSize() const;
+
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);

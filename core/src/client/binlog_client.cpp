@@ -265,7 +265,7 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
 void BinlogClient::ReaderLoop() {
   while (!stop_requested_.load(std::memory_order_acquire)) {
     protocol::BinlogEventPacket event_pkt;
-    mes_error_t rc = binlog_stream_.FetchEvent(conn_.Socket(), &event_pkt);
+    mes_error_t rc = binlog_stream_.FetchEvent(conn_.Socket(), &reader_scratch_, &event_pkt);
 
     // Check stop flag after blocking call returns
     if (stop_requested_.load(std::memory_order_acquire)) {
@@ -323,15 +323,14 @@ void BinlogClient::ReaderLoop() {
     // Update GTID tracking (protected by gtid_mutex_)
     UpdateGtidFromEvent(event_pkt.data, event_pkt.size);
 
-    // Copy event data and push to queue.
-    // Push blocks if queue is full (backpressure -> TCP flow control).
-    // TODO(perf): eliminate this per-event copy by having
-    // protocol::BinlogStream::FetchEvent hand off ownership of the event
-    // buffer (e.g. via std::vector<uint8_t>&& or a pooled allocator). That
-    // is a cross-cutting refactor spanning the protocol layer and is
-    // intentionally deferred to avoid conflicting changes in that module.
+    // Move the packet buffer into the queue. event_pkt.data_offset (typically
+    // 1 to skip the OK byte) lets the consumer locate the real event bytes
+    // inside the moved buffer without an intermediate copy. After the move,
+    // reader_scratch_ is left in a valid-but-unspecified (empty) state; the
+    // next FetchEvent() will resize it as needed.
     QueuedEvent qe;
-    qe.data.assign(event_pkt.data, event_pkt.data + event_pkt.size);
+    qe.data = std::move(reader_scratch_);
+    qe.data_offset = event_pkt.data_offset;
     qe.error = MES_OK;
 
     if (!event_queue_->Push(std::move(qe))) {
@@ -383,9 +382,14 @@ PollResult BinlogClient::Poll() {
     return {event.error, nullptr, 0, false};
   }
 
-  // Store event data so pointer remains valid until next Poll()
+  // Store event data so pointer remains valid until next Poll().
+  // Apply data_offset to skip the OK byte prefix kept in the buffer so
+  // ownership could be moved in from the reader thread without a copy.
   current_event_ = std::move(event);
-  return {MES_OK, current_event_.data.data(), current_event_.data.size(), false};
+  const size_t offset = current_event_.data_offset;
+  const uint8_t* payload = current_event_.data.data() + offset;
+  const size_t payload_size = current_event_.data.size() - offset;
+  return {MES_OK, payload, payload_size, false};
 }
 
 void BinlogClient::Stop() {

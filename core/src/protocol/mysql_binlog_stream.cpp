@@ -63,28 +63,33 @@ mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& co
   return sock->WriteAll(pkt_buf.Data(), pkt_buf.Size());
 }
 
-mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, BinlogEventPacket* result) {
+mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* buffer,
+                                     BinlogEventPacket* result) {
+  // Initialize output so callers can rely on consistent defaults on all paths.
+  result->data = nullptr;
+  result->size = 0;
+  result->data_offset = 0;
+  result->is_heartbeat = false;
+
   uint8_t seq_id = 0;
-  mes_error_t rc = ReadPacket(sock, &packet_buf_, &seq_id);
+  mes_error_t rc = ReadPacket(sock, buffer, &seq_id);
   if (rc != MES_OK) {
     return rc;
   }
 
   // Empty packet is treated as a heartbeat
-  if (packet_buf_.empty()) {
-    result->data = nullptr;
-    result->size = 0;
+  if (buffer->empty()) {
     result->is_heartbeat = true;
     return MES_OK;
   }
 
-  uint8_t status_byte = packet_buf_[0];
+  uint8_t status_byte = (*buffer)[0];
 
   // ERR packet
   if (status_byte == 0xFF) {
     uint16_t err_code = 0;
     std::string msg;
-    ParseErrPacketPayload(packet_buf_.data(), packet_buf_.size(), &err_code, &msg);
+    ParseErrPacketPayload(buffer->data(), buffer->size(), &err_code, &msg);
     StructuredLog()
         .Event("binlog_stream_server_error")
         .Field("error_code", static_cast<uint64_t>(err_code))
@@ -101,27 +106,22 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, BinlogEventPacket* resu
   // OK packet - binlog event follows after the status byte
   if (status_byte == 0x00) {
     // Just the OK byte with no event data: heartbeat
-    if (packet_buf_.size() <= 1) {
-      result->data = nullptr;
-      result->size = 0;
+    if (buffer->size() <= 1) {
       result->is_heartbeat = true;
       return MES_OK;
     }
+
+    // Event bytes start at offset 1 (past the OK byte).
+    result->data = buffer->data() + 1;
+    result->size = buffer->size() - 1;
+    result->data_offset = 1;
 
     // Check event type at offset 4 within the binlog event header.
     // The binlog event header starts right after the OK byte (index 1).
     // Event type is at byte 4 of the event header, so index 1+4=5.
-    if (packet_buf_.size() > 5 && packet_buf_[5] == kHeartbeatLogEvent) {
-      result->data = packet_buf_.data() + 1;
-      result->size = packet_buf_.size() - 1;
+    if (buffer->size() > 5 && (*buffer)[5] == kHeartbeatLogEvent) {
       result->is_heartbeat = true;
-      return MES_OK;
     }
-
-    // Real binlog event
-    result->data = packet_buf_.data() + 1;
-    result->size = packet_buf_.size() - 1;
-    result->is_heartbeat = false;
     return MES_OK;
   }
 

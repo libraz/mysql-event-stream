@@ -18,16 +18,18 @@
 namespace mes {
 
 /// @brief Compute CRC32 checksum using zlib.
-/// @note Callers must ensure length <= kMaxEventSize (64 MB). The zlib
-///       overflow guard below is a defence-in-depth measure; it is
-///       unreachable under normal operation.
+/// @note Callers must ensure length <= the configured max event size
+///       (see EventStreamParser::SetMaxEventSize, capped at
+///       kAbsoluteMaxEventSize = 1 GiB). The zlib overflow guard below
+///       is a defence-in-depth measure; it is unreachable under normal
+///       operation because the parser rejects over-sized events before
+///       the CRC step runs.
 inline uint32_t ComputeCRC32(const void* data, size_t length) {
   static_assert(sizeof(uInt) >= 4, "zlib uInt must be at least 32 bits");
-  // Unreachable: binlog events are limited to kMaxEventSize (64 MB).
   // Return UINT32_MAX as a "not computed" sentinel.
   // NOTE(review): Sentinel value collision with a real CRC is astronomically
   // unlikely (1 in 2^32) and this path is already unreachable under the
-  // 64 MB event-size limit enforced in state_machine.cpp. Callers treat
+  // event-size limit enforced in state_machine.cpp. Callers treat
   // this as "not yet computed" rather than as a CRC comparison target, so
   // even a theoretical collision would be surfaced as a checksum mismatch
   // on the next real event rather than silent data corruption.

@@ -73,16 +73,19 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     case mes::ColumnType::kLongBlob:
     case mes::ColumnType::kGeometry:
     case mes::ColumnType::kVector:
+      // BLOB/JSON/GEOMETRY payloads live in string_val alongside text
+      // columns; see ColumnValue documentation. bytes_data()/bytes_size()
+      // are thin wrappers that return the same pointer/length.
       c.type = MES_COL_BYTES;
-      c.str_data = reinterpret_cast<const char*>(col.bytes_val.data());
-      if (col.bytes_val.size() > UINT32_MAX) {
+      c.str_data = reinterpret_cast<const char*>(col.bytes_data());
+      if (col.bytes_size() > UINT32_MAX) {
         mes::StructuredLog()
             .Event("column_data_truncated")
-            .Field("size", static_cast<uint64_t>(col.bytes_val.size()))
+            .Field("size", static_cast<uint64_t>(col.bytes_size()))
             .Warn();
       }
       c.str_len =
-          static_cast<uint32_t>(std::min(col.bytes_val.size(), static_cast<size_t>(UINT32_MAX)));
+          static_cast<uint32_t>(std::min(col.bytes_size(), static_cast<size_t>(UINT32_MAX)));
       break;
     default:
       // All remaining types use string representation:
@@ -230,6 +233,17 @@ MES_API mes_error_t mes_reset(mes_engine_t* engine) {
   }
   engine->engine.Reset();
   return MES_OK;
+}
+
+MES_API mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  engine->engine.SetMaxEventSize(max_event_size);
+  return MES_OK;
+}
+
+MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine) {
+  if (engine == nullptr) return 0;
+  return engine->engine.MaxEventSize();
 }
 
 MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,

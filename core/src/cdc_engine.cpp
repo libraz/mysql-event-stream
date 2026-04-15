@@ -140,6 +140,12 @@ bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& t
 
 void CdcEngine::SetMetadataFetcher(MetadataFetcher* fetcher) { metadata_fetcher_ = fetcher; }
 
+void CdcEngine::SetMaxEventSize(uint32_t max_event_size) {
+  stream_parser_.SetMaxEventSize(max_event_size);
+}
+
+uint32_t CdcEngine::MaxEventSize() const { return stream_parser_.MaxEventSize(); }
+
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
   // Update position from next_position
   if (header.next_position > 0) {

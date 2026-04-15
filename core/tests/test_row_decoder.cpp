@@ -373,8 +373,8 @@ TEST(DecodeColumnValueTest, BlobPack1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kBlob, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
-  EXPECT_EQ(result.bytes_val[0], 'a');
+  EXPECT_EQ(result.bytes_size(), 3u);
+  EXPECT_EQ(result.bytes_data()[0], 'a');
 }
 
 TEST(DecodeColumnValueTest, BlobPack2) {
@@ -384,7 +384,7 @@ TEST(DecodeColumnValueTest, BlobPack2) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
-  EXPECT_EQ(result.bytes_val.size(), 5u);
+  EXPECT_EQ(result.bytes_size(), 5u);
 }
 
 TEST(DecodeColumnValueTest, BlobPack4) {
@@ -394,7 +394,7 @@ TEST(DecodeColumnValueTest, BlobPack4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kBlob, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
-  EXPECT_EQ(result.bytes_val.size(), 4u);
+  EXPECT_EQ(result.bytes_size(), 4u);
 }
 
 TEST(DecodeColumnValueTest, JsonAsBlob) {
@@ -404,7 +404,7 @@ TEST(DecodeColumnValueTest, JsonAsBlob) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, NewDecimal) {
@@ -841,7 +841,7 @@ TEST(DecodeColumnValueTest, BlobPack3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kBlob, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, BlobPackZeroDefaultsTo1) {
@@ -851,7 +851,7 @@ TEST(DecodeColumnValueTest, BlobPackZeroDefaultsTo1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kBlob, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, BlobInvalidPackLength) {
@@ -870,7 +870,7 @@ TEST(DecodeColumnValueTest, JsonPack1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kJson, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, JsonPack2) {
@@ -880,7 +880,7 @@ TEST(DecodeColumnValueTest, JsonPack2) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kJson, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, JsonPack3) {
@@ -890,7 +890,7 @@ TEST(DecodeColumnValueTest, JsonPack3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kJson, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, JsonPackZeroDefaultsTo4) {
@@ -900,7 +900,7 @@ TEST(DecodeColumnValueTest, JsonPackZeroDefaultsTo4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kJson, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, JsonInvalidPackLength) {
@@ -976,7 +976,7 @@ TEST(DecodeColumnValueTest, GeometryPack4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kGeometry, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 9u);
-  EXPECT_EQ(result.bytes_val.size(), 5u);
+  EXPECT_EQ(result.bytes_size(), 5u);
 }
 
 TEST(DecodeColumnValueTest, GeometryPack1) {
@@ -987,7 +987,7 @@ TEST(DecodeColumnValueTest, GeometryPack1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kGeometry, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, GeometryPack2) {
@@ -998,7 +998,7 @@ TEST(DecodeColumnValueTest, GeometryPack2) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kGeometry, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, GeometryPack3) {
@@ -1009,7 +1009,7 @@ TEST(DecodeColumnValueTest, GeometryPack3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kGeometry, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, GeometryPackZeroDefaultsTo4) {
@@ -1020,7 +1020,7 @@ TEST(DecodeColumnValueTest, GeometryPackZeroDefaultsTo4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kGeometry, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, GeometryInvalidPackLength) {
@@ -1159,7 +1159,7 @@ TEST(DecodeColumnValueTest, TinyBlobPack1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTinyBlob, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 3u);
-  EXPECT_EQ(result.bytes_val.size(), 2u);
+  EXPECT_EQ(result.bytes_size(), 2u);
 }
 
 TEST(DecodeColumnValueTest, MediumBlobPack3) {
@@ -1169,7 +1169,7 @@ TEST(DecodeColumnValueTest, MediumBlobPack3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kMediumBlob, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.bytes_val.size(), 3u);
+  EXPECT_EQ(result.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, LongBlobPack4) {
@@ -1179,7 +1179,7 @@ TEST(DecodeColumnValueTest, LongBlobPack4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kLongBlob, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
-  EXPECT_EQ(result.bytes_val.size(), 4u);
+  EXPECT_EQ(result.bytes_size(), 4u);
 }
 
 // --- kDatetime2 boundary values ---
@@ -1477,7 +1477,7 @@ TEST(DecodeColumnValueTest, BlobCalcFieldSizeUsesBufferLength) {
   auto val = DecodeColumnValue(ColumnType::kBlob, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 5u);  // 2 + 3
-  EXPECT_EQ(val.bytes_val.size(), 3u);
+  EXPECT_EQ(val.bytes_size(), 3u);
 }
 
 TEST(DecodeColumnValueTest, JsonCalcFieldSizeUsesBufferLength) {
@@ -1489,7 +1489,7 @@ TEST(DecodeColumnValueTest, JsonCalcFieldSizeUsesBufferLength) {
   auto val = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 9u);  // 4 + 5
-  EXPECT_EQ(val.bytes_val.size(), 5u);
+  EXPECT_EQ(val.bytes_size(), 5u);
 }
 
 TEST(DecodeColumnValueTest, BlobTruncatedPrefix) {

@@ -228,6 +228,35 @@ MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size
  */
 MES_API mes_error_t mes_reset(mes_engine_t* engine);
 
+/**
+ * @brief Override the maximum per-event size accepted by the engine.
+ *
+ * The default is 64 MiB, matching MySQL's default max_allowed_packet
+ * for binlog events. Workloads with very large BLOB/JSON columns and
+ * a raised max_allowed_packet on the server may need a larger ceiling.
+ *
+ * Values below the minimum (header + checksum) or above 1 GiB are
+ * clamped to the nearest valid bound; the call always succeeds.
+ *
+ * @param engine Engine handle.
+ * @param max_event_size Desired ceiling in bytes. 0 falls back to the
+ *                       minimum valid value (equivalent to "reject
+ *                       every event"), which is probably not useful;
+ *                       pass a real cap.
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size);
+
+/**
+ * @brief Get the currently configured maximum event size (bytes).
+ *
+ * @param engine Engine handle.
+ * @return Configured ceiling, or 0 if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
+
 /* ---- Table filtering ---- */
 
 /**

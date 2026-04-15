@@ -120,16 +120,20 @@ TEST(ColumnValueTest, BytesValue) {
   auto v = ColumnValue::Bytes(ColumnType::kBlob, data);
   EXPECT_EQ(v.type, ColumnType::kBlob);
   EXPECT_FALSE(v.is_null);
-  EXPECT_EQ(v.bytes_val, data);
+  // Post-H-6: bytes live in string_val; bytes_data()/bytes_size() are thin
+  // accessors that alias the same storage.
+  EXPECT_EQ(v.bytes_size(), data.size());
+  ASSERT_NE(v.bytes_data(), nullptr);
+  EXPECT_TRUE(std::equal(data.begin(), data.end(), v.bytes_data()));
 }
 
-TEST(ColumnValueTest, BytesMoveSemantics) {
+TEST(ColumnValueTest, BytesFromPointerRange) {
   std::vector<uint8_t> data = {0xDE, 0xAD, 0xBE, 0xEF};
-  auto v = ColumnValue::Bytes(ColumnType::kGeometry, std::move(data));
+  auto v = ColumnValue::Bytes(ColumnType::kGeometry, data.data(), data.size());
   EXPECT_EQ(v.type, ColumnType::kGeometry);
   EXPECT_FALSE(v.is_null);
-  EXPECT_EQ(v.bytes_val.size(), 4u);
-  EXPECT_EQ(v.bytes_val[0], 0xDE);
+  EXPECT_EQ(v.bytes_size(), 4u);
+  EXPECT_EQ(v.bytes_data()[0], 0xDE);
 }
 
 // --- RowData ---

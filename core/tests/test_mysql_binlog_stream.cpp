@@ -21,6 +21,7 @@ TEST(BinlogEventPacketTest, DefaultValues) {
   BinlogEventPacket packet;
   EXPECT_EQ(packet.data, nullptr);
   EXPECT_EQ(packet.size, 0u);
+  EXPECT_EQ(packet.data_offset, 0u);
   EXPECT_FALSE(packet.is_heartbeat);
 }
 

@@ -10,13 +10,6 @@
 
 namespace mes {
 
-// Maximum binlog event size (64 MB). This matches MySQL's default
-// max_allowed_packet for binlog events. Servers with larger
-// max_allowed_packet (up to 1 GB) and very large BLOB columns may
-// produce events that exceed this limit, causing a parse error.
-// Increase this value if your workload requires larger events.
-constexpr uint32_t kMaxEventSize = 64 * 1024 * 1024;
-
 size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
   if (state_ == ParserState::kEventReady || state_ == ParserState::kError) {
     return 0;
@@ -69,13 +62,13 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
         break;
       }
 
-      if (current_header_.event_length > kMaxEventSize) {
+      if (current_header_.event_length > max_event_size_) {
         state_ = ParserState::kError;
         StructuredLog()
             .Event("parse_error")
             .Field("reason", "event_too_large")
             .Field("size", static_cast<uint64_t>(current_header_.event_length))
-            .Field("max_size", static_cast<uint64_t>(kMaxEventSize))
+            .Field("max_size", static_cast<uint64_t>(max_event_size_))
             .Field("event_type", static_cast<int64_t>(current_header_.type_code))
             .Error();
         break;
@@ -133,5 +126,21 @@ void EventStreamParser::Advance() {
 void EventStreamParser::Reset() { Advance(); }
 
 ParserState EventStreamParser::GetState() const { return state_; }
+
+void EventStreamParser::SetMaxEventSize(uint32_t max_event_size) {
+  // Clamp to the valid range so the parser cannot be configured into
+  // an unusable state (e.g. smaller than a header+checksum, or large
+  // enough to enable a malicious peer to force huge allocations).
+  constexpr uint32_t kMinValid = static_cast<uint32_t>(kEventHeaderSize + kChecksumSize);
+  if (max_event_size < kMinValid) {
+    max_event_size_ = kMinValid;
+  } else if (max_event_size > kAbsoluteMaxEventSize) {
+    max_event_size_ = kAbsoluteMaxEventSize;
+  } else {
+    max_event_size_ = max_event_size;
+  }
+}
+
+uint32_t EventStreamParser::MaxEventSize() const { return max_event_size_; }
 
 }  // namespace mes

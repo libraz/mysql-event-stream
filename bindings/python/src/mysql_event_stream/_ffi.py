@@ -260,6 +260,14 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.mes_set_max_queue_size.restype = ctypes.c_int32
     lib.mes_set_max_queue_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 
+    # mes_set_max_event_size
+    lib.mes_set_max_event_size.restype = ctypes.c_int32
+    lib.mes_set_max_event_size.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+
+    # mes_get_max_event_size
+    lib.mes_get_max_event_size.restype = ctypes.c_uint32
+    lib.mes_get_max_event_size.argtypes = [ctypes.c_void_p]
+
     # mes_set_log_callback
     lib.mes_set_log_callback.restype = None
     lib.mes_set_log_callback.argtypes = [MES_LOG_CALLBACK, ctypes.c_int32, ctypes.c_void_p]
