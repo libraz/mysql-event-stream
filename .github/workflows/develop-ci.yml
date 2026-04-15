@@ -1,0 +1,151 @@
+name: Develop CI
+
+on:
+  push:
+    branches: [develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      tests: ${{ steps.filter.outputs.tests }}
+      node: ${{ steps.filter.outputs.node }}
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            core:
+              - 'core/src/**'
+              - 'core/include/**'
+              - 'core/CMakeLists.txt'
+              - 'CMakeLists.txt'
+              - '.github/workflows/develop-ci.yml'
+            tests:
+              - 'core/tests/**'
+            node:
+              - 'bindings/node/**'
+            python:
+              - 'bindings/python/**'
+
+  build-and-test:
+    name: Build and Test
+    needs: changes
+    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache CMake dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'core/CMakeLists.txt', 'core/tests/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-cmake-deps-
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ runner.os }}-ccache-develop-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-develop-
+            ${{ runner.os }}-ccache-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            ccache
+
+      - name: Setup ccache
+        run: |
+          ccache --set-config=max_size=500M
+          ccache --zero-stats
+
+      - name: Configure CMake
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Show ccache statistics
+        run: ccache --show-stats
+
+      - name: Run tests (unit only, E2E requires Docker MySQL)
+        run: ctest --test-dir build --output-on-failure --parallel $(nproc) -E "E2E"
+
+      - name: Upload build artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-develop
+          path: |
+            build/CMakeFiles/*.log
+            build/Testing/Temporary/
+
+  node-test:
+    name: Node.js Build and Test
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.node == 'true' || needs.changes.outputs.core == 'true'
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.1'
+      - run: corepack enable && corepack prepare yarn@4.9.1 --activate
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: yarn install --immutable
+      - name: Build native addon
+        working-directory: bindings/node
+        run: yarn build
+      - name: Run tests
+        working-directory: bindings/node
+        run: yarn test
+
+  python-test:
+    name: Python Build and Test
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true'
+    needs: changes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev cmake build-essential pkg-config
+      - name: Build shared library
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+      - name: Install Python package
+        working-directory: bindings/python
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        working-directory: bindings/python
+        run: pytest tests/ -v
