@@ -65,19 +65,22 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
   // Try query, retry once on connection loss
   protocol::QueryResult qr;
   std::string err;
+  bool query_ok = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err) == MES_OK) {
-      break;
-    }
-    if (attempt == 0) {
+    if (attempt == 1) {
       // Reconnect and retry
       conn_.Disconnect();
       if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, 0 /* read_timeout */,
-                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_) == MES_OK) {
-        continue;
+                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_) != MES_OK) {
+        break;
       }
     }
-    // Query failed
+    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err) == MES_OK) {
+      query_ok = true;
+      break;
+    }
+  }
+  if (!query_ok) {
     cache_.erase(key);
     return {};
   }
@@ -124,7 +127,8 @@ std::string MetadataFetcher::EscapeIdentifier(const std::string& id) {
   std::string escaped = "`";
   for (char c : id) {
     if (c == '\0') {
-      continue;
+      // Null bytes in identifiers are not valid; reject instead of silently modifying
+      return {};
     }
     if (c == '`') {
       escaped += "``";

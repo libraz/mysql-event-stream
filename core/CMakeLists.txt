@@ -84,22 +84,18 @@ target_link_libraries(mes-objects PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLI
 # Sanitizers (applied to OBJECT library so both static and shared inherit them)
 if(MES_ENABLE_ASAN)
   target_compile_options(mes-objects PRIVATE -fsanitize=address -fno-omit-frame-pointer)
-  target_link_options(mes-objects PRIVATE -fsanitize=address)
 endif()
 
 if(MES_ENABLE_TSAN)
   target_compile_options(mes-objects PRIVATE -fsanitize=thread)
-  target_link_options(mes-objects PRIVATE -fsanitize=thread)
 endif()
 
 if(MES_ENABLE_UBSAN)
   target_compile_options(mes-objects PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
-  target_link_options(mes-objects PRIVATE -fsanitize=undefined)
 endif()
 
 if(MES_ENABLE_COVERAGE)
   target_compile_options(mes-objects PRIVATE --coverage)
-  target_link_options(mes-objects PRIVATE --coverage)
 endif()
 
 # Core static library

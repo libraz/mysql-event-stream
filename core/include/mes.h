@@ -131,6 +131,10 @@ typedef struct {
   uint32_t before_count;
   const mes_column_t* after_columns;
   uint32_t after_count;
+  /** @brief Unix epoch seconds from the binlog event header.
+   *
+   * Mirrors MySQL's 4-byte `time_written` field. Will overflow on
+   * 2038-01-19. Widening to uint64_t requires a major ABI version bump. */
   uint32_t timestamp;
   const char* binlog_file;
   uint64_t binlog_offset;
@@ -171,7 +175,7 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
  * @brief Get the next change event.
  *
  * Pointers in the returned event are valid until the next call to
- * mes_feed() or mes_next_event().
+ * mes_feed(), mes_next_event(), or mes_reset().
  *
  * @param engine Engine handle.
  * @param event  Output: pointer to the event.
@@ -262,6 +266,13 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
 MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables, size_t count);
 
 /* ---- SSL mode ---- */
+/** @brief SSL connection mode.
+ *
+ * NOTE(abi): The underlying type of this C enum is implementation-defined.
+ * All bindings assume sizeof(mes_ssl_mode_t) == sizeof(uint32_t), which
+ * holds on all supported platforms (x86-64, ARM64). A future major version
+ * may switch to typedef uint32_t + #define constants for strict portability.
+ */
 typedef enum {
   MES_SSL_DISABLED = 0,
   MES_SSL_PREFERRED = 1,
@@ -273,6 +284,9 @@ typedef enum {
 /* ---- BinlogClient API ---- */
 
 typedef struct mes_client mes_client_t;
+
+/** @brief Default internal event queue size when max_queue_size is 0. */
+#define MES_DEFAULT_QUEUE_SIZE 10000u
 
 typedef struct {
   const char* host;
@@ -289,7 +303,7 @@ typedef struct {
   const char* ssl_cert;    /**< Path to client certificate file (NULL to skip) */
   const char* ssl_key;     /**< Path to client private key file (NULL to skip) */
   /* Buffering */
-  size_t max_queue_size; /**< Max internal event queue size (0 = default 10000) */
+  size_t max_queue_size; /**< @brief 0 = use MES_DEFAULT_QUEUE_SIZE */
 } mes_client_config_t;
 
 /**

@@ -125,7 +125,13 @@ class BinlogClient {
   /** @brief Get last error message */
   const char* GetLastError() const;
 
-  /** @brief Get current GTID position (thread-safe) */
+  /** @brief Get the current GTID position as a string.
+   *
+   * Thread-safe: protected by gtid_mutex_. The returned pointer is valid
+   * until the next call to GetCurrentGtid() from the same thread.
+   * At the C ABI boundary (mes_client_current_gtid), this is documented
+   * as single-owner-thread for pointer lifetime safety.
+   */
   const char* GetCurrentGtid() const;
 
   /** @brief Get total CRC32 checksum errors detected (thread-safe) */

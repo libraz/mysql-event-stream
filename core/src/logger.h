@@ -34,6 +34,10 @@ struct LogConfigSnapshot {
 class LogConfig {
  public:
   static void SetCallback(mes_log_callback_t callback, mes_log_level_t log_level, void* userdata);
+
+  // NOTE(perf): Each accessor independently acquires the snapshot mutex.
+  // Hot paths that need multiple fields should call GetSnapshot() once
+  // and read fields from the returned shared_ptr.
   static mes_log_callback_t GetCallback();
   static mes_log_level_t GetLogLevel();
   static void* GetUserdata();

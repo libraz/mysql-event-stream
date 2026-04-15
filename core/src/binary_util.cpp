@@ -204,6 +204,15 @@ uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
   }
 }
 
+/** @brief Calculate field size for types with a variable-length prefix (BLOB, JSON, etc.) */
+static uint32_t CalcVarPrefixFieldSize(uint8_t pack_len, const uint8_t* data, size_t buf_len) {
+  if (pack_len == 0 || pack_len > 4) return 0;
+  size_t consumed = 0;
+  uint32_t content_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
+  if (consumed == 0) return 0;
+  return static_cast<uint32_t>(consumed) + content_len;
+}
+
 uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint16_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
@@ -276,21 +285,13 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, ui
     // JSON (stored like BLOB)
     case 0xF5: {  // MYSQL_TYPE_JSON
       uint8_t pack_len = static_cast<uint8_t>(metadata);
-      if (pack_len == 0 || pack_len > 4) pack_len = 4;
-      size_t consumed = 0;
-      uint32_t json_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
-      if (consumed == 0) return 0;
-      return static_cast<uint32_t>(consumed) + json_len;
+      if (pack_len == 0 || pack_len > 4) pack_len = 4;  // JSON defaults to 4-byte prefix
+      return CalcVarPrefixFieldSize(pack_len, data, buf_len);
     }
 
     // VECTOR (same encoding as BLOB, MySQL 9.0+)
     case 0xF2: {  // MYSQL_TYPE_VECTOR
-      uint8_t pack_len = static_cast<uint8_t>(metadata);
-      if (pack_len == 0 || pack_len > 4) return 0;
-      size_t consumed = 0;
-      uint32_t vec_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
-      if (consumed == 0) return 0;
-      return static_cast<uint32_t>(consumed) + vec_len;
+      return CalcVarPrefixFieldSize(static_cast<uint8_t>(metadata), data, buf_len);
     }
 
     // BLOB (includes TEXT, TINY_BLOB, MEDIUM_BLOB, LONG_BLOB)
@@ -298,12 +299,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, ui
     case 0xFA:    // MYSQL_TYPE_MEDIUM_BLOB
     case 0xFB:    // MYSQL_TYPE_LONG_BLOB
     case 0xFC: {  // MYSQL_TYPE_BLOB
-      uint8_t pack_len = static_cast<uint8_t>(metadata);
-      if (pack_len == 0 || pack_len > 4) return 0;
-      size_t consumed = 0;
-      uint32_t blob_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
-      if (consumed == 0) return 0;
-      return static_cast<uint32_t>(consumed) + blob_len;
+      return CalcVarPrefixFieldSize(static_cast<uint8_t>(metadata), data, buf_len);
     }
 
     // STRING (CHAR) - also handles ENUM and SET via metadata encoding
@@ -313,7 +309,11 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, ui
         // ENUM or SET: metadata low byte is the size
         return metadata & 0xFF;
       }
-      // Fixed or variable length string
+      // MYSQL_TYPE_STRING metadata encodes the real type in the high byte
+      // and max length in the low byte. For types > 0xFF bytes, the length
+      // is split: bits 8-9 are in metadata[1] bits 4-5, XORed with 0x300
+      // to invert (MySQL stores the complement). See row_decoder.cpp kString
+      // case and MySQL source sql/field.cc for the full encoding.
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xFF);
       if (max_len > 255) {
         if (buf_len < 2) return 0;
@@ -325,12 +325,7 @@ uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, ui
 
     // GEOMETRY (stored like BLOB)
     case 0xFF: {  // MYSQL_TYPE_GEOMETRY
-      uint8_t pack_len = static_cast<uint8_t>(metadata);
-      if (pack_len == 0 || pack_len > 4) return 0;
-      size_t consumed = 0;
-      uint32_t geo_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
-      if (consumed == 0) return 0;
-      return static_cast<uint32_t>(consumed) + geo_len;
+      return CalcVarPrefixFieldSize(static_cast<uint8_t>(metadata), data, buf_len);
     }
 
     default:

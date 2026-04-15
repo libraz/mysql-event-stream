@@ -43,10 +43,11 @@ struct QueryResult {
  * For commands with no result set (SET, USE, etc.), returns an empty
  * QueryResult with MES_OK.
  *
- * When @p deprecate_eof is true (default), the connection is assumed to use
- * CLIENT_DEPRECATE_EOF (MySQL 8.4 default) where EOF packets are replaced
- * by OK packets. When false, traditional EOF packets are expected between
- * column definitions and row data, and after the last row.
+ * When @p deprecate_eof is true (default), the connection uses
+ * CLIENT_DEPRECATE_EOF framing where EOF packets are replaced by OK packets.
+ * This is the negotiated default for MySQL 8.4+ and MariaDB 10.2+. When
+ * false, traditional EOF packets are expected between column definitions and
+ * row data, and after the last row.
  *
  * @param sock           Connected socket handle
  * @param query          SQL query string

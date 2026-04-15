@@ -339,6 +339,16 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
     }
   }
 
+  // Verify that the certificate and private key match.
+  if (ssl_cert != nullptr && ssl_cert[0] != '\0' && ssl_key != nullptr && ssl_key[0] != '\0') {
+    if (SSL_CTX_check_private_key(ssl_ctx_) != 1) {
+      StructuredLog().Event("ssl_keypair_mismatch").Error();
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
+  }
+
   // Set verification mode based on ssl_mode.
   // 1=preferred, 2=required: encrypt but do not verify server cert.
   // 3=verify_ca: verify the server certificate against the CA.
@@ -411,7 +421,7 @@ mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
   if (fd_ < 0) return MES_ERR_CONNECT;
 
 #ifdef _WIN32
-  DWORD tv = static_cast<DWORD>(timeout_s) * 1000;
+  DWORD tv = (timeout_s > 4294967U) ? MAXDWORD : static_cast<DWORD>(timeout_s) * 1000;
   if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv)) !=
       0) {
     return MES_ERR_CONNECT;
@@ -464,16 +474,17 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
 #else
       n = static_cast<int>(recv(fd_, buf + total, len - total, 0));
 #endif
-      if (n <= 0) {
-        if (n == 0) {
-          StructuredLog().Event("socket_read_eof").Debug();
-        } else {
-          StructuredLog()
-              .Event("socket_read_error")
-              .Field("errno", errno)
-              .Field("error", strerror(errno))
-              .Error();
-        }
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        StructuredLog()
+            .Event("socket_read_error")
+            .Field("errno", errno)
+            .Field("error", strerror(errno))
+            .Error();
+        return MES_ERR_STREAM;
+      }
+      if (n == 0) {
+        StructuredLog().Event("socket_read_eof").Debug();
         return MES_ERR_STREAM;
       }
     }
@@ -514,12 +525,17 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
 #else
       n = static_cast<int>(send(fd_, buf + total, len - total, 0));
 #endif
-      if (n <= 0) {
+      if (n < 0) {
+        if (errno == EINTR) continue;
         StructuredLog()
             .Event("socket_write_error")
             .Field("errno", errno)
             .Field("error", strerror(errno))
             .Error();
+        return MES_ERR_STREAM;
+      }
+      if (n == 0) {
+        StructuredLog().Event("socket_write_zero").Warn();
         return MES_ERR_STREAM;
       }
     }

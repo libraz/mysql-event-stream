@@ -113,14 +113,19 @@ class CdcEngine:
         self._check_open()
 
         event_ptr = ctypes.POINTER(MESEvent)()
-        rc = self._lib.mes_next_event(self._handle, ctypes.byref(event_ptr))
-        if rc == MES_ERR_NO_EVENT:
-            return None
-        if rc == MES_ERR_CHECKSUM:
-            raise RuntimeError("mes_next_event failed: checksum mismatch")
-        if rc != MES_OK:
-            raise RuntimeError(f"mes_next_event failed with error code {rc}")
-        return _convert_event(event_ptr.contents)
+        while True:
+            rc = self._lib.mes_next_event(self._handle, ctypes.byref(event_ptr))
+            if rc == MES_ERR_NO_EVENT:
+                return None
+            if rc == MES_ERR_CHECKSUM:
+                raise RuntimeError("mes_next_event failed: checksum mismatch")
+            if rc != MES_OK:
+                raise RuntimeError(f"mes_next_event failed with error code {rc}")
+            result = _convert_event(event_ptr.contents)
+            if result is not None:
+                return result
+            # Unknown event type was skipped; drain next event from the C queue
+            continue
 
     def has_events(self) -> bool:
         """Check if there are pending events.
@@ -183,6 +188,28 @@ class CdcEngine:
         if rc != MES_OK:
             raise RuntimeError(f"mes_reset failed with error code {rc}")
 
+    def _set_string_filter(
+        self,
+        func: Any,
+        names: list[str],
+        func_name: str,
+    ) -> None:
+        """Call a C string-array filter function.
+
+        Args:
+            func: The ctypes function to call.
+            names: List of filter strings.
+            func_name: Function name for error messages.
+
+        Raises:
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        arr = (ctypes.c_char_p * len(names))(*(n.encode("utf-8") for n in names))
+        rc = func(self._handle, arr, len(names))
+        if rc != MES_OK:
+            raise RuntimeError(f"{func_name} failed with error code {rc}")
+
     def set_include_databases(self, databases: list[str]) -> None:
         """Set database include filter.
 
@@ -195,13 +222,9 @@ class CdcEngine:
         Raises:
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._check_open()
-        arr = (ctypes.c_char_p * len(databases))(
-            *(db.encode("utf-8") for db in databases)
+        self._set_string_filter(
+            self._lib.mes_set_include_databases, databases, "mes_set_include_databases"
         )
-        rc = self._lib.mes_set_include_databases(self._handle, arr, len(databases))
-        if rc != MES_OK:
-            raise RuntimeError(f"mes_set_include_databases failed with error code {rc}")
 
     def set_include_tables(self, tables: list[str]) -> None:
         """Set table include filter.
@@ -217,13 +240,9 @@ class CdcEngine:
         Raises:
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._check_open()
-        arr = (ctypes.c_char_p * len(tables))(
-            *(t.encode("utf-8") for t in tables)
+        self._set_string_filter(
+            self._lib.mes_set_include_tables, tables, "mes_set_include_tables"
         )
-        rc = self._lib.mes_set_include_tables(self._handle, arr, len(tables))
-        if rc != MES_OK:
-            raise RuntimeError(f"mes_set_include_tables failed with error code {rc}")
 
     def set_exclude_tables(self, tables: list[str]) -> None:
         """Set table exclude filter.
@@ -238,13 +257,9 @@ class CdcEngine:
         Raises:
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._check_open()
-        arr = (ctypes.c_char_p * len(tables))(
-            *(t.encode("utf-8") for t in tables)
+        self._set_string_filter(
+            self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables"
         )
-        rc = self._lib.mes_set_exclude_tables(self._handle, arr, len(tables))
-        if rc != MES_OK:
-            raise RuntimeError(f"mes_set_exclude_tables failed with error code {rc}")
 
     def enable_metadata(
         self,
@@ -351,7 +366,8 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
             if col.str_data and col.str_len > 0:
                 result[key] = ctypes.string_at(col.str_data, col.str_len)
             else:
-                result[key] = b""
+                # Absent value: None matches Node.js binding and C ABI semantics
+                result[key] = None
         else:
             result[key] = None
 
@@ -359,10 +375,20 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
 
 
 def _convert_event(raw: MESEvent) -> ChangeEvent | None:
-    """Convert C mes_event_t to Python ChangeEvent, or None for unknown types."""
+    """Convert C mes_event_t to Python ChangeEvent.
+
+    Returns None only when the event type is unrecognized (future MySQL type).
+    Callers must distinguish this from "queue empty" via the C-layer return code.
+    """
     try:
         event_type = EventType(raw.type)
     except ValueError:
+        import warnings
+
+        warnings.warn(
+            f"Unknown event type {raw.type}; skipping event",
+            stacklevel=2,
+        )
         return None
 
     before: dict[str, Any] | None = None

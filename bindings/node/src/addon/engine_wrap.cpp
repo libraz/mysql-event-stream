@@ -301,7 +301,9 @@ static std::vector<std::string> ExtractStringArray(Napi::Env env, const Napi::Va
   return result;
 }
 
-void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
+void EngineWrap::SetStringFilter(const Napi::CallbackInfo& info,
+                                 mes_error_t (*setter)(mes_engine_t*, const char**, size_t),
+                                 const char* method_name) {
   Napi::Env env = info.Env();
   if (!engine_) {
     Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
@@ -311,57 +313,27 @@ void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
     Napi::TypeError::New(env, "Expected array of strings").ThrowAsJavaScriptException();
     return;
   }
-  auto dbs = ExtractStringArray(env, info[0]);
+  auto strings = ExtractStringArray(env, info[0]);
   if (env.IsExceptionPending()) return;
   std::vector<const char*> ptrs;
-  for (const auto& s : dbs) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_include_databases(engine_, ptrs.data(), ptrs.size());
+  for (const auto& s : strings) ptrs.push_back(s.c_str());
+  mes_error_t err = setter(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_set_include_databases failed: ") + MesErrorString(err))
+    Napi::Error::New(env, std::string(method_name) + " failed: " + MesErrorString(err))
         .ThrowAsJavaScriptException();
   }
+}
+
+void EngineWrap::SetIncludeDatabases(const Napi::CallbackInfo& info) {
+  SetStringFilter(info, mes_set_include_databases, "mes_set_include_databases");
 }
 
 void EngineWrap::SetIncludeTables(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
-    return;
-  }
-  if (info.Length() < 1 || !info[0].IsArray()) {
-    Napi::TypeError::New(env, "Expected array of strings").ThrowAsJavaScriptException();
-    return;
-  }
-  auto tables = ExtractStringArray(env, info[0]);
-  if (env.IsExceptionPending()) return;
-  std::vector<const char*> ptrs;
-  for (const auto& s : tables) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_include_tables(engine_, ptrs.data(), ptrs.size());
-  if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_set_include_tables failed: ") + MesErrorString(err))
-        .ThrowAsJavaScriptException();
-  }
+  SetStringFilter(info, mes_set_include_tables, "mes_set_include_tables");
 }
 
 void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-  if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
-    return;
-  }
-  if (info.Length() < 1 || !info[0].IsArray()) {
-    Napi::TypeError::New(env, "Expected array of strings").ThrowAsJavaScriptException();
-    return;
-  }
-  auto tables = ExtractStringArray(env, info[0]);
-  if (env.IsExceptionPending()) return;
-  std::vector<const char*> ptrs;
-  for (const auto& s : tables) ptrs.push_back(s.c_str());
-  mes_error_t err = mes_set_exclude_tables(engine_, ptrs.data(), ptrs.size());
-  if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_set_exclude_tables failed: ") + MesErrorString(err))
-        .ThrowAsJavaScriptException();
-  }
+  SetStringFilter(info, mes_set_exclude_tables, "mes_set_exclude_tables");
 }
 
 void EngineWrap::Destroy(const Napi::CallbackInfo& info) {

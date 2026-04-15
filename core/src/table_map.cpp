@@ -94,6 +94,9 @@ size_t ReadColumnMetadataValue(uint8_t col_type, const uint8_t* data, size_t rem
       return 0;
 
     default:
+      // Unknown column type: assume no metadata bytes. If the type
+      // actually has metadata, the equality check after the loop will
+      // catch the mismatch and fail the parse.
       *out = 0;
       return 0;
   }
@@ -172,6 +175,10 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   metadata->columns.resize(column_count);
   size_t meta_offset = 0;
   for (size_t i = 0; i < column_count; i++) {
+    // NOTE(review): `>` (not `>=`) is intentional. Fixed-size column types
+    // (kTiny, kShort, kLong, etc.) consume 0 metadata bytes, so
+    // meta_offset == metadata_length is valid mid-loop. The strict equality
+    // check at the end (line ~187) catches actual length mismatches.
     if (meta_offset > metadata_length) return false;
     uint16_t meta_val = 0;
     size_t consumed = ReadColumnMetadataValue(col_types_ptr[i], data + offset + meta_offset,

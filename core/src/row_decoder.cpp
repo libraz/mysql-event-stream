@@ -126,11 +126,13 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
     size_t consumed = 0;
     row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
     if (consumed == 0) {
-      // consumed=0 is valid ONLY for NEWDECIMAL with precision==0, where
-      // DecodeDecimal returns is_null=false and string_val="0". For any
-      // other column type, consumed==0 signals an error (unknown type or
-      // insufficient data) and must fail the decode to avoid an infinite
-      // loop where the data pointer never advances.
+      // DESIGN(review): consumed=0 serves a dual purpose — it signals
+      // either a decode error OR a legitimate zero-size DECIMAL(0,0).
+      // This ambiguity is intentional: DecodeDecimal returns consumed=0
+      // with string_val="0" for precision==0, which is the only valid
+      // zero-consumed case. All other column types or non-zero precisions
+      // with consumed==0 are errors. The checks below disambiguate.
+      // For any other type, consumed==0 must fail to prevent infinite loops.
       if (col_type != ColumnType::kNewDecimal) {
         return false;
       }
@@ -424,6 +426,10 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       int32_t val =
           (raw & 0x800000) ? static_cast<int32_t>(raw | 0xFF000000) : static_cast<int32_t>(raw);
       bool negative = val < 0;
+      // Guard: raw == 0x800000 produces val == INT32_MIN (-2147483648),
+      // whose negation is undefined behavior. This value is outside the
+      // valid MySQL TIME range (±838:59:59), so treat it as invalid.
+      if (val == INT32_MIN) return ColumnValue::Null(type);
       if (negative) val = -val;
       int sec = val % 100;
       int min = (val / 100) % 100;
@@ -611,10 +617,7 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
   if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
 
   rows->clear();
-  // Typical multi-row events contain a handful of rows. Reserving avoids
-  // the first few reallocations without over-committing for single-row
-  // events (vector capacity grows geometrically after this).
-  rows->reserve(8);
+  rows->reserve(8);  // typical rows per event; avoids reallocation in common case
   while (ctx.remaining > 0) {
     RowData row;
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,

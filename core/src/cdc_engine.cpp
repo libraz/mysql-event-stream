@@ -3,6 +3,8 @@
 
 #include "cdc_engine.h"
 
+#include <algorithm>
+
 #include "binary_util.h"
 #include "client/metadata_fetcher.h"
 #include "logger.h"
@@ -141,7 +143,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
           break;
         }
         blocked_table_ids_.erase(table_id);
-        if (metadata_fetcher_ && !meta->columns.empty() && meta->columns[0].name.empty()) {
+        bool needs_column_names =
+            metadata_fetcher_ && !meta->columns.empty() &&
+            std::any_of(meta->columns.begin(), meta->columns.end(),
+                        [](const ColumnMetadata& c) { return c.name.empty(); });
+        if (needs_column_names) {
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import random
 import warnings
 
 from .client import BinlogClient
@@ -232,7 +233,9 @@ class CdcStream:
             self._client = None
 
         max_delay_s = 10.0
-        delay = min(float(self._reconnect_attempts), max_delay_s)
+        base_delay = min(float(self._reconnect_attempts), max_delay_s)
+        # 50%-100% jitter to prevent thundering herd (aligned with Node.js binding)
+        delay = base_delay * (0.5 + random.random() * 0.5)
         await asyncio.sleep(delay)
 
         # Re-check after sleep: close() may have been called while we slept.
@@ -324,6 +327,7 @@ class CdcStream:
             await asyncio.to_thread(self._client.connect)
             await asyncio.to_thread(self._client.start)
             self._started = True
+            self._reconnect_attempts = 0
         except Exception:
             if self._engine is not None:
                 self._engine.close()

@@ -24,6 +24,9 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   void SetIncludeDatabases(const Napi::CallbackInfo& info);
   void SetIncludeTables(const Napi::CallbackInfo& info);
   void SetExcludeTables(const Napi::CallbackInfo& info);
+  void SetStringFilter(const Napi::CallbackInfo& info,
+                       mes_error_t (*setter)(mes_engine_t*, const char**, size_t),
+                       const char* method_name);
   void Destroy(const Napi::CallbackInfo& info);
 
   Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count);

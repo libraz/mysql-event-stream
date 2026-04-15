@@ -36,6 +36,10 @@ bool IsValidMariaDBGtidSet(const std::string& gtid) {
 /// MySQL GTID_LOG_EVENT post-header body size: commit_flag(1) + UUID(16) + GNO(8)
 constexpr size_t kMySQLGtidBodySize = 25;
 
+/// Binlog files begin with a 4-byte magic number (0xFE 0x62 0x69 0x6E).
+/// Streaming starts at offset 4 to skip the magic header.
+constexpr uint32_t kBinlogMagicOffset = 4;
+
 /// Heartbeat period in nanoseconds (3 seconds)
 constexpr uint64_t kHeartbeatPeriodNs = 3'000'000'000ULL;
 
@@ -51,11 +55,12 @@ void BinlogClient::SetLastError(const std::string& msg) {
 }
 
 mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
-  stop_requested_.store(false, std::memory_order_release);
-
+  // Tear down any previous stream first
   if (conn_.IsConnected()) {
     Disconnect();
   }
+  // Reset stop flag after previous stream is fully torn down
+  stop_requested_.store(false, std::memory_order_release);
 
   if (config.ssl_mode > MES_SSL_VERIFY_IDENTITY) {
     SetLastError("Invalid ssl_mode value");
@@ -118,7 +123,7 @@ mes_error_t BinlogClient::StartStream() {
   streaming_.store(true, std::memory_order_release);
 
   // Create bounded event queue and launch reader thread
-  size_t queue_size = config_.max_queue_size > 0 ? config_.max_queue_size : 10000;
+  size_t queue_size = config_.max_queue_size > 0 ? config_.max_queue_size : MES_DEFAULT_QUEUE_SIZE;
   event_queue_ = std::make_unique<EventQueue>(queue_size);
   reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
 
@@ -164,7 +169,7 @@ mes_error_t BinlogClient::StartStreamMySQL() {
   // Start binlog stream via COM_BINLOG_DUMP_GTID
   protocol::BinlogStreamConfig stream_config;
   stream_config.server_id = config_.server_id;
-  stream_config.binlog_position = 4;
+  stream_config.binlog_position = kBinlogMagicOffset;
   stream_config.gtid_encoded = gtid_encoded_;
 
   auto rc = binlog_stream_.Start(conn_.Socket(), stream_config);
@@ -246,7 +251,7 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   // Start binlog stream via COM_BINLOG_DUMP (not COM_BINLOG_DUMP_GTID)
   protocol::BinlogStreamConfig stream_config;
   stream_config.server_id = config_.server_id;
-  stream_config.binlog_position = 4;
+  stream_config.binlog_position = kBinlogMagicOffset;
 
   auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
   if (rc != MES_OK) {
@@ -270,7 +275,7 @@ void BinlogClient::ReaderLoop() {
     if (rc != MES_OK) {
       // Push error sentinel so Poll() can surface the error
       QueuedEvent err_event;
-      err_event.error = MES_ERR_STREAM;
+      err_event.error = rc;
       event_queue_->Push(std::move(err_event));
       return;
     }
@@ -300,7 +305,7 @@ void BinlogClient::ReaderLoop() {
         QueuedEvent crc_err;
         crc_err.error = MES_ERR_CHECKSUM;
         event_queue_->Push(std::move(crc_err));
-        continue;
+        return;  // Stop reader; consistent with stream error handling above
       }
     }
 
@@ -382,9 +387,13 @@ void BinlogClient::StopReaderThread() {
     reader_thread_.join();
   }
 
+  // NOTE(thread-safety): event_queue_ is intentionally NOT reset here.
+  // Poll() reads event_queue_ without a lock (only streaming_ is atomic),
+  // and Stop() can be called from any thread. Resetting event_queue_ here
+  // would race with Poll()'s non-atomic read. The closed queue stays alive
+  // until StartStream() replaces it or the destructor runs.
   if (event_queue_) {
     event_queue_->Clear();
-    event_queue_.reset();
   }
 }
 

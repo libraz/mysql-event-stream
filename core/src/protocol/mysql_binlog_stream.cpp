@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "logger.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
 
@@ -81,6 +82,14 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, BinlogEventPacket* resu
 
   // ERR packet
   if (status_byte == 0xFF) {
+    uint16_t err_code = 0;
+    std::string msg;
+    ParseErrPacketPayload(packet_buf_.data(), packet_buf_.size(), &err_code, &msg);
+    StructuredLog()
+        .Event("binlog_stream_server_error")
+        .Field("error_code", static_cast<uint64_t>(err_code))
+        .Field("message", msg)
+        .Error();
     return MES_ERR_STREAM;
   }
 
@@ -130,6 +139,11 @@ mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock, const BinlogStr
   std::vector<uint8_t> payload;
 
   payload.push_back(kComBinlogDump);
+  // COM_BINLOG_DUMP uses a 4-byte position field. Reject positions
+  // that would be silently truncated.
+  if (config.binlog_position > 0xFFFFFFFFULL) {
+    return MES_ERR_INVALID_ARG;
+  }
   WriteFixedInt(&payload, config.binlog_position, 4);
   WriteFixedInt(&payload, config.flags, 2);
   WriteFixedInt(&payload, config.server_id, 4);

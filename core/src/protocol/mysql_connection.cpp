@@ -320,10 +320,12 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     const std::vector<uint8_t>& auth_data, uint32_t ssl_mode, const std::string& ssl_ca,
     const std::string& ssl_cert, const std::string& ssl_key, const std::string& host) {
   // Build client capabilities.
-  // CLIENT_DEPRECATE_EOF is intentionally not requested: ExecuteQuery()
-  // relies on traditional EOF packets for result set framing.
+  // CLIENT_DEPRECATE_EOF: request OK-replacing-EOF framing. MySQL 8.4+ and
+  // MariaDB 10.2+ advertise this capability; older servers that do not will
+  // clear it during the capability intersection below. ExecuteQuery() uses
+  // deprecate_eof=true by default, matching this negotiation.
   uint32_t client_caps = kClientProtocol41 | kClientSecureConnection | kClientPluginAuth |
-                         kClientPluginAuthLenencData | kClientTransactions;
+                         kClientPluginAuthLenencData | kClientTransactions | kClientDeprecateEOF;
 
   // Intersect with server capabilities
   client_caps &= server_info_.server_capabilities;

@@ -10,6 +10,9 @@
  * between internal C++ types and their C ABI equivalents.
  */
 
+#include <algorithm>
+#include <climits>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <vector>
@@ -72,7 +75,14 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     case mes::ColumnType::kVector:
       c.type = MES_COL_BYTES;
       c.str_data = reinterpret_cast<const char*>(col.bytes_val.data());
-      c.str_len = static_cast<uint32_t>(col.bytes_val.size());
+      if (col.bytes_val.size() > UINT32_MAX) {
+        mes::StructuredLog()
+            .Event("column_data_truncated")
+            .Field("size", static_cast<uint64_t>(col.bytes_val.size()))
+            .Warn();
+      }
+      c.str_len =
+          static_cast<uint32_t>(std::min(col.bytes_val.size(), static_cast<size_t>(UINT32_MAX)));
       break;
     default:
       // All remaining types use string representation:
@@ -80,7 +90,14 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       // kDatetime2, kTimestamp2, kTime2, kNewDecimal
       c.type = MES_COL_STRING;
       c.str_data = col.string_val.c_str();
-      c.str_len = static_cast<uint32_t>(col.string_val.size());
+      if (col.string_val.size() > UINT32_MAX) {
+        mes::StructuredLog()
+            .Event("column_data_truncated")
+            .Field("size", static_cast<uint64_t>(col.string_val.size()))
+            .Warn();
+      }
+      c.str_len =
+          static_cast<uint32_t>(std::min(col.string_val.size(), static_cast<size_t>(UINT32_MAX)));
       break;
   }
   return c;
@@ -96,6 +113,11 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
     case mes::EventType::kDelete:
       return MES_EVENT_DELETE;
   }
+  // Unknown EventType — should not happen; log for diagnosis.
+  mes::StructuredLog()
+      .Event("capi_unknown_event_type")
+      .Field("value", static_cast<uint64_t>(static_cast<uint8_t>(t)))
+      .Warn();
   return MES_EVENT_INSERT;
 }
 
@@ -126,6 +148,9 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
     // the caller keeps their full input buffer intact. After mes_reset()
     // clears all internal state (including any buffered bytes), the caller
     // can re-feed from the start or seek to a known-good stream position.
+    // TODO(error-granularity): CdcEngine currently only exposes IsError()
+    // without a specific error code. All feed errors are mapped to
+    // MES_ERR_PARSE. See cdc_engine.h for the internal error state.
     *consumed = 0;
     return MES_ERR_PARSE;
   }
@@ -207,6 +232,7 @@ MES_API mes_error_t mes_reset(mes_engine_t* engine) {
 MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,
                                               size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
+  if (databases == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> dbs;
   for (size_t i = 0; i < count; i++) {
     if (databases[i]) dbs.emplace_back(databases[i]);
@@ -218,6 +244,7 @@ MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char**
 MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables,
                                            size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
+  if (tables == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
   for (size_t i = 0; i < count; i++) {
     if (tables[i]) tbs.emplace_back(tables[i]);
@@ -229,6 +256,7 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
 MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables,
                                            size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
+  if (tables == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
   for (size_t i = 0; i < count; i++) {
     if (tables[i]) tbs.emplace_back(tables[i]);
