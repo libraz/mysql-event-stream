@@ -22,10 +22,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     if (this.iterator) {
       throw new Error("Cannot configure after streaming has started");
     }
-    if (
-      overrides.port !== undefined &&
-      (overrides.port < 1 || overrides.port > 65535)
-    ) {
+    if (overrides.port !== undefined && (overrides.port < 1 || overrides.port > 65535)) {
       throw new Error(`port must be 1-65535, got ${overrides.port}`);
     }
     this.config = { ...this.config, ...overrides };

@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of mysql-event-s
 
 ## Available Versions
 
-- v1.3.0 - Latest release - MariaDB 10.11+ support, configurable max event size, zero-copy reader path
+- v1.3.1 - Latest release - Fix npm publish formatting check blocked on v1.3.0 (no runtime changes)
+- v1.3.0 - 2026-04-15 - MariaDB 10.11+ support, configurable max event size, zero-copy reader path (PyPI only; npm skipped)
 - v1.2.0 - 2026-04-13 - CRC32 binlog checksum validation, E2E port update
 - [v1.1.0](v1.1.0.md) - 2026-04-09 - MySQL 9.x compatibility, VECTOR type, RSA auth
 - v1.0.1 - 2026-03-31 - Security hardening, thread safety, bounds checking

@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-04-15
+
+### Fixed
+
+- `bindings/node/src/stream.ts`: Biome formatting violation (multi-line `if` condition collapsed to one line) that blocked npm publish on v1.3.0
+
+### CI
+
+- Added `yarn check` (Biome lint) step to `ci.yml` and `develop-ci.yml` so Node formatting/lint issues are caught before the publish workflow runs
+
+### Notes
+
+- No runtime behavior changes versus v1.3.0
+- v1.3.0 was released to PyPI but not to npm due to the formatting check failure; v1.3.1 publishes the same content to both registries
+
 ## [1.3.0] - 2026-04-15
 
 ### Added
@@ -84,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/libraz/mysql-event-stream/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/libraz/mysql-event-stream/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/libraz/mysql-event-stream/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/libraz/mysql-event-stream/compare/v1.0.1...v1.1.0

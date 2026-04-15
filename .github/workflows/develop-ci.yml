@@ -123,6 +123,9 @@ jobs:
       - name: Build native addon
         working-directory: bindings/node
         run: yarn build
+      - name: Lint (Biome)
+        working-directory: bindings/node
+        run: yarn check
       - name: Run tests
         working-directory: bindings/node
         run: yarn test
