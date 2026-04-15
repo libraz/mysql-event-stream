@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""CDC Watcher - Monitor MySQL changes in real time.
+"""CDC Watcher - Monitor MySQL / MariaDB changes in real time.
 
-Connects to MySQL via CdcStream and prints change events
+Connects to MySQL or MariaDB via CdcStream and prints change events
 with colored output. Optionally filters by table name.
+Server flavor is auto-detected.
 
 Requires OpenSSL (linked at build time).
 
 Prerequisites:
-    1. Docker MySQL running: cd e2e/docker && docker compose up -d
+    1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+    1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+        (same port 13308 / database mes_test; flavor auto-detected)
     2. Build libmes with client support:
        cmake -B build-client
        cmake --build build-client --parallel
@@ -21,7 +24,7 @@ Usage:
 
 Example output:
     mysql-event-stream CDC Watcher
-      MySQL: 127.0.0.1:13307
+      Server: 127.0.0.1:13308 (MySQL or MariaDB)
 
     Waiting for changes... (Ctrl+C to stop)
 
@@ -57,7 +60,7 @@ from mysql_event_stream.stream import CdcStream
 # --- Configuration ---
 
 MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
+MYSQL_PORT = 13308
 MYSQL_USER = "root"
 MYSQL_PASSWORD = "test_root_password"
 
@@ -173,7 +176,7 @@ def main() -> None:
     lib_path = find_lib_path()
 
     print("mysql-event-stream CDC Watcher")
-    print(f"  MySQL: {MYSQL_HOST}:{MYSQL_PORT}")
+    print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     if args.table:
         print(f"  Filter: table={args.table}")
     print("\nWaiting for changes... (Ctrl+C to stop)\n")

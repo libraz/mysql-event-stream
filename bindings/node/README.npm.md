@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 
-Lightweight MySQL 8.4 CDC (Change Data Capture) engine for Node.js. Native N-API addon -- no libmysqlclient required.
+Lightweight CDC (Change Data Capture) engine for Node.js supporting MySQL 8.4+ and MariaDB 10.11+. Native N-API addon -- no libmysqlclient required.
 
 ## Installation
 
@@ -96,9 +96,10 @@ engine.setExcludeTables(["mydb.audit_log"]);
 ## Features
 
 - **Native performance** -- C++ core with N-API binding, >100k events/sec
-- **No libmysqlclient** -- MySQL wire protocol implemented directly; only OpenSSL required
+- **No libmysqlclient** -- MySQL / MariaDB wire protocol implemented directly; only OpenSSL required
 - **Streaming** -- Process events incrementally as bytes arrive
-- **GTID support** -- BinlogClient with GTID-based replication
+- **MySQL 8.4+ and MariaDB 10.11+** -- Auto-detects server flavor and negotiates the appropriate binlog protocol
+- **GTID support** -- BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** -- Full before/after column values for INSERT, UPDATE, DELETE
 - **Column names** -- Automatic column name resolution via metadata queries
 - **SSL/TLS** -- Secure MySQL connections with certificate verification
@@ -106,11 +107,17 @@ engine.setExcludeTables(["mydb.audit_log"]);
 - **Auto-reconnection** -- Linear backoff on connection loss (default 10 attempts)
 - **Table filtering** -- Include/exclude databases and tables
 
-## MySQL Requirements
+## Server Requirements
 
-- Version: 8.4
+**MySQL:**
+- Version: 8.4+
 - Binary log format: ROW (`binlog_format=ROW`)
 - GTID mode enabled (for BinlogClient)
+- Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+
+**MariaDB:**
+- Version: 10.11+ (tested against 10.11 and 11.4)
+- GTID replication enabled (`log_bin` in ROW format)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 ## Also available

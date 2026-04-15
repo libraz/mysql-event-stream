@@ -1,12 +1,12 @@
 #!/usr/bin/env npx tsx
 /**
- * Search Index Sync - Keep an in-memory index in sync with MySQL via CDC.
+ * Search Index Sync - Keep an in-memory index in sync with MySQL / MariaDB via CDC.
  *
  * Demonstrates a practical CDC use case: building and maintaining a
- * secondary index from MySQL row events. This pattern is commonly used
- * with Elasticsearch, Meilisearch, or any external search engine.
+ * secondary index from row events. This pattern is commonly used with
+ * Elasticsearch, Meilisearch, or any external search engine.
  *
- * Table setup (run in MySQL):
+ * Table setup (run in MySQL or MariaDB):
  *
  *   CREATE TABLE products (
  *       id         INT NOT NULL AUTO_INCREMENT,
@@ -39,7 +39,7 @@
  *
  * Example output:
  *   Search Index Sync
- *     MySQL:  127.0.0.1:13307
+ *     Server: 127.0.0.1:13308 (MySQL or MariaDB)
  *     Table:  products
  *
  *   Waiting for changes...
@@ -52,8 +52,10 @@
  *   [STATS] indexed=2 updated=1 removed=1
  *
  * Prerequisites:
- *   1. Docker MySQL running: cd e2e/docker && docker compose up -d
- *   2. Build native addon: yarn build
+ *   1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+ *   1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+ *       (same port 13308 / database mes_test; flavor auto-detected)
+ *   2. Build native addon:      yarn build
  *   3. Create the products table (DDL above)
  *
  * Usage:
@@ -148,7 +150,7 @@ function handleEvent(event: ChangeEvent): void {
 async function main(): Promise<void> {
   const stream = new CdcStream({
     host: "127.0.0.1",
-    port: 13307,
+    port: 13308,
     user: "root",
     password: "test_root_password",
     serverId: 97,
@@ -158,7 +160,7 @@ async function main(): Promise<void> {
   let running = true;
 
   console.log("Search Index Sync");
-  console.log("  MySQL:  127.0.0.1:13307");
+  console.log("  Server: 127.0.0.1:13308 (MySQL or MariaDB)");
   console.log("  Table:  products\n");
   console.log("Waiting for changes...\n");
 

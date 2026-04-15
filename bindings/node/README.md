@@ -5,9 +5,10 @@
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen?logo=node.js)](https://nodejs.org/)
 [![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
+[![MariaDB](https://img.shields.io/badge/MariaDB-10.11%2B-003545?logo=mariadb)](https://mariadb.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
-Native N-API binding for the mysql-event-stream CDC engine. Wraps the C++ core as a Node.js addon using cmake-js.
+Native N-API binding for the mysql-event-stream CDC engine (MySQL 8.4+ and MariaDB 10.11+). Wraps the C++ core as a Node.js addon using cmake-js.
 
 > **npm users**: See the [npm README](README.npm.md) for installation and usage.
 

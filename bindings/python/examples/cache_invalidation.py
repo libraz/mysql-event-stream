@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Cache Invalidation - Invalidate caches in real time via CDC.
 
-Demonstrates a practical CDC use case: watching MySQL row changes and
-invalidating/refreshing cached data. This pattern is commonly used with
+Demonstrates a practical CDC use case: watching MySQL / MariaDB row changes
+and invalidating/refreshing cached data. This pattern is commonly used with
 Redis, Memcached, or any application-level cache.
 
-Table setup (run in MySQL):
+Table setup (run in MySQL or MariaDB):
 
     CREATE TABLE sessions (
         id          CHAR(36) NOT NULL,
@@ -49,7 +49,7 @@ Sample DML to trigger events:
 
 Example output:
     Cache Invalidation Example
-      MySQL: 127.0.0.1:13307
+      Server: 127.0.0.1:13308 (MySQL or MariaDB)
 
     Watching for changes...
 
@@ -59,7 +59,9 @@ Example output:
     [AUDIT] 3 events processed (cache_set=1, cache_invalidate=1, cache_evict=1)
 
 Prerequisites:
-    1. Docker MySQL running: cd e2e/docker && docker compose up -d
+    1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+    1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+        (same port 13308 / database mes_test; flavor auto-detected)
     2. Build libmes with client support:
        cmake -B build-client
        cmake --build build-client --parallel
@@ -87,7 +89,7 @@ from mysql_event_stream.stream import CdcStream
 # --- Configuration ---
 
 MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
+MYSQL_PORT = 13308
 MYSQL_USER = "root"
 MYSQL_PASSWORD = "test_root_password"
 
@@ -229,7 +231,7 @@ def main() -> None:
     lib_path = find_lib_path()
 
     print("Cache Invalidation Example")
-    print(f"  MySQL: {MYSQL_HOST}:{MYSQL_PORT}")
+    print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     print(f"  Tables: {', '.join(HANDLERS)}\n")
     print("Watching for changes... (Ctrl+C to stop)\n")
 

@@ -8,21 +8,22 @@
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 [![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
+[![MariaDB](https://img.shields.io/badge/MariaDB-10.11%2B-003545?logo=mariadb)](https://mariadb.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
-MySQL の binlog レプリケーションイベントをアプリケーション向けのストリーミング API に変換する軽量ライブラリです。
+MySQL / MariaDB の binlog レプリケーションイベントをアプリケーション向けのストリーミング API に変換する軽量ライブラリです。
 
 [mygram-db](https://github.com/libraz/mygram-db) のレプリケーション層を独立した CDC (Change Data Capture) エンジンとして切り出したプロジェクトです。
 
 ## 概要
 
-mysql-event-stream は MySQL 8.4+ のバイナリログイベントをパースし、行レベルの変更イベント (INSERT / UPDATE / DELETE) を構造化データとして出力します。C ABI のコアライブラリに加え、Node.js と Python のバインディングを提供しており、リアルタイムデータパイプライン、監査ログ、キャッシュ無効化、イベント駆動アーキテクチャの構築に利用できます。
+mysql-event-stream は MySQL 8.4+ および MariaDB 10.11+ のバイナリログイベントをパースし、行レベルの変更イベント (INSERT / UPDATE / DELETE) を構造化データとして出力します。C ABI のコアライブラリに加え、Node.js と Python のバインディングを提供しており、リアルタイムデータパイプライン、監査ログ、キャッシュ無効化、イベント駆動アーキテクチャの構築に MySQL / MariaDB のどちらからでも利用できます。
 
 ## アーキテクチャ
 
 ```mermaid
 graph TD
-    MySQL[MySQL 8.4+ Primary] -->|binlog stream / GTID| Proto
+    MySQL[MySQL 8.4+ / MariaDB 10.11+ Primary] -->|binlog stream / GTID| Proto
 
     subgraph mysql-event-stream
         Proto[プロトコル層\nTCP + TLS + MySQL ワイヤープロトコル] --> Core[CDC エンジン\nC ABI: libmes]
@@ -133,7 +134,8 @@ mes_destroy(engine);
 - **ストリーミング処理** - バイト列の到着に合わせて逐次的にイベントを処理
 - **多言語対応** - C/C++、Node.js (N-API)、Python (ctypes) バインディング
 - **MySQL 8.4+** - LTS および Innovation リリースに対応
-- **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient
+- **MariaDB 10.11+** - MariaDB 向け binlog プロトコル、GTID (`domain-server-seq` 形式)、ANNOTATE_ROWS、slave capability ネゴシエーションに対応
+- **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient (MySQL / MariaDB 両形式)
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
 - **VECTOR 型** - MySQL 9.0+ の VECTOR カラムをネイティブサポート（生バイト列としてデコード）
 - **カラム名解決** - メタデータクエリによる自動カラム名解決
@@ -303,9 +305,15 @@ mysql-event-stream/
 ## 要件
 
 **MySQL:**
-- バージョン: 8.4+
+- バージョン: 8.4+ (LTS および Innovation リリース)
 - GTID モード有効 (BinlogClient 使用時)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+
+**MariaDB:**
+- バージョン: 10.11+ (10.11 / 11.4 で動作検証済み)
+- GTID レプリケーション有効 (`gtid_strict_mode`、行フォーマットの `log_bin`)
+- レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- クライアントはサーバーフレーバーを自動検出し、MariaDB binlog プロトコル（GTID イベント type 162、ANNOTATE_ROWS、`@mariadb_slave_capability`）に切り替えます
 
 ## ライセンス
 

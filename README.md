@@ -8,21 +8,22 @@
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 [![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
+[![MariaDB](https://img.shields.io/badge/MariaDB-10.11%2B-003545?logo=mariadb)](https://mariadb.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
-A lightweight library that converts MySQL binlog replication events into a streaming API for applications.
+A lightweight library that converts MySQL / MariaDB binlog replication events into a streaming API for applications.
 
 Extracted from [mygram-db](https://github.com/libraz/mygram-db)'s replication layer as a standalone, embeddable CDC (Change Data Capture) engine.
 
 ## Overview
 
-mysql-event-stream parses MySQL 8.4+ binary log events and emits structured row-level change events (INSERT / UPDATE / DELETE). It provides a C ABI core with first-class bindings for Node.js and Python, making it easy to build real-time data pipelines, audit logs, cache invalidation, and event-driven architectures on top of MySQL.
+mysql-event-stream parses MySQL 8.4+ and MariaDB 10.11+ binary log events and emits structured row-level change events (INSERT / UPDATE / DELETE). It provides a C ABI core with first-class bindings for Node.js and Python, making it easy to build real-time data pipelines, audit logs, cache invalidation, and event-driven architectures on top of MySQL or MariaDB.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    MySQL[MySQL 8.4+ Primary] -->|binlog stream / GTID| Proto
+    MySQL[MySQL 8.4+ / MariaDB 10.11+ Primary] -->|binlog stream / GTID| Proto
 
     subgraph mysql-event-stream
         Proto[Protocol Layer\nTCP + TLS + MySQL Wire Protocol] --> Core[CDC Engine\nC ABI: libmes]
@@ -134,7 +135,8 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Streaming** - Process events incrementally as bytes arrive
 - **Multi-language** - C/C++, Node.js (N-API), and Python (ctypes) bindings
 - **MySQL 8.4+** - Supports LTS and Innovation releases
-- **GTID support** - Native BinlogClient with GTID-based replication
+- **MariaDB 10.11+** - MariaDB-flavor binlog protocol, GTID (`domain-server-seq`), ANNOTATE_ROWS, and slave capability negotiation
+- **GTID support** - Native BinlogClient with GTID-based replication (both MySQL and MariaDB formats)
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** - Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
 - **Column Names** - Automatic column name resolution via metadata queries
@@ -307,9 +309,15 @@ This project extracts the binlog parsing and replication components from [mygram
 ## Requirements
 
 **MySQL:**
-- Version: 8.4+
+- Version: 8.4+ (LTS and Innovation releases)
 - GTID mode enabled (for BinlogClient)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+
+**MariaDB:**
+- Version: 10.11+ (tested against 10.11 and 11.4)
+- GTID replication enabled (`gtid_strict_mode`, `log_bin` with row format)
+- Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- The client auto-detects the server flavor and switches to the MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS, `@mariadb_slave_capability`)
 
 ## License
 

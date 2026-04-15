@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""CDC Streaming - Real-time MySQL change event streaming via CdcStream.
+"""CDC Streaming - Real-time MySQL / MariaDB change event streaming via CdcStream.
 
-Connects directly to MySQL using the replication protocol and streams
-events as an async iterator.
+Connects directly to MySQL or MariaDB using the replication protocol and
+streams events as an async iterator. CdcStream auto-detects the server
+flavor and negotiates the appropriate binlog protocol.
 
 Requires OpenSSL (linked at build time).
 
 Prerequisites:
-    1. Docker MySQL running: cd e2e/docker && docker compose up -d
+    1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+    1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+        (same port 13308 / database mes_test; this example works unchanged against either)
     2. Build libmes with client support:
        cmake -B build-client
        cmake --build build-client --parallel
@@ -25,7 +28,7 @@ Usage:
 
 Example output:
     mysql-event-stream CDC Streaming (CdcStream)
-      MySQL: 127.0.0.1:13307
+      Server: 127.0.0.1:13308 (MySQL or MariaDB)
 
     Waiting for changes... (Ctrl+C to stop)
 
@@ -61,7 +64,7 @@ from mysql_event_stream.stream import CdcStream
 # --- Configuration ---
 
 MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
+MYSQL_PORT = 13308
 MYSQL_USER = "root"
 MYSQL_PASSWORD = "test_root_password"
 
@@ -187,7 +190,7 @@ def main() -> None:
     lib_path = find_lib_path()
 
     print("mysql-event-stream CDC Streaming (CdcStream)")
-    print(f"  MySQL: {MYSQL_HOST}:{MYSQL_PORT}")
+    print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     if args.gtid:
         print(f"  Start GTID: {args.gtid}")
     if args.table:

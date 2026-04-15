@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-04-15
+
+### Added
+
+- **MariaDB 10.11+ support** — Full MariaDB binlog protocol: flavor auto-detection, GTID events (type 162, `domain-server-seq` format), ANNOTATE_ROWS, slave capability negotiation (`@mariadb_slave_capability = 4`), flavor-aware GTID encoding/decoding
+- **Configurable max event size** — `maxEventSize` / `max_event_size` client option to cap peak memory per event
+- **Zero-copy reader path** — Avoid buffer copies in the hot streaming path
+- **Develop branch CI** — Fast-feedback CI workflow on `develop` branch
+- E2E matrix runner (`e2e/run-matrix.sh`) covering `mysql:8.4`, `mysql:9.1`, `mariadb:10.11`, `mariadb:11.4`
+
+### Changed
+
+- Consolidated `ColumnValue` byte storage for reduced memory footprint
+- Hardened error granularity, observability, and correctness across all layers
+- Applied clang-format and reduced duplication across layers
+
+### Fixed
+
+- MariaDB E2E infrastructure: slave capability negotiation, flavor-aware GTID queries, GTID format assertions, Docker compose port alignment
+- Node addon: link `mariadb_gtid.cpp` and `mariadb_event_parser.cpp` into `CORE_SOURCES` (previously unreferenced)
+- Python E2E: configurable MySQL connection via `MES_MYSQL_*` env vars, flavor-aware `get_current_gtid()`, add `cryptography` dev dep for modern PyMySQL auth
+- Multiple correctness bugs, undefined behavior, and safety hardening across all layers
+
+### Testing
+
+- Vitest pinned to exact `2.1.9`; refreshed Node lockfile
+
+## [1.2.0] - 2026-04-13
+
+### Added
+
+- **CRC32 binlog checksum validation** — Verify event integrity when server advertises `CRC32` checksum
+
+### Changed
+
+- E2E Docker port updated (13307 → 13308) to avoid conflicts
+
 ## [1.1.0] - 2026-04-09
 
 ### Added
@@ -47,7 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/libraz/mysql-event-stream/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/libraz/mysql-event-stream/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/libraz/mysql-event-stream/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/libraz/mysql-event-stream/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/libraz/mysql-event-stream/releases/tag/v1.0.0

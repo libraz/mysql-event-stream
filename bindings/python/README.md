@@ -5,9 +5,10 @@
 [![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.11-blue?logo=python)](https://python.org/)
 [![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
+[![MariaDB](https://img.shields.io/badge/MariaDB-10.11%2B-003545?logo=mariadb)](https://mariadb.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
-A lightweight MySQL 8.4+ CDC (Change Data Capture) engine for Python. Parses binlog replication streams and emits structured row-level change events (INSERT / UPDATE / DELETE).
+A lightweight CDC (Change Data Capture) engine for Python supporting MySQL 8.4+ and MariaDB 10.11+. Parses binlog replication streams and emits structured row-level change events (INSERT / UPDATE / DELETE).
 
 Built on a self-contained C++ core using ctypes FFI for high throughput and low latency. No external MySQL client library (libmysqlclient) required.
 
@@ -82,7 +83,8 @@ ChangeEvent(
 - **Zero native dependencies** — No libmysqlclient required; only OpenSSL
 - **Streaming** — Process events incrementally as bytes arrive
 - **MySQL 8.4+** — Supports LTS and Innovation releases
-- **GTID support** — Native BinlogClient with GTID-based replication
+- **MariaDB 10.11+** — Auto-detects flavor and handles MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS, slave capability negotiation)
+- **GTID support** — Native BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** — Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** — Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
 - **Column names** — Automatic column name resolution via metadata queries
@@ -90,10 +92,16 @@ ChangeEvent(
 - **Backpressure** — Internal reader thread with bounded event queue (default 10,000)
 - **Auto-reconnection** — Automatic reconnection with linear backoff on connection loss
 
-## MySQL Requirements
+## Server Requirements
 
+**MySQL:**
 - Version: 8.4+
 - GTID mode enabled (for BinlogClient)
+- Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+
+**MariaDB:**
+- Version: 10.11+ (tested against 10.11 and 11.4)
+- GTID replication enabled (`log_bin` in ROW format)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 ## License

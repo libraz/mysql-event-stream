@@ -132,7 +132,7 @@ target_include_directories(mes-shared PUBLIC
 
 set_target_properties(mes-shared PROPERTIES
   OUTPUT_NAME mes
-  VERSION 1.2.0
+  VERSION 1.3.0
   SOVERSION 1
 )
 

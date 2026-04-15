@@ -2,12 +2,15 @@
 /**
  * CDC Streaming Example for Node.js
  *
- * Connects to MySQL and streams binlog events using CdcStream.
+ * Connects to MySQL or MariaDB and streams binlog events using CdcStream.
  * Demonstrates the AsyncIterator pattern with `for await`.
  *
  * Prerequisites:
- *   1. Docker MySQL running: cd e2e/docker && docker compose up -d
- *   2. Build native addon: yarn build
+ *   1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+ *   1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+ *       (both expose the same port 13308 / database mes_test, so this example
+ *        works unchanged against either server; CdcStream auto-detects flavor)
+ *   2. Build native addon:      yarn build
  *
  * Usage:
  *   npx tsx examples/cdc-streaming.ts
@@ -65,7 +68,7 @@ async function main(): Promise<void> {
 
   const stream = new CdcStream({
     host: "127.0.0.1",
-    port: 13307,
+    port: 13308,
     user: "root",
     password: "test_root_password",
     serverId: 99,

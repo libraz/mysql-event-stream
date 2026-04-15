@@ -1,13 +1,15 @@
 #!/usr/bin/env npx tsx
 /**
- * CDC Watcher - Monitor MySQL changes in real time.
+ * CDC Watcher - Monitor MySQL / MariaDB changes in real time.
  *
- * Connects to MySQL via CdcStream and prints change events
+ * Connects to MySQL or MariaDB via CdcStream and prints change events
  * with colored output. Optionally filters by table name.
  *
  * Prerequisites:
- *   1. Docker MySQL running: cd e2e/docker && docker compose up -d
- *   2. Build native addon: yarn build
+ *   1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
+ *   1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
+ *       (same port 13308 / database mes_test; flavor auto-detected)
+ *   2. Build native addon:      yarn build
  *
  * Usage:
  *   # Watch all tables
@@ -18,7 +20,7 @@
  *
  * Example output:
  *   mysql-event-stream CDC Watcher
- *     MySQL:  127.0.0.1:13307
+ *     Server: 127.0.0.1:13308 (MySQL or MariaDB)
  *
  *   Waiting for changes... (Ctrl+C to stop)
  *
@@ -94,7 +96,7 @@ async function main(): Promise<void> {
 
   const stream = new CdcStream({
     host: "127.0.0.1",
-    port: 13307,
+    port: 13308,
     user: "root",
     password: "test_root_password",
     serverId: 98,
@@ -107,7 +109,7 @@ async function main(): Promise<void> {
   let running = true;
 
   console.log("mysql-event-stream CDC Watcher");
-  console.log("  MySQL:  127.0.0.1:13307");
+  console.log("  Server: 127.0.0.1:13308 (MySQL or MariaDB)");
   if (tableFilter) console.log(`  Filter: table=${tableFilter}`);
   console.log("\nWaiting for changes... (Ctrl+C to stop)\n");
 
