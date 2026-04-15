@@ -34,7 +34,7 @@ class StreamingCollector:
         lib_path: str,
         *,
         host: str = "127.0.0.1",
-        port: int = 13307,
+        port: int = 13308,
         user: str = "root",
         password: str = "test_root_password",
         server_id: int = 100,

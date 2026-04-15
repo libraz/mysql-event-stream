@@ -122,7 +122,9 @@ describe("CdcStream", () => {
     try {
       for await (const event of stream) {
         if (event.table === "items") {
-          expect(stream.currentGtid).toContain(":");
+          // MySQL GTID: "uuid:gno" (contains ':'), MariaDB GTID: "domain-server-seq" (contains '-')
+          expect(stream.currentGtid.length).toBeGreaterThan(0);
+          expect(stream.currentGtid).toMatch(/[:\-]/);
           break;
         }
       }

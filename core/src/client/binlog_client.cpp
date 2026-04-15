@@ -185,6 +185,18 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   protocol::QueryResult qr;
   std::string err;
 
+  // Advertise MariaDB slave capability so the server sends GTID events (type 162)
+  // and ANNOTATE_ROWS events. Without this, MariaDB falls back to the legacy
+  // replication format that omits per-transaction GTID events.
+  // Capability 4 = MARIA_SLAVE_CAPABILITY_GTID (MariaDB 10.0.2+)
+  {
+    mes_error_t rc =
+        protocol::ExecuteQuery(conn_.Socket(), "SET @mariadb_slave_capability = 4", &qr, &err);
+    if (rc != MES_OK) {
+      StructuredLog().Event("mariadb_slave_capability_failed").Field("error", err).Warn();
+    }
+  }
+
   // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
   if (protocol::ExecuteQuery(conn_.Socket(),
                              "SET @master_binlog_checksum = @@global.binlog_checksum", &qr,

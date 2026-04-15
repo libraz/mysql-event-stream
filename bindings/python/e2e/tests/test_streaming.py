@@ -10,15 +10,11 @@ import threading
 import time
 
 import pytest
+from conftest import MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from lib.mysql_client import MysqlClient
 
 from mysql_event_stream import CdcEngine
 from mysql_event_stream.client import BinlogClient
-
-MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "test_root_password"
 
 
 @pytest.mark.streaming
@@ -42,6 +38,7 @@ class TestBinlogClient:
         """BinlogClient tracks GTID after receiving events."""
         gtid_result: list[str] = []
         stop = threading.Event()
+        start_gtid = mysql.get_current_gtid()
 
         def stream_worker() -> None:
             with BinlogClient(
@@ -50,6 +47,7 @@ class TestBinlogClient:
                 user=MYSQL_USER,
                 password=MYSQL_PASSWORD,
                 server_id=201,
+                start_gtid=start_gtid,
                 lib_path=lib_path,
             ) as client:
                 client.connect()
@@ -75,7 +73,11 @@ class TestBinlogClient:
         t.join(timeout=30)
         assert not t.is_alive(), "Streaming thread did not finish"
         assert len(gtid_result) == 1
-        assert ":" in gtid_result[0], f"Expected GTID format uuid:gno, got: {gtid_result[0]}"
+        # MySQL GTID: "uuid:gno" (contains ':'), MariaDB GTID: "domain-server-seq" (contains '-')
+        assert len(gtid_result[0]) > 0, "Expected non-empty GTID"
+        assert ":" in gtid_result[0] or "-" in gtid_result[0], (
+            f"Expected GTID format, got: {gtid_result[0]}"
+        )
 
     def test_connection_error(self, lib_path: str) -> None:
         """Connecting to unreachable host raises ConnectionError."""

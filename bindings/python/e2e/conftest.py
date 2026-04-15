@@ -16,11 +16,11 @@ from lib.mysql_client import MysqlClient  # noqa: E402
 from lib.streaming_collector import StreamingCollector  # noqa: E402
 from lib.wait import wait_until  # noqa: E402
 
-MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "test_root_password"
-MYSQL_DATABASE = "mes_test"
+MYSQL_HOST = os.environ.get("MES_MYSQL_HOST", "127.0.0.1")
+MYSQL_PORT = int(os.environ.get("MES_MYSQL_PORT", "13308"))
+MYSQL_USER = os.environ.get("MES_MYSQL_USER", "root")
+MYSQL_PASSWORD = os.environ.get("MES_MYSQL_PASSWORD", "test_root_password")
+MYSQL_DATABASE = os.environ.get("MES_MYSQL_DATABASE", "mes_test")
 
 # Incrementing server ID to avoid conflicts between concurrent tests
 _server_id_counter = 100
@@ -102,7 +102,15 @@ def collector(lib_path: str, mysql: MysqlClient) -> Generator[StreamingCollector
     Use collector.wait_for_events() to collect events after DML operations.
     """
     gtid = mysql.get_current_gtid()
-    c = StreamingCollector(lib_path, server_id=_next_server_id(), start_gtid=gtid)
+    c = StreamingCollector(
+        lib_path,
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        server_id=_next_server_id(),
+        start_gtid=gtid,
+    )
     c.start()
     yield c
     c.stop()

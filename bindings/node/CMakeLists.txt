@@ -29,6 +29,8 @@ set(CORE_SOURCES
   ${MES_ROOT}/core/src/cdc_engine.cpp
   ${MES_ROOT}/core/src/capi.cpp
   ${MES_ROOT}/core/src/logger.cpp
+  ${MES_ROOT}/core/src/mariadb_gtid.cpp
+  ${MES_ROOT}/core/src/mariadb_event_parser.cpp
   ${MES_ROOT}/core/src/client/gtid_encoder.cpp
   ${MES_ROOT}/core/src/client/connection_validator.cpp
   ${MES_ROOT}/core/src/client/binlog_client.cpp

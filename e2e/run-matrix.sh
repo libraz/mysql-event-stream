@@ -18,6 +18,11 @@ NODE_DIR="$PROJECT_ROOT/bindings/node"
 
 cd "$SCRIPT_DIR"
 
+# Ensure Volta shims are on PATH (project pins Node via volta.node in package.json)
+if [[ -d "$HOME/.volta/bin" ]]; then
+    export PATH="$HOME/.volta/bin:$PATH"
+fi
+
 # Parse options
 CTEST_ARGS=()
 TARGETS=()

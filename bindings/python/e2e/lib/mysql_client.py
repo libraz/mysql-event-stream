@@ -91,10 +91,18 @@ class MysqlClient:
         return rows[0]
 
     def get_current_gtid(self) -> str:
-        """Get current GTID executed position."""
+        """Get current GTID executed position (flavor-aware).
+
+        MariaDB uses @@GLOBAL.gtid_current_pos; MySQL uses @@GLOBAL.gtid_executed.
+        """
+        import os
+
         conn = self._connect()
         with conn.cursor() as cur:
-            cur.execute("SELECT @@GLOBAL.gtid_executed AS gtid")
+            if os.environ.get("DB_FLAVOR") == "mariadb":
+                cur.execute("SELECT @@GLOBAL.gtid_current_pos AS gtid")
+            else:
+                cur.execute("SELECT @@GLOBAL.gtid_executed AS gtid")
             row = cur.fetchone()
             if not row:
                 return ""

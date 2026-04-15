@@ -5,14 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from lib.mysql_client import MysqlClient
 
 from mysql_event_stream.stream import CdcStream
-
-MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 13307
-MYSQL_USER = "root"
-MYSQL_PASSWORD = "test_root_password"
 
 
 @pytest.mark.streaming
@@ -23,6 +19,7 @@ class TestCdcStream:
     async def test_receives_events(self, mysql: MysqlClient, lib_path: str) -> None:
         """CdcStream yields INSERT events via async for."""
         collected: list[tuple[str, str]] = []
+        start_gtid = mysql.get_current_gtid()
 
         async def insert_later() -> None:
             await asyncio.sleep(1)
@@ -36,6 +33,7 @@ class TestCdcStream:
             user=MYSQL_USER,
             password=MYSQL_PASSWORD,
             server_id=210,
+            start_gtid=start_gtid,
             lib_path=lib_path,
         ):
             if event.table == "items":
@@ -55,6 +53,7 @@ class TestCdcStream:
     async def test_context_manager(self, mysql: MysqlClient, lib_path: str) -> None:
         """CdcStream works as async context manager."""
         collected: list[str] = []
+        start_gtid = mysql.get_current_gtid()
 
         async def insert_later() -> None:
             await asyncio.sleep(1)
@@ -68,6 +67,7 @@ class TestCdcStream:
             user=MYSQL_USER,
             password=MYSQL_PASSWORD,
             server_id=211,
+            start_gtid=start_gtid,
             lib_path=lib_path,
         ) as stream:
             async for event in stream:
@@ -87,6 +87,7 @@ class TestCdcStream:
     async def test_current_gtid(self, mysql: MysqlClient, lib_path: str) -> None:
         """CdcStream exposes current_gtid after receiving events."""
         gtid = ""
+        start_gtid = mysql.get_current_gtid()
 
         async def insert_later() -> None:
             await asyncio.sleep(1)
@@ -100,6 +101,7 @@ class TestCdcStream:
             user=MYSQL_USER,
             password=MYSQL_PASSWORD,
             server_id=212,
+            start_gtid=start_gtid,
             lib_path=lib_path,
         ) as stream:
             async for event in stream:
@@ -113,4 +115,6 @@ class TestCdcStream:
                     break
 
         await task
-        assert ":" in gtid, f"Expected GTID format uuid:gno, got: {gtid}"
+        # MySQL GTID: "uuid:gno" (contains ':'), MariaDB GTID: "domain-server-seq" (contains '-')
+        assert len(gtid) > 0, "Expected non-empty GTID"
+        assert ":" in gtid or "-" in gtid, f"Expected GTID format, got: {gtid}"
