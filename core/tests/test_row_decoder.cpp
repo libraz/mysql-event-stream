@@ -1130,6 +1130,26 @@ TEST(DecodeWriteRowsTest, TooShort) {
   EXPECT_FALSE(DecodeWriteRows(data, 4, metadata, true, &rows));
 }
 
+TEST(DecodeWriteRowsTest, RejectsColumnCountMismatch) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(1);
+  metadata.columns[0].type = ColumnType::kLong;
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(2);     // Corrupt: ROWS event has more columns than TABLE_MAP
+  w.WriteU8(0x03);  // columns_present
+  w.WriteU8(0x00);  // null_bitmap
+  w.WriteU32Le(42);
+  w.WriteU32Le(100);
+
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+}
+
 // --- DecodeUpdateRows null pointers and V1 ---
 
 TEST(DecodeUpdateRowsTest, NullPointers) {

@@ -205,18 +205,21 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
 }
 
 void ClientWrap::Stop(const Napi::CallbackInfo& info) {
+  (void)info;
   if (client_) {
     mes_client_stop(client_);
   }
 }
 
 void ClientWrap::Disconnect(const Napi::CallbackInfo& info) {
+  (void)info;
   if (client_) {
     mes_client_disconnect(client_);
   }
 }
 
 void ClientWrap::Destroy(const Napi::CallbackInfo& info) {
+  (void)info;
   if (!client_) return;
 
   if (pending_workers_.load(std::memory_order_acquire) > 0) {

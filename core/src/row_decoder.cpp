@@ -21,13 +21,6 @@ uint64_t ReadBigEndian(const uint8_t* data, size_t bytes) {
   return val;
 }
 
-// Format an integer with zero-padding to the given width.
-void AppendZeroPadded(std::string& out, int val, int width) {
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "%0*d", width, val);
-  out += buf;
-}
-
 // Parse the common ROWS_EVENT post-header and return a pointer to row data.
 // Sets column_count, columns_present, and optionally columns_present_update.
 // Returns nullptr on error.
@@ -199,7 +192,8 @@ bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& meta
   ctx->ptr =
       ParseRowsPostHeader(data, len, is_v2, is_update, &ctx->column_count, &ctx->columns_present,
                           &ctx->columns_present_update, &ctx->remaining);
-  return ctx->ptr != nullptr;
+  if (ctx->ptr == nullptr) return false;
+  return ctx->column_count == metadata.columns.size();
 }
 
 }  // namespace

@@ -93,6 +93,17 @@ inline std::string WrongCa() { return CertDir() + "/wrong-ca.pem"; }
 
 inline std::string DefaultCa() { return IsMariaDB() ? "" : CaCert(); }
 
+inline bool IsE2eServerAvailable() {
+  mes::protocol::MysqlConnection conn;
+  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                         DefaultCa(), "", "");
+  if (rc != MES_OK) {
+    return false;
+  }
+  conn.Disconnect();
+  return true;
+}
+
 // Captured column value (deep-copied from transient mes_column_t)
 struct CapturedColumn {
   mes_col_type_t type = MES_COL_NULL;

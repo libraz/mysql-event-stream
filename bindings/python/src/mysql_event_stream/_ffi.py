@@ -358,7 +358,7 @@ _client_lock = threading.Lock()
 # _client_configured boolean, which incorrectly treated the second lib
 # passed to load_client_library as already configured. That broke tests
 # that loaded two different libmes builds side-by-side.
-_client_configured_libs: "weakref.WeakValueDictionary[int, ctypes.CDLL]" = (
+_client_configured_libs: weakref.WeakValueDictionary[int, ctypes.CDLL] = (
     weakref.WeakValueDictionary()
 )
 

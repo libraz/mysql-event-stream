@@ -373,6 +373,7 @@ void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
 }
 
 void EngineWrap::Destroy(const Napi::CallbackInfo& info) {
+  (void)info;
   if (engine_) {
     mes_destroy(engine_);
     engine_ = nullptr;
