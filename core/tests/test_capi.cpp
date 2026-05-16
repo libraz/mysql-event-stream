@@ -582,9 +582,8 @@ TEST(CApi, FeedReturnsDecodeErrorForTruncatedRowEvent) {
 
   EXPECT_EQ(mes_reset(engine), MES_OK);
 
-  auto valid_wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
-                 BuildWriteRowsBody(1, 99));
+  auto valid_wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                   300, BuildWriteRowsBody(1, 99));
   stream.clear();
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
   stream.insert(stream.end(), valid_wr_event.begin(), valid_wr_event.end());
