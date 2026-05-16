@@ -10,6 +10,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-05-17
+
+### Fixed
+
+- **Auth (OpenSSL EVP migration)** — `core/src/protocol/mysql_auth.cpp` migrated from deprecated `SHA1()` / `SHA256()` one-shot APIs and `SHA_CTX` / `SHA256_CTX` low-level structs to `EVP_MD_CTX` via a new `ComputeDigest()` helper; `SecureCleanse` RAII now wipes all intermediate hash buffers including the previously unprotected scramble and `hash3` outputs
+- **Row decoder column count validation** — `core/src/row_decoder.cpp` `ParseRowsContext()` now validates that the `ROWS_EVENT` column_count matches `TABLE_MAP` metadata and rejects mismatched events with `MES_ERR_DECODE_ROW` instead of silently decoding garbage
+- **CdcEngine error propagation** — `IsError()` now returns true when `last_error_ != MES_OK` even if the parser state machine has not transitioned to `kError`; `Feed()` short-circuits to `0` on entry when in an error state and breaks mid-stream after a row-decode failure; `ErrorCode()` precedence cleaned up
+- **Python binding input validation** — `set_max_queue_size()` raises `ValueError` for negative values before crossing the FFI boundary
+- **Python annotation** — `_client_configured_libs` type annotation no longer string-quoted (`WeakValueDictionary[int, ctypes.CDLL]`) so it is valid under Python 3.11+ without `from __future__ import annotations`
+- **Node addon warnings** — `(void)info;` casts added to `Stop()` / `Disconnect()` / `Destroy()` N-API callbacks to silence unused-parameter warnings under `-Wall -Werror`
+
+### Added
+
+- **`make test-tsan` target** — `Makefile` now exposes a Debug+ThreadSanitizer build that runs all non-E2E C++ tests under TSan
+- **Thread safety documentation** — All five READMEs (`README.md`, `README_ja.md`, `bindings/node/README.md`, `bindings/node/README.npm.md`, `bindings/python/README.md`) document single-owner semantics for `CdcEngine` and the any-thread `stop()` cancellation path for `BinlogClient` / `CdcStream`
+
+### Testing
+
+- `TruncatedRowEventSetsDecodeError` (C++) and `FeedReturnsDecodeErrorForTruncatedRowEvent` (C API) cover the truncated-row error path and post-`Reset()` recovery
+- `RejectsColumnCountMismatch` unit test for the new column-count validation in `row_decoder`
+- `test_negative_max_queue_size_rejected` in the Python binding tests
+- `test_e2e_main.cpp` with `E2eEnvironment::IsE2eServerAvailable()` probe emits `GTEST_SKIP` when the test database is not reachable, preventing false failures in offline CI environments
+
+### Changed
+
+- **CMake test boilerplate** — Introduced `mes_add_gtest()` and `mes_add_e2e_gtest()` helpers in `core/tests/CMakeLists.txt` and `core/tests/e2e/CMakeLists.txt`, replacing 17 copies of the same 4-line `add_executable`/`target_link_libraries`/`gtest_discover_tests` boilerplate (~118 → ~68 lines combined). E2E tests now link `GTest::gtest` and share `test_e2e_main.cpp`; all `gtest_discover_tests()` calls get `DISCOVERY_TIMEOUT 30`
+
+### Notes
+
+- No public API or wire-format changes versus v1.3.1
+- All four matrix targets (MySQL 8.4, MySQL 9.1, MariaDB 10.11, MariaDB 11.4) pass C++ and Node.js E2E
+
+**Detailed Release Notes**: [docs/releases/v1.3.2.md](docs/releases/v1.3.2.md)
+
 ## [1.3.1] - 2026-04-15
 
 ### Fixed
@@ -99,7 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/libraz/mysql-event-stream/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/libraz/mysql-event-stream/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/libraz/mysql-event-stream/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/libraz/mysql-event-stream/compare/v1.1.0...v1.2.0
