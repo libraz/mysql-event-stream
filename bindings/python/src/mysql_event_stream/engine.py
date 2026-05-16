@@ -190,6 +190,8 @@ class CdcEngine:
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
+        if max_size < 0:
+            raise ValueError(f"max_size must be non-negative, got {max_size}")
         rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
         if rc != MES_OK:
             raise RuntimeError(f"mes_set_max_queue_size failed with error code {rc}")

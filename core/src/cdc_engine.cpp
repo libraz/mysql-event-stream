@@ -19,6 +19,10 @@ static void AttachColumnNames(RowData& row, const TableMetadata& meta) {
 }
 
 size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
+  if (IsError()) {
+    return 0;
+  }
+
   size_t total_consumed = 0;
 
   while (total_consumed < len) {
@@ -46,6 +50,9 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
       size_t body_len = 0;
       stream_parser_.CurrentBody(&body, &body_len);
       ProcessEvent(header, body, body_len);
+      if (IsError()) {
+        break;
+      }
       stream_parser_.Advance();
     }
   }
@@ -86,17 +93,18 @@ void CdcEngine::Reset() {
 
 size_t CdcEngine::PendingEventCount() const { return event_queue_.size(); }
 
-bool CdcEngine::IsError() const { return stream_parser_.GetState() == ParserState::kError; }
+bool CdcEngine::IsError() const {
+  return last_error_ != MES_OK || stream_parser_.GetState() == ParserState::kError;
+}
 
 mes_error_t CdcEngine::ErrorCode() const {
+  if (last_error_ != MES_OK) {
+    return last_error_;
+  }
   if (stream_parser_.GetState() != ParserState::kError) {
     return MES_OK;
   }
-  // ProcessRowEvent refines last_error_ to a decode-specific code when it
-  // can; otherwise the parser entered kError on its own and we report the
-  // generic parse error. MES_OK is never surfaced from this branch because
-  // the outer state check above already filtered non-error states.
-  return last_error_ != MES_OK ? last_error_ : MES_ERR_PARSE;
+  return MES_ERR_PARSE;
 }
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {

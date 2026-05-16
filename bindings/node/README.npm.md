@@ -79,6 +79,17 @@ engine.setIncludeDatabases(["mydb"]);
 engine.setExcludeTables(["mydb.audit_log"]);
 ```
 
+## Thread Safety
+
+`CdcEngine` instances are single-owner objects. Do not call `feed()`,
+`nextEvent()`, `reset()`, or filter/configuration methods concurrently on the
+same engine instance. Use one engine per worker/task or serialize access
+externally.
+
+`BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
+connection lifecycle calls are single-owner operations; `stop()` is the intended
+any-thread cancellation path and may be used to unblock a pending poll/iterator.
+
 ## Event Format
 
 ```json

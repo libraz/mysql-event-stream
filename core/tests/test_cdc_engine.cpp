@@ -235,6 +235,34 @@ TEST(CdcEngineTest, RowEventWithoutTableMap) {
   EXPECT_FALSE(engine.HasEvents());
 }
 
+TEST(CdcEngineTest, TruncatedRowEventSetsDecodeError) {
+  CdcEngine engine;
+
+  auto table_map_body = BuildTableMapBody(1, "db", "t");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+
+  auto write_body = BuildWriteRowsBody(1, 42);
+  write_body.pop_back();
+  auto write_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
+  stream.insert(stream.end(), write_event.begin(), write_event.end());
+
+  size_t consumed = engine.Feed(stream.data(), stream.size());
+  EXPECT_EQ(consumed, stream.size());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_EQ(engine.Feed(stream.data(), stream.size()), 0u);
+
+  engine.Reset();
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_OK);
+}
+
 TEST(CdcEngineTest, BackpressureStopsFeedingWhenQueueFull) {
   CdcEngine engine;
   engine.SetMaxQueueSize(2);

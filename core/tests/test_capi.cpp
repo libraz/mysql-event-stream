@@ -559,6 +559,46 @@ TEST(CApi, ResetAfterErrorRecovers) {
   mes_destroy(engine);
 }
 
+TEST(CApi, FeedReturnsDecodeErrorForTruncatedRowEvent) {
+  auto* engine = mes_create();
+
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+
+  auto wr_body = BuildWriteRowsBody(1, 42);
+  wr_body.pop_back();
+  auto wr_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed = 123;
+  EXPECT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_ERR_DECODE_ROW);
+  EXPECT_EQ(consumed, 0u);
+  EXPECT_EQ(mes_has_events(engine), 0);
+
+  EXPECT_EQ(mes_reset(engine), MES_OK);
+
+  auto valid_wr_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                 BuildWriteRowsBody(1, 99));
+  stream.clear();
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), valid_wr_event.begin(), valid_wr_event.end());
+
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->after_columns[0].int_val, 99);
+
+  mes_destroy(engine);
+}
+
 // ---- mes_set_max_queue_size backpressure ----
 
 TEST(CApi, SetMaxQueueSizeBackpressure) {

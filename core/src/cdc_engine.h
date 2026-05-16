@@ -83,7 +83,7 @@ class CdcEngine {
    */
   void SetMaxQueueSize(size_t max_size);
 
-  /** @brief Check if the engine is in an error state (e.g., parse error). */
+  /** @brief Check if the engine is in an error state (e.g., parse/decode error). */
   bool IsError() const;
 
   /**
@@ -143,9 +143,8 @@ class CdcEngine {
   std::vector<RowData> row_buf_;
   std::vector<UpdatePair> update_buf_;
 
-  // Last specific error code, set alongside ParserState::kError transitions
-  // inside ProcessRowEvent / stream_parser_. MES_OK until an error is
-  // observed.
+  // Last specific error code set by engine-level processing, such as row
+  // decode failures. Parser-only failures are represented by stream_parser_.
   mes_error_t last_error_ = MES_OK;
 
   bool IsTableAllowed(const std::string& database, const std::string& table) const;

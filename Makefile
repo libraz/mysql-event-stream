@@ -1,7 +1,7 @@
 # mysql-event-stream Makefile
 # Convenience wrapper for CMake + Node.js + Python build systems
 
-.PHONY: help build test clean rebuild install uninstall format format-check \
+.PHONY: help build test test-tsan clean rebuild install uninstall format format-check \
         node-build node-test node-check node-fix \
         py-test py-lint py-format py-typecheck \
         e2e e2e-cpp build-wheel configure lint
@@ -22,6 +22,7 @@ help:
 	@echo "C++ core:"
 	@echo "  make build          - Build C++ core (default)"
 	@echo "  make test           - Run C++ unit tests"
+	@echo "  make test-tsan      - Run non-E2E C++ tests under ThreadSanitizer"
 	@echo "  make clean          - Clean build directory"
 	@echo "  make rebuild        - Clean and rebuild"
 	@echo "  make install        - Install library"
@@ -62,6 +63,11 @@ build: configure
 
 test: build
 	ctest --test-dir $(BUILD_DIR) --output-on-failure --parallel
+
+test-tsan:
+	cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DMES_ENABLE_TSAN=ON $(CMAKE_OPTIONS)
+	cmake --build build-tsan --parallel
+	ctest --test-dir build-tsan --output-on-failure --parallel -E "E2E"
 
 clean:
 	rm -rf $(BUILD_DIR)

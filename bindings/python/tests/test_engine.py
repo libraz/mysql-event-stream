@@ -50,6 +50,12 @@ class TestFeed:
         with CdcEngine(lib_path=lib_path) as engine:
             assert engine.next_event() is None
 
+    def test_negative_max_queue_size_rejected(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine, pytest.raises(
+            ValueError, match="non-negative"
+        ):
+            engine.set_max_queue_size(-1)
+
 
 class TestInsertEvent:
     def test_insert(self, lib_path: str) -> None:

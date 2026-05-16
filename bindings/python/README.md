@@ -77,6 +77,18 @@ ChangeEvent(
 )
 ```
 
+## Thread Safety
+
+`CdcEngine` instances are single-owner objects. Do not call `feed()`,
+`next_event()`, `reset()`, or filter/configuration methods concurrently on the
+same engine instance. Use one engine per thread/task or serialize access
+externally.
+
+`CdcStream` uses an internal reader thread through the native binlog client.
+Iteration and connection lifecycle operations should be owned by one task.
+Cancellation should go through the stream/client stop path instead of calling
+other lifecycle methods concurrently.
+
 ## Features
 
 - **Native performance** — C++ core with ctypes FFI, >100k events/sec
