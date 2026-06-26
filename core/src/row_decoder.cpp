@@ -273,16 +273,22 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
     case ColumnType::kFloat: {
       if (len < 4) return ColumnValue::Null(type);
       *bytes_consumed = 4;
+      // MySQL stores FLOAT little-endian. Assemble the bit pattern via a
+      // byte-order-independent read, then reinterpret it as a host float so
+      // decoding is correct on big-endian builds as well.
+      uint32_t bits = binary::ReadU32Le(data);
       float fval = 0.0f;
-      std::memcpy(&fval, data, 4);
+      std::memcpy(&fval, &bits, 4);
       return ColumnValue::Float(static_cast<double>(fval));
     }
 
     case ColumnType::kDouble: {
       if (len < 8) return ColumnValue::Null(type);
       *bytes_consumed = 8;
+      // MySQL stores DOUBLE little-endian; see kFloat for the rationale.
+      uint64_t bits = binary::ReadU64Le(data);
       double dval = 0.0;
-      std::memcpy(&dval, data, 8);
+      std::memcpy(&dval, &bits, 8);
       return ColumnValue::Double(dval);
     }
 
@@ -472,15 +478,51 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       if (len < total) return ColumnValue::Null(type);
       *bytes_consumed = total;
 
-      // 5 bytes big-endian
-      int64_t packed = static_cast<int64_t>(ReadBigEndian(data, 5));
+      // MySQL stores DATETIME2 as a 5-byte integer part (offset by
+      // 0x8000000000) plus a fractional part. Like TIME2, negative values are
+      // stored in complement form, so the fraction cannot be decoded
+      // independently of the sign — reconstruct the combined packed value
+      // exactly as my_datetime_packed_from_binary does, then split sign and
+      // magnitude. Legitimate MySQL datetimes (year >= 1) are always positive;
+      // this matters for the sub-epoch values a malicious server could emit.
       static constexpr int64_t kDatetime2IntOfs = 0x8000000000LL;
-      int64_t intpart = packed - kDatetime2IntOfs;
-      bool negative = intpart < 0;
-      if (negative) intpart = -intpart;
+      int64_t intpart = static_cast<int64_t>(ReadBigEndian(data, 5)) - kDatetime2IntOfs;
 
-      int64_t ymd = intpart >> 17;
-      int64_t hms = intpart & 0x1FFFF;
+      int64_t usec = 0;
+      if (frac_bytes > 0) {
+        int64_t frac = static_cast<int64_t>(ReadBigEndian(data + 5, frac_bytes));
+        int64_t complement = 0;
+        int64_t multiplier = 1;
+        switch (frac_bytes) {
+          case 1:  // fsp 1,2: stored in 1/100s
+            complement = 0x100;
+            multiplier = 10000;
+            break;
+          case 2:  // fsp 3,4: stored in 1/10000s
+            complement = 0x10000;
+            multiplier = 100;
+            break;
+          default:  // fsp 5,6: stored in microseconds (3 bytes)
+            complement = 0x1000000;
+            multiplier = 1;
+            break;
+        }
+        if (intpart < 0 && frac > 0) {
+          // Reverse the complement encoding used for negative fractions.
+          ++intpart;
+          frac -= complement;
+        }
+        usec = frac * multiplier;
+      }
+
+      int64_t packed = (intpart << 24) + usec;
+      bool negative = packed < 0;
+      if (negative) packed = -packed;
+
+      int64_t datetime = packed >> 24;
+      int micros = static_cast<int>(packed & 0xFFFFFF);
+      int64_t ymd = datetime >> 17;
+      int64_t hms = datetime & 0x1FFFF;
       int64_t ym = ymd >> 5;
       int day = static_cast<int>(ymd & 0x1F);
       int month = static_cast<int>(ym % 13);
@@ -496,10 +538,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
                     minute, second);
       result += buf;
 
-      if (meta > 0 && frac_bytes > 0) {
-        int frac = static_cast<int>(ReadBigEndian(data + 5, frac_bytes));
-        int usec = FracToMicroseconds(frac, meta);
-        AppendFractional(result, usec);
+      if (frac_bytes > 0) {
+        AppendFractional(result, micros);
       }
 
       return ColumnValue::String(type, result);

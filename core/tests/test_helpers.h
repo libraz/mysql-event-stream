@@ -277,6 +277,34 @@ inline void WriteDatetime2(Writer& w, int year, int month, int day, int hour, in
   w.WriteU8(static_cast<uint8_t>(packed & 0xFF));
 }
 
+/// @brief Pack a signed DATETIME2 value (integer + fractional part).
+///
+/// Mirrors MySQL's my_datetime_packed_to_binary: the signed packed value is
+/// `(datetime_intpart << 24) + microseconds`, where a negative datetime
+/// negates the whole quantity. The integer part is stored as 5 bytes
+/// big-endian (offset 0x8000000000) and the fraction as a signed big-endian
+/// value sized by fsp. Used to exercise the negative-value complement path.
+template <typename Writer>
+inline void WriteDatetime2Packed(Writer& w, int64_t signed_packed, int fsp) {
+  int64_t intpart = signed_packed >> 24;  // arithmetic shift (floors)
+  int frac = static_cast<int>(signed_packed - (intpart << 24));
+  int64_t stored = intpart + 0x8000000000LL;
+  for (int i = 4; i >= 0; --i) {
+    w.WriteU8(static_cast<uint8_t>((stored >> (i * 8)) & 0xFF));
+  }
+  if (fsp >= 1 && fsp <= 2) {
+    w.WriteU8(static_cast<uint8_t>(frac / 10000));
+  } else if (fsp >= 3 && fsp <= 4) {
+    int16_t two = static_cast<int16_t>(frac / 100);
+    w.WriteU8(static_cast<uint8_t>((two >> 8) & 0xFF));
+    w.WriteU8(static_cast<uint8_t>(two & 0xFF));
+  } else if (fsp >= 5 && fsp <= 6) {
+    w.WriteU8(static_cast<uint8_t>((frac >> 16) & 0xFF));
+    w.WriteU8(static_cast<uint8_t>((frac >> 8) & 0xFF));
+    w.WriteU8(static_cast<uint8_t>(frac & 0xFF));
+  }
+}
+
 }  // namespace test
 }  // namespace mes
 

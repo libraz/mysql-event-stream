@@ -278,6 +278,27 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac6) {
   EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.123456");
 }
 
+TEST(DecodeColumnValueTest, Datetime2NegativeWithFrac) {
+  // Negative DATETIME2 values store the fraction in complement form, so the
+  // decoder must reconstruct the combined signed packed value rather than
+  // decode the fraction independently. Build the signed packed value MySQL
+  // would emit for the magnitude 2024-03-15 10:30:45.500000 negated, then
+  // assert it round-trips to "-2024-03-15 10:30:45.500000".
+  const int64_t ym = 2024 * 13 + 3;
+  const int64_t ymd = (ym << 5) | 15;
+  const int64_t hms = (static_cast<int64_t>(10) << 12) | (30 << 6) | 45;
+  const int64_t magnitude_intpart = (ymd << 17) | hms;
+  const int64_t magnitude_packed = (magnitude_intpart << 24) + 500000;
+
+  BinaryWriter w;
+  test::WriteDatetime2Packed(w, -magnitude_packed, 6);
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kDatetime2, 6, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 8u);
+  EXPECT_EQ(result.string_val, "-2024-03-15 10:30:45.500000");
+}
+
 TEST(DecodeColumnValueTest, Timestamp2NoFrac) {
   // Unix timestamp 1710502245 (2024-03-15 10:30:45 UTC)
   BinaryWriter w;
