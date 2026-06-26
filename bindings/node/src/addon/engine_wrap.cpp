@@ -9,6 +9,7 @@
 
 #include "addon_constants.h"
 #include "config_parser.h"
+#include "mes_error_util.h"
 
 static const char* const kEventTypeNames[] = {"INSERT", "UPDATE", "DELETE"};
 
@@ -134,7 +135,12 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   size_t consumed = 0;
   mes_error_t err = mes_feed(engine_, data, len, &consumed);
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_feed failed: ") + MesErrorString(err))
+    // After a feed error the engine parse state is undefined; reset() is the
+    // only valid next operation. Re-feeding without reset duplicates events.
+    mes_node::MakeMesError(env,
+                           std::string("mes_feed failed: ") + MesErrorString(err) +
+                               " (call reset() before feeding again)",
+                           err)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -157,7 +163,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
     return env.Null();
   }
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_next_event failed: ") + MesErrorString(err))
+    mes_node::MakeMesError(env, std::string("mes_next_event failed: ") + MesErrorString(err), err)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -206,6 +212,10 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   }
   obj.Set("position", pos);
 
+  // namesResolved: false when column names could not be resolved for this
+  // event's table, so all column keys fall back to numeric indices.
+  obj.Set("namesResolved", Napi::Boolean::New(env, event->names_resolved != 0));
+
   return obj;
 }
 
@@ -232,7 +242,7 @@ Napi::Value EngineWrap::GetPosition(const Napi::CallbackInfo& info) {
   uint64_t offset = 0;
   mes_error_t err = mes_get_position(engine_, &file, &offset);
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_get_position failed: ") + MesErrorString(err))
+    mes_node::MakeMesError(env, std::string("mes_get_position failed: ") + MesErrorString(err), err)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -257,7 +267,7 @@ void EngineWrap::Reset(const Napi::CallbackInfo& info) {
 
   mes_error_t err = mes_reset(engine_);
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_reset failed: ") + MesErrorString(err))
+    mes_node::MakeMesError(env, std::string("mes_reset failed: ") + MesErrorString(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -282,7 +292,8 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   }
   mes_error_t err = mes_set_max_queue_size(engine_, static_cast<size_t>(max_size));
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_set_max_queue_size failed: ") + MesErrorString(err))
+    mes_node::MakeMesError(
+        env, std::string("mes_set_max_queue_size failed: ") + MesErrorString(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -306,7 +317,8 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
   }
   mes_error_t err = mes_set_max_event_size(engine_, static_cast<uint32_t>(raw));
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string("mes_set_max_event_size failed: ") + MesErrorString(err))
+    mes_node::MakeMesError(
+        env, std::string("mes_set_max_event_size failed: ") + MesErrorString(err), err)
         .ThrowAsJavaScriptException();
   }
 }

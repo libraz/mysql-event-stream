@@ -1,8 +1,47 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CdcStream } from "../src/stream.js";
+import { MesErrorCode } from "../src/types.js";
+
+// Shared spies for the reconnect tests below. Hoisted so the vi.mock factories
+// (which are themselves hoisted above imports) can reference them.
+const mocks = vi.hoisted(() => ({
+  clientCtor: vi.fn(),
+  startImpl: vi.fn(),
+}));
+
+vi.mock("../src/client.js", () => ({
+  BinlogClient: class {
+    constructor(config: unknown) {
+      mocks.clientCtor(config);
+    }
+    start(): void {
+      mocks.startImpl();
+    }
+    get currentGtid(): string {
+      return "";
+    }
+    stop(): void {}
+    disconnect(): void {}
+    destroy(): void {}
+  },
+}));
+
+vi.mock("../src/engine.js", () => ({
+  CdcEngine: class {
+    enableMetadata(): void {}
+    feed(): number {
+      return 0;
+    }
+    nextEvent(): null {
+      return null;
+    }
+    reset(): void {}
+    destroy(): void {}
+  },
+}));
 
 describe("CdcStream", () => {
   it("should create with config", () => {
@@ -40,5 +79,63 @@ describe("CdcStream", () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     expect(stream[Symbol.asyncDispose]).toBeDefined();
     expect(typeof stream[Symbol.asyncDispose]).toBe("function");
+  });
+
+  describe("reconnect policy", () => {
+    it("fails fast on an auth error without retrying", async () => {
+      mocks.clientCtor.mockClear();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {
+        const err: Error & { code?: number } = new Error("auth failed");
+        err.code = MesErrorCode.Auth;
+        throw err;
+      });
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        user: "root",
+        maxReconnectAttempts: 10,
+      });
+
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("auth failed");
+
+      // A non-retryable error must surface after the first attempt only.
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
+      expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+      await stream.close();
+    });
+
+    it("retries a transient (non-auth) error", async () => {
+      mocks.clientCtor.mockClear();
+      mocks.startImpl.mockReset();
+      let attempts = 0;
+      mocks.startImpl.mockImplementation(() => {
+        attempts++;
+        const err: Error & { code?: number } = new Error("stream error");
+        err.code = MesErrorCode.Stream;
+        // Throw twice (one retry), then give up after maxReconnectAttempts.
+        throw err;
+      });
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        user: "root",
+        maxReconnectAttempts: 1,
+      });
+
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("stream error");
+
+      // With one allowed retry, start() runs the initial attempt plus one retry.
+      expect(attempts).toBe(2);
+      await stream.close();
+    });
   });
 });

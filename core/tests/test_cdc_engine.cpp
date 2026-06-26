@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cdc_engine.h"
+#include "client/metadata_fetcher.h"
 #include "event_header.h"
 #include "test_helpers.h"
 
@@ -75,6 +76,44 @@ TEST(CdcEngineDdlTest, DetectsDdlStatements) {
 
   auto with_status = BuildQueryEventBody("testdb", "DROP TABLE t", /*status_vars_len=*/7);
   EXPECT_TRUE(IsDdlQueryEvent(with_status.data(), with_status.size()));
+}
+
+// --- M-8: names_resolved surfaces metadata-fetch failures ---
+
+TEST(CdcEngineNamesResolvedTest, TrueInStandaloneMode) {
+  // No metadata fetcher attached: name resolution is not attempted, so the
+  // event reports names_resolved == true (column names are simply absent).
+  CdcEngine engine;
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 1));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_TRUE(event.names_resolved);
+}
+
+TEST(CdcEngineNamesResolvedTest, FalseWhenFetcherCannotResolve) {
+  // A metadata fetcher is attached but never connected, so FetchColumnInfo
+  // fails. The binlog carries no column names, so resolution is required and
+  // fails: the event must report names_resolved == false.
+  CdcEngine engine;
+  MetadataFetcher fetcher;  // intentionally not Connect()ed
+  engine.SetMetadataFetcher(&fetcher);
+
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 1));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_FALSE(event.names_resolved);
 }
 
 TEST(CdcEngineDdlTest, IgnoresNonDdlStatements) {

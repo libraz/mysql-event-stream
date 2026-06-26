@@ -206,6 +206,7 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
   ce.timestamp = engine->current_event.timestamp;
   ce.binlog_file = engine->current_event.position.binlog_file.c_str();
   ce.binlog_offset = engine->current_event.position.offset;
+  ce.names_resolved = engine->current_event.names_resolved ? 1 : 0;
 
   *event = &engine->c_event;
   return MES_OK;

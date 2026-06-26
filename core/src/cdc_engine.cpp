@@ -233,6 +233,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         if (needs_column_names) {
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
+          // FetchColumnInfo returns an empty vector on any failure (connection
+          // loss, lost SELECT privilege, column-count mismatch). Record that
+          // names could not be resolved so downstream events can surface the
+          // gap instead of silently shipping empty column names.
+          meta->names_resolved = infos.size() == meta->columns.size();
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
             meta->columns[i].name = infos[i].name;
             // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
@@ -334,6 +339,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.after, *meta);
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }
     } else {
@@ -353,6 +359,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.after, *meta);
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }
     } else {
@@ -371,6 +378,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.before, *meta);
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }
     } else {

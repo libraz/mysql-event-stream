@@ -4,6 +4,22 @@
 import { BinlogClient } from "./client.js";
 import { CdcEngine } from "./engine.js";
 import type { ChangeEvent, StreamConfig } from "./types.js";
+import { MesErrorCode } from "./types.js";
+
+/** Error codes that indicate a permanent failure where reconnecting is futile. */
+const NON_RETRYABLE_CODES: ReadonlySet<number> = new Set([
+  MesErrorCode.Auth,
+  MesErrorCode.Validation,
+]);
+
+/** Extract the numeric `code` an addon error carries, if any. */
+function errorCode(err: unknown): number | undefined {
+  if (err !== null && typeof err === "object" && "code" in err) {
+    const code = (err as { code: unknown }).code;
+    return typeof code === "number" ? code : undefined;
+  }
+  return undefined;
+}
 
 /** High-level CDC stream that implements AsyncIterable for easy consumption. */
 export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
@@ -96,6 +112,14 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         } catch (err) {
           if (this.closed) break;
           if (maxAttempts === 0) throw err;
+
+          // Permanent failures (bad credentials, server misconfiguration) will
+          // never succeed on retry. Fail fast instead of burning every
+          // reconnect attempt plus backoff before surfacing the error.
+          const code = errorCode(err);
+          if (code !== undefined && NON_RETRYABLE_CODES.has(code)) {
+            throw err;
+          }
 
           const gtid = this.client.currentGtid;
           this.cleanupClient();

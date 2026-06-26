@@ -78,6 +78,9 @@ class TestInsertEvent:
             assert len(event.after) == 1
             assert event.after["0"] == 42
             assert event.timestamp == 1000
+            # Standalone mode (no metadata connection): resolution is not
+            # attempted, so names_resolved is reported as True.
+            assert event.names_resolved is True
 
             assert engine.next_event() is None
 

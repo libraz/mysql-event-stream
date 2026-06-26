@@ -196,6 +196,11 @@ struct TableMetadata {
   /// metadata (authoritative). When false, signedness may be filled from a
   /// metadata side-connection as a fallback.
   bool signedness_from_binlog = false;
+  /// True when column names are known (either carried in the binlog or
+  /// resolved via the metadata side-connection). False when names were needed
+  /// but could not be resolved (e.g. the side-connection failed), in which
+  /// case emitted events carry empty column names.
+  bool names_resolved = true;
 };
 
 /**
@@ -209,6 +214,10 @@ struct ChangeEvent {
   RowData after;   ///< Populated for INSERT and UPDATE
   uint32_t timestamp = 0;
   BinlogPosition position;
+  /// False when column names could not be resolved for this row's table, so
+  /// column names in @ref before / @ref after are empty. See
+  /// TableMetadata::names_resolved.
+  bool names_resolved = true;
 };
 
 }  // namespace mes

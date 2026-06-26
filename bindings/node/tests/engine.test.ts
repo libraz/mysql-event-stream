@@ -59,6 +59,9 @@ describe("CdcEngine", () => {
     expect(event!.after).not.toBeNull();
     expect(event!.after!["0"]).toBe(42);
     expect(event!.timestamp).toBe(1000);
+    // Standalone mode (no metadata connection): name resolution is not
+    // attempted, so namesResolved is reported as true.
+    expect(event!.namesResolved).toBe(true);
   });
 
   it("should parse UPDATE event", async () => {

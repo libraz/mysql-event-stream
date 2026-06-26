@@ -24,24 +24,27 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
-from .types import BinlogPosition, ChangeEvent, ChecksumError, DecodeError, EventType, ParseError
+from .types import BinlogPosition, ChangeEvent, EventType, exception_for_rc
 
 
 def _raise_for_rc(rc: int, op: str) -> None:
     """Translate a C-ABI error code into the best-fitting Python exception.
 
-    Keeps backward compatibility: every exception raised here is still a
-    subclass of ``RuntimeError``, so code that catches ``RuntimeError``
-    continues to work.  Callers that want to distinguish categories can
-    catch ``ChecksumError`` / ``DecodeError`` / ``ParseError`` directly.
+    Delegates to :func:`exception_for_rc` so engine and client surfaces map
+    the same code to the same exception type. Every exception raised here is
+    still a subclass of ``RuntimeError`` for backward compatibility; callers
+    that want to distinguish categories can catch ``ChecksumError`` /
+    ``DecodeError`` / ``ParseError`` directly.
     """
     if rc == MES_ERR_CHECKSUM:
-        raise ChecksumError(f"{op} failed: checksum mismatch (code {rc})")
-    if rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
-        raise DecodeError(f"{op} failed: row decode error (code {rc})")
-    if rc == MES_ERR_PARSE:
-        raise ParseError(f"{op} failed: binlog parse error (code {rc})")
-    raise RuntimeError(f"{op} failed with error code {rc}")
+        message = f"{op} failed: checksum mismatch (code {rc})"
+    elif rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+        message = f"{op} failed: row decode error (code {rc})"
+    elif rc == MES_ERR_PARSE:
+        message = f"{op} failed: binlog parse error (code {rc})"
+    else:
+        message = f"{op} failed with error code {rc}"
+    raise exception_for_rc(rc, message)
 
 
 class CdcEngine:
@@ -97,6 +100,13 @@ class CdcEngine:
     def feed(self, data: bytes | bytearray) -> int:
         """Feed raw binlog bytes into the engine.
 
+        On a partial consume, re-feed from ``data[consumed:]`` (never from the
+        start) or already-queued events are delivered twice.
+
+        After this raises, the engine parse state is undefined: the only valid
+        next operation is :meth:`reset`. Re-feeding without a reset is
+        unsupported and may duplicate events or spin in a busy-loop.
+
         Args:
             data: Raw binlog byte stream.
 
@@ -104,7 +114,8 @@ class CdcEngine:
             Number of bytes consumed by the engine.
 
         Raises:
-            RuntimeError: If the engine is closed or feed fails.
+            RuntimeError: If the engine is closed or feed fails. Call
+                :meth:`reset` before feeding again.
         """
         self._check_open()
         if not data:
@@ -117,7 +128,7 @@ class CdcEngine:
         consumed = ctypes.c_size_t(0)
         rc = self._lib.mes_feed(self._handle, buf, len(data), ctypes.byref(consumed))
         if rc != MES_OK:
-            _raise_for_rc(rc, "mes_feed")
+            _raise_for_rc(rc, "mes_feed (call reset() before feeding again)")
         return consumed.value
 
     def next_event(self) -> ChangeEvent | None:
@@ -475,4 +486,5 @@ def _convert_event(raw: MESEvent) -> ChangeEvent | None:
         after=after,
         timestamp=raw.timestamp,
         position=BinlogPosition(file=binlog_file, offset=raw.binlog_offset),
+        names_resolved=bool(raw.names_resolved),
     )

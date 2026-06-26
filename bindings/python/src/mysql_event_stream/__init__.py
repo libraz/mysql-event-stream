@@ -2,6 +2,7 @@
 
 from .client import BinlogClient
 from .engine import CdcEngine
+from .logging import LogLevel, set_log_callback
 from .stream import CdcStream
 from .types import (
     BinlogPosition,
@@ -29,7 +30,9 @@ __all__ = [
     "ColumnValue",
     "DecodeError",
     "EventType",
+    "LogLevel",
     "ParseError",
     "PollResult",
     "SslMode",
+    "set_log_callback",
 ]

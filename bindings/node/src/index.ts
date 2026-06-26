@@ -1,6 +1,11 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
+export { BinlogClient } from "./client.js";
+export { CdcEngine } from "./engine.js";
+export type { LogHandler } from "./logging.js";
+export { LogLevel, setLogCallback } from "./logging.js";
+export { CdcStream } from "./stream.js";
 export type {
   ChangeEvent,
   ClientConfig,
@@ -8,7 +13,4 @@ export type {
   PollResult,
   StreamConfig,
 } from "./types.js";
-export { SslMode } from "./types.js";
-export { CdcEngine } from "./engine.js";
-export { BinlogClient } from "./client.js";
-export { CdcStream } from "./stream.js";
+export { MesErrorCode, SslMode } from "./types.js";

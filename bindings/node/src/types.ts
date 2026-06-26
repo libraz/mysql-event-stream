@@ -4,6 +4,33 @@
 /** CDC change event types. */
 export type EventType = "INSERT" | "UPDATE" | "DELETE";
 
+/**
+ * Numeric error codes mirroring the C ABI `mes_error_t`. Errors thrown by the
+ * native addon carry the matching value on their `code` property, so callers
+ * can branch on category (e.g. `err.code === MesErrorCode.Auth`) instead of
+ * matching message strings.
+ */
+export const MesErrorCode = {
+  Ok: 0,
+  NullArg: 1,
+  InvalidArg: 2,
+  Internal: 99,
+  Parse: 100,
+  Checksum: 101,
+  Decode: 200,
+  DecodeColumn: 201,
+  DecodeRow: 202,
+  NoEvent: 300,
+  QueueFull: 301,
+  Connect: 400,
+  Auth: 401,
+  Validation: 402,
+  Stream: 403,
+  Disconnected: 404,
+} as const;
+
+export type MesErrorCode = (typeof MesErrorCode)[keyof typeof MesErrorCode];
+
 /** SSL connection mode. */
 export const SslMode = {
   /** No SSL. */
@@ -47,6 +74,12 @@ export interface ChangeEvent {
     file: string;
     offset: number | bigint;
   };
+  /**
+   * False when column names could not be resolved for this event's table
+   * (e.g. the metadata side-connection failed), in which case column keys in
+   * `before`/`after` fall back to numeric string indices ("0", "1", ...).
+   */
+  namesResolved: boolean;
 }
 
 /** BinlogClient connection configuration. */

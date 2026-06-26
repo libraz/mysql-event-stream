@@ -12,9 +12,26 @@
 #include <string>
 #include <vector>
 
+#include "logger.h"
 #include "mariadb_gtid.h"
 
 namespace mes {
+
+namespace {
+
+/** @brief Detect a MySQL 8.4 tagged-GTID interval list ("tag:1-5").
+ *
+ * After the UUID's colon, a tagged GTID carries an alphabetic tag instead of a
+ * numeric interval. Plain intervals are digits, dashes, and colons only, so the
+ * presence of an ASCII letter marks the tagged form, which this encoder does
+ * not support.
+ */
+bool LooksLikeTaggedInterval(const std::string& intervals_str) {
+  return std::any_of(intervals_str.begin(), intervals_str.end(),
+                     [](char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'); });
+}
+
+}  // namespace
 
 mes_error_t GtidEncoder::Encode(const char* gtid_set, std::vector<uint8_t>* out) {
   if (out == nullptr) {
@@ -66,6 +83,14 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set, std::vector<uint8_t>* out)
     Sid sid;
     std::string uuid_str = sid_part.substr(0, colon_pos);
     std::string intervals_str = sid_part.substr(colon_pos + 1);
+
+    // MySQL 8.4 tagged GTIDs ("uuid:tag:1-5") are not supported by this
+    // encoder. Reject them explicitly with a clear diagnostic rather than
+    // failing with an opaque interval parse error.
+    if (LooksLikeTaggedInterval(intervals_str)) {
+      StructuredLog().Event("gtid_encode_tagged_unsupported").Field("sid", sid_part).Error();
+      return MES_ERR_INVALID_ARG;
+    }
 
     // Parse UUID
     mes_error_t err = ParseUuid(uuid_str.c_str(), sid.uuid.data());

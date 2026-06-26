@@ -370,12 +370,37 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
 
   SSL_set_fd(ssl_, fd_);
 
-  // For verify_identity mode, enable hostname checking.
-  if (ssl_mode >= 4 && hostname != nullptr && hostname[0] != '\0') {
+  // Classify the peer name so verify_identity can bind to the correct SAN
+  // entry and SNI is only sent for DNS names (RFC 6066 forbids IP-literal SNI).
+  const bool have_host = hostname != nullptr && hostname[0] != '\0';
+  bool host_is_ip = false;
+  if (have_host) {
+    unsigned char addr_buf[sizeof(struct in6_addr)];
+    host_is_ip =
+        inet_pton(AF_INET, hostname, addr_buf) == 1 || inet_pton(AF_INET6, hostname, addr_buf) == 1;
+  }
+
+  // For verify_identity mode, bind the certificate identity check.
+  if (ssl_mode >= 4) {
+    if (!have_host) {
+      // verify_identity cannot be satisfied without a name or address to
+      // match against the certificate; CA-only verification would silently
+      // accept any valid cert and defeat the requested guarantee.
+      StructuredLog().Event("ssl_verify_identity_no_host").Error();
+      SSL_free(ssl_);
+      ssl_ = nullptr;
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
     SSL_set_hostflags(ssl_, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-    if (SSL_set1_host(ssl_, hostname) != 1) {
+    // IP literals must match an iPAddress SAN, not a DNS name; SSL_set1_host
+    // only checks DNS/CN, so route address peers through the IP matcher.
+    const int verify_rc = host_is_ip ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl_), hostname)
+                                     : SSL_set1_host(ssl_, hostname);
+    if (verify_rc != 1) {
       StructuredLog()
-          .Event("ssl_set1_host_failed")
+          .Event(host_is_ip ? "ssl_set1_ip_failed" : "ssl_set1_host_failed")
           .Field("hostname", hostname)
           .Field("error", GetOpenSSLError())
           .Error();
@@ -388,8 +413,9 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
   }
 
   // Set SNI (Server Name Indication) extension so the server can select
-  // the correct certificate when hosting multiple virtual hosts.
-  if (hostname != nullptr && hostname[0] != '\0') {
+  // the correct certificate when hosting multiple virtual hosts. SNI carries
+  // DNS hostnames only; IP literals are excluded per RFC 6066.
+  if (have_host && !host_is_ip) {
     SSL_set_tlsext_host_name(ssl_, hostname);
   }
 

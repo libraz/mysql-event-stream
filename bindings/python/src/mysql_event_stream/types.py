@@ -96,6 +96,10 @@ class ChangeEvent:
     string indices ("0", "1", ...) are used as keys.
 
     Values are typed as: None, int, float, str, or bytes.
+
+    ``names_resolved`` is False when column names could not be resolved for
+    this event's table (e.g. the metadata side-connection failed). In that
+    case column keys fall back to string indices ("0", "1", ...).
     """
 
     type: EventType
@@ -105,6 +109,7 @@ class ChangeEvent:
     after: dict[str, Any] | None
     timestamp: int
     position: BinlogPosition
+    names_resolved: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,3 +178,38 @@ class DecodeError(RuntimeError):
 
 class ChecksumError(RuntimeError):
     """Raised when a CRC32 mismatch is detected on a binlog event."""
+
+
+def exception_for_rc(rc: int, message: str) -> RuntimeError:
+    """Map a C-ABI error code to the matching typed exception instance.
+
+    Shared by :class:`CdcEngine` and :class:`BinlogClient` so that the same
+    error code raises the same exception type regardless of which surface
+    produced it. All returned exceptions subclass ``RuntimeError`` for
+    backward compatibility.
+
+    Args:
+        rc: A ``MES_ERR_*`` error code.
+        message: Human-readable message for the exception.
+
+    Returns:
+        A ``ChecksumError`` / ``DecodeError`` / ``ParseError`` for those
+        categories, otherwise a plain ``RuntimeError``.
+    """
+    # Imported lazily to keep this module free of any native-library coupling
+    # at import time.
+    from ._ffi import (
+        MES_ERR_CHECKSUM,
+        MES_ERR_DECODE,
+        MES_ERR_DECODE_COLUMN,
+        MES_ERR_DECODE_ROW,
+        MES_ERR_PARSE,
+    )
+
+    if rc == MES_ERR_CHECKSUM:
+        return ChecksumError(message)
+    if rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+        return DecodeError(message)
+    if rc == MES_ERR_PARSE:
+        return ParseError(message)
+    return RuntimeError(message)

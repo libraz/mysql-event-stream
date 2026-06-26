@@ -26,7 +26,7 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
-from .types import ClientConfig, PollResult
+from .types import ClientConfig, PollResult, exception_for_rc
 
 _ERROR_MESSAGES = {
     MES_ERR_NULL_ARG: "Null argument",
@@ -222,7 +222,10 @@ class BinlogClient:
             if result.error != MES_OK:
                 error_msg = self._get_last_error()
                 base_msg = _ERROR_MESSAGES.get(result.error, f"Error code {result.error}")
-                raise RuntimeError(f"{base_msg}: {error_msg}")
+                # Map checksum/decode/parse codes to the same typed exceptions
+                # the CdcEngine raises, so consumers get consistent types
+                # regardless of which surface produced the error.
+                raise exception_for_rc(result.error, f"{base_msg}: {error_msg}")
 
             if result.is_heartbeat or result.size == 0:
                 return PollResult(data=None, is_heartbeat=bool(result.is_heartbeat))

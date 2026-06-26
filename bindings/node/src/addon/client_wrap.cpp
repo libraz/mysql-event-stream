@@ -9,6 +9,7 @@
 
 #include "addon_constants.h"
 #include "config_parser.h"
+#include "mes_error_util.h"
 
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
 class PollWorker : public Napi::AsyncWorker {
@@ -38,7 +39,8 @@ class PollWorker : public Napi::AsyncWorker {
     if (error_ != MES_OK) {
       const char* msg = mes_client_last_error(client_);
       std::string err_msg = msg ? msg : "poll failed";
-      deferred_.Reject(Napi::Error::New(env, "mes_client_poll failed: " + err_msg).Value());
+      deferred_.Reject(
+          mes_node::MakeMesError(env, "mes_client_poll failed: " + err_msg, error_).Value());
     } else {
       Napi::Object result = Napi::Object::New(env);
 
@@ -156,7 +158,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     // or ssl_mode) are forwarded. Safe to surface directly.
     const char* msg = mes_client_last_error(client_);
     std::string err_msg = msg ? msg : "connection failed";
-    Napi::Error::New(env, "mes_client_connect failed: " + err_msg).ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "mes_client_connect failed: " + err_msg, err)
+        .ThrowAsJavaScriptException();
   }
 }
 
@@ -172,7 +175,8 @@ void ClientWrap::Start(const Napi::CallbackInfo& info) {
   if (err != MES_OK) {
     const char* msg = mes_client_last_error(client_);
     std::string err_msg = msg ? msg : "start failed";
-    Napi::Error::New(env, "mes_client_start failed: " + err_msg).ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "mes_client_start failed: " + err_msg, err)
+        .ThrowAsJavaScriptException();
   }
 }
 

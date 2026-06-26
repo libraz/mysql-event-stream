@@ -138,6 +138,14 @@ typedef struct {
   uint32_t timestamp;
   const char* binlog_file;
   uint64_t binlog_offset;
+  /** @brief 1 if column names were resolved for this event's table, 0 if not.
+   *
+   * When 0, column resolution was required but failed (e.g. the metadata
+   * side-connection dropped or lost SELECT privilege), so every col_name in
+   * before_columns / after_columns is the empty string. This lets a consumer
+   * distinguish "no names available" from a genuine fetch failure rather than
+   * silently receiving unnamed columns. */
+  int names_resolved;
 } mes_event_t;
 
 /* ---- Engine lifecycle ---- */
@@ -159,6 +167,18 @@ MES_API void mes_destroy(mes_engine_t* engine);
 
 /**
  * @brief Feed raw binlog bytes into the engine.
+ *
+ * On a partial success, @p consumed reflects the bytes accepted before the
+ * stop; events already parsed from those bytes remain queued and retrievable
+ * via mes_next_event(). Always re-feed from data + @p consumed, never from
+ * offset 0, or already-queued change events will be delivered a second time.
+ *
+ * @warning Error-recovery contract: if this returns a non-OK code, the engine
+ * is in an undefined parse state. The ONLY valid next operation is mes_reset()
+ * (after which feeding may resume from a known binlog position). Re-feeding the
+ * same or subsequent bytes without a reset is unsupported: it may duplicate
+ * events, or — if no bytes are consumed and the call is retried in a loop —
+ * spin in a zero-progress busy-loop. Do not retry mes_feed() on error.
  *
  * @param engine  Engine handle.
  * @param data    Pointer to binlog byte stream.
@@ -211,6 +231,14 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * When the queue reaches this limit, mes_feed() will stop consuming
  * bytes early. The caller should drain events via mes_next_event()
  * then re-feed the remaining data.
+ *
+ * @warning The default is 0 (unlimited). With the default, feeding a large
+ * binlog faster than mes_next_event() drains it lets the internal queue grow
+ * without bound, which can exhaust memory. For streaming workloads with a
+ * slow or bursty consumer, set a non-zero cap (e.g. 10000, matching the
+ * BinlogClient default) and use the feed/drain/re-feed loop above. Because the
+ * cap is rechecked per binlog event (not per row), a single multi-row event
+ * may push the queue slightly past it.
  *
  * @param engine Engine handle.
  * @param max_size Maximum queue size. 0 means unlimited (default).

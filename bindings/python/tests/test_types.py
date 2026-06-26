@@ -1,6 +1,20 @@
 """Tests for mysql-event-stream type definitions."""
 
 from mysql_event_stream import BinlogPosition, ChangeEvent, ColumnType, ColumnValue, EventType
+from mysql_event_stream._ffi import (
+    MES_ERR_CHECKSUM,
+    MES_ERR_CONNECT,
+    MES_ERR_DECODE,
+    MES_ERR_DECODE_COLUMN,
+    MES_ERR_DECODE_ROW,
+    MES_ERR_PARSE,
+)
+from mysql_event_stream.types import (
+    ChecksumError,
+    DecodeError,
+    ParseError,
+    exception_for_rc,
+)
 
 
 class TestColumnValue:
@@ -65,6 +79,53 @@ class TestChangeEvent:
         assert event.after is not None
         assert len(event.after) == 1
         assert event.after["id"] == 1
+
+    def test_names_resolved_defaults_true(self) -> None:
+        event = ChangeEvent(
+            type=EventType.INSERT,
+            database="db",
+            table="t",
+            before=None,
+            after={"id": 1},
+            timestamp=1,
+            position=BinlogPosition(),
+        )
+        assert event.names_resolved is True
+
+    def test_names_resolved_settable(self) -> None:
+        event = ChangeEvent(
+            type=EventType.INSERT,
+            database="db",
+            table="t",
+            before=None,
+            after={"0": 1},
+            timestamp=1,
+            position=BinlogPosition(),
+            names_resolved=False,
+        )
+        assert event.names_resolved is False
+
+
+class TestExceptionForRc:
+    def test_checksum(self) -> None:
+        exc = exception_for_rc(MES_ERR_CHECKSUM, "boom")
+        assert isinstance(exc, ChecksumError)
+        assert str(exc) == "boom"
+
+    def test_decode_variants(self) -> None:
+        for code in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+            assert isinstance(exception_for_rc(code, "x"), DecodeError)
+
+    def test_parse(self) -> None:
+        assert isinstance(exception_for_rc(MES_ERR_PARSE, "x"), ParseError)
+
+    def test_other_falls_back_to_runtime_error(self) -> None:
+        exc = exception_for_rc(MES_ERR_CONNECT, "x")
+        assert type(exc) is RuntimeError
+
+    def test_all_subclass_runtime_error(self) -> None:
+        for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
+            assert isinstance(exception_for_rc(code, "x"), RuntimeError)
 
 
 class TestBinlogPosition:

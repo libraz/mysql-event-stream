@@ -50,6 +50,7 @@ set(ADDON_SOURCES
   src/addon/addon.cpp
   src/addon/engine_wrap.cpp
   src/addon/client_wrap.cpp
+  src/addon/log_callback.cpp
 )
 
 # OpenSSL (required for protocol layer)

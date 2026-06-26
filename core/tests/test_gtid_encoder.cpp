@@ -223,6 +223,28 @@ TEST(GtidEncoderTest, ErrorOverflowRangeEnd) {
             MES_ERR_INVALID_ARG);
 }
 
+// --- Error: tagged GTID (MySQL 8.4 uuid:tag:N) is rejected explicitly ---
+
+TEST(GtidEncoderTest, ErrorTaggedGtidRejected) {
+  std::vector<uint8_t> out;
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:mytag:1-5", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidEncoderTest, ErrorTaggedGtidSingleTransaction) {
+  std::vector<uint8_t> out;
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:tag:7", &out),
+            MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidEncoderTest, ErrorTaggedGtidAmongMultiUuid) {
+  std::vector<uint8_t> out;
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3,"
+                                "00000000-0000-0000-0000-000000000002:analytics:1-9",
+                                &out),
+            MES_ERR_INVALID_ARG);
+}
+
 // --- Error: null output pointer ---
 
 TEST(GtidEncoderTest, ErrorNullOutput) {

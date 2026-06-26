@@ -36,7 +36,12 @@ bool EqualsIgnoreCase(const char* a, const char* b) {
  */
 bool IsAllowedVariableName(const char* var_name) {
   static constexpr const char* kAllowed[] = {
-      "log_bin", "gtid_mode", "binlog_format", "binlog_row_image", "binlog_transaction_compression",
+      "log_bin",
+      "gtid_mode",
+      "binlog_format",
+      "binlog_row_image",
+      "binlog_transaction_compression",
+      "binlog_row_value_options",
   };
   if (var_name == nullptr) return false;
   for (const char* allowed : kAllowed) {
@@ -116,6 +121,16 @@ ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
   // (MariaDB doesn't have this variable)
   if (flavor != ServerFlavor::kMariaDB) {
     CheckVariableNot(conn, "binlog_transaction_compression", "ON", &result);
+    if (result.error != MES_OK) {
+      return result;
+    }
+  }
+
+  // 6. binlog_row_value_options must NOT be PARTIAL_JSON (MySQL only).
+  // PARTIAL_JSON emits JSON column updates as partial diff payloads rather than
+  // full values, which the row decoder cannot interpret; reject it up front.
+  if (flavor != ServerFlavor::kMariaDB) {
+    CheckVariableNot(conn, "binlog_row_value_options", "PARTIAL_JSON", &result);
     if (result.error != MES_OK) {
       return result;
     }

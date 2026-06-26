@@ -41,6 +41,7 @@ class MESEvent(ctypes.Structure):
         ("timestamp", ctypes.c_uint32),
         ("binlog_file", ctypes.c_char_p),
         ("binlog_offset", ctypes.c_uint64),
+        ("names_resolved", ctypes.c_int32),
     ]
 
 
