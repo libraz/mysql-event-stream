@@ -134,7 +134,7 @@ void CdcEngine::Reset() {
   // Clear the queue
   std::queue<ChangeEvent> empty;
   event_queue_.swap(empty);
-  // NOTE(review): metadata_fetcher_ is intentionally NOT cleared. Reset()
+  // Note: metadata_fetcher_ is intentionally NOT cleared. Reset()
   // is used on reconnect paths; the metadata connection is long-lived and
   // reusing it avoids a SHOW COLUMNS round-trip storm right after a
   // reconnect. The caller owns the fetcher's lifetime via
@@ -207,7 +207,11 @@ uint32_t CdcEngine::MaxEventSize() const { return stream_parser_.MaxEventSize();
 void CdcEngine::SetChecksumEnabled(bool enabled) { stream_parser_.SetChecksumEnabled(enabled); }
 
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
-  // Update position from next_position
+  // Advance the resume position to next_position so events emitted by this
+  // call carry the offset to resume from after consuming them. The pre-event
+  // position is saved so it can be restored if processing fails to decode,
+  // ensuring a reconnect re-reads the offending event rather than skipping it.
+  const BinlogPosition saved_position = position_;
   if (header.next_position > 0) {
     position_.offset = header.next_position;
   }
@@ -279,6 +283,13 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       if (ParseRotateEvent(body, body_len, &rot)) {
         position_.binlog_file = std::move(rot.new_log_file);
         position_.offset = rot.position;
+        // A new binlog file reassigns table_ids and re-sends TABLE_MAP events
+        // before any row events, so the old registry is stale. Clear it (and
+        // the derived filter cache) to avoid retaining metadata for table_ids
+        // that no longer apply and to keep the registry from growing toward
+        // its cap across many rotations.
+        table_registry_.Clear();
+        blocked_table_ids_.clear();
         StructuredLog().Event("binlog_rotate").Field("file", position_.binlog_file).Debug();
       }
       break;
@@ -293,12 +304,18 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
 
     default:
-      // TODO(review): FORMAT_DESCRIPTION_EVENT is currently treated as a
+      // TODO: FORMAT_DESCRIPTION_EVENT is currently treated as a
       // no-op. Post-header sizes are assumed fixed for MySQL 5.6+/MariaDB
       // 10.0+ (which covers MySQL 8.4 and MariaDB 10.x, the target versions).
       // If supporting other versions, parse the post-header size array here
       // to dynamically determine event offsets.
       break;
+  }
+
+  // If this event failed to decode, restore the pre-event position so the
+  // recorded resume offset does not advance past the offending event.
+  if (last_error_ != MES_OK) {
+    position_ = saved_position;
   }
 }
 

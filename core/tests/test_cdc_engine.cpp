@@ -23,7 +23,7 @@ using test::BuildTableMapBody;
 using test::BuildUpdateRowsBody;
 using test::BuildWriteRowsBody;
 
-// --- P2-B: binlog_checksum=NONE handling ---
+// --- binlog_checksum=NONE handling ---
 
 TEST(CdcEngineChecksumTest, DecodesStreamWithoutChecksum) {
   // With checksum disabled, events carry no trailing CRC32; the engine must
@@ -62,7 +62,7 @@ TEST(CdcEngineChecksumTest, DefaultStripsChecksum) {
   EXPECT_EQ(event.after.columns[0].int_val, 4242);
 }
 
-// --- H-5: DDL detection drives metadata cache invalidation ---
+// --- DDL detection drives metadata cache invalidation ---
 
 TEST(CdcEngineDdlTest, DetectsDdlStatements) {
   auto alter = BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT");
@@ -78,7 +78,7 @@ TEST(CdcEngineDdlTest, DetectsDdlStatements) {
   EXPECT_TRUE(IsDdlQueryEvent(with_status.data(), with_status.size()));
 }
 
-// --- M-8: names_resolved surfaces metadata-fetch failures ---
+// --- names_resolved surfaces metadata-fetch failures ---
 
 TEST(CdcEngineNamesResolvedTest, TrueInStandaloneMode) {
   // No metadata fetcher attached: name resolution is not attempted, so the
@@ -251,6 +251,56 @@ TEST(CdcEngineTest, RotateEvent) {
   EXPECT_FALSE(engine.HasEvents());
   EXPECT_EQ(engine.CurrentPosition().binlog_file, "binlog.000002");
   EXPECT_EQ(engine.CurrentPosition().offset, 4u);
+}
+
+TEST(CdcEngineTest, RotateClearsTableMapRegistry) {
+  CdcEngine engine;
+
+  // Register table_id 1, then rotate to a new binlog file.
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "db", "t"));
+  auto rotate_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0,
+                                 BuildRotateBody(4, "binlog.000002"));
+  // A row event for table_id 1 *after* the rotate, without a fresh TABLE_MAP.
+  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                BuildWriteRowsBody(1, 42));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
+  stream.insert(stream.end(), rotate_event.begin(), rotate_event.end());
+  stream.insert(stream.end(), write_event.begin(), write_event.end());
+
+  engine.Feed(stream.data(), stream.size());
+
+  // The registry was cleared on rotate, so the stale table_id no longer
+  // resolves and the row event produces nothing (rather than decoding against
+  // stale metadata). It is skipped without error.
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+}
+
+TEST(CdcEngineTest, DecodeFailureDoesNotAdvancePosition) {
+  CdcEngine engine;
+
+  // TABLE_MAP advances the position to its next_position (100).
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "db", "t"));
+  // Truncated row event with next_position 200; its decode will fail.
+  auto write_body = BuildWriteRowsBody(1, 42);
+  write_body.pop_back();
+  auto write_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
+  stream.insert(stream.end(), write_event.begin(), write_event.end());
+
+  engine.Feed(stream.data(), stream.size());
+
+  EXPECT_TRUE(engine.IsError());
+  // The resume offset must stay at the last good event (100), not advance to
+  // the failed event's next_position (200), so a reconnect re-reads it.
+  EXPECT_EQ(engine.CurrentPosition().offset, 100u);
 }
 
 TEST(CdcEngineTest, UnknownEventSkipped) {
