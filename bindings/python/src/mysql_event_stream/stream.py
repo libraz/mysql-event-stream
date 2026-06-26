@@ -150,7 +150,7 @@ class CdcStream:
             setattr(self, attr, value)
 
     async def __anext__(self) -> ChangeEvent:
-        # NOTE(review): close() is safe to call during iteration. It sets
+        # Note: close() is safe to call during iteration. It sets
         # _closed=True and calls client.stop(), which unblocks the worker
         # thread inside poll(). The next __anext__ iteration will then
         # observe _closed and return StopAsyncIteration cleanly.

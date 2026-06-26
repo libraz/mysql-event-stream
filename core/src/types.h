@@ -79,8 +79,8 @@ enum class EventType : uint8_t {
  *       is byte-addressable and permits embedded NULs, so it is a
  *       strict superset of what a std::vector<uint8_t> would offer.
  *       Keeping a single buffer instead of separate string/bytes
- *       members saves ~24 bytes per ColumnValue (see H-6 in review
- *       notes) without any loss of fidelity. Callers that need byte
+ *       members saves ~24 bytes per ColumnValue without any loss of
+ *       fidelity. Callers that need byte
  *       access can use `bytes_data()` / `bytes_size()` below; the
  *       returned pointer is unmodified from `string_val.data()`.
  */

@@ -453,7 +453,7 @@ TEST(StateMachineTest, SetMaxEventSizeAcceptsEventAtLimit) {
   EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
 }
 
-// --- P2-B: checksum handling and FDE auto-detection ---
+// --- Checksum handling and FDE auto-detection ---
 
 // Build a minimal FORMAT_DESCRIPTION_EVENT body whose final byte is the given
 // checksum algorithm descriptor.

@@ -154,7 +154,7 @@ class BinlogClient {
   // stop_mutex_. It is also read from Poll() before taking any lock, so
   // make it atomic to avoid torn reads / data races.
   //
-  // NOTE(review): Poll() reads event_queue_ without a lock. The thread
+  // Note: Poll() reads event_queue_ without a lock. The thread
   // contract (see class-level Doxygen) requires that Poll(), Connect(),
   // and StartStream() be serialised on the single owner thread, so the
   // event_queue_ unique_ptr cannot be reassigned by StartStream() while
@@ -188,7 +188,7 @@ class BinlogClient {
 
   // GTID tracking (reader thread writes, GetCurrentGtid reads)
   std::string current_gtid_;
-  // NOTE(review): gtid_snapshot_ is written under gtid_mutex_ every call.
+  // Note: gtid_snapshot_ is written under gtid_mutex_ every call.
   // Per mes.h contract, the returned pointer is valid only until the next
   // GetCurrentGtid() call on the same BinlogClient. Concurrent callers from
   // different threads may see the buffer re-assigned; single-owner-thread

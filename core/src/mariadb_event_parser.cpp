@@ -119,7 +119,7 @@ mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer, size_
     return MES_ERR_PARSE;
   }
 
-  // NOTE(review): ANNOTATE_ROWS payload is the original SQL text in the
+  // Note: ANNOTATE_ROWS payload is the original SQL text in the
   // server's character set (typically UTF-8 on modern MariaDB). Storing
   // it as a std::string preserves the raw bytes verbatim; downstream
   // consumers must handle potential non-UTF-8 bytes if the server

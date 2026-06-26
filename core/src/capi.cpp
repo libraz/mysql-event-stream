@@ -119,7 +119,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
 
 // Map internal EventType to C ABI event type.
 //
-// NOTE(review): mes::EventType currently has exactly three values (see
+// Note: mes::EventType currently has exactly three values (see
 // types.h). The switch below is exhaustive for the current enum. The
 // fallback path exists only to satisfy compilers that do not treat the
 // switch as total when the argument is an enum class; it logs at ERROR
@@ -326,7 +326,7 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   if (rc != MES_OK) {
     return rc;
   }
-  // NOTE(review): the three-step swap below (null -> move -> set) is
+  // Note: the three-step swap below (null -> move -> set) is
   // intentional and MUST NOT be collapsed into
   //   engine->metadata_fetcher = std::move(fetcher);
   //   engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());

@@ -43,7 +43,7 @@ class TestStreamClose:
 
     @pytest.mark.asyncio
     async def test_close_awaits_inflight_poll(self) -> None:
-        # C-1: when a poll() task is in flight, close() must stop the client to
+        # When a poll() task is in flight, close() must stop the client to
         # unblock it and await its completion before destroying the client.
         import asyncio
 

@@ -56,7 +56,7 @@ class TestColumnValue:
 
 
 class TestAbiStructSizes:
-    """The ctypes layout must match the C ABI exactly (L-23)."""
+    """The ctypes layout must match the C ABI exactly."""
 
     def test_event_size_matches_libmes(self, lib_path: str) -> None:
         from mysql_event_stream._ffi import MESEvent, load_library

@@ -29,7 +29,7 @@ struct ConfigStrings {
 
 /** Parse common client config fields from a JS object into a C config struct.
  *  Returns false and schedules a JS exception on validation errors.
- *  NOTE(review): Uses a single Get() per key — undefined keys return
+ *  Note: Uses a single Get() per key — undefined keys return
  *  env.Undefined(), which fails the subsequent IsString()/IsNumber() check,
  *  matching the intent of the previous Has() + Get() pattern while halving
  *  N-API round-trips. */

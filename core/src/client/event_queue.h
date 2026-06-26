@@ -15,7 +15,7 @@
 
 namespace mes {
 
-// NOTE(review): this queue intentionally uses std::queue + mutex + condition
+// Note: this queue intentionally uses std::queue + mutex + condition
 // variables rather than a lock-free SPSC ring buffer. Rationale:
 //   * Each QueuedEvent owns a std::vector<uint8_t> payload; the per-event
 //     heap allocation for that payload dominates any queue-structure cost,

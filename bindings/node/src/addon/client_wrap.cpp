@@ -151,7 +151,7 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
   mes_error_t err = mes_client_connect(client_, &c_config);
   if (err != MES_OK) {
-    // NOTE(review): verified last_error messages in core
+    // Note: verified last_error messages in core
     // (core/src/client/binlog_client.cpp and
     // core/src/protocol/mysql_connection.cpp) do not include credentials.
     // Only descriptive strings (optionally with host:port, auth plugin name,

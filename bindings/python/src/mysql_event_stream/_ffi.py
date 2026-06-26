@@ -362,7 +362,7 @@ _client_lock = threading.Lock()
 # configured independently without leaking references once the CDLL is
 # garbage-collected.
 #
-# NOTE(review): a previous implementation used a single module-level
+# Note: a previous implementation used a single module-level
 # _client_configured boolean, which incorrectly treated the second lib
 # passed to load_client_library as already configured. That broke tests
 # that loaded two different libmes builds side-by-side.

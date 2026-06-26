@@ -69,7 +69,7 @@ class TestClientClose:
 
 
 class TestClosePollRace:
-    """C-1: close() must not destroy the handle while poll() is in flight."""
+    """close() must not destroy the handle while poll() is in flight."""
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")

@@ -204,7 +204,7 @@ TEST(TableMapTest, ParseMixedColumnTypes) {
   EXPECT_TRUE(metadata.columns[4].is_nullable);
 }
 
-// --- P2-A: optional metadata (SIGNEDNESS / COLUMN_NAME) ---
+// --- Optional metadata (SIGNEDNESS / COLUMN_NAME) ---
 
 TEST(TableMapTest, ParseSignednessOptionalMetadata) {
   TableMapBuilder builder;

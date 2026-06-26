@@ -8,8 +8,9 @@ diagnostics that are otherwise invisible from the bindings.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import IntEnum
-from typing import Callable
+from typing import Any
 
 from ._ffi import (
     MES_LOG_CALLBACK,
@@ -36,7 +37,9 @@ class LogLevel(IntEnum):
 # trampoline must outlive this call. Keep a module-level reference; without it
 # the closure would be garbage-collected and the C side would call freed
 # memory. Reassigned on each set_log_callback() call; cleared when disabled.
-_active_callback: MES_LOG_CALLBACK | None = None
+# Typed as Any: it holds a ctypes CFUNCTYPE instance, whose factory is not a
+# valid static type annotation.
+_active_callback: Any = None
 
 
 def set_log_callback(

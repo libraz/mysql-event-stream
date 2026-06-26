@@ -120,7 +120,7 @@ TEST(ColumnValueTest, BytesValue) {
   auto v = ColumnValue::Bytes(ColumnType::kBlob, data);
   EXPECT_EQ(v.type, ColumnType::kBlob);
   EXPECT_FALSE(v.is_null);
-  // Post-H-6: bytes live in string_val; bytes_data()/bytes_size() are thin
+  // Bytes live in string_val; bytes_data()/bytes_size() are thin
   // accessors that alias the same storage.
   EXPECT_EQ(v.bytes_size(), data.size());
   ASSERT_NE(v.bytes_data(), nullptr);

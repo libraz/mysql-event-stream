@@ -113,7 +113,7 @@ uint64_t ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos) {
   }
 
   if (first == 0xFB) {
-    // NOTE(review): 0xFB (NULL marker) and a legitimate length of 0 both
+    // Note: 0xFB (NULL marker) and a legitimate length of 0 both
     // return 0 here. This ambiguity is intentional and safe because every
     // caller in this codebase that has to distinguish NULL from length-0
     // inspects the raw 0xFB byte *before* invoking ReadLenEncInt (see

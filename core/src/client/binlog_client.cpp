@@ -482,7 +482,7 @@ const char* BinlogClient::GetLastError() const {
 }
 
 const char* BinlogClient::GetCurrentGtid() const {
-  // NOTE(review): gtid_snapshot_ is a shared buffer protected by
+  // Note: gtid_snapshot_ is a shared buffer protected by
   // gtid_mutex_. The returned pointer is valid only until the next
   // GetCurrentGtid() call on this BinlogClient. If multiple threads call
   // this method concurrently, they must synchronize externally to avoid

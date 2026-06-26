@@ -119,7 +119,7 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
     size_t consumed = 0;
     row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
     if (consumed == 0) {
-      // DESIGN(review): consumed=0 serves a dual purpose — it signals
+      // consumed=0 serves a dual purpose — it signals
       // either a decode error OR a legitimate zero-size DECIMAL(0,0).
       // This ambiguity is intentional: DecodeDecimal returns consumed=0
       // with string_val="0" for precision==0, which is the only valid
@@ -316,7 +316,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
     case ColumnType::kMediumBlob:
     case ColumnType::kLongBlob:
     case ColumnType::kVector: {
-      // NOTE(review): MySQL TABLE_MAP should always record a valid
+      // Note: MySQL TABLE_MAP should always record a valid
       // pack_length in the metadata low byte (1 for TINY_BLOB,
       // 2 for BLOB/TEXT, 3 for MEDIUM_BLOB, 4 for LONG_BLOB). A value
       // of 0 is not expected from a correct server; this legacy
@@ -382,7 +382,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       }
 
       // CHAR type
-      // NOTE(review): Formula matches MySQL server source (log_event.cc
+      // Note: Formula matches MySQL server source (log_event.cc
       // Rows_log_event::print_verbose_one_row). The `^ 0x300` is
       // intentional: it decodes the field length when real_type was
       // upgraded from CHAR to STRING, where the upper 2 bits of meta[0]
@@ -705,7 +705,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
                       std::vector<UpdatePair>* pairs) {
   if (!pairs) return false;
   RowsContext ctx{};
-  // NOTE(review): When ParseRowsContext returns true with is_update=true,
+  // Note: When ParseRowsContext returns true with is_update=true,
   // ParseRowsPostHeader guarantees that ctx.columns_present_update is
   // non-null -- the is_update branch inside ParseRowsPostHeader either
   // assigns *columns_present_update and returns a non-null pointer, or

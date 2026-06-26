@@ -27,7 +27,7 @@ namespace mes {
 inline uint32_t ComputeCRC32(const void* data, size_t length) {
   static_assert(sizeof(uInt) >= 4, "zlib uInt must be at least 32 bits");
   // Return UINT32_MAX as a "not computed" sentinel.
-  // NOTE(review): Sentinel value collision with a real CRC is astronomically
+  // Note: Sentinel value collision with a real CRC is astronomically
   // unlikely (1 in 2^32) and this path is already unreachable under the
   // event-size limit enforced in state_machine.cpp. Callers treat
   // this as "not yet computed" rather than as a CRC comparison target, so

@@ -260,7 +260,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   if (packed_bytes == 0) return false;
   offset += packed_bytes;
 
-  // NOTE(review): column_count == 0 is rejected. MySQL does not allow
+  // Note: column_count == 0 is rejected. MySQL does not allow
   // zero-column tables, so a TABLE_MAP with column_count == 0 indicates
   // a corrupt or truncated event. Rejecting here also simplifies the
   // downstream allocation math (null bitmap bytes = 0 would pass the
@@ -289,7 +289,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   metadata->columns.resize(column_count);
   size_t meta_offset = 0;
   for (size_t i = 0; i < column_count; i++) {
-    // NOTE(review): `>` (not `>=`) is intentional. Fixed-size column types
+    // Note: `>` (not `>=`) is intentional. Fixed-size column types
     // (kTiny, kShort, kLong, etc.) consume 0 metadata bytes, so
     // meta_offset == metadata_length is valid mid-loop. The strict equality
     // check at the end (line ~187) catches actual length mismatches.

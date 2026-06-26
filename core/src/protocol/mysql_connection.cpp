@@ -672,7 +672,7 @@ mes_error_t MysqlConnection::HandleAuthSwitchRequest(const std::vector<uint8_t>&
 }
 
 mes_error_t MysqlConnection::ProcessOkOrError(const std::vector<uint8_t>& packet) {
-  // NOTE(review): this helper is only used on the authentication / handshake
+  // Note: this helper is only used on the authentication / handshake
   // path. All call sites are inside the auth pipeline, so mapping an ERR
   // packet to MES_ERR_AUTH is correct. If this helper is ever repurposed
   // for post-auth OK/ERR packets (e.g. a COM_QUERY response), introduce an
