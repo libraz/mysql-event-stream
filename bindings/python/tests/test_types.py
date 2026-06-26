@@ -1,5 +1,7 @@
 """Tests for mysql-event-stream type definitions."""
 
+import ctypes
+
 from mysql_event_stream import BinlogPosition, ChangeEvent, ColumnType, ColumnValue, EventType
 from mysql_event_stream._ffi import (
     MES_ERR_CHECKSUM,
@@ -51,6 +53,22 @@ class TestColumnValue:
             pass
         else:
             raise AssertionError("Should have raised AttributeError")
+
+
+class TestAbiStructSizes:
+    """The ctypes layout must match the C ABI exactly (L-23)."""
+
+    def test_event_size_matches_libmes(self, lib_path: str) -> None:
+        from mysql_event_stream._ffi import MESEvent, load_library
+
+        lib = load_library(lib_path)
+        assert ctypes.sizeof(MESEvent) == lib.mes_sizeof_event()
+
+    def test_column_size_matches_libmes(self, lib_path: str) -> None:
+        from mysql_event_stream._ffi import MESColumn, load_library
+
+        lib = load_library(lib_path)
+        assert ctypes.sizeof(MESColumn) == lib.mes_sizeof_column()
 
 
 class TestColumnValueName:

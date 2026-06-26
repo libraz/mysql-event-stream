@@ -305,6 +305,28 @@ MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
  */
 MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled);
 
+/* ---- ABI introspection ---- */
+
+/**
+ * @brief Size in bytes of mes_event_t as compiled into this library.
+ *
+ * Lets a foreign-function binding assert that its mirror of the struct matches
+ * the loaded library exactly, catching ABI drift (e.g. an appended field) that
+ * a loose range check would miss.
+ *
+ * @return sizeof(mes_event_t).
+ * @threadsafety Thread-safe (pure constant).
+ */
+MES_API size_t mes_sizeof_event(void);
+
+/**
+ * @brief Size in bytes of mes_column_t as compiled into this library.
+ *
+ * @return sizeof(mes_column_t).
+ * @threadsafety Thread-safe (pure constant).
+ */
+MES_API size_t mes_sizeof_column(void);
+
 /* ---- Table filtering ---- */
 
 /**

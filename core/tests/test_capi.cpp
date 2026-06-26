@@ -21,6 +21,12 @@ using mes::test::BuildTableMapBody;
 using mes::test::BuildUpdateRowsBody;
 using mes::test::BuildWriteRowsBody;
 
+// ---- ABI introspection ----
+
+TEST(CApi, SizeofEventMatchesStruct) { EXPECT_EQ(mes_sizeof_event(), sizeof(mes_event_t)); }
+
+TEST(CApi, SizeofColumnMatchesStruct) { EXPECT_EQ(mes_sizeof_column(), sizeof(mes_column_t)); }
+
 // ---- Engine lifecycle ----
 
 TEST(CApi, CreateAndDestroy) {

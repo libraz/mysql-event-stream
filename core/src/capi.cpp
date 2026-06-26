@@ -264,6 +264,10 @@ MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled) 
   return MES_OK;
 }
 
+MES_API size_t mes_sizeof_event(void) { return sizeof(mes_event_t); }
+
+MES_API size_t mes_sizeof_column(void) { return sizeof(mes_column_t); }
+
 MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,
                                               size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;

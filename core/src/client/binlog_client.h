@@ -161,7 +161,16 @@ class BinlogClient {
   // a Poll() on the same thread is in progress. Stop() may run from any
   // thread but does not reassign event_queue_; it only Close()s it.
   std::atomic<bool> streaming_{false};
-  bool checksum_enabled_ = true;  // Whether server uses CRC32 binlog checksum
+  // Whether the server emits a CRC32 trailer on every binlog event. This is
+  // a protocol-layer flag distinct from EventStreamParser::has_checksum_:
+  // BinlogClient detects it via SQL (SELECT @@global.binlog_checksum) because
+  // it must (a) send "SET @source_binlog_checksum='CRC32'" before streaming
+  // and (b) verify the CRC on the wire for the integrity counter, both of
+  // which happen before any FORMAT_DESCRIPTION_EVENT is seen. The parser
+  // independently auto-detects checksums from the FDE byte when it strips the
+  // trailer during decode. The two layers are intentionally decoupled so each
+  // component is usable on its own; only the kChecksumSize constant is shared.
+  bool checksum_enabled_ = true;
   std::atomic<bool> stop_requested_{false};
 
   // Reader thread infrastructure

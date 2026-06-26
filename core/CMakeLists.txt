@@ -5,6 +5,7 @@ option(MES_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MES_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MES_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MES_ENABLE_COVERAGE "Enable code coverage" OFF)
+option(MES_ENABLE_FUZZ "Build libFuzzer harnesses (requires Clang)" OFF)
 
 # OpenSSL (required for protocol layer)
 # Static linking for self-contained wheel/binary distribution
@@ -164,6 +165,17 @@ install(TARGETS mes-shared
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 install(FILES include/mes.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Fuzzing harnesses (libFuzzer; Clang only). Combine with ASan/UBSan.
+if(MES_ENABLE_FUZZ)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "MES_ENABLE_FUZZ requires Clang (libFuzzer support)")
+  endif()
+  add_executable(fuzz_feed tests/fuzz/fuzz_feed.cpp)
+  target_link_libraries(fuzz_feed PRIVATE mes-core)
+  target_compile_options(fuzz_feed PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_feed PRIVATE -fsanitize=fuzzer)
+endif()
 
 # Tests
 enable_testing()

@@ -158,47 +158,48 @@ def _find_library() -> str:
     )
 
 
-def _verify_struct_sizes() -> None:
-    """Verify ctypes struct sizes match expected C ABI layout."""
+def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
+    """Verify ctypes struct sizes match the C ABI layout.
+
+    The event and column structs are validated against the authoritative
+    ``sizeof`` reported by the loaded library (``mes_sizeof_event`` /
+    ``mes_sizeof_column``), so the check is exact and portable across
+    pointer widths and C-side struct packing. A mismatch means the ctypes
+    layout is stale and every C call using these structs would corrupt
+    memory, so it is a hard error.
+
+    Args:
+        lib: The loaded shared library, with introspection signatures set.
+    """
+    event_size = ctypes.sizeof(MESEvent)
+    expected_event = lib.mes_sizeof_event()
+    if event_size != expected_event:
+        raise RuntimeError(
+            f"MESEvent size mismatch: ctypes={event_size}, "
+            f"libmes={expected_event}. ABI incompatibility detected."
+        )
+
+    column_size = ctypes.sizeof(MESColumn)
+    expected_column = lib.mes_sizeof_column()
+    if column_size != expected_column:
+        raise RuntimeError(
+            f"MESColumn size mismatch: ctypes={column_size}, "
+            f"libmes={expected_column}. ABI incompatibility detected."
+        )
+
+    # mes_client_config_t has no C-side sizeof helper; validate the known
+    # 64-bit layout directly (7 pointers + uint16 w/pad + 4x uint32 +
+    # enum w/pad + size_t = 96). On 32-bit platforms the size differs and
+    # the layout is exercised at call time instead.
     import struct as _struct
-    ptr_size = _struct.calcsize("P")
-    if ptr_size == 8:  # 64-bit
-        # mes_client_config_t: 7 pointers (56) + uint16 w/pad (8) + 4x uint32 (16)
-        # + enum w/pad (8) + size_t (8) = 96
+    if _struct.calcsize("P") == 8:
         expected_config = 96
-        if ctypes.sizeof(MESClientConfig) != expected_config:
+        config_size = ctypes.sizeof(MESClientConfig)
+        if config_size != expected_config:
             raise RuntimeError(
-                f"MESClientConfig size mismatch: got {ctypes.sizeof(MESClientConfig)}, "
+                f"MESClientConfig size mismatch: got {config_size}, "
                 f"expected {expected_config}. ABI incompatibility detected."
             )
-        # mes_column_t on 64-bit: enum w/pad (8) + int64 (8) + double (8) +
-        # ptr (8) + uint32 w/pad (8) + ptr (8) = 48.
-        # A mismatch here corrupts every per-column read, so treat as a
-        # hard error. On platforms where this layout differs (none among
-        # supported ones), bump the major ABI and widen this check.
-        expected_column = 48
-        column_size = ctypes.sizeof(MESColumn)
-        if column_size != expected_column:
-            raise RuntimeError(
-                f"MESColumn size mismatch: got {column_size}, "
-                f"expected {expected_column}. ABI incompatibility detected."
-            )
-        # mes_event_t: uint8 w/pad (4) + 2x uint32 (8) + ptr (8) + 2x ptr (16)
-        # + 2x uint32 (8) + ptr (8) + uint32 w/pad (8) = 60 -> padded to 64
-        # Verify by checking it's within a reasonable range.
-        # NOTE(review): event_size varies by platform (32-bit vs 64-bit
-        # pointers) and by struct-packing of mes_event_t on the C side.
-        # The range check is intentionally loose; exact sizeof is not
-        # portable. TODO: expose a `mes_sizeof_event()` helper in the C
-        # ABI so bindings can assert an exact match.
-        event_size = ctypes.sizeof(MESEvent)
-        if event_size < 48 or event_size > 128:
-            raise RuntimeError(
-                f"MESEvent size unexpected: got {event_size}. "
-                "ABI incompatibility detected."
-            )
-    # On 32-bit platforms, sizes differ but struct layout integrity is
-    # still validated at runtime by the C library's internal checks.
 
 
 def load_library(lib_path: str | None = None) -> ctypes.CDLL:
@@ -265,6 +266,12 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.mes_set_max_event_size.restype = ctypes.c_int32
     lib.mes_set_max_event_size.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 
+    # mes_sizeof_event / mes_sizeof_column (ABI introspection)
+    lib.mes_sizeof_event.restype = ctypes.c_size_t
+    lib.mes_sizeof_event.argtypes = []
+    lib.mes_sizeof_column.restype = ctypes.c_size_t
+    lib.mes_sizeof_column.argtypes = []
+
     # mes_get_max_event_size
     lib.mes_get_max_event_size.restype = ctypes.c_uint32
     lib.mes_get_max_event_size.argtypes = [ctypes.c_void_p]
@@ -299,7 +306,7 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
 
     # Verify struct layout matches C ABI. If this fails, the ctypes struct
     # fields are misaligned and all C calls using this struct will corrupt memory.
-    _verify_struct_sizes()
+    _verify_struct_sizes(lib)
 
     return lib
 
