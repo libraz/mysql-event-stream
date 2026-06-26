@@ -21,6 +21,7 @@ namespace mes {
 /// Values match MySQL's Log_event_type enum.
 enum class BinlogEventType : uint8_t {
   kUnknown = 0,
+  kQueryEvent = 2,
   kRotateEvent = 4,
   kFormatDescriptionEvent = 15,
   kXidEvent = 16,

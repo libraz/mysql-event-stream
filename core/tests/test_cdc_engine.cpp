@@ -15,10 +15,66 @@ namespace {
 
 using test::BuildDeleteRowsBody;
 using test::BuildEvent;
+using test::BuildQueryEventBody;
 using test::BuildRotateBody;
 using test::BuildTableMapBody;
 using test::BuildUpdateRowsBody;
 using test::BuildWriteRowsBody;
+
+// --- H-5: DDL detection drives metadata cache invalidation ---
+
+TEST(CdcEngineDdlTest, DetectsDdlStatements) {
+  auto alter = BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT");
+  EXPECT_TRUE(IsDdlQueryEvent(alter.data(), alter.size()));
+
+  auto rename = BuildQueryEventBody("testdb", "RENAME TABLE a TO b");
+  EXPECT_TRUE(IsDdlQueryEvent(rename.data(), rename.size()));
+
+  auto lowercase = BuildQueryEventBody("testdb", "  create table t (id int)");
+  EXPECT_TRUE(IsDdlQueryEvent(lowercase.data(), lowercase.size()));
+
+  auto with_status = BuildQueryEventBody("testdb", "DROP TABLE t", /*status_vars_len=*/7);
+  EXPECT_TRUE(IsDdlQueryEvent(with_status.data(), with_status.size()));
+}
+
+TEST(CdcEngineDdlTest, IgnoresNonDdlStatements) {
+  auto begin = BuildQueryEventBody("testdb", "BEGIN");
+  EXPECT_FALSE(IsDdlQueryEvent(begin.data(), begin.size()));
+
+  auto commit = BuildQueryEventBody("testdb", "COMMIT");
+  EXPECT_FALSE(IsDdlQueryEvent(commit.data(), commit.size()));
+
+  auto insert = BuildQueryEventBody("testdb", "INSERT INTO t VALUES (1)");
+  EXPECT_FALSE(IsDdlQueryEvent(insert.data(), insert.size()));
+}
+
+TEST(CdcEngineDdlTest, HandlesMalformedQueryEvent) {
+  std::vector<uint8_t> too_short = {0x01, 0x02, 0x03};
+  EXPECT_FALSE(IsDdlQueryEvent(too_short.data(), too_short.size()));
+  EXPECT_FALSE(IsDdlQueryEvent(nullptr, 0));
+}
+
+TEST(CdcEngineDdlTest, QueryEventFedThroughEngineIsSafe) {
+  // A QUERY_EVENT (including DDL) must not break the parser; subsequent row
+  // events must still decode.
+  CdcEngine engine;
+  auto ddl_body = BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT");
+  auto ddl_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 50, ddl_body);
+  size_t consumed = engine.Feed(ddl_event.data(), ddl_event.size());
+  EXPECT_EQ(consumed, ddl_event.size());
+  EXPECT_FALSE(engine.IsError());
+
+  auto table_map_body = BuildTableMapBody(42, "testdb", "users");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  engine.Feed(table_map_event.data(), table_map_event.size());
+  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                                BuildWriteRowsBody(42, 123));
+  engine.Feed(write_event.data(), write_event.size());
+  EXPECT_TRUE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+}
 
 TEST(CdcEngineTest, InsertEvent) {
   CdcEngine engine;

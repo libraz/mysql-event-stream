@@ -9,7 +9,7 @@ import warnings
 
 from .client import BinlogClient
 from .engine import CdcEngine
-from .types import ChangeEvent
+from .types import ChangeEvent, PollResult
 
 
 class CdcStream:
@@ -91,6 +91,9 @@ class CdcStream:
         self._engine: CdcEngine | None = None
         self._started = False
         self._closed = False
+        # Tracks an in-flight poll() worker so close() can await its completion
+        # before destroying the client (prevents a use-after-free).
+        self._poll_task: asyncio.Task[PollResult] | None = None
 
     async def __aenter__(self) -> CdcStream:
         return self
@@ -171,7 +174,14 @@ class CdcStream:
                 return ev
 
             try:
-                result = await asyncio.to_thread(self._client.poll)
+                # Track the poll worker so close() can await it before tearing
+                # down the client.
+                poll_task = asyncio.ensure_future(asyncio.to_thread(self._client.poll))
+                self._poll_task = poll_task
+                try:
+                    result = await poll_task
+                finally:
+                    self._poll_task = None
             except asyncio.CancelledError:
                 # The Future returned by to_thread is cancelled, but the
                 # underlying C poll() call keeps blocking. Signal the C
@@ -211,6 +221,15 @@ class CdcStream:
             return
         self._closed = True
         self._started = False
+        # Unblock and await any in-flight poll() before destroying the client so
+        # the worker thread is not still inside the C poll() call during destroy.
+        poll_task = getattr(self, "_poll_task", None)
+        if poll_task is not None:
+            if self._client is not None:
+                self._client.stop()
+            with contextlib.suppress(BaseException):
+                await poll_task
+            self._poll_task = None
         if self._client is not None:
             # close() internally calls stop() and disconnect()
             self._client.close()

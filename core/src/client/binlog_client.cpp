@@ -182,6 +182,13 @@ mes_error_t BinlogClient::StartStreamMySQL() {
 }
 
 mes_error_t BinlogClient::StartStreamMariaDB() {
+  // Default to "no checksum" until detection proves otherwise. This mirrors the
+  // explicit reset in StartStreamMySQL() and prevents a stale `true` (left over
+  // from a previous MySQL stream on a reused object) from causing spurious
+  // MES_ERR_CHECKSUM failures against a MariaDB server with binlog_checksum=NONE
+  // (MariaDB's historical default).
+  checksum_enabled_ = false;
+
   protocol::QueryResult qr;
   std::string err;
 
@@ -232,16 +239,21 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
     }
   }
 
-  // Detect whether checksum is actually enabled
+  // Detect whether checksum is actually enabled. This must succeed: if we
+  // cannot read the server's setting we would not know whether to strip and
+  // validate the trailing CRC32, leading to silent corruption or spurious
+  // checksum failures, so treat detection failure as a hard stream error.
   {
     protocol::QueryResult checksum_qr;
     std::string checksum_err;
     if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@global.binlog_checksum", &checksum_qr,
-                               &checksum_err) == MES_OK &&
-        !checksum_qr.rows.empty() && !checksum_qr.rows[0].values.empty()) {
-      std::string val = checksum_qr.rows[0].values[0];
-      checksum_enabled_ = (val != "NONE" && val != "none");
+                               &checksum_err) != MES_OK ||
+        checksum_qr.rows.empty() || checksum_qr.rows[0].values.empty()) {
+      SetLastError("Failed to detect MariaDB binlog checksum setting: " + checksum_err);
+      return MES_ERR_STREAM;
     }
+    std::string val = checksum_qr.rows[0].values[0];
+    checksum_enabled_ = (val != "NONE" && val != "none");
   }
 
   // Set MariaDB GTID position via session variable.

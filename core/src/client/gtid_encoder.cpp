@@ -155,19 +155,10 @@ mes_error_t GtidEncoder::Encode(const char* gtid_set, std::vector<uint8_t>* out)
   return MES_OK;
 }
 
-std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {
-  if (gtid.empty()) {
-    return gtid;
-  }
-
+std::string GtidEncoder::NormalizeSingleSid(const std::string& gtid) {
   // MariaDB GTIDs (domain-server-seq) are used as-is in session variables.
   // They don't need range conversion (that's a MySQL COM_BINLOG_DUMP_GTID concept).
   if (MariaDBGtid::IsMariaDBGtidFormat(gtid)) {
-    return gtid;
-  }
-
-  // Multi-UUID (contains comma) - pass through
-  if (gtid.find(',') != std::string::npos) {
     return gtid;
   }
 
@@ -197,6 +188,54 @@ std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {
   // Single GTID "uuid:N" -> "uuid:1-N"
   std::string uuid = gtid.substr(0, colon_pos);
   return uuid + ":1-" + after_colon;
+}
+
+std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {
+  if (gtid.empty()) {
+    return gtid;
+  }
+
+  // No comma: single SID, normalize directly.
+  if (gtid.find(',') == std::string::npos) {
+    return NormalizeSingleSid(gtid);
+  }
+
+  // Multi-UUID: normalize each comma-separated SID independently and rejoin.
+  // Without this, "uuidA:100,uuidB:200" would be sent verbatim, encoding
+  // interval [100,101) for uuidA and [200,201) for uuidB, causing the server
+  // to resend transactions 1-99 / 1-199 (duplicates).
+  std::string result;
+  size_t pos = 0;
+  while (pos < gtid.size()) {
+    size_t comma_pos = gtid.find(',', pos);
+    std::string part;
+    if (comma_pos == std::string::npos) {
+      part = gtid.substr(pos);
+      pos = gtid.size();
+    } else {
+      part = gtid.substr(pos, comma_pos - pos);
+      pos = comma_pos + 1;
+    }
+
+    // Trim surrounding whitespace before normalizing.
+    size_t start = part.find_first_not_of(" \t\n\r");
+    if (start == std::string::npos) {
+      continue;
+    }
+    size_t end = part.find_last_not_of(" \t\n\r");
+    part = part.substr(start, end - start + 1);
+
+    std::string converted = NormalizeSingleSid(part);
+    // A "uuid:0" part converts to empty (no transactions) and is dropped.
+    if (converted.empty()) {
+      continue;
+    }
+    if (!result.empty()) {
+      result += ",";
+    }
+    result += converted;
+  }
+  return result;
 }
 
 mes_error_t GtidEncoder::ParseUuid(const char* str, uint8_t* out) {

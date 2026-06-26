@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 
 from ._ffi import (
     MES_ERR_AUTH,
@@ -138,6 +139,12 @@ class BinlogClient:
                 ssl_key=ssl_key,
                 max_queue_size=max_queue_size,
             )
+        # Serializes poll() against close()/destroy(). poll() holds this lock
+        # for the duration of the blocking C call (and the result copy), so
+        # close() can wait for an in-flight poll() to return before destroying
+        # the handle. Without this, destroying mid-poll is a use-after-free.
+        self._poll_lock = threading.Lock()
+
         self._handle: int | None = self._lib.mes_client_create()
         if self._handle is None:
             raise RuntimeError("Failed to create BinlogClient")
@@ -206,22 +213,26 @@ class BinlogClient:
         Raises:
             RuntimeError: If a streaming error occurs.
         """
-        self._check_open()
-        result = self._lib.mes_client_poll(self._handle)
-        if result.error != MES_OK:
-            error_msg = self._get_last_error()
-            base_msg = _ERROR_MESSAGES.get(result.error, f"Error code {result.error}")
-            raise RuntimeError(f"{base_msg}: {error_msg}")
+        # Hold the poll lock across the blocking C call AND the result copy.
+        # close() takes the same lock before destroying the handle, so the C
+        # buffer referenced by `result` cannot be freed while we read it.
+        with self._poll_lock:
+            self._check_open()
+            result = self._lib.mes_client_poll(self._handle)
+            if result.error != MES_OK:
+                error_msg = self._get_last_error()
+                base_msg = _ERROR_MESSAGES.get(result.error, f"Error code {result.error}")
+                raise RuntimeError(f"{base_msg}: {error_msg}")
 
-        if result.is_heartbeat or result.size == 0:
-            return PollResult(data=None, is_heartbeat=bool(result.is_heartbeat))
+            if result.is_heartbeat or result.size == 0:
+                return PollResult(data=None, is_heartbeat=bool(result.is_heartbeat))
 
-        if not result.data:
-            return PollResult(data=None, is_heartbeat=False)
+            if not result.data:
+                return PollResult(data=None, is_heartbeat=False)
 
-        # Copy data from C buffer to Python bytes
-        data = ctypes.string_at(result.data, result.size)
-        return PollResult(data=data, is_heartbeat=False)
+            # Copy data from C buffer to Python bytes while still holding the lock.
+            data = ctypes.string_at(result.data, result.size)
+            return PollResult(data=data, is_heartbeat=False)
 
     def stop(self) -> None:
         """Request stream stop. Thread-safe; unblocks a pending poll()."""
@@ -234,12 +245,21 @@ class BinlogClient:
             self._lib.mes_client_disconnect(self._handle)
 
     def close(self) -> None:
-        """Stop, disconnect, and destroy the client, freeing all resources."""
-        if self._handle is not None:
-            self.stop()
-            self.disconnect()
-            self._lib.mes_client_destroy(self._handle)
-            self._handle = None
+        """Stop, disconnect, and destroy the client, freeing all resources.
+
+        Safe to call while another thread is blocked in :meth:`poll`: ``stop()``
+        unblocks the pending poll, then the poll lock is acquired to wait for it
+        to return before the handle is destroyed (avoiding a use-after-free).
+        """
+        if self._handle is None:
+            return
+        # Unblock any in-flight poll() before waiting for the lock it holds.
+        self.stop()
+        with self._poll_lock:
+            if self._handle is not None:
+                self.disconnect()
+                self._lib.mes_client_destroy(self._handle)
+                self._handle = None
 
     @property
     def is_connected(self) -> bool:

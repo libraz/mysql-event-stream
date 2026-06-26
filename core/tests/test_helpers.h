@@ -191,6 +191,24 @@ inline std::vector<uint8_t> BuildDeleteRowsBody(uint64_t table_id, int32_t value
   return b.Data();
 }
 
+// Build a QUERY_EVENT (type 2) body for the given database and SQL statement.
+inline std::vector<uint8_t> BuildQueryEventBody(const std::string& db, const std::string& stmt,
+                                                uint16_t status_vars_len = 0) {
+  EventBuilder b;
+  b.WriteU32Le(1);                                  // thread_id
+  b.WriteU32Le(0);                                  // exec_time
+  b.WriteU8(static_cast<uint8_t>(db.size()));       // db name length
+  b.WriteU16Le(0);                                  // error_code
+  b.WriteU16Le(status_vars_len);                    // status_vars length
+  for (uint16_t i = 0; i < status_vars_len; ++i) {  // status_vars padding
+    b.WriteU8(0);
+  }
+  b.WriteString(db);  // db name
+  b.WriteU8(0);       // null terminator
+  b.WriteString(stmt);
+  return b.Data();
+}
+
 // Build a ROTATE_EVENT body.
 inline std::vector<uint8_t> BuildRotateBody(uint64_t position, const std::string& filename) {
   EventBuilder b;

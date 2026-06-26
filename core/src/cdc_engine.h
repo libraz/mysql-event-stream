@@ -31,6 +31,20 @@ namespace mes {
 class MetadataFetcher;
 
 /**
+ * @brief Determine whether a QUERY_EVENT body carries a DDL statement.
+ *
+ * Parses the QUERY_EVENT body to locate the SQL statement and checks whether it
+ * begins with a schema-altering verb (ALTER/RENAME/DROP/CREATE/TRUNCATE).
+ * Exposed for testing. Returns false for non-DDL statements (e.g. BEGIN) and
+ * for malformed/too-short bodies.
+ *
+ * @param body QUERY_EVENT body (header already stripped).
+ * @param body_len Length of the body.
+ * @return true if the statement is DDL.
+ */
+bool IsDdlQueryEvent(const uint8_t* body, size_t body_len);
+
+/**
  * @brief Main CDC engine that processes a binlog byte stream and produces
  *        ChangeEvents.
  *

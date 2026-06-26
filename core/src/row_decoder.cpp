@@ -531,15 +531,50 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       if (len < total) return ColumnValue::Null(type);
       *bytes_consumed = total;
 
-      uint32_t packed = binary::ReadU24Be(data);
-      static constexpr int32_t kTimefIntOfs = 0x800000;
-      int32_t intpart = static_cast<int32_t>(packed) - kTimefIntOfs;
-      bool negative = intpart < 0;
-      if (negative) intpart = -intpart;
+      // MySQL stores TIME2 as a single signed packed value (integer part plus
+      // fractional part) offset by 0x800000. Negative values are stored in
+      // complement form, so the fraction cannot be decoded independently of the
+      // sign — we must reconstruct the combined packed value exactly as
+      // my_time_packed_from_binary does, then split sign and magnitude.
+      static constexpr int32_t kTimeIntOfs = 0x800000;
+      int64_t intpart = static_cast<int64_t>(binary::ReadU24Be(data)) - kTimeIntOfs;
 
-      int hour = (intpart >> 12) & 0x3FF;
-      int minute = (intpart >> 6) & 0x3F;
-      int second = intpart & 0x3F;
+      int64_t usec = 0;
+      if (frac_bytes > 0) {
+        int64_t frac = static_cast<int64_t>(ReadBigEndian(data + 3, frac_bytes));
+        int64_t complement = 0;
+        int64_t multiplier = 1;
+        switch (frac_bytes) {
+          case 1:  // fsp 1,2: stored in 1/100s
+            complement = 0x100;
+            multiplier = 10000;
+            break;
+          case 2:  // fsp 3,4: stored in 1/10000s
+            complement = 0x10000;
+            multiplier = 100;
+            break;
+          default:  // fsp 5,6: stored in microseconds (3 bytes)
+            complement = 0x1000000;
+            multiplier = 1;
+            break;
+        }
+        if (intpart < 0 && frac > 0) {
+          // Reverse the complement encoding used for negative fractions.
+          ++intpart;
+          frac -= complement;
+        }
+        usec = frac * multiplier;
+      }
+
+      int64_t packed_time = (intpart << 24) + usec;
+      bool negative = packed_time < 0;
+      if (negative) packed_time = -packed_time;
+
+      int64_t hms = packed_time >> 24;
+      int micros = static_cast<int>(packed_time & 0xFFFFFF);
+      int hour = static_cast<int>(hms >> 12);
+      int minute = static_cast<int>((hms >> 6) & 0x3F);
+      int second = static_cast<int>(hms & 0x3F);
 
       std::string result;
       if (negative) result += "-";
@@ -547,10 +582,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour, minute, second);
       result += buf;
 
-      if (meta > 0 && frac_bytes > 0) {
-        int frac = static_cast<int>(ReadBigEndian(data + 3, frac_bytes));
-        int usec = FracToMicroseconds(frac, meta);
-        AppendFractional(result, usec);
+      if (frac_bytes > 0) {
+        AppendFractional(result, micros);
       }
 
       return ColumnValue::String(type, result);

@@ -4,6 +4,9 @@
 #include "cdc_engine.h"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstring>
 
 #include "binary_util.h"
 #include "client/metadata_fetcher.h"
@@ -16,6 +19,53 @@ static void AttachColumnNames(RowData& row, const TableMetadata& meta) {
   for (size_t i = 0; i < row.columns.size() && i < meta.columns.size(); i++) {
     row.columns[i].name = meta.columns[i].name;
   }
+}
+
+// Extract the SQL statement from a QUERY_EVENT body and decide whether it is a
+// DDL statement that may alter table schema. QUERY_EVENT (v4) body layout:
+//   [0..4)  thread_id, [4..8) exec_time, [8] db_len, [9..11) error_code,
+//   [11..13) status_vars_len, status_vars(status_vars_len), db_name(db_len),
+//   '\0', query statement (remainder).
+bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
+  if (body == nullptr || body_len < 13) {
+    return false;
+  }
+  uint8_t db_len = body[8];
+  uint16_t status_vars_len = binary::ReadU16Le(body + 11);
+  size_t stmt_offset = 13 + static_cast<size_t>(status_vars_len) + db_len + 1;
+  if (stmt_offset >= body_len) {
+    return false;
+  }
+  const char* stmt = reinterpret_cast<const char*>(body + stmt_offset);
+  size_t stmt_len = body_len - stmt_offset;
+
+  // Skip leading whitespace.
+  size_t pos = 0;
+  while (pos < stmt_len && (stmt[pos] == ' ' || stmt[pos] == '\t' || stmt[pos] == '\n' ||
+                            stmt[pos] == '\r')) {
+    ++pos;
+  }
+
+  // Compare the first keyword case-insensitively against known DDL verbs.
+  static constexpr std::array<const char*, 5> kDdlKeywords = {"ALTER", "RENAME", "DROP", "CREATE",
+                                                              "TRUNCATE"};
+  for (const char* keyword : kDdlKeywords) {
+    size_t keyword_len = std::strlen(keyword);
+    if (stmt_len - pos < keyword_len) {
+      continue;
+    }
+    bool match = true;
+    for (size_t i = 0; i < keyword_len; ++i) {
+      if (std::toupper(static_cast<unsigned char>(stmt[pos + i])) != keyword[i]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return true;
+    }
+  }
+  return false;
 }
 
 size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
@@ -198,6 +248,18 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kDeleteRowsEventV1):
       ProcessRowEvent(header, body, body_len);
       break;
+
+    case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
+      // A DDL statement (ALTER/RENAME/DROP/CREATE/TRUNCATE) may change a
+      // table's columns while preserving the column count, which the metadata
+      // cache's count guard cannot detect. Invalidate the whole metadata cache
+      // so the next row event re-fetches fresh column names and signedness.
+      if (metadata_fetcher_ != nullptr && IsDdlQueryEvent(body, body_len)) {
+        metadata_fetcher_->ClearCache();
+        StructuredLog().Event("metadata_cache_invalidated_on_ddl").Debug();
+      }
+      break;
+    }
 
     case static_cast<uint8_t>(BinlogEventType::kRotateEvent): {
       RotateEventData rot;

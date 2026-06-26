@@ -77,6 +77,16 @@ class MetadataFetcher {
    */
   void InvalidateCache(const std::string& database, const std::string& table);
 
+  /**
+   * @brief Remove all cached column info.
+   *
+   * Used when a DDL statement is observed in the binlog stream: a schema change
+   * may rename/retype columns while preserving the column count, which the
+   * per-table count guard cannot detect. Clearing forces a fresh SHOW COLUMNS
+   * on the next row event.
+   */
+  void ClearCache();
+
  private:
   protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::vector<ColumnInfo>> cache_;

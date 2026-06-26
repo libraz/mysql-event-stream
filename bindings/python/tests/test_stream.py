@@ -41,6 +41,39 @@ class TestStreamClose:
         await stream.close()
         await stream.close()  # Should not raise
 
+    @pytest.mark.asyncio
+    async def test_close_awaits_inflight_poll(self) -> None:
+        # C-1: when a poll() task is in flight, close() must stop the client to
+        # unblock it and await its completion before destroying the client.
+        import asyncio
+
+        stream = CdcStream.__new__(CdcStream)
+        stream._closed = False
+        stream._engine = MagicMock()
+        mock_client = MagicMock()
+        stream._client = mock_client
+
+        release = asyncio.Event()
+        awaited = False
+
+        async def fake_poll() -> None:
+            nonlocal awaited
+            await release.wait()
+            awaited = True
+
+        poll_task = asyncio.ensure_future(fake_poll())
+        stream._poll_task = poll_task
+
+        # stop() must release the in-flight poll so close() can complete.
+        mock_client.stop.side_effect = lambda: release.set()
+
+        await stream.close()
+
+        assert awaited, "close() did not await the in-flight poll task"
+        mock_client.stop.assert_called_once()
+        mock_client.close.assert_called_once()
+        assert stream._poll_task is None
+
 
 class TestStreamStartFailure:
     """Verify that _start() cleans up on failure."""

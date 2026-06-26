@@ -327,6 +327,53 @@ TEST(DecodeColumnValueTest, Time2Negative) {
   EXPECT_EQ(result.string_val, "-05:15:30");
 }
 
+// Negative TIME with fractional seconds is stored in complement form. These
+// disk encodings are taken directly from MySQL's my_time_packed_from_binary
+// documentation (fsp 2 -> 1 fractional byte).
+TEST(DecodeColumnValueTest, Time2NegativeFracSmall) {
+  // Disk 7FFFFF.9D -> -00:00:00.99
+  BinaryWriter w;
+  w.WriteU24Be(0x7FFFFF);
+  w.WriteU8(0x9D);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.string_val, "-00:00:00.990000");
+}
+
+TEST(DecodeColumnValueTest, Time2NegativeFracOneCentisecond) {
+  // Disk 7FFFFF.FF -> -00:00:00.01
+  BinaryWriter w;
+  w.WriteU24Be(0x7FFFFF);
+  w.WriteU8(0xFF);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.string_val, "-00:00:00.010000");
+}
+
+TEST(DecodeColumnValueTest, Time2NegativeFracBorrow) {
+  // Disk 7FFFFE.FF -> -00:00:01.01 (integer part borrows across the boundary)
+  BinaryWriter w;
+  w.WriteU24Be(0x7FFFFE);
+  w.WriteU8(0xFF);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.string_val, "-00:00:01.010000");
+}
+
+TEST(DecodeColumnValueTest, Time2NegativeWholeSecondNoFrac) {
+  // Disk 7FFFFF.00 -> -00:00:01.00 (frac byte zero, no complement adjustment)
+  BinaryWriter w;
+  w.WriteU24Be(0x7FFFFF);
+  w.WriteU8(0x00);
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_EQ(result.string_val, "-00:00:01.000000");
+}
+
 TEST(DecodeColumnValueTest, Time2WithFrac3) {
   uint32_t intpart = (10 << 12) | (30 << 6) | 45;
   uint32_t packed = intpart + 0x800000;

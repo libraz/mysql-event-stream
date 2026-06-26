@@ -63,6 +63,8 @@ class GtidEncoder {
     std::vector<Interval> intervals;
   };
 
+  /// Normalize a single comma-free SID ("uuid:N" -> "uuid:1-N").
+  static std::string NormalizeSingleSid(const std::string& gtid);
   static mes_error_t ParseUuid(const char* str, uint8_t* out);
   static mes_error_t ParseInterval(const char* str, Interval* out);
   static void StoreInt64Le(std::vector<uint8_t>& buf, uint64_t val);

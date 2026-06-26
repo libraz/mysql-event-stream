@@ -144,6 +144,8 @@ void MetadataFetcher::InvalidateCache(const std::string& database, const std::st
   cache_.erase(MakeCacheKey(database, table));
 }
 
+void MetadataFetcher::ClearCache() { cache_.clear(); }
+
 std::string MetadataFetcher::MakeCacheKey(const std::string& db, const std::string& table) {
   return db + "." + table;
 }

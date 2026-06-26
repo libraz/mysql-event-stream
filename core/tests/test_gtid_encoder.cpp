@@ -260,10 +260,33 @@ TEST(GtidEncoderTest, ConvertAlreadyRange) {
 }
 
 TEST(GtidEncoderTest, ConvertMultiUuid) {
+  // Each comma-separated single GTID must be normalized to a range so the
+  // server does not resend already-processed transactions (duplicate replay).
   std::string gtid =
-      "00000000-0000-0000-0000-000000000001:1,"
+      "00000000-0000-0000-0000-000000000001:100,"
+      "00000000-0000-0000-0000-000000000002:200";
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid),
+            "00000000-0000-0000-0000-000000000001:1-100,"
+            "00000000-0000-0000-0000-000000000002:1-200");
+}
+
+TEST(GtidEncoderTest, ConvertMultiUuidMixedRangeAndSingle) {
+  // A part already expressed as a range is preserved; a bare single is widened.
+  std::string gtid =
+      "00000000-0000-0000-0000-000000000001:1-50,"
+      "00000000-0000-0000-0000-000000000002:7";
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid),
+            "00000000-0000-0000-0000-000000000001:1-50,"
+            "00000000-0000-0000-0000-000000000002:1-7");
+}
+
+TEST(GtidEncoderTest, ConvertMultiUuidDropsZero) {
+  // "uuid:0" (no transactions) is dropped from a multi-UUID set.
+  std::string gtid =
+      "00000000-0000-0000-0000-000000000001:0,"
       "00000000-0000-0000-0000-000000000002:5";
-  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid), gtid);
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid),
+            "00000000-0000-0000-0000-000000000002:1-5");
 }
 
 TEST(GtidEncoderTest, ConvertTaggedGtid) {
