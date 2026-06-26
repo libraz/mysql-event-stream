@@ -149,6 +149,10 @@ const ServerHandshake& MysqlConnection::GetServerInfo() const { return server_in
 
 uint32_t MysqlConnection::GetNegotiatedCaps() const { return negotiated_caps_; }
 
+bool MysqlConnection::DeprecateEofNegotiated() const {
+  return (negotiated_caps_ & kClientDeprecateEOF) != 0;
+}
+
 ServerFlavor MysqlConnection::GetServerFlavor() const { return server_flavor_; }
 
 mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& packet) {

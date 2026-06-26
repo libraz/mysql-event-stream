@@ -89,7 +89,8 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
         break;
       }
     }
-    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err) == MES_OK) {
+    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err, conn_.DeprecateEofNegotiated()) ==
+        MES_OK) {
       query_ok = true;
       break;
     }

@@ -453,5 +453,54 @@ TEST(StateMachineTest, SetMaxEventSizeAcceptsEventAtLimit) {
   EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
 }
 
+// --- P2-B: checksum handling and FDE auto-detection ---
+
+// Build a minimal FORMAT_DESCRIPTION_EVENT body whose final byte is the given
+// checksum algorithm descriptor.
+std::vector<uint8_t> BuildFdeBody(uint8_t checksum_alg) {
+  test::EventBuilder fde;
+  fde.WriteU16Le(4);  // binlog_version
+  for (int i = 0; i < 50; ++i) {
+    fde.WriteU8(0);  // server_version (50 bytes)
+  }
+  fde.WriteU32Le(0);  // create_timestamp
+  fde.WriteU8(19);    // event_header_length
+  fde.WriteU8(0);     // one event-type header-length entry
+  fde.WriteU8(checksum_alg);
+  return fde.Data();
+}
+
+TEST(StateMachineChecksumTest, DetectsCrc32Fde) {
+  EventStreamParser parser;
+  // BuildEvent appends a 4-byte checksum, placing the alg byte at size-5.
+  auto fde = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent), 1000,
+                              0, BuildFdeBody(kBinlogChecksumAlgCrc32));
+  parser.Feed(fde.data(), fde.size());
+  EXPECT_TRUE(parser.ChecksumEnabled());
+}
+
+TEST(StateMachineChecksumTest, DetectsOffFde) {
+  EventStreamParser parser;
+  // No trailing checksum; the OFF alg byte is the final byte.
+  auto fde =
+      test::BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent),
+                                 1000, 0, BuildFdeBody(kBinlogChecksumAlgOff));
+  parser.Feed(fde.data(), fde.size());
+  EXPECT_FALSE(parser.ChecksumEnabled());
+}
+
+TEST(StateMachineChecksumTest, ExplicitSetterControlsBodySize) {
+  EventStreamParser parser;
+  parser.SetChecksumEnabled(false);
+  std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04, 0x05};
+  auto event = test::BuildEventNoChecksum(30, 1000, 0, body);
+  ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+  const uint8_t* body_ptr = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+}
+
 }  // namespace
 }  // namespace mes

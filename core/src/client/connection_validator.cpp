@@ -61,7 +61,8 @@ mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
 
   protocol::QueryResult qr;
   std::string err;
-  mes_error_t rc = protocol::ExecuteQuery(conn->Socket(), query, &qr, &err);
+  mes_error_t rc =
+      protocol::ExecuteQuery(conn->Socket(), query, &qr, &err, conn->DeprecateEofNegotiated());
   if (rc != MES_OK) {
     out_value.clear();
     return rc;

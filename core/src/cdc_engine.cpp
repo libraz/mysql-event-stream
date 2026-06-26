@@ -41,8 +41,8 @@ bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
 
   // Skip leading whitespace.
   size_t pos = 0;
-  while (pos < stmt_len && (stmt[pos] == ' ' || stmt[pos] == '\t' || stmt[pos] == '\n' ||
-                            stmt[pos] == '\r')) {
+  while (pos < stmt_len &&
+         (stmt[pos] == ' ' || stmt[pos] == '\t' || stmt[pos] == '\n' || stmt[pos] == '\r')) {
     ++pos;
   }
 
@@ -204,6 +204,8 @@ void CdcEngine::SetMaxEventSize(uint32_t max_event_size) {
 
 uint32_t CdcEngine::MaxEventSize() const { return stream_parser_.MaxEventSize(); }
 
+void CdcEngine::SetChecksumEnabled(bool enabled) { stream_parser_.SetChecksumEnabled(enabled); }
+
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
   // Update position from next_position
   if (header.next_position > 0) {
@@ -233,7 +235,13 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
                                                           meta->columns.size());
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
             meta->columns[i].name = infos[i].name;
-            meta->columns[i].is_unsigned = infos[i].is_unsigned;
+            // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
+            // default) is authoritative for the exact schema at this position.
+            // Only fall back to the side-connection's signedness when the
+            // binlog did not carry it (very old servers).
+            if (!meta->signedness_from_binlog) {
+              meta->columns[i].is_unsigned = infos[i].is_unsigned;
+            }
           }
         }
       }

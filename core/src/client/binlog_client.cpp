@@ -137,8 +137,8 @@ mes_error_t BinlogClient::StartStreamMySQL() {
   {
     protocol::QueryResult qr;
     std::string err;
-    if (protocol::ExecuteQuery(conn_.Socket(), "SET @source_binlog_checksum='CRC32'", &qr, &err) !=
-        MES_OK) {
+    if (protocol::ExecuteQuery(conn_.Socket(), "SET @source_binlog_checksum='CRC32'", &qr, &err,
+                               conn_.DeprecateEofNegotiated()) != MES_OK) {
       SetLastError(err);
       return MES_ERR_STREAM;
     }
@@ -149,7 +149,8 @@ mes_error_t BinlogClient::StartStreamMySQL() {
     protocol::QueryResult qr;
     std::string err;
     std::string hb_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
-    mes_error_t hb_rc = protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
+    mes_error_t hb_rc =
+        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err, conn_.DeprecateEofNegotiated());
     if (hb_rc != MES_OK) {
       StructuredLog().Event("heartbeat_setup_failed").Field("error", err).Warn();
     }
@@ -197,8 +198,8 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   // replication format that omits per-transaction GTID events.
   // Capability 4 = MARIA_SLAVE_CAPABILITY_GTID (MariaDB 10.0.2+)
   {
-    mes_error_t rc =
-        protocol::ExecuteQuery(conn_.Socket(), "SET @mariadb_slave_capability = 4", &qr, &err);
+    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @mariadb_slave_capability = 4",
+                                            &qr, &err, conn_.DeprecateEofNegotiated());
     if (rc != MES_OK) {
       StructuredLog().Event("mariadb_slave_capability_failed").Field("error", err).Warn();
     }
@@ -206,16 +207,16 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
 
   // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
   if (protocol::ExecuteQuery(conn_.Socket(),
-                             "SET @master_binlog_checksum = @@global.binlog_checksum", &qr,
-                             &err) != MES_OK) {
+                             "SET @master_binlog_checksum = @@global.binlog_checksum", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
     SetLastError("Failed to set MariaDB binlog checksum: " + err);
     return MES_ERR_STREAM;
   }
 
   // Strict GTID mode: fail on GTID gap rather than silently skipping
   {
-    mes_error_t rc =
-        protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr, &err);
+    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr,
+                                            &err, conn_.DeprecateEofNegotiated());
     if (rc != MES_OK) {
       StructuredLog().Event("mariadb_strict_mode_failed").Field("error", err).Warn();
     }
@@ -223,8 +224,8 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
 
   // Don't skip duplicate GTIDs
   {
-    mes_error_t rc =
-        protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0", &qr, &err);
+    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0",
+                                            &qr, &err, conn_.DeprecateEofNegotiated());
     if (rc != MES_OK) {
       StructuredLog().Event("mariadb_ignore_duplicates_failed").Field("error", err).Warn();
     }
@@ -233,7 +234,8 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
   // Heartbeat period
   {
     std::string hb_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
-    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err);
+    mes_error_t rc =
+        protocol::ExecuteQuery(conn_.Socket(), hb_query, &qr, &err, conn_.DeprecateEofNegotiated());
     if (rc != MES_OK) {
       StructuredLog().Event("heartbeat_setup_failed").Field("error", err).Warn();
     }
@@ -247,7 +249,7 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
     protocol::QueryResult checksum_qr;
     std::string checksum_err;
     if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@global.binlog_checksum", &checksum_qr,
-                               &checksum_err) != MES_OK ||
+                               &checksum_err, conn_.DeprecateEofNegotiated()) != MES_OK ||
         checksum_qr.rows.empty() || checksum_qr.rows[0].values.empty()) {
       SetLastError("Failed to detect MariaDB binlog checksum setting: " + checksum_err);
       return MES_ERR_STREAM;
@@ -265,7 +267,8 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
     return MES_ERR_INVALID_ARG;
   }
   std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
-  if (protocol::ExecuteQuery(conn_.Socket(), gtid_query, &qr, &err) != MES_OK) {
+  if (protocol::ExecuteQuery(conn_.Socket(), gtid_query, &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
     SetLastError("Failed to set slave_connect_state: " + err);
     return MES_ERR_STREAM;
   }

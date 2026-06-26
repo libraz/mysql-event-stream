@@ -78,6 +78,13 @@ class TableMapBuilder {
     }
   }
 
+  // Append raw bytes (e.g. an optional metadata block after the null bitmap).
+  void WriteRawBytes(const std::vector<uint8_t>& bytes) {
+    for (auto b : bytes) {
+      WriteByte(b);
+    }
+  }
+
   const std::vector<uint8_t>& Data() const { return buf_; }
   size_t Size() const { return buf_.size(); }
 
@@ -195,6 +202,87 @@ TEST(TableMapTest, ParseMixedColumnTypes) {
   EXPECT_EQ(metadata.columns[4].type, ColumnType::kNewDecimal);
   EXPECT_EQ(metadata.columns[4].metadata, (10 << 8) | 2);
   EXPECT_TRUE(metadata.columns[4].is_nullable);
+}
+
+// --- P2-A: optional metadata (SIGNEDNESS / COLUMN_NAME) ---
+
+TEST(TableMapTest, ParseSignednessOptionalMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(7);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  // 3 numeric columns: INT, BIGINT, TINYINT.
+  std::vector<uint8_t> col_types = {
+      static_cast<uint8_t>(ColumnType::kLong),
+      static_cast<uint8_t>(ColumnType::kLongLong),
+      static_cast<uint8_t>(ColumnType::kTiny),
+  };
+  builder.WriteColumnCount(3);
+  builder.WriteColumnTypes(col_types);
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x07});
+
+  // Optional metadata: SIGNEDNESS field (type=1), length=1, bitmap=0x40.
+  // Numeric columns in order: INT(0), BIGINT(1), TINY(2). MSB-first, so
+  // 0x40 = bit for numeric index 1 (BIGINT) -> BIGINT is unsigned.
+  builder.WriteRawBytes({0x01, 0x01, 0x40});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 3u);
+  EXPECT_TRUE(metadata.signedness_from_binlog);
+  EXPECT_FALSE(metadata.columns[0].is_unsigned);  // INT signed
+  EXPECT_TRUE(metadata.columns[1].is_unsigned);   // BIGINT UNSIGNED
+  EXPECT_FALSE(metadata.columns[2].is_unsigned);  // TINYINT signed
+}
+
+TEST(TableMapTest, ParseColumnNameOptionalMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(8);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  std::vector<uint8_t> col_types = {
+      static_cast<uint8_t>(ColumnType::kLong),
+      static_cast<uint8_t>(ColumnType::kLong),
+  };
+  builder.WriteColumnCount(2);
+  builder.WriteColumnTypes(col_types);
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x03});
+
+  // COLUMN_NAME field (type=4): value is per-column length-encoded strings.
+  // "id" (len 2) + "amount" (len 6) -> value length = 1+2 + 1+6 = 10.
+  builder.WriteRawBytes({0x04, 0x0A, 0x02, 'i', 'd', 0x06, 'a', 'm', 'o', 'u', 'n', 't'});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 2u);
+  EXPECT_EQ(metadata.columns[0].name, "id");
+  EXPECT_EQ(metadata.columns[1].name, "amount");
+}
+
+TEST(TableMapTest, OptionalMetadataAbsentIsSafe) {
+  // The default MINIMAL-less case: no optional metadata after the null bitmap.
+  TableMapBuilder builder;
+  builder.WriteTableId(9);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x01});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 1u);
+  EXPECT_FALSE(metadata.signedness_from_binlog);
+  EXPECT_FALSE(metadata.columns[0].is_unsigned);
+  EXPECT_TRUE(metadata.columns[0].name.empty());
 }
 
 TEST(TableMapTest, ParseTruncatedBuffer) {

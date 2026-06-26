@@ -137,6 +137,16 @@ class CdcEngine {
   /** @brief Get the currently configured maximum event size (bytes). */
   uint32_t MaxEventSize() const;
 
+  /**
+   * @brief Set whether fed events carry a trailing 4-byte CRC32 checksum.
+   *
+   * Defaults to true. Set to false when feeding raw bytes from a stream
+   * produced with binlog_checksum=NONE and no FORMAT_DESCRIPTION_EVENT.
+   * If the stream contains an FDE, the checksum algorithm is auto-detected
+   * and this setting is overridden.
+   */
+  void SetChecksumEnabled(bool enabled);
+
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);

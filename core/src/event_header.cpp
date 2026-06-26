@@ -22,13 +22,15 @@ bool ParseEventHeader(const uint8_t* data, size_t len, EventHeader* header) {
   return true;
 }
 
-size_t EventBodySize(const EventHeader& header) {
-  size_t min_size = kEventHeaderSize + kChecksumSize;
+size_t EventBodySize(const EventHeader& header, bool has_checksum) {
+  size_t min_size = kEventHeaderSize + (has_checksum ? kChecksumSize : 0);
   if (header.event_length < min_size) {
     return 0;
   }
   return header.event_length - min_size;
 }
+
+size_t EventBodySize(const EventHeader& header) { return EventBodySize(header, true); }
 
 bool IsRowEvent(BinlogEventType type) { return IsRowEvent(static_cast<uint8_t>(type)); }
 

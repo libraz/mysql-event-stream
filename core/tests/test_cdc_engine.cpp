@@ -15,11 +15,51 @@ namespace {
 
 using test::BuildDeleteRowsBody;
 using test::BuildEvent;
+using test::BuildEventNoChecksum;
 using test::BuildQueryEventBody;
 using test::BuildRotateBody;
 using test::BuildTableMapBody;
 using test::BuildUpdateRowsBody;
 using test::BuildWriteRowsBody;
+
+// --- P2-B: binlog_checksum=NONE handling ---
+
+TEST(CdcEngineChecksumTest, DecodesStreamWithoutChecksum) {
+  // With checksum disabled, events carry no trailing CRC32; the engine must
+  // not strip 4 bytes (which would corrupt the last column / metadata).
+  CdcEngine engine;
+  engine.SetChecksumEnabled(false);
+
+  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                        100, BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                    150, BuildWriteRowsBody(42, 7777));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_EQ(event.type, EventType::kInsert);
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 7777);
+}
+
+TEST(CdcEngineChecksumTest, DefaultStripsChecksum) {
+  // Default path: events include a 4-byte checksum (BuildEvent appends one).
+  CdcEngine engine;  // checksum enabled by default
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 4242));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 4242);
+}
 
 // --- H-5: DDL detection drives metadata cache invalidation ---
 

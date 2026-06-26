@@ -106,12 +106,31 @@ class EventStreamParser {
   /** @brief Get the current maximum event size (in bytes). */
   uint32_t MaxEventSize() const;
 
+  /**
+   * @brief Set whether events carry a trailing 4-byte CRC32 checksum.
+   *
+   * Defaults to true (MySQL's default). Set to false for streams produced
+   * with binlog_checksum=NONE (e.g. MariaDB's historical default) when
+   * feeding raw bytes without a FORMAT_DESCRIPTION_EVENT. When an FDE is
+   * present in the stream, the parser auto-detects the algorithm and
+   * overrides this setting.
+   */
+  void SetChecksumEnabled(bool enabled);
+
+  /** @brief Whether the parser currently treats events as checksummed. */
+  bool ChecksumEnabled() const;
+
  private:
+  /// Auto-detect the checksum algorithm from a buffered FORMAT_DESCRIPTION
+  /// event and update has_checksum_ accordingly.
+  void DetectChecksumFromFde();
+
   ParserState state_ = ParserState::kWaitingHeader;
   std::vector<uint8_t> buffer_;
   EventHeader current_header_{};
   size_t bytes_needed_ = kEventHeaderSize;
   uint32_t max_event_size_ = kDefaultMaxEventSize;
+  bool has_checksum_ = true;
 };
 
 }  // namespace mes

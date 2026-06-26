@@ -115,6 +115,21 @@ TEST(EventHeaderTest, EventBodySizeZero) {
   EXPECT_EQ(EventBodySize(header), 0u);
 }
 
+TEST(EventHeaderTest, EventBodySizeNoChecksum) {
+  EventHeader header;
+  header.event_length = 100;
+  // Without a trailing checksum: body = 100 - 19 (header) = 81.
+  EXPECT_EQ(EventBodySize(header, false), 81u);
+  // With checksum: body = 100 - 19 - 4 = 77.
+  EXPECT_EQ(EventBodySize(header, true), 77u);
+}
+
+TEST(EventHeaderTest, EventBodySizeNoChecksumMinimal) {
+  EventHeader header;
+  header.event_length = 19;  // header only, no checksum
+  EXPECT_EQ(EventBodySize(header, false), 0u);
+}
+
 TEST(EventHeaderTest, IsRowEventWriteV1) {
   EXPECT_TRUE(IsRowEvent(BinlogEventType::kWriteRowsEventV1));
   EXPECT_TRUE(IsRowEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEventV1)));

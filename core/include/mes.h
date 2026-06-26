@@ -257,6 +257,26 @@ MES_API mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_ev
  */
 MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
 
+/**
+ * @brief Set whether fed events carry a trailing 4-byte CRC32 checksum.
+ *
+ * Defaults to enabled (1), matching MySQL's default binlog_checksum=CRC32.
+ * Set to 0 when feeding raw bytes from a stream produced with
+ * binlog_checksum=NONE (e.g. MariaDB's historical default) when the stream
+ * does not start with a FORMAT_DESCRIPTION_EVENT. When the fed stream
+ * contains an FDE, the engine auto-detects the algorithm and this setting
+ * is overridden.
+ *
+ * Misframing the checksum silently corrupts the last bytes of every event,
+ * so this must match the stream.
+ *
+ * @param engine Engine handle.
+ * @param enabled Non-zero to treat events as checksummed; 0 otherwise.
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled);
+
 /* ---- Table filtering ---- */
 
 /**

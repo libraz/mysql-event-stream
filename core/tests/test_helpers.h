@@ -112,6 +112,22 @@ inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
   return b.Data();
 }
 
+// Build a binlog event WITHOUT a trailing checksum (binlog_checksum=NONE).
+inline std::vector<uint8_t> BuildEventNoChecksum(uint8_t type_code, uint32_t timestamp,
+                                                 uint32_t next_position,
+                                                 const std::vector<uint8_t>& body) {
+  EventBuilder b;
+  uint32_t event_length = static_cast<uint32_t>(kEventHeaderSize + body.size());
+  b.WriteU32Le(timestamp);
+  b.WriteU8(type_code);
+  b.WriteU32Le(1);  // server_id
+  b.WriteU32Le(event_length);
+  b.WriteU32Le(next_position);
+  b.WriteU16Le(0);  // flags
+  b.WriteBytes(body);
+  return b.Data();
+}
+
 // Build a TABLE_MAP_EVENT body for a simple schema: single INT column.
 inline std::vector<uint8_t> BuildTableMapBody(uint64_t table_id, const std::string& db,
                                               const std::string& table) {

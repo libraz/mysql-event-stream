@@ -102,6 +102,115 @@ size_t ReadColumnMetadataValue(uint8_t col_type, const uint8_t* data, size_t rem
   }
 }
 
+// Optional metadata field types appended to a TABLE_MAP event when
+// binlog_row_metadata is enabled (SIGNEDNESS is present even in MINIMAL mode,
+// the MySQL default; COLUMN_NAME requires FULL). Values match MySQL's
+// Table_map_event::Optional_metadata_field_type.
+enum class OptionalMetadataFieldType : uint8_t {
+  kSignedness = 1,
+  kDefaultCharset = 2,
+  kColumnCharset = 3,
+  kColumnName = 4,
+  kSetStrValue = 5,
+  kEnumStrValue = 6,
+  kGeometryType = 7,
+  kSimplePrimaryKey = 8,
+  kPrimaryKeyWithPrefix = 9,
+  kEnumAndSetDefaultCharset = 10,
+  kEnumAndSetColumnCharset = 11,
+  kColumnVisibility = 12,
+};
+
+// Numeric column types that carry a SIGNEDNESS bit (one bit per such column,
+// in column order, MSB-first within each byte).
+bool IsNumericColumnType(uint8_t col_type) {
+  switch (col_type) {
+    case static_cast<uint8_t>(ColumnType::kTiny):
+    case static_cast<uint8_t>(ColumnType::kShort):
+    case static_cast<uint8_t>(ColumnType::kInt24):
+    case static_cast<uint8_t>(ColumnType::kLong):
+    case static_cast<uint8_t>(ColumnType::kLongLong):
+    case static_cast<uint8_t>(ColumnType::kNewDecimal):
+    case static_cast<uint8_t>(ColumnType::kFloat):
+    case static_cast<uint8_t>(ColumnType::kDouble):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Apply a SIGNEDNESS bitmap to the numeric columns of `metadata`.
+void ApplySignedness(const uint8_t* bitmap, size_t bitmap_len, TableMetadata* metadata) {
+  metadata->signedness_from_binlog = true;
+  size_t numeric_index = 0;
+  for (auto& column : metadata->columns) {
+    if (!IsNumericColumnType(static_cast<uint8_t>(column.type))) {
+      continue;
+    }
+    size_t byte_index = numeric_index / 8;
+    if (byte_index >= bitmap_len) {
+      break;
+    }
+    // MySQL packs signedness MSB-first within each byte.
+    uint8_t bit = static_cast<uint8_t>(0x80 >> (numeric_index % 8));
+    column.is_unsigned = (bitmap[byte_index] & bit) != 0;
+    ++numeric_index;
+  }
+}
+
+// Apply COLUMN_NAME entries (one length-encoded string per column).
+void ApplyColumnNames(const uint8_t* data, size_t value_len, TableMetadata* metadata) {
+  size_t pos = 0;
+  for (auto& column : metadata->columns) {
+    if (pos >= value_len) {
+      break;
+    }
+    size_t packed_bytes = 0;
+    uint64_t name_len = binary::ReadPackedInt(data + pos, value_len - pos, packed_bytes);
+    if (packed_bytes == 0 || pos + packed_bytes + name_len > value_len) {
+      break;
+    }
+    pos += packed_bytes;
+    column.name = std::string(reinterpret_cast<const char*>(data + pos), name_len);
+    pos += name_len;
+  }
+}
+
+// Best-effort parse of the optional metadata block following the null bitmap.
+// On any inconsistency it stops; the supplementary fields are enhancements, so
+// partial population is acceptable and the core parse still succeeds.
+void ParseOptionalMetadata(const uint8_t* data, size_t offset, size_t len,
+                           TableMetadata* metadata) {
+  while (offset < len) {
+    uint8_t field_type = binary::ReadU8(data + offset);
+    offset += 1;
+    if (offset >= len) {
+      return;
+    }
+    size_t packed_bytes = 0;
+    uint64_t field_len = binary::ReadPackedInt(data + offset, len - offset, packed_bytes);
+    if (packed_bytes == 0 || offset + packed_bytes + field_len > len) {
+      return;
+    }
+    offset += packed_bytes;
+    const uint8_t* value = data + offset;
+
+    switch (static_cast<OptionalMetadataFieldType>(field_type)) {
+      case OptionalMetadataFieldType::kSignedness:
+        ApplySignedness(value, field_len, metadata);
+        break;
+      case OptionalMetadataFieldType::kColumnName:
+        ApplyColumnNames(value, field_len, metadata);
+        break;
+      default:
+        // Other fields (charsets, enum/set values, primary keys, visibility)
+        // are not consumed by the decoder yet; skip their bytes.
+        break;
+    }
+    offset += field_len;
+  }
+}
+
 }  // namespace
 
 bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata) {
@@ -207,6 +316,13 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   for (size_t i = 0; i < column_count; i++) {
     metadata->columns[i].is_nullable = binary::BitmapIsSet(null_bitmap, i);
   }
+  offset += null_bitmap_bytes;
+
+  // Optional metadata (SIGNEDNESS, COLUMN_NAME, ...) follows when the server
+  // has binlog_row_metadata enabled. SIGNEDNESS is present in the default
+  // MINIMAL mode, so this is what lets the engine decode UNSIGNED columns
+  // correctly from raw binlog bytes without a metadata side-connection.
+  ParseOptionalMetadata(data, offset, len, metadata);
 
   return true;
 }

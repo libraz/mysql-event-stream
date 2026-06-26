@@ -51,7 +51,8 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
       }
 
       // Validate event_length
-      if (current_header_.event_length < kEventHeaderSize + kChecksumSize) {
+      size_t min_event_length = kEventHeaderSize + (has_checksum_ ? kChecksumSize : 0);
+      if (current_header_.event_length < min_event_length) {
         state_ = ParserState::kError;
         StructuredLog()
             .Event("parse_error")
@@ -94,6 +95,15 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
     } else if (state_ == ParserState::kWaitingBody) {
       state_ = ParserState::kEventReady;
     }
+
+    // When a FORMAT_DESCRIPTION_EVENT completes, auto-detect the checksum
+    // algorithm from the stream itself so subsequent events are framed
+    // correctly regardless of the server's binlog_checksum setting.
+    if (state_ == ParserState::kEventReady &&
+        current_header_.type_code ==
+            static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent)) {
+      DetectChecksumFromFde();
+    }
   }
 
   return total_consumed;
@@ -108,7 +118,7 @@ void EventStreamParser::CurrentBody(const uint8_t** body_data, size_t* body_len)
     *body_data = buffer_.data() + kEventHeaderSize;
   }
   if (body_len != nullptr) {
-    *body_len = EventBodySize(current_header_);
+    *body_len = EventBodySize(current_header_, has_checksum_);
   }
 }
 
@@ -142,5 +152,31 @@ void EventStreamParser::SetMaxEventSize(uint32_t max_event_size) {
 }
 
 uint32_t EventStreamParser::MaxEventSize() const { return max_event_size_; }
+
+void EventStreamParser::SetChecksumEnabled(bool enabled) { has_checksum_ = enabled; }
+
+bool EventStreamParser::ChecksumEnabled() const { return has_checksum_; }
+
+void EventStreamParser::DetectChecksumFromFde() {
+  // buffer_ holds the full FDE event: [19-byte header][body...]. Since MySQL
+  // 5.6+/MariaDB 10.0+ the FDE always carries a 1-byte checksum-algorithm
+  // descriptor after the event-type header-length array; when the algorithm is
+  // CRC32 it is followed by a 4-byte checksum. Detect CRC32 by inspecting the
+  // descriptor at offset (size - 5); otherwise look for an OFF descriptor as
+  // the final byte. On ambiguity, leave the current setting unchanged.
+  const size_t size = buffer_.size();
+  // Fixed FDE prefix after the common header: binlog_version(2) +
+  // server_version(50) + create_timestamp(4) + header_length(1) = 57.
+  constexpr size_t kFdePrefix = 57;
+  if (size < kEventHeaderSize + kFdePrefix + 1) {
+    return;  // Too short to be a valid FDE; keep current setting.
+  }
+  if (size >= kEventHeaderSize + kFdePrefix + 1 + kChecksumSize &&
+      buffer_[size - kChecksumSize - 1] == kBinlogChecksumAlgCrc32) {
+    has_checksum_ = true;
+  } else if (buffer_[size - 1] == kBinlogChecksumAlgOff) {
+    has_checksum_ = false;
+  }
+}
 
 }  // namespace mes

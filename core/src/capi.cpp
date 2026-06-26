@@ -58,8 +58,19 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
     case mes::ColumnType::kTimestamp:
     case mes::ColumnType::kEnum:
     case mes::ColumnType::kSet:
-      c.type = MES_COL_INT;
-      c.int_val = col.int_val;
+      // An UNSIGNED BIGINT whose value exceeds INT64_MAX is decoded into
+      // string_val (a decimal string) to avoid signed overflow; int_val is 0
+      // in that case. Surface it as a string so the binding does not report a
+      // wrong 0. Normal integers leave string_val empty.
+      if (!col.string_val.empty()) {
+        c.type = MES_COL_STRING;
+        c.str_data = col.string_val.c_str();
+        c.str_len =
+            static_cast<uint32_t>(std::min(col.string_val.size(), static_cast<size_t>(UINT32_MAX)));
+      } else {
+        c.type = MES_COL_INT;
+        c.int_val = col.int_val;
+      }
       break;
     case mes::ColumnType::kFloat:
     case mes::ColumnType::kDouble:
@@ -244,6 +255,12 @@ MES_API mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_ev
 MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine) {
   if (engine == nullptr) return 0;
   return engine->engine.MaxEventSize();
+}
+
+MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  engine->engine.SetChecksumEnabled(enabled != 0);
+  return MES_OK;
 }
 
 MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,

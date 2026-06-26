@@ -57,6 +57,10 @@ struct EventHeader {
 inline constexpr size_t kEventHeaderSize = 19;
 inline constexpr size_t kChecksumSize = 4;
 
+/// Binlog checksum algorithm descriptor values (FORMAT_DESCRIPTION_EVENT).
+inline constexpr uint8_t kBinlogChecksumAlgOff = 0;
+inline constexpr uint8_t kBinlogChecksumAlgCrc32 = 1;
+
 /**
  * @brief Parse a 19-byte binlog event header.
  * @param data Pointer to at least 19 bytes of header data.
@@ -69,7 +73,16 @@ bool ParseEventHeader(const uint8_t* data, size_t len, EventHeader* header);
 /**
  * @brief Calculate the body size of an event (excludes header and checksum).
  * @param header Parsed event header.
+ * @param has_checksum Whether the event carries a trailing 4-byte CRC32.
  * @return Body size in bytes, or 0 if event_length is too small.
+ */
+size_t EventBodySize(const EventHeader& header, bool has_checksum);
+
+/**
+ * @brief Calculate the body size assuming a trailing checksum is present.
+ *
+ * Equivalent to EventBodySize(header, true); retained for callers that always
+ * operate on checksummed streams.
  */
 size_t EventBodySize(const EventHeader& header);
 

@@ -102,6 +102,16 @@ class MysqlConnection {
   /** @brief Get the capability flags negotiated during handshake */
   uint32_t GetNegotiatedCaps() const;
 
+  /**
+   * @brief Whether CLIENT_DEPRECATE_EOF was negotiated with the server.
+   *
+   * Result-set framing differs: with DEPRECATE_EOF the trailing EOF packet is
+   * replaced by an OK packet. Callers must pass this to ExecuteQuery() so the
+   * result set is framed correctly; assuming it unconditionally desyncs the
+   * socket against servers that do not support it.
+   */
+  bool DeprecateEofNegotiated() const;
+
   /** @brief Get the detected server flavor (MySQL or MariaDB) */
   ServerFlavor GetServerFlavor() const;
 

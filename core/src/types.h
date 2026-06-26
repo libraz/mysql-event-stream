@@ -192,6 +192,10 @@ struct TableMetadata {
   std::string database_name;
   std::string table_name;
   std::vector<ColumnMetadata> columns;
+  /// True when column signedness came from the binlog TABLE_MAP optional
+  /// metadata (authoritative). When false, signedness may be filled from a
+  /// metadata side-connection as a fallback.
+  bool signedness_from_binlog = false;
 };
 
 /**
