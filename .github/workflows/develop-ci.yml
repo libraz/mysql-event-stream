@@ -22,8 +22,8 @@ jobs:
       node: ${{ steps.filter.outputs.node }}
       python: ${{ steps.filter.outputs.python }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -48,10 +48,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Cache CMake dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/_deps
           key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'core/CMakeLists.txt', 'core/tests/CMakeLists.txt') }}
@@ -59,7 +59,7 @@ jobs:
             ${{ runner.os }}-cmake-deps-
 
       - name: Cache ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ccache
           key: ${{ runner.os }}-ccache-develop-${{ github.sha }}
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload build artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs-develop
           path: |
@@ -112,8 +112,8 @@ jobs:
     if: needs.changes.outputs.node == 'true' || needs.changes.outputs.core == 'true'
     needs: changes
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: '22.22.1'
       - run: corepack enable && corepack prepare yarn@4.9.1 --activate
@@ -136,8 +136,8 @@ jobs:
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.core == 'true'
     needs: changes
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: Install system dependencies

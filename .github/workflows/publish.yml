@@ -13,9 +13,9 @@ jobs:
   publish-npm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
@@ -24,7 +24,7 @@ jobs:
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             bindings/node/.yarn/cache
@@ -52,7 +52,7 @@ jobs:
           yarn test
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: Release ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
@@ -94,7 +94,7 @@ jobs:
             lib_name: libmes.dylib
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install OpenSSL (Linux)
         if: runner.os == 'Linux'
@@ -104,7 +104,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install openssl cmake
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
 
@@ -134,7 +134,7 @@ jobs:
           MES_LIB_PATH=$(python3 -c "import mysql_event_stream._ffi as f; print(f._find_library())") \
             python3 -m pytest bindings/python/tests/ -x -q
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
           path: bindings/python/dist/*.whl
@@ -149,7 +149,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheel-*
           path: dist/
