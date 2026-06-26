@@ -146,7 +146,14 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
   Napi::Value max_queue_size_v = config.Get("maxQueueSize");
   if (max_queue_size_v.IsNumber()) {
-    c_config.max_queue_size = max_queue_size_v.As<Napi::Number>().Uint32Value();
+    // max_queue_size is size_t (64-bit) in the C ABI. Read via Int64Value() to
+    // avoid silently truncating large values, then reject anything negative.
+    int64_t max_queue_size = max_queue_size_v.As<Napi::Number>().Int64Value();
+    if (max_queue_size < 0) {
+      Napi::RangeError::New(env, "maxQueueSize must be non-negative").ThrowAsJavaScriptException();
+      return;
+    }
+    c_config.max_queue_size = static_cast<size_t>(max_queue_size);
   }
 
   mes_error_t err = mes_client_connect(client_, &c_config);

@@ -12,6 +12,14 @@ const NON_RETRYABLE_CODES: ReadonlySet<number> = new Set([
   MesErrorCode.Validation,
 ]);
 
+/** Concatenate two byte arrays into a new Uint8Array. */
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
 /** Extract the numeric `code` an addon error carries, if any. */
 function errorCode(err: unknown): number | undefined {
   if (err !== null && typeof err === "object" && "code" in err) {
@@ -97,14 +105,32 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     try {
       while (!this.closed) {
         this.client = new BinlogClient(this.config);
+        // Bytes the engine declined to consume on the previous feed (e.g. when
+        // a queue limit applies backpressure). They are prepended to the next
+        // chunk so no data is lost. Scoped per-connection: on reconnect the
+        // engine is reset and the stream resumes from a GTID, so any leftover
+        // from the dropped connection must not carry over.
+        let leftover: Uint8Array | null = null;
         try {
           this.client.start();
           reconnectAttempts = 0;
 
           while (!this.closed) {
             const result = await this.client.poll();
-            if (!result.data) continue;
-            this.engine!.feed(result.data);
+            if (!result.data && !leftover) continue;
+
+            let chunk: Uint8Array;
+            if (leftover && result.data) {
+              chunk = concatBytes(leftover, result.data);
+            } else if (leftover) {
+              chunk = leftover;
+            } else {
+              chunk = result.data as Uint8Array;
+            }
+
+            const consumed = this.engine!.feed(chunk);
+            leftover = consumed < chunk.length ? chunk.subarray(consumed) : null;
+
             for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
               yield ev;
             }

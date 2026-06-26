@@ -10,7 +10,7 @@ interface NativeAddon {
   CdcEngine: new () => NativeEngine;
   /**
    * Indicates whether the native addon was built with client (socket/SSL)
-   * support. Only relevant when instantiating `MysqlClient`; `CdcEngine`
+   * support. Only relevant when instantiating `BinlogClient`; `CdcEngine`
    * is always available regardless of this flag.
    */
   hasClient: boolean;

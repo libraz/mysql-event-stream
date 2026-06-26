@@ -48,13 +48,37 @@ export const SslMode = {
 export type SslMode = (typeof SslMode)[keyof typeof SslMode];
 
 /**
+ * A column value as represented in JavaScript.
+ *
+ * The mapping from MySQL column types is:
+ * - `null` — SQL NULL.
+ * - `number` — integer, decimal, floating-point, temporal, ENUM, SET and BIT
+ *   columns. ENUM arrives as its 1-based numeric index, SET as its numeric
+ *   bitmask, and BIT as the integer value of its bits. Integers outside the
+ *   safe-integer range are returned as `bigint` instead.
+ * - `bigint` — integers that do not fit in a JS safe integer.
+ * - `string` — textual columns (CHAR, VARCHAR, TEXT). See the limitation below.
+ * - `Uint8Array` — binary columns: BLOB, BINARY/VARBINARY, GEOMETRY, and JSON.
+ *   JSON columns arrive as raw bytes in MySQL's internal binary JSON format,
+ *   not as a decoded string or object.
+ *
+ * String limitation: textual columns are decoded as UTF-8. Data stored in a
+ * non-UTF-8 character set (e.g. latin1, sjis) is not transcoded; invalid byte
+ * sequences are replaced with the Unicode replacement character (U+FFFD), so
+ * such columns may be lossy. For lossless access to non-UTF-8 text, treat the
+ * column as binary at the schema level.
+ */
+export type ColumnValue = null | number | bigint | string | Uint8Array;
+
+/**
  * A CDC change event.
  *
  * Column values are represented as plain records keyed by column name.
  * When column names are unavailable (standalone mode without metadata),
  * string indices ("0", "1", ...) are used as keys.
  *
- * Values are typed as: null, number, bigint, string, or Uint8Array.
+ * See {@link ColumnValue} for how each MySQL column type is represented and for
+ * the non-UTF-8 string limitation.
  */
 export interface ChangeEvent {
   /** Event type. */
@@ -63,10 +87,10 @@ export interface ChangeEvent {
   database: string;
   /** Table name. */
   table: string;
-  /** Before image (populated for UPDATE and DELETE). */
-  before: Record<string, unknown> | null;
-  /** After image (populated for INSERT and UPDATE). */
-  after: Record<string, unknown> | null;
+  /** Before image (populated for UPDATE and DELETE). See {@link ColumnValue}. */
+  before: Record<string, ColumnValue> | null;
+  /** After image (populated for INSERT and UPDATE). See {@link ColumnValue}. */
+  after: Record<string, ColumnValue> | null;
   /** Unix timestamp of the event. */
   timestamp: number;
   /** Binlog position. */

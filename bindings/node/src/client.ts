@@ -54,7 +54,14 @@ export class BinlogClient {
     this.client!.start();
   }
 
-  /** Poll for the next binlog event (non-blocking, returns Promise). */
+  /**
+   * Poll for the next binlog event.
+   *
+   * The returned Promise resolves on the libuv thread pool, but the underlying
+   * native call blocks: it does not resolve until an event becomes available or
+   * the stream stops (e.g. via {@link stop} or disconnect). Only one poll() may
+   * be in flight at a time.
+   */
   poll(): Promise<PollResult> {
     this.ensureNotDestroyed();
     return this.client!.poll();

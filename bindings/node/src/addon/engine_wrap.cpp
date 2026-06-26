@@ -460,6 +460,10 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
         break;
 
       case MES_COL_STRING:
+        // Napi::String interprets the bytes as UTF-8. Text stored in a
+        // non-UTF-8 charset (latin1, sjis, ...) is not transcoded; invalid
+        // sequences become U+FFFD, so such columns may be lossy. Charset-aware
+        // decoding is intentionally out of scope here.
         if (col.str_data) {
           val = Napi::String::New(env, col.str_data, col.str_len);
         } else {
