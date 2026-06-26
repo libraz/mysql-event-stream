@@ -5,7 +5,7 @@ import ctypes
 import pytest
 
 from mysql_event_stream import CdcEngine, EventType
-from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_STRING, MESColumn
+from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_INT, MES_COL_STRING, MESColumn
 from mysql_event_stream.engine import _convert_columns
 
 from .helpers import (
@@ -242,3 +242,57 @@ class TestConvertColumns:
         arr = (MESColumn * 1)(col)
         result = _convert_columns(arr, 1)
         assert result["0"] == b""
+
+
+def _make_int_column(value: int) -> MESColumn:
+    """Build a MESColumn of type INT with the given value."""
+    col = MESColumn()
+    col.type = MES_COL_INT
+    col.int_val = value
+    col.double_val = 0.0
+    col.str_data = None
+    col.str_len = 0
+    col.col_name = None
+    return col
+
+
+class TestSpecialColumnRepresentations:
+    """Document how special MySQL column types surface to Python.
+
+    The C engine flattens every MySQL type onto the small C-ABI set
+    (NULL/INT/DOUBLE/STRING/BYTES), so the binding sees JSON as bytes and
+    ENUM/SET/BIT as integers. These tests pin that contract.
+    """
+
+    def test_json_column_is_bytes(self) -> None:
+        # JSON is delivered as MES_COL_BYTES holding MySQL binary JSON.
+        binary_json = b"\x00\x01\x00\x0c\x00\x0bhello"
+        col = _make_bytes_column(binary_json)
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert isinstance(result["0"], bytes)
+        assert result["0"] == binary_json
+
+    def test_enum_column_is_int_index(self) -> None:
+        # ENUM is delivered as MES_COL_INT carrying the 1-based index.
+        col = _make_int_column(2)
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == 2
+        assert isinstance(result["0"], int)
+
+    def test_set_column_is_int_bitmask(self) -> None:
+        # SET is delivered as MES_COL_INT carrying a bitmask (members 1 and 3).
+        col = _make_int_column(0b101)
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == 0b101
+        assert isinstance(result["0"], int)
+
+    def test_bit_column_is_int(self) -> None:
+        # BIT is delivered as MES_COL_INT carrying the bit value.
+        col = _make_int_column(0xFF)
+        arr = (MESColumn * 1)(col)
+        result = _convert_columns(arr, 1)
+        assert result["0"] == 0xFF
+        assert isinstance(result["0"], int)

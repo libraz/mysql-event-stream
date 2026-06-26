@@ -103,7 +103,8 @@ class BinlogClient:
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
-            max_queue_size: Maximum event queue size (0 = unlimited).
+            max_queue_size: Maximum internal event queue size. 0 selects the
+                default of 10000.
             lib_path: Explicit path to libmes shared library.
 
         Raises:

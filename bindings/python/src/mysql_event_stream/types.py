@@ -29,8 +29,11 @@ class ColumnType(Enum):
     """Column value types.
 
     .. deprecated::
-        Events return plain Python values in dict format.
-        This enum is provided for manual construction only.
+        Legacy helper retained for backward compatibility. CDC events
+        expose column values as plain Python values in a dict (see
+        :class:`ChangeEvent`); this enum is never used to describe them.
+        It exists only for callers that still construct :class:`ColumnValue`
+        instances manually and has no counterpart in the Node binding.
     """
 
     NULL = "null"
@@ -45,8 +48,11 @@ class ColumnValue:
     """A column value in a change event.
 
     .. deprecated::
-        Events return plain Python values in dict format.
-        This class is provided for manual construction only.
+        Legacy helper retained for backward compatibility. CDC events do not
+        return :class:`ColumnValue` objects; :class:`ChangeEvent` exposes
+        columns as a plain dict of Python values. This class is provided only
+        for callers that construct column values manually and has no
+        counterpart in the Node binding.
     """
 
     type: ColumnType
@@ -97,6 +103,17 @@ class ChangeEvent:
 
     Values are typed as: None, int, float, str, or bytes.
 
+    Special MySQL column types surface as follows:
+
+    - JSON columns arrive as raw ``bytes`` holding MySQL's binary JSON
+      representation (not decoded text). Use a MySQL binary-JSON parser to
+      obtain a structured value.
+    - ENUM columns arrive as the 1-based numeric index (``int``) into the
+      column's value list, not the string label.
+    - SET columns arrive as a numeric bitmask (``int``); bit i (LSB first)
+      is set when the i-th member of the SET definition is present.
+    - BIT columns arrive as an integer (``int``) holding the bit value.
+
     ``names_resolved`` is False when column names could not be resolved for
     this event's table (e.g. the metadata side-connection failed). In that
     case column keys fall back to string indices ("0", "1", ...).
@@ -130,7 +147,8 @@ class ClientConfig:
         ssl_ca: Path to CA certificate file (empty to skip).
         ssl_cert: Path to client certificate file (empty to skip).
         ssl_key: Path to client private key file (empty to skip).
-        max_queue_size: Maximum event queue size (0 = unlimited).
+        max_queue_size: Maximum internal event queue size. 0 selects the
+            default of 10000.
     """
 
     host: str = "127.0.0.1"

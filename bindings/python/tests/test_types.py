@@ -2,7 +2,14 @@
 
 import ctypes
 
-from mysql_event_stream import BinlogPosition, ChangeEvent, ColumnType, ColumnValue, EventType
+from mysql_event_stream import (
+    BinlogPosition,
+    ChangeEvent,
+    ClientConfig,
+    ColumnType,
+    ColumnValue,
+    EventType,
+)
 from mysql_event_stream._ffi import (
     MES_ERR_CHECKSUM,
     MES_ERR_CONNECT,
@@ -144,6 +151,37 @@ class TestExceptionForRc:
     def test_all_subclass_runtime_error(self) -> None:
         for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
             assert isinstance(exception_for_rc(code, "x"), RuntimeError)
+
+
+class TestClientConfig:
+    def test_max_queue_size_default_is_zero(self) -> None:
+        # 0 is the sentinel that selects the engine default (10000);
+        # it does not mean "unlimited" for the client config.
+        assert ClientConfig().max_queue_size == 0
+
+    def test_max_queue_size_docstring_documents_default(self) -> None:
+        assert ClientConfig.__doc__ is not None
+        assert "10000" in ClientConfig.__doc__
+
+
+class TestDeprecatedTypes:
+    def test_column_type_marked_deprecated(self) -> None:
+        assert ColumnType.__doc__ is not None
+        assert "deprecated" in ColumnType.__doc__.lower()
+
+    def test_column_value_marked_deprecated(self) -> None:
+        assert ColumnValue.__doc__ is not None
+        assert "deprecated" in ColumnValue.__doc__.lower()
+
+
+class TestChangeEventDocstring:
+    def test_documents_special_column_representations(self) -> None:
+        doc = ChangeEvent.__doc__
+        assert doc is not None
+        assert "JSON" in doc
+        assert "ENUM" in doc
+        assert "SET" in doc
+        assert "BIT" in doc
 
 
 class TestBinlogPosition:
