@@ -194,6 +194,23 @@ uint64_t ReadFixedInt(const uint8_t* data, size_t width) {
   return val;
 }
 
+bool ReadFixedIntChecked(const uint8_t* data, size_t len, size_t* pos, size_t width,
+                         uint64_t* out) {
+  // Width must be 1-8 to avoid undefined behavior from shift overflow.
+  if (width == 0 || width > 8) {
+    return false;
+  }
+  // Subtraction-form bounds check: avoids overflow when *pos is near SIZE_MAX.
+  if (*pos > len || width > len - *pos) {
+    return false;
+  }
+  if (out != nullptr) {
+    *out = ReadFixedInt(data + *pos, width);
+  }
+  *pos += width;
+  return true;
+}
+
 void ParseErrPacketPayload(const uint8_t* data, size_t len, uint16_t* error_code,
                            std::string* message) {
   *error_code = 0;

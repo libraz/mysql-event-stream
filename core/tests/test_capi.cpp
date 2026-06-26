@@ -725,4 +725,13 @@ TEST(CApi, MaxEventSizeClampsToAbsoluteMax) {
   mes_destroy(engine);
 }
 
+TEST(CApi, MaxEventSizeZeroMeansNoLimit) {
+  auto* engine = mes_create();
+  // 0 means "no limit": resolves to the 1 GiB hard cap, consistent with
+  // max_queue_size == 0 semantics elsewhere, rather than rejecting all events.
+  EXPECT_EQ(mes_set_max_event_size(engine, 0), MES_OK);
+  EXPECT_EQ(mes_get_max_event_size(engine), 1024u * 1024u * 1024u);
+  mes_destroy(engine);
+}
+
 }  // namespace

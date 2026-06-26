@@ -189,12 +189,12 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
   pos = static_cast<size_t>(nul - data) + 1;
 
   // Connection ID (4 bytes LE)
-  if (pos + 4 > len) {
+  uint64_t conn_id = 0;
+  if (!ReadFixedIntChecked(data, len, &pos, 4, &conn_id)) {
     last_error_ = "Invalid handshake: truncated connection ID";
     return MES_ERR_AUTH;
   }
-  server_info_.connection_id = static_cast<uint32_t>(ReadFixedInt(data + pos, 4));
-  pos += 4;
+  server_info_.connection_id = static_cast<uint32_t>(conn_id);
 
   // auth_plugin_data_part_1 (8 bytes)
   if (pos + 8 > len) {
@@ -212,12 +212,12 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
   pos += 1;
 
   // Capability flags lower 2 bytes
-  if (pos + 2 > len) {
+  uint64_t cap_lower_raw = 0;
+  if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_lower_raw)) {
     last_error_ = "Invalid handshake: truncated capabilities lower";
     return MES_ERR_AUTH;
   }
-  uint32_t cap_lower = static_cast<uint32_t>(ReadFixedInt(data + pos, 2));
-  pos += 2;
+  uint32_t cap_lower = static_cast<uint32_t>(cap_lower_raw);
 
   // Charset (1 byte)
   if (pos + 1 > len) {
@@ -227,20 +227,20 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
   server_info_.charset = data[pos++];
 
   // Status flags (2 bytes LE)
-  if (pos + 2 > len) {
+  uint64_t status_flags_raw = 0;
+  if (!ReadFixedIntChecked(data, len, &pos, 2, &status_flags_raw)) {
     last_error_ = "Invalid handshake: truncated status flags";
     return MES_ERR_AUTH;
   }
-  server_info_.status_flags = static_cast<uint16_t>(ReadFixedInt(data + pos, 2));
-  pos += 2;
+  server_info_.status_flags = static_cast<uint16_t>(status_flags_raw);
 
   // Capability flags upper 2 bytes
-  if (pos + 2 > len) {
+  uint64_t cap_upper_raw = 0;
+  if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_upper_raw)) {
     last_error_ = "Invalid handshake: truncated capabilities upper";
     return MES_ERR_AUTH;
   }
-  uint32_t cap_upper = static_cast<uint32_t>(ReadFixedInt(data + pos, 2));
-  pos += 2;
+  uint32_t cap_upper = static_cast<uint32_t>(cap_upper_raw);
 
   server_info_.server_capabilities = cap_lower | (cap_upper << 16);
 
@@ -314,6 +314,13 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
     server_info_.auth_plugin_name = kPluginCachingSha2Password;
   }
 
+  // The server version normally comes from the handshake's NUL-terminated
+  // server-version field parsed above. If it is empty (malformed/stripped
+  // handshake), DetectServerFlavor falls back to MySQL; record the ambiguity so
+  // the chosen flavor is traceable rather than silently assumed.
+  if (server_info_.server_version.empty()) {
+    StructuredLog().Event("server_flavor_version_unavailable").Field("fallback", "MySQL").Warn();
+  }
   server_flavor_ = DetectServerFlavor(server_info_.server_version);
 
   return MES_OK;
@@ -340,11 +347,13 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
   bool do_tls = (ssl_mode > 0) && (server_info_.server_capabilities & kClientSSL);
 
   // ssl_mode >= 2 (required, verify_ca, verify_identity) demands TLS.
-  // Fail early if the server does not advertise SSL support.
+  // Fail early if the server does not advertise SSL support. This is distinct
+  // from a TLS handshake failure below: here the server never offered TLS at
+  // all, so retrying or fixing certificates would not help.
   if (ssl_mode >= 2 && !do_tls) {
     StructuredLog().Event("ssl_required_not_available").Error();
-    last_error_ = "SSL is required (ssl_mode=" + std::to_string(ssl_mode) +
-                  ") but the server does not support SSL";
+    last_error_ =
+        "server does not support TLS but ssl_mode (" + std::to_string(ssl_mode) + ") requires it";
     return MES_ERR_CONNECT;
   }
 
@@ -379,7 +388,10 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     const char* hn = host.empty() ? nullptr : host.c_str();
     rc = socket_.UpgradeToTLS(ssl_mode, ca, cert, key, hn);
     if (rc != MES_OK) {
-      last_error_ = "TLS handshake failed";
+      // The server offered TLS (do_tls is set) but the encrypted handshake or
+      // certificate verification failed. Distinct from the "server does not
+      // support TLS" case above; the specific OpenSSL reason is in the log.
+      last_error_ = "TLS handshake failed (see log for OpenSSL reason)";
       return rc;
     }
   }
@@ -639,10 +651,16 @@ mes_error_t MysqlConnection::HandleAuthSwitchRequest(const std::vector<uint8_t>&
   pos = static_cast<size_t>(nul - data) + 1;
 
   // Remaining bytes are the new auth data.
-  // Strip trailing NUL byte if present (mysql_native_password sends 20-byte
-  // scramble + NUL terminator, but the salt must be exactly 20 bytes).
+  // mysql_native_password and caching_sha2_password send their 20-byte scramble
+  // followed by a 0x00 terminator; the salt those plugins consume must be
+  // exactly 20 bytes, so strip the trailing NUL for them only. Stripping it
+  // unconditionally would silently truncate a future plugin's auth data whose
+  // last byte is legitimately 0x00 (an off-by-one), so the strip is gated on the
+  // plugin name.
   size_t auth_data_len = len - pos;
-  if (auth_data_len > 0 && data[len - 1] == 0x00) {
+  const bool strips_trailing_nul =
+      (plugin_name == kPluginNativePassword || plugin_name == kPluginCachingSha2Password);
+  if (strips_trailing_nul && auth_data_len > 0 && data[len - 1] == 0x00) {
     --auth_data_len;
   }
   std::vector<uint8_t> new_auth_data(data + pos, data + pos + auth_data_len);

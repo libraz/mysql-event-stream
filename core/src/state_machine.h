@@ -96,10 +96,12 @@ class EventStreamParser {
    *
    * Events larger than this value cause Feed() to enter kError with a
    * "event_too_large" log. Callable at any time; takes effect on the
-   * next event whose header is parsed. Values outside the range
-   * [kEventHeaderSize + kChecksumSize, kAbsoluteMaxEventSize] are
-   * clamped to the nearest valid bound so the parser cannot be
-   * configured into an unusable state.
+   * next event whose header is parsed. A value of 0 means "no limit" and
+   * resolves to kAbsoluteMaxEventSize (the hard cap still applies so a
+   * malicious peer cannot force unbounded allocation). Other values outside
+   * the range [kEventHeaderSize + kChecksumSize, kAbsoluteMaxEventSize] are
+   * clamped to the nearest valid bound so the parser cannot be configured
+   * into an unusable state.
    */
   void SetMaxEventSize(uint32_t max_event_size);
 

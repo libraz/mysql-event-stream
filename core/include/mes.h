@@ -136,6 +136,8 @@ typedef struct {
    * Mirrors MySQL's 4-byte `time_written` field. Will overflow on
    * 2038-01-19. Widening to uint64_t requires a major ABI version bump. */
   uint32_t timestamp;
+  /** @brief Active binlog filename, or "" until the first ROTATE event is seen
+   *  (ROTATE carries the filename). Until then only binlog_offset is meaningful. */
   const char* binlog_file;
   uint64_t binlog_offset;
   /** @brief 1 if column names were resolved for this event's table, 0 if not.
@@ -197,6 +199,12 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
  * Pointers in the returned event are valid until the next call to
  * mes_feed(), mes_next_event(), or mes_reset().
  *
+ * @note The event's `binlog_file` is empty until the engine has seen the first
+ *       ROTATE event in the fed stream, which is what carries the active binlog
+ *       filename. Until then only `binlog_offset` is meaningful. When streaming
+ *       via BinlogClient the server emits a ROTATE before any row events, so
+ *       this is normally populated by the time row events arrive.
+ *
  * @param engine Engine handle.
  * @param event  Output: pointer to the event.
  * @return MES_OK if event available, MES_ERR_NO_EVENT if empty.
@@ -215,6 +223,10 @@ MES_API int mes_has_events(mes_engine_t* engine);
 
 /**
  * @brief Get current binlog position.
+ *
+ * @note The returned @p file is empty until the engine has seen the first
+ *       ROTATE event in the fed stream (ROTATE is what carries the active
+ *       binlog filename). Until then only @p offset is meaningful.
  *
  * @param engine Engine handle.
  * @param file   Output: binlog filename (points to internal memory).
@@ -241,7 +253,11 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * may push the queue slightly past it.
  *
  * @param engine Engine handle.
- * @param max_size Maximum queue size. 0 means unlimited (default).
+ * @param max_size Maximum queue size. 0 means unlimited (the engine default).
+ *        Note this differs from mes_client_config_t::max_queue_size, where 0
+ *        selects the bounded default MES_DEFAULT_QUEUE_SIZE (10000) rather than
+ *        unlimited: the engine is a synchronous feed/drain API the caller paces,
+ *        whereas the client has an async reader thread that needs a bound.
  * @return MES_OK on success.
  * @threadsafety NOT thread-safe.
  */
@@ -267,10 +283,11 @@ MES_API mes_error_t mes_reset(mes_engine_t* engine);
  * clamped to the nearest valid bound; the call always succeeds.
  *
  * @param engine Engine handle.
- * @param max_event_size Desired ceiling in bytes. 0 falls back to the
- *                       minimum valid value (equivalent to "reject
- *                       every event"), which is probably not useful;
- *                       pass a real cap.
+ * @param max_event_size Desired ceiling in bytes. 0 means "no limit",
+ *                       consistent with max_queue_size == 0 elsewhere; it
+ *                       resolves to the 1 GiB hard cap, which still guards
+ *                       against unbounded per-event allocation. Pass a real
+ *                       cap to reject oversized events sooner.
  * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
  * @threadsafety NOT thread-safe.
  */

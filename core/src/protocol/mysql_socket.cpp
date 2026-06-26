@@ -423,16 +423,51 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
   int ret = SSL_connect(ssl_);
   if (ret != 1) {
     int ssl_err = SSL_get_error(ssl_, ret);
+    const std::string reason = GetOpenSSLError();
     StructuredLog()
         .Event("ssl_handshake_failed")
         .Field("ssl_error", ssl_err)
-        .Field("error", GetOpenSSLError())
+        .Field("error", reason)
         .Error();
     SSL_free(ssl_);
     ssl_ = nullptr;
     SSL_CTX_free(ssl_ctx_);
     ssl_ctx_ = nullptr;
     return MES_ERR_CONNECT;
+  }
+
+  // For verify modes (verify_ca / verify_identity) the handshake succeeding is
+  // not sufficient: OpenSSL records the verification outcome separately, and a
+  // missing peer certificate or a failed chain check must be treated as a hard
+  // error. SSL_VERIFY_PEER already aborts the handshake on most verification
+  // failures, but assert the result explicitly so a configuration that lets a
+  // peer through (e.g. no certificate presented) cannot silently pass.
+  if (ssl_mode >= MES_SSL_VERIFY_CA) {
+    const long verify_result = SSL_get_verify_result(ssl_);
+    if (verify_result != X509_V_OK) {
+      StructuredLog()
+          .Event("ssl_verify_failed")
+          .Field("verify_result", static_cast<int64_t>(verify_result))
+          .Field("reason", X509_verify_cert_error_string(verify_result))
+          .Error();
+      SSL_free(ssl_);
+      ssl_ = nullptr;
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
+
+    // SSL_get1_peer_certificate returns a reference that must be freed.
+    X509* peer_cert = SSL_get1_peer_certificate(ssl_);
+    if (peer_cert == nullptr) {
+      StructuredLog().Event("ssl_verify_no_peer_certificate").Error();
+      SSL_free(ssl_);
+      ssl_ = nullptr;
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
+    X509_free(peer_cert);
   }
 
   tls_active_ = true;

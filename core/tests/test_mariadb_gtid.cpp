@@ -359,3 +359,27 @@ TEST(BinlogEventTypeTest, MariaDBEventNames) {
   EXPECT_STRNE(gtid_name, "UNKNOWN");
   EXPECT_STRNE(gtid_list_name, "UNKNOWN");
 }
+
+// ===========================================================================
+// Server flavor detection
+// ===========================================================================
+
+TEST(ServerFlavorTest, DetectsMariaDB) {
+  EXPECT_EQ(mes::DetectServerFlavor("10.11.6-MariaDB"), mes::ServerFlavor::kMariaDB);
+  EXPECT_EQ(mes::DetectServerFlavor("11.4.0-MariaDB-1:11.4.0+maria~ubu2404"),
+            mes::ServerFlavor::kMariaDB);
+}
+
+TEST(ServerFlavorTest, DetectsMySQL) {
+  EXPECT_EQ(mes::DetectServerFlavor("8.4.7"), mes::ServerFlavor::kMySQL);
+  EXPECT_EQ(mes::DetectServerFlavor("9.0.1"), mes::ServerFlavor::kMySQL);
+}
+
+TEST(ServerFlavorTest, EmptyVersionFallsBackToMySQL) {
+  // Documented fallback: an empty/unavailable version string defaults to MySQL.
+  EXPECT_EQ(mes::DetectServerFlavor(""), mes::ServerFlavor::kMySQL);
+}
+
+TEST(ServerFlavorTest, UnrecognizedVersionFallsBackToMySQL) {
+  EXPECT_EQ(mes::DetectServerFlavor("some-unexpected-string"), mes::ServerFlavor::kMySQL);
+}

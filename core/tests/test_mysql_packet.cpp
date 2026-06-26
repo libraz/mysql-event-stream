@@ -206,6 +206,58 @@ TEST(FixedIntTest, WidthGreaterThan8ReturnsZero) {
   EXPECT_EQ(ReadFixedInt(data, 100), 0u);
 }
 
+// --- ReadFixedIntChecked length guard ---
+
+TEST(FixedIntCheckedTest, ReadsWithinBounds) {
+  uint8_t data[] = {0x11, 0x22, 0x33, 0x44};
+  size_t pos = 0;
+  uint64_t val = 0;
+  EXPECT_TRUE(ReadFixedIntChecked(data, sizeof(data), &pos, 4, &val));
+  EXPECT_EQ(val, 0x44332211u);
+  EXPECT_EQ(pos, 4u);
+}
+
+TEST(FixedIntCheckedTest, AdvancesPositionSequentially) {
+  uint8_t data[] = {0xAA, 0xBB, 0xCC};
+  size_t pos = 0;
+  uint64_t v1 = 0;
+  uint64_t v2 = 0;
+  EXPECT_TRUE(ReadFixedIntChecked(data, sizeof(data), &pos, 1, &v1));
+  EXPECT_EQ(v1, 0xAAu);
+  EXPECT_EQ(pos, 1u);
+  EXPECT_TRUE(ReadFixedIntChecked(data, sizeof(data), &pos, 2, &v2));
+  EXPECT_EQ(v2, 0xCCBBu);
+  EXPECT_EQ(pos, 3u);
+}
+
+TEST(FixedIntCheckedTest, InsufficientBytesFailsAndLeavesPosUnchanged) {
+  uint8_t data[] = {0x01, 0x02, 0x03};
+  size_t pos = 2;
+  uint64_t val = 0xDEAD;
+  // Only 1 byte remains but 2 requested.
+  EXPECT_FALSE(ReadFixedIntChecked(data, sizeof(data), &pos, 2, &val));
+  EXPECT_EQ(pos, 2u);       // unchanged
+  EXPECT_EQ(val, 0xDEADu);  // unchanged
+}
+
+TEST(FixedIntCheckedTest, PosAtEndFails) {
+  uint8_t data[] = {0x01};
+  size_t pos = 1;
+  uint64_t val = 0;
+  EXPECT_FALSE(ReadFixedIntChecked(data, sizeof(data), &pos, 1, &val));
+  EXPECT_EQ(pos, 1u);
+}
+
+TEST(FixedIntCheckedTest, WidthZeroOrTooLargeFails) {
+  uint8_t data[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
+  size_t pos = 0;
+  uint64_t val = 0;
+  EXPECT_FALSE(ReadFixedIntChecked(data, sizeof(data), &pos, 0, &val));
+  EXPECT_EQ(pos, 0u);
+  EXPECT_FALSE(ReadFixedIntChecked(data, sizeof(data), &pos, 9, &val));
+  EXPECT_EQ(pos, 0u);
+}
+
 // --- ParseErrPacketPayload ---
 
 TEST(ParseErrPacketPayloadTest, StandardErrPacketWithSqlState) {

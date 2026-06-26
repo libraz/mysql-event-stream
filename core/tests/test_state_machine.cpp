@@ -408,9 +408,30 @@ TEST(StateMachineTest, MaxEventSizeDefaultIs64MiB) {
 
 TEST(StateMachineTest, SetMaxEventSizeClampsToMinimum) {
   EventStreamParser parser;
-  parser.SetMaxEventSize(0);
-  // Must still accept at least an empty event (header + checksum).
+  // The smallest non-zero value clamps up to header + checksum so the parser
+  // can always accept at least an empty event.
+  parser.SetMaxEventSize(1);
   EXPECT_EQ(parser.MaxEventSize(), static_cast<uint32_t>(kEventHeaderSize + kChecksumSize));
+}
+
+TEST(StateMachineTest, SetMaxEventSizeZeroMeansNoLimit) {
+  EventStreamParser parser;
+  parser.SetMaxEventSize(0);
+  // 0 means "no limit": resolves to the absolute hard cap rather than the
+  // minimum (which would reject every real event).
+  EXPECT_EQ(parser.MaxEventSize(), kAbsoluteMaxEventSize);
+}
+
+TEST(StateMachineTest, SetMaxEventSizeZeroDoesNotRejectEvents) {
+  EventStreamParser parser;
+  parser.SetMaxEventSize(0);
+
+  // A normal event must be accepted, not rejected as "too large".
+  std::vector<uint8_t> body(64, 0xCD);
+  auto event = test::BuildEvent(30, 1000, 0, body);
+  size_t consumed = parser.Feed(event.data(), event.size());
+  EXPECT_EQ(consumed, event.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kEventReady);
 }
 
 TEST(StateMachineTest, SetMaxEventSizeClampsToAbsoluteMax) {

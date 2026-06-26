@@ -63,8 +63,15 @@ std::string ParseColumnName(const std::vector<uint8_t>& payload) {
   return ReadLenEncString(data, len, &pos);  // name
 }
 
-/** @brief Parse a result set row into values and null flags */
-void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, QueryResultRow* row) {
+/**
+ * @brief Parse a result set row into values and null flags
+ *
+ * Returns false if the row payload is truncated (fewer columns than declared,
+ * or a value whose declared length runs past the payload end). Truncation must
+ * be reported as a parse failure rather than fabricating NULLs, otherwise a
+ * corrupt or partially-decoded payload would silently surface as missing data.
+ */
+bool ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, QueryResultRow* row) {
   const uint8_t* data = payload.data();
   size_t data_size = payload.size();
   size_t pos = 0;
@@ -72,8 +79,11 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, Quer
   row->values.resize(column_count);
   row->is_null.resize(column_count);
 
-  size_t i = 0;
-  for (; i < column_count && pos < data_size; ++i) {
+  for (size_t i = 0; i < column_count; ++i) {
+    if (pos >= data_size) {
+      // Fewer column values present than the result set declared.
+      return false;
+    }
     if (data[pos] == kNullColumnMarker) {
       // NULL value: text-protocol row uses a dedicated 0xFB marker byte
       // *before* ReadLenEncInt is consulted. ReadLenEncInt's built-in
@@ -88,21 +98,16 @@ void ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, Quer
       // Subtraction-form bounds check to prevent size_t overflow when
       // str_len is attacker-controlled and size_t is 32-bit (WASM).
       // ReadLenEncInt guarantees pos <= data_size on return.
-      if (str_len <= static_cast<uint64_t>(data_size - pos)) {
-        row->values[i].assign(reinterpret_cast<const char*>(data + pos),
-                              static_cast<size_t>(str_len));
-        pos += static_cast<size_t>(str_len);
-      } else {
-        // Truncated row: stop parsing further columns.
-        pos = data_size;
+      if (str_len > static_cast<uint64_t>(data_size - pos)) {
+        // Declared length runs past the payload end: treat as truncation.
+        return false;
       }
+      row->values[i].assign(reinterpret_cast<const char*>(data + pos),
+                            static_cast<size_t>(str_len));
+      pos += static_cast<size_t>(str_len);
     }
   }
-  // Mark remaining columns as NULL if the row data was truncated
-  for (; i < column_count; ++i) {
-    row->is_null[i] = true;
-    row->values[i].clear();
-  }
+  return true;
 }
 
 }  // namespace
@@ -217,9 +222,13 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
       return MES_ERR_STREAM;
     }
 
-    // Parse row data
+    // Parse row data. A truncated row (insufficient bytes for the declared
+    // column count/length) is a parse failure, not silently-missing data.
     QueryResultRow row;
-    ParseRowData(payload, static_cast<size_t>(column_count), &row);
+    if (!ParseRowData(payload, static_cast<size_t>(column_count), &row)) {
+      *error_msg = "Truncated result-set row";
+      return MES_ERR_PARSE;
+    }
     result->rows.push_back(std::move(row));
   }
 

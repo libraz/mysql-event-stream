@@ -45,8 +45,18 @@ inline const char* GetServerFlavorName(ServerFlavor flavor) {
  * (e.g., "10.11.6-MariaDB", "11.4.0-MariaDB-1:11.4.0+maria~ubu2404").
  * MySQL's VERSION() is purely numeric (e.g., "8.4.7", "9.0.1").
  *
- * @param version_string Result of SELECT VERSION().
- * @return Detected server flavor.
+ * @note Fallback behavior: when @p version_string is empty or does not contain
+ *       a recognizable "MariaDB" marker, this returns ServerFlavor::kMySQL. The
+ *       version string is normally never empty (it comes from the handshake
+ *       packet's NUL-terminated server-version field), but a malformed or
+ *       stripped handshake could leave it empty; in that ambiguous case we
+ *       default to MySQL, which uses the more strict GTID/checksum negotiation
+ *       and the wider-deployed wire dialect. Callers that record the detection
+ *       should log the ambiguity when the input is empty.
+ *
+ * @param version_string Result of SELECT VERSION() (or the handshake
+ *                       server-version field).
+ * @return Detected server flavor; ServerFlavor::kMySQL when undetectable.
  */
 inline ServerFlavor DetectServerFlavor(const std::string& version_string) {
   if (version_string.find("MariaDB") != std::string::npos ||

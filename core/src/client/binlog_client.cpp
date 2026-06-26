@@ -300,10 +300,18 @@ void BinlogClient::ReaderLoop() {
     }
 
     if (rc != MES_OK) {
-      // Push error sentinel so Poll() can surface the error
+      // Push error sentinel so Poll() can surface the error. If the push fails
+      // the queue was closed concurrently (shutdown race); the specific code
+      // would otherwise be lost, so record it for diagnostics.
       QueuedEvent err_event;
       err_event.error = rc;
-      event_queue_->Push(std::move(err_event));
+      if (!event_queue_->Push(std::move(err_event))) {
+        StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "error_sentinel_push_dropped")
+            .Field("error_code", static_cast<int64_t>(rc))
+            .Warn();
+      }
       return;
     }
 
@@ -339,10 +347,18 @@ void BinlogClient::ReaderLoop() {
             .Field("stored_crc", static_cast<uint64_t>(stored_crc))
             .Field("event_length", static_cast<uint64_t>(event_pkt.size))
             .Error();
-        // Push error event so the consumer can detect the corrupted event
+        // Push error event so the consumer can detect the corrupted event. If
+        // the push fails (queue closed during shutdown) the code is lost from
+        // the queue, so record it for diagnostics.
         QueuedEvent crc_err;
         crc_err.error = MES_ERR_CHECKSUM;
-        event_queue_->Push(std::move(crc_err));
+        if (!event_queue_->Push(std::move(crc_err))) {
+          StructuredLog()
+              .Event("binlog_error")
+              .Field("type", "error_sentinel_push_dropped")
+              .Field("error_code", static_cast<int64_t>(MES_ERR_CHECKSUM))
+              .Warn();
+        }
         return;  // Stop reader; consistent with stream error handling above
       }
     }

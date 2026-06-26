@@ -138,6 +138,14 @@ void EventStreamParser::Reset() { Advance(); }
 ParserState EventStreamParser::GetState() const { return state_; }
 
 void EventStreamParser::SetMaxEventSize(uint32_t max_event_size) {
+  // 0 means "no limit", consistent with how max_queue_size == 0 means
+  // default/unlimited elsewhere. The absolute hard cap still applies so a
+  // malicious peer cannot force unbounded per-event allocation; "no limit"
+  // therefore resolves to the largest value the parser will ever accept.
+  if (max_event_size == 0) {
+    max_event_size_ = kAbsoluteMaxEventSize;
+    return;
+  }
   // Clamp to the valid range so the parser cannot be configured into
   // an unusable state (e.g. smaller than a header+checksum, or large
   // enough to enable a malicious peer to force huge allocations).

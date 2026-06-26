@@ -135,6 +135,23 @@ void WriteFixedInt(std::vector<uint8_t>* buf, uint64_t val, size_t width);
 uint64_t ReadFixedInt(const uint8_t* data, size_t width);
 
 /**
+ * @brief Read a fixed-width little-endian integer with a bounds guard
+ *
+ * Length-aware overload for callers that have a known remaining buffer length.
+ * Reads @p width bytes starting at @p data + *pos only when at least @p width
+ * bytes remain (i.e. *pos + width <= len); otherwise it leaves @p pos unchanged
+ * and reports failure rather than reading past the buffer end.
+ *
+ * @param data   Pointer to the start of the buffer
+ * @param len    Total bytes available in the buffer
+ * @param pos    In/out: current offset; advanced by @p width on success
+ * @param width  Number of bytes (1, 2, 3, 4, or 8)
+ * @param[out] out Decoded value on success (unchanged on failure)
+ * @return true on success, false if insufficient bytes remain or @p width > 8
+ */
+bool ReadFixedIntChecked(const uint8_t* data, size_t len, size_t* pos, size_t width, uint64_t* out);
+
+/**
  * @brief Parse MySQL ERR packet into error code and message string.
  * @param data Packet payload (starting with 0xFF marker)
  * @param len Length of the payload

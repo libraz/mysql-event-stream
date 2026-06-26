@@ -3,6 +3,7 @@
 
 #include "client/metadata_fetcher.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -42,6 +43,17 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
 void MetadataFetcher::Disconnect() {
   cache_.clear();
   conn_.Disconnect();
+
+  // Scrub the retained plaintext password. It is held between Connect() and
+  // Disconnect() so FetchColumnInfo() can reconnect once on connection loss
+  // (the retry path uses conn_.Disconnect(), not this method, so it stays
+  // available there). At final teardown, overwrite the backing bytes before
+  // releasing them so the secret does not linger in freed heap memory.
+  if (!password_.empty()) {
+    std::fill(password_.begin(), password_.end(), '\0');
+  }
+  password_.clear();
+  password_.shrink_to_fit();
 }
 
 std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& database,
