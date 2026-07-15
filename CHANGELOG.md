@@ -40,10 +40,6 @@ only — no symbols removed and no struct layout changes. One behavioral change:
 - **`allow_public_key_retrieval`** — opt-in config for plaintext
   `caching_sha2_password` public-key retrieval, disabled by default; surfaced in
   both bindings
-- **Prebuilt distribution** — per-platform Node native packages
-  (`@libraz/mysql-event-stream-<platform>-<arch>`) with a loader that falls back
-  from a local build, and per-platform Python wheels, both built in CI against
-  pinned static dependencies
 
 ### Changed
 

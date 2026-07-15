@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist/"
+    "dist/",
+    "build/Release/*.node"
   ],
   "scripts": {
     "build:native": "cmake-js compile",
@@ -17,7 +18,7 @@
     "test": "vitest run",
     "test:e2e": "vitest run --config e2e/vitest.config.ts",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build:js && npm run check && npm run test",
+    "prepublishOnly": "npm run build && npm run check && npm run test",
     "prepack": "cp README.md .readme-backup && cp README.npm.md README.md",
     "postpack": "mv .readme-backup README.md"
   },
@@ -41,16 +42,7 @@
   "engines": {
     "node": ">=22"
   },
-  "optionalDependencies": {
-    "@libraz/mysql-event-stream-darwin-arm64": "1.5.0",
-    "@libraz/mysql-event-stream-darwin-x64": "1.5.0",
-    "@libraz/mysql-event-stream-linux-arm64": "1.5.0",
-    "@libraz/mysql-event-stream-linux-x64": "1.5.0"
-  },
   "packageManager": "yarn@4.9.1",
-  "workspaces": [
-    "npm/*"
-  ],
   "volta": {
     "node": "22.16.0",
     "yarn": "4.9.1"

@@ -15,198 +15,8 @@ jobs:
     with:
       targets_json: '["mysql:8.4","mysql:9.1","mariadb:10.11","mariadb:11.4"]'
 
-  node-prebuild-linux:
-    needs: [e2e-release]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x64
-            target: linux-x64
-            container: quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            target: linux-arm64
-            container: quay.io/pypa/manylinux_2_28_aarch64:2026.06.04-1
-    runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install build tools
-        run: |
-          dnf install -y perl-core make curl tar gzip
-          /opt/python/cp311-cp311/bin/python -m pip install 'cmake>=3.20,<5'
-          echo '/opt/python/cp311-cp311/bin' >> "$GITHUB_PATH"
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22.22.1'
-
-      - run: corepack enable
-      - run: corepack prepare yarn@4.9.1 --activate
-
-      - name: Build pinned static dependencies
-        run: .github/scripts/build-static-deps.sh /opt/mes-deps
-
-      - name: Build native addon
-        working-directory: bindings/node
-        run: |
-          yarn install --immutable
-          yarn cmake-js compile \
-            --CDMES_BUNDLE_DEPENDENCIES=ON \
-            --CDCMAKE_PREFIX_PATH=/opt/mes-deps
-          yarn build:js
-
-      - name: Verify Linux linkage policy
-        working-directory: bindings/node
-        run: |
-          ldd build/Release/mes-node.node
-          if ldd build/Release/mes-node.node | grep -E 'lib(ssl|crypto|z|stdc\+\+|gcc_s)\.so'; then
-            echo 'Unexpected dynamic dependency in Linux prebuild' >&2
-            exit 1
-          fi
-          if readelf --version-info build/Release/mes-node.node | grep -E 'GLIBC_2\.(29|[3-9][0-9])'; then
-            echo 'Linux prebuild requires glibc newer than 2.28' >&2
-            exit 1
-          fi
-          strings build/Release/mes-node.node > "$RUNNER_TEMP/mes-node.strings"
-          grep -q 'OpenSSL 3.5.7' "$RUNNER_TEMP/mes-node.strings"
-
-      - name: Pack and clean-install smoke test
-        working-directory: bindings/node
-        run: |
-          mkdir -p "$RUNNER_TEMP/node-packages" npm/${{ matrix.target }}
-          cp build/Release/mes-node.node npm/${{ matrix.target }}/mes-node.node
-          npm pack ./npm/${{ matrix.target }} --pack-destination "$RUNNER_TEMP/node-packages"
-          npm pack . --pack-destination "$RUNNER_TEMP/node-packages"
-          smoke_dir="$(mktemp -d)"
-          cd "$smoke_dir"
-          npm init -y
-          npm install --ignore-scripts --offline \
-            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-${{ matrix.target }}-*.tgz \
-            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-[0-9]*.tgz
-          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: node-prebuild-${{ matrix.target }}
-          path: ${{ runner.temp }}/node-packages/*mysql-event-stream-${{ matrix.target }}-*.tgz
-
-  node-prebuild-macos:
-    needs: [e2e-release]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15-intel
-            arch: x64
-            target: darwin-x64
-          - os: macos-15
-            arch: arm64
-            target: darwin-arm64
-    runs-on: ${{ matrix.os }}
-    env:
-      MACOSX_DEPLOYMENT_TARGET: '15.0'
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22.22.1'
-
-      - run: brew install cmake
-      - run: corepack enable
-      - run: corepack prepare yarn@4.9.1 --activate
-
-      - name: Build pinned static dependencies
-        run: .github/scripts/build-static-deps.sh "$RUNNER_TEMP/mes-deps"
-
-      - name: Build and test native addon
-        working-directory: bindings/node
-        run: |
-          yarn install --immutable
-          yarn cmake-js compile \
-            --CDMES_BUNDLE_DEPENDENCIES=ON \
-            --CDCMAKE_PREFIX_PATH="$RUNNER_TEMP/mes-deps" \
-            --CDCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
-          yarn build:js
-          yarn check
-          yarn test
-
-      - name: Verify macOS linkage policy
-        working-directory: bindings/node
-        run: |
-          test "$(sw_vers -productVersion | cut -d. -f1)" = "${MACOSX_DEPLOYMENT_TARGET%%.*}"
-          otool -L build/Release/mes-node.node
-          if otool -L build/Release/mes-node.node | grep -E '/(opt|usr/local)/|lib(ssl|crypto|z)\.'; then
-            echo 'Unexpected non-system dynamic dependency in macOS prebuild' >&2
-            exit 1
-          fi
-          otool -l build/Release/mes-node.node > "$RUNNER_TEMP/mes-node-load-commands.txt"
-          grep -A5 LC_BUILD_VERSION "$RUNNER_TEMP/mes-node-load-commands.txt" | grep -q 'minos 15.0'
-          strings build/Release/mes-node.node > "$RUNNER_TEMP/mes-node.strings"
-          grep -q 'OpenSSL 3.5.7' "$RUNNER_TEMP/mes-node.strings"
-
-      - name: Pack and clean-install smoke test
-        working-directory: bindings/node
-        run: |
-          mkdir -p "$RUNNER_TEMP/node-packages" npm/${{ matrix.target }}
-          cp build/Release/mes-node.node npm/${{ matrix.target }}/mes-node.node
-          npm pack ./npm/${{ matrix.target }} --pack-destination "$RUNNER_TEMP/node-packages"
-          npm pack . --pack-destination "$RUNNER_TEMP/node-packages"
-          smoke_dir="$(mktemp -d)"
-          cd "$smoke_dir"
-          npm init -y
-          npm install --ignore-scripts --offline \
-            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-${{ matrix.target }}-*.tgz \
-            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-[0-9]*.tgz
-          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: node-prebuild-${{ matrix.target }}
-          path: ${{ runner.temp }}/node-packages/*mysql-event-stream-${{ matrix.target }}-*.tgz
-
-  publish-npm-platforms:
-    needs: [node-prebuild-linux, node-prebuild-macos]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '22.22.1'
-          registry-url: 'https://registry.npmjs.org'
-
-      # Trusted publishing (OIDC) needs a recent npm; the bundled one is too old.
-      - run: npm install -g npm@latest
-
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: node-prebuild-*
-          path: prebuilds/
-          merge-multiple: true
-
-      - name: Publish platform packages
-        working-directory: bindings/node
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          test "${GITHUB_REF_NAME#v}" = "$version"
-          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
-            name="$(node -p "require('./npm/$target/package.json').name")"
-            package_file="$(find ../../prebuilds -name "*mysql-event-stream-$target-$version.tgz" -print -quit)"
-            test -n "$package_file"
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "::notice::$name@$version already published, skipping"
-            else
-              npm publish "$package_file" --access public --provenance
-            fi
-          done
-
   publish-npm:
-    needs: [publish-npm-platforms]
+    needs: [e2e-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -218,35 +28,26 @@ jobs:
 
       # Trusted publishing (OIDC) needs a recent npm; the bundled one is too old.
       - run: npm install -g npm@latest
-
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: node-prebuild-linux-x64
-          path: prebuild/
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libssl-dev zlib1g-dev pkg-config
 
-      - name: Install and test
+      - name: Build C++ core
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Build and test Node.js binding
         working-directory: bindings/node
         run: |
           yarn install --immutable
-          mkdir -p build/Release
-          tar -xzf ../../prebuild/*linux-x64-*.tgz -C build/Release --strip-components=1 package/mes-node.node
-          yarn build:js
+          yarn build
           yarn check
           yarn test
-
-      - name: Pack and verify registry install
-        working-directory: bindings/node
-        run: |
-          mkdir -p "$RUNNER_TEMP/main-package"
-          npm pack . --pack-destination "$RUNNER_TEMP/main-package"
-          smoke_dir="$(mktemp -d)"
-          cd "$smoke_dir"
-          npm init -y
-          npm install --ignore-scripts "$RUNNER_TEMP/main-package"/*.tgz
-          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
 
       - name: Publish main package
         working-directory: bindings/node
