@@ -12,6 +12,8 @@
 #include <chrono>
 #include <climits>
 #include <cstring>
+#include <ctime>
+#include <optional>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -23,6 +25,8 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -30,6 +34,76 @@
 #include "logger.h"
 
 namespace mes::protocol {
+
+namespace {
+
+#ifdef __linux__
+// Suppresses SIGPIPE for the calling thread across a TLS write.
+//
+// OpenSSL's SSL_write() writes to the underlying socket without MSG_NOSIGNAL,
+// and SO_NOSIGPIPE does not exist on Linux, so a write to a peer that has closed
+// the connection would deliver SIGPIPE and terminate the process. Block SIGPIPE
+// for this thread for the duration of the write and drain any SIGPIPE the write
+// raised, without touching process-wide signal disposition or consuming a
+// SIGPIPE that was already pending before the write.
+//
+// Other platforms do not need this: Windows has no SIGPIPE, and macOS/BSD apply
+// SO_NOSIGPIPE to the socket, which also covers SSL_write().
+class ScopedSigPipeSuppressor {
+ public:
+  ScopedSigPipeSuppressor() {
+    sigset_t pipe_set;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+
+    sigset_t pending;
+    sigemptyset(&pending);
+    sigpending(&pending);
+    already_pending_ = sigismember(&pending, SIGPIPE) == 1;
+
+    sigset_t old_set;
+    sigemptyset(&old_set);
+    if (pthread_sigmask(SIG_BLOCK, &pipe_set, &old_set) == 0) {
+      was_blocked_ = sigismember(&old_set, SIGPIPE) == 1;
+      active_ = true;
+    }
+  }
+
+  ~ScopedSigPipeSuppressor() {
+    if (!active_) return;
+    if (!already_pending_) {
+      // Consume a SIGPIPE that our write raised while it was blocked.
+      sigset_t pipe_set;
+      sigemptyset(&pipe_set);
+      sigaddset(&pipe_set, SIGPIPE);
+      const struct timespec zero = {0, 0};
+      int wait_rc;
+      do {
+        wait_rc = sigtimedwait(&pipe_set, nullptr, &zero);
+      } while (wait_rc == -1 && errno == EINTR);
+    }
+    if (!was_blocked_) {
+      sigset_t pipe_set;
+      sigemptyset(&pipe_set);
+      sigaddset(&pipe_set, SIGPIPE);
+      pthread_sigmask(SIG_UNBLOCK, &pipe_set, nullptr);
+    }
+  }
+
+  ScopedSigPipeSuppressor(const ScopedSigPipeSuppressor&) = delete;
+  ScopedSigPipeSuppressor& operator=(const ScopedSigPipeSuppressor&) = delete;
+
+ private:
+  bool active_ = false;
+  bool was_blocked_ = false;
+  bool already_pending_ = false;
+};
+#else
+// Windows has no SIGPIPE; the guard is a no-op.
+class ScopedSigPipeSuppressor {};
+#endif
+
+}  // namespace
 
 namespace {
 
@@ -612,6 +686,11 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   if (buf == nullptr) return MES_ERR_NULL_ARG;
   if (fd_ < 0) return MES_ERR_STREAM;
 
+  // The plain send() path is already SIGPIPE-safe (MSG_NOSIGNAL / SO_NOSIGPIPE);
+  // guard only the TLS path, where SSL_write() offers no such protection.
+  std::optional<ScopedSigPipeSuppressor> sigpipe_guard;
+  if (tls_active_) sigpipe_guard.emplace();
+
   size_t total = 0;
   const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
   const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
@@ -686,7 +765,12 @@ bool SocketHandle::IsTlsActive() const { return tls_active_; }
 void SocketHandle::Close() {
   if (ssl_ != nullptr) {
     // Attempt a clean TLS shutdown; ignore errors (we are tearing down).
-    SSL_shutdown(ssl_);
+    // SSL_shutdown() writes close_notify and can raise SIGPIPE if the peer has
+    // already gone, so guard it the same way as WriteAll().
+    {
+      [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
+      SSL_shutdown(ssl_);
+    }
     SSL_free(ssl_);
     ssl_ = nullptr;
   }

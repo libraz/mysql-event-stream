@@ -63,6 +63,10 @@ only — no symbols removed and no struct layout changes. One behavioral change:
 - Hardened protocol packet and socket I/O, state-machine buffering, TABLE_MAP
   metadata parsing, row decoding, and connection-validation edge cases against
   malformed or truncated input
+- Prevented a `SIGPIPE`-induced process crash when a TLS connection is written
+  to after the server closed it (e.g. a rejected stream). `SSL_write()` has no
+  `MSG_NOSIGNAL` equivalent and `SO_NOSIGPIPE` is unavailable on Linux, so TLS
+  writes are now guarded by a thread-scoped `SIGPIPE` suppressor
 
 ## [1.4.0] - 2026-06-26
 
