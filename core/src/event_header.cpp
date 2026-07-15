@@ -74,6 +74,8 @@ const char* BinlogEventTypeName(uint8_t type_code) {
       return "GTID_LOG_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kAnonymousGtidLogEvent):
       return "ANONYMOUS_GTID_LOG_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent):
+      return "PREVIOUS_GTIDS_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
       return "MARIADB_ANNOTATE_ROWS_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
@@ -87,6 +89,24 @@ const char* BinlogEventTypeName(uint8_t type_code) {
     default:
       return "UNKNOWN";
   }
+}
+
+BinlogChecksumAlgorithm DetectFormatDescriptionChecksum(const uint8_t* data, size_t len) {
+  // Fixed FDE prefix after the common header: binlog_version(2) +
+  // server_version(50) + create_timestamp(4) + header_length(1) = 57.
+  constexpr size_t kFdePrefix = 57;
+  if (data == nullptr || len < kEventHeaderSize + kFdePrefix + 1 ||
+      data[4] != static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent)) {
+    return BinlogChecksumAlgorithm::kUnknown;
+  }
+  if (len >= kEventHeaderSize + kFdePrefix + 1 + kChecksumSize &&
+      data[len - kChecksumSize - 1] == kBinlogChecksumAlgCrc32) {
+    return BinlogChecksumAlgorithm::kCrc32;
+  }
+  if (data[len - 1] == kBinlogChecksumAlgOff) {
+    return BinlogChecksumAlgorithm::kOff;
+  }
+  return BinlogChecksumAlgorithm::kUnknown;
 }
 
 }  // namespace mes

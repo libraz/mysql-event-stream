@@ -78,7 +78,9 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       c.double_val = col.real_val;
       break;
     case mes::ColumnType::kJson:
+    case mes::ColumnType::kTypedArray:
     case mes::ColumnType::kBlob:
+    case mes::ColumnType::kBlobCompressed:
     case mes::ColumnType::kTinyBlob:
     case mes::ColumnType::kMediumBlob:
     case mes::ColumnType::kLongBlob:
@@ -322,7 +324,8 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   std::string ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
   std::string ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
   auto rc = fetcher->Connect(host, config->port, user, password, config->connect_timeout_s,
-                             config->ssl_mode, ssl_ca, ssl_cert, ssl_key);
+                             config->read_timeout_s, config->ssl_mode, ssl_ca, ssl_cert, ssl_key,
+                             config->allow_public_key_retrieval != 0);
   if (rc != MES_OK) {
     return rc;
   }

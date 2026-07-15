@@ -82,7 +82,8 @@ class MysqlConnection {
   mes_error_t Connect(const std::string& host, uint16_t port, const std::string& user,
                       const std::string& password, uint32_t connect_timeout_s,
                       uint32_t read_timeout_s, uint32_t ssl_mode, const std::string& ssl_ca,
-                      const std::string& ssl_cert, const std::string& ssl_key);
+                      const std::string& ssl_cert, const std::string& ssl_key,
+                      bool allow_public_key_retrieval = false);
 
   /** @brief Send COM_QUIT and close the connection */
   void Disconnect();
@@ -124,6 +125,7 @@ class MysqlConnection {
   uint32_t negotiated_caps_ = 0;
   ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
   int auth_switch_count_ = 0;
+  bool allow_public_key_retrieval_ = false;
 
   /**
    * @brief Parse the server's Initial Handshake Packet (protocol v10)

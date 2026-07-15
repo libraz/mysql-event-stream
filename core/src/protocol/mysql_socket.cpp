@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstring>
 
@@ -102,6 +103,35 @@ std::string GetOpenSSLError() {
   return result;
 }
 
+using SteadyClock = std::chrono::steady_clock;
+
+/** Wait until the socket direction requested by OpenSSL is ready. */
+int WaitForSocket(int fd, bool want_read, SteadyClock::time_point deadline, bool has_deadline) {
+  for (;;) {
+    int timeout_ms = -1;
+    if (has_deadline) {
+      auto remaining = deadline - SteadyClock::now();
+      if (remaining <= SteadyClock::duration::zero()) return 0;
+      auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+      timeout_ms = static_cast<int>(std::min<int64_t>(std::max<int64_t>(millis, 1), INT_MAX));
+    }
+
+    struct pollfd pfd {};
+    pfd.fd = fd;
+    pfd.events = want_read ? POLLIN : POLLOUT;
+#ifdef _WIN32
+    int rc = WSAPoll(&pfd, 1, timeout_ms);
+    if (rc < 0 && WSAGetLastError() == WSAEINTR) continue;
+#else
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc < 0 && errno == EINTR) continue;
+#endif
+    if (rc <= 0) return rc;
+    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) return -1;
+    if ((pfd.revents & pfd.events) != 0) return 1;
+  }
+}
+
 }  // namespace
 
 // --- Construction / Destruction ---
@@ -111,11 +141,16 @@ SocketHandle::SocketHandle() = default;
 SocketHandle::~SocketHandle() { Close(); }
 
 SocketHandle::SocketHandle(SocketHandle&& other) noexcept
-    : fd_(other.fd_), ssl_ctx_(other.ssl_ctx_), ssl_(other.ssl_), tls_active_(other.tls_active_) {
+    : fd_(other.fd_),
+      ssl_ctx_(other.ssl_ctx_),
+      ssl_(other.ssl_),
+      tls_active_(other.tls_active_),
+      read_timeout_s_(other.read_timeout_s_) {
   other.fd_ = -1;
   other.ssl_ctx_ = nullptr;
   other.ssl_ = nullptr;
   other.tls_active_ = false;
+  other.read_timeout_s_ = 0;
 }
 
 SocketHandle& SocketHandle::operator=(SocketHandle&& other) noexcept {
@@ -125,10 +160,12 @@ SocketHandle& SocketHandle::operator=(SocketHandle&& other) noexcept {
     ssl_ctx_ = other.ssl_ctx_;
     ssl_ = other.ssl_;
     tls_active_ = other.tls_active_;
+    read_timeout_s_ = other.read_timeout_s_;
     other.fd_ = -1;
     other.ssl_ctx_ = nullptr;
     other.ssl_ = nullptr;
     other.tls_active_ = false;
+    other.read_timeout_s_ = 0;
   }
   return *this;
 }
@@ -496,6 +533,14 @@ mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
   }
 #endif
 
+  // OpenSSL must not perform an unbounded blocking syscall before it can
+  // report WANT_READ/WANT_WRITE. Drive TLS sockets with poll and a monotonic
+  // deadline instead of relying on SO_RCVTIMEO/BIO retry behavior.
+  if (tls_active_ && SetNonBlocking(fd_, timeout_s > 0) != 0) {
+    return MES_ERR_CONNECT;
+  }
+  read_timeout_s_ = timeout_s;
+
   return MES_OK;
 }
 
@@ -506,6 +551,8 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
   if (fd_ < 0) return MES_ERR_STREAM;
 
   size_t total = 0;
+  const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
+  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
   while (total < len) {
     int n;
     if (tls_active_) {
@@ -514,7 +561,13 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          continue;  // Retry after transient SSL renegotiation
+          int wait_rc = WaitForSocket(fd_, ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+          if (wait_rc > 0) continue;
+          StructuredLog()
+              .Event(wait_rc == 0 ? "ssl_read_timeout" : "ssl_read_wait_error")
+              .Field("timeout_s", static_cast<uint64_t>(read_timeout_s_))
+              .Error();
+          return MES_ERR_STREAM;
         }
         // SSL_ERROR_ZERO_RETURN means clean shutdown (EOF).
         if (ssl_err == SSL_ERROR_ZERO_RETURN) {
@@ -560,6 +613,8 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   if (fd_ < 0) return MES_ERR_STREAM;
 
   size_t total = 0;
+  const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
+  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
   while (total < len) {
     int n;
     if (tls_active_) {
@@ -568,7 +623,13 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          continue;  // Retry after transient SSL renegotiation
+          int wait_rc = WaitForSocket(fd_, ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+          if (wait_rc > 0) continue;
+          StructuredLog()
+              .Event(wait_rc == 0 ? "ssl_write_timeout" : "ssl_write_wait_error")
+              .Field("timeout_s", static_cast<uint64_t>(read_timeout_s_))
+              .Error();
+          return MES_ERR_STREAM;
         }
         StructuredLog()
             .Event("ssl_write_error")
@@ -636,6 +697,7 @@ void SocketHandle::Close() {
   }
 
   tls_active_ = false;
+  read_timeout_s_ = 0;
 
   if (fd_ >= 0) {
     CloseSocket(fd_);

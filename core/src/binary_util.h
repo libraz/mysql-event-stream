@@ -162,7 +162,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
  * @param metadata Type-specific metadata from TABLE_MAP event
  * @return Size of the field in bytes, or 0 for unsupported types
  */
-uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint16_t metadata);
+uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint32_t metadata);
 
 }  // namespace mes::binary
 

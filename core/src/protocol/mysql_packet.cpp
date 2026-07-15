@@ -10,9 +10,8 @@
 namespace mes::protocol {
 
 namespace {
-constexpr size_t kMaxPacketPayload = 0xFFFFFF;               // 16 MB - 1
-constexpr size_t kPacketHeaderSize = 4;                      // 3 length + 1 sequence
-constexpr size_t kMaxReassembledPayload = 64 * 1024 * 1024;  // 64 MB
+constexpr size_t kMaxPacketPayload = 0xFFFFFF;  // 16 MB - 1
+constexpr size_t kPacketHeaderSize = 4;         // 3 length + 1 sequence
 }  // namespace
 
 // --- PacketBuffer ---
@@ -61,7 +60,8 @@ size_t PacketBuffer::Size() const { return buf_.size(); }
 
 // --- ReadPacket ---
 
-mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id) {
+mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id,
+                       size_t max_payload_size) {
   payload->clear();
 
   for (;;) {
@@ -78,8 +78,9 @@ mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_
 
     if (payload_length > 0) {
       size_t prev_size = payload->size();
-      // Check before resize to prevent overflow on 32-bit targets (WASM)
-      if (prev_size > kMaxReassembledPayload - payload_length) {
+      // Check before resize to prevent both the configured-cap bypass and
+      // size_t overflow on 32-bit targets (WASM).
+      if (!PacketPayloadAppendFits(prev_size, payload_length, max_payload_size)) {
         return MES_ERR_STREAM;
       }
       payload->resize(prev_size + payload_length);

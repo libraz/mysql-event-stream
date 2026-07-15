@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "client/event_queue.h"
+#include "client/transaction_gtid_tracker.h"
 #include "mes.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
@@ -46,6 +47,7 @@ struct BinlogClientConfig {
   std::string ssl_cert;           // Path to client certificate file
   std::string ssl_key;            // Path to client private key file
   size_t max_queue_size = 10000;  // 0 = use default (10000)
+  bool allow_public_key_retrieval = false;
 };
 
 /**
@@ -74,7 +76,7 @@ struct PollResult {
  *   BinlogClient client;
  *   client.Connect(config);
  *   client.StartStream();
- *   while (client.IsConnected()) {
+ *   while (client.IsStreaming()) {
  *     auto result = client.Poll();
  *     if (result.data) engine.Feed(result.data, result.size);
  *   }
@@ -113,14 +115,20 @@ class BinlogClient {
    */
   PollResult Poll();
 
-  /** @brief Request stream stop from any thread. Unblocks a pending Poll(). */
+  /**
+   * @brief Synchronously stop from any thread and unblock a pending Poll().
+   * @note Acquires locks and joins the reader; not async-signal-safe.
+   */
   void Stop();
 
   /** @brief Disconnect from MySQL server */
   void Disconnect();
 
-  /** @brief Check if connected */
+  /** @brief Check whether the transport is still usable. */
   bool IsConnected() const;
+
+  /** @brief Check whether Poll() can still drain events or a terminal error. */
+  bool IsStreaming() const;
 
   /** @brief Get last error message */
   const char* GetLastError() const;
@@ -136,6 +144,26 @@ class BinlogClient {
 
   /** @brief Get total CRC32 checksum errors detected (thread-safe) */
   uint64_t GetCRCErrors() const;
+
+  /** @brief Whether wire events currently carry CRC32 trailers. */
+  bool ChecksumEnabled() const;
+
+  /**
+   * @brief Set the maximum wire event size accepted by the reader.
+   *
+   * Uses the same normalization contract as EventStreamParser: 0 resolves to
+   * the 1 GiB hard cap and other out-of-range values are clamped. Call before
+   * StartStream(); changing it while the reader is running is not supported.
+   */
+  void SetMaxEventSize(uint32_t max_event_size);
+
+  /** @brief Get the normalized reader event-size ceiling. */
+  uint32_t MaxEventSize() const;
+
+  /** @brief Set/get the total payload byte budget for queued events. */
+  void SetMaxQueueBytes(size_t max_queue_bytes);
+  size_t MaxQueueBytes() const;
+  size_t QueuedBytes() const;
 
  private:
   protocol::MysqlConnection conn_;
@@ -161,6 +189,7 @@ class BinlogClient {
   // a Poll() on the same thread is in progress. Stop() may run from any
   // thread but does not reassign event_queue_; it only Close()s it.
   std::atomic<bool> streaming_{false};
+  std::atomic<bool> connected_{false};
   // Whether the server emits a CRC32 trailer on every binlog event. This is
   // a protocol-layer flag distinct from EventStreamParser::has_checksum_:
   // BinlogClient detects it via SQL (SELECT @@global.binlog_checksum) because
@@ -170,14 +199,17 @@ class BinlogClient {
   // independently auto-detects checksums from the FDE byte when it strips the
   // trailer during decode. The two layers are intentionally decoupled so each
   // component is usable on its own; only the kChecksumSize constant is shared.
-  bool checksum_enabled_ = true;
+  std::atomic<bool> checksum_enabled_{true};
   std::atomic<bool> stop_requested_{false};
+  uint32_t max_event_size_ = 64u * 1024u * 1024u;
+  size_t max_queue_bytes_ = kDefaultEventQueueBytes;
 
   // Reader thread infrastructure
   std::unique_ptr<EventQueue> event_queue_;
   std::thread reader_thread_;
-  QueuedEvent current_event_;  // Holds data for current Poll() result
-  std::mutex stop_mutex_;      // Serializes Stop() calls
+  QueuedEvent current_event_;            // Holds data for current Poll() result
+  TransactionGtidTracker gtid_tracker_;  // Reader-thread received/commit state
+  std::mutex stop_mutex_;                // Serializes Stop() calls
 
   // Reusable scratch buffer for FetchEvent() packet reads. Lives on the
   // reader thread: after a successful non-heartbeat read, the buffer is
@@ -214,8 +246,11 @@ class BinlogClient {
   /** @brief MariaDB-specific stream setup (COM_BINLOG_DUMP) */
   mes_error_t StartStreamMariaDB();
 
-  /** @brief Update current_gtid_ from GTID_LOG_EVENT or MariaDB GTID (thread-safe) */
-  void UpdateGtidFromEvent(const uint8_t* event_data, size_t event_size);
+  /** Configure a heartbeat period safely below the socket read timeout. */
+  mes_error_t ConfigureHeartbeat();
+
+  /** Promote the prior Poll() event's commit checkpoint to delivered state. */
+  void PromoteDeliveredCheckpoint();
 };
 
 }  // namespace mes

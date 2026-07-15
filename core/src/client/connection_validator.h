@@ -11,9 +11,25 @@
 
 #include "mes.h"
 #include "protocol/mysql_connection.h"
+#include "protocol/mysql_query.h"
 #include "server_flavor.h"
 
 namespace mes {
+
+namespace detail {
+
+enum class VariableQueryStatus {
+  kFound,
+  kNotFound,
+  kMalformed,
+  kQueryError,
+};
+
+/** Classify a SHOW VARIABLES result without conflating absence with failure. */
+VariableQueryStatus ClassifyVariableQueryResult(mes_error_t query_error,
+                                                const protocol::QueryResult& result);
+
+}  // namespace detail
 
 /**
  * @brief Result of server configuration validation

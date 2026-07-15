@@ -29,7 +29,7 @@ constexpr uint16_t kBinlogThroughGtid = 0x04;
 
 }  // namespace
 
-mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& config) {
+std::vector<uint8_t> BuildComBinlogDumpGtidPayload(const BinlogStreamConfig& config) {
   // Build COM_BINLOG_DUMP_GTID payload:
   //   [1] command byte
   //   [2] flags (LE)
@@ -55,6 +55,12 @@ mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& co
   WriteFixedInt(&payload, config.gtid_encoded.size(), 4);
   payload.insert(payload.end(), config.gtid_encoded.begin(), config.gtid_encoded.end());
 
+  return payload;
+}
+
+mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& config) {
+  std::vector<uint8_t> payload = BuildComBinlogDumpGtidPayload(config);
+
   // Send as a single command packet with sequence_id = 0
   PacketBuffer pkt_buf;
   uint8_t seq_id = 0;
@@ -64,7 +70,7 @@ mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& co
 }
 
 mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* buffer,
-                                     BinlogEventPacket* result) {
+                                     BinlogEventPacket* result, uint32_t max_event_size) {
   // Initialize output so callers can rely on consistent defaults on all paths.
   result->data = nullptr;
   result->size = 0;
@@ -72,7 +78,11 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   result->is_heartbeat = false;
 
   uint8_t seq_id = 0;
-  mes_error_t rc = ReadPacket(sock, buffer, &seq_id);
+  // The replication packet contains a one-byte OK marker before the event.
+  // Include it in the packet cap so an event exactly at max_event_size is
+  // accepted while max_event_size + 1 event bytes are rejected.
+  const size_t max_packet_payload = BinlogPacketPayloadLimit(max_event_size);
+  mes_error_t rc = ReadPacket(sock, buffer, &seq_id, max_packet_payload);
   if (rc != MES_OK) {
     return rc;
   }

@@ -137,7 +137,9 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
     for (int i = 0; i < bytes; i++) {
       val = (val << 8) | *ptr++;
     }
-    result += std::to_string(val);
+    if (val != 0) {
+      result += std::to_string(val);
+    }
   }
 
   // Process full 4-byte groups in integer part
@@ -147,7 +149,9 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
       val = (val << 8) | *ptr++;
     }
     if (result.empty()) {
-      result += std::to_string(val);
+      if (val != 0) {
+        result += std::to_string(val);
+      }
     } else {
       char fmt_buf[16];
       std::snprintf(fmt_buf, sizeof(fmt_buf), "%09d", val);
@@ -226,7 +230,7 @@ static uint32_t CalcVarPrefixFieldSize(uint8_t pack_len, const uint8_t* data, si
   return static_cast<uint32_t>(consumed) + content_len;
 }
 
-uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint16_t metadata) {
+uint32_t CalcFieldSize(uint8_t col_type, const uint8_t* data, size_t buf_len, uint32_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
     case 0x01:  // MYSQL_TYPE_TINY

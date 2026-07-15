@@ -18,9 +18,10 @@ MetadataFetcher::~MetadataFetcher() { Disconnect(); }
 
 mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
                                      const std::string& user, const std::string& password,
-                                     uint32_t connect_timeout_s, uint32_t ssl_mode,
-                                     const std::string& ssl_ca, const std::string& ssl_cert,
-                                     const std::string& ssl_key) {
+                                     uint32_t connect_timeout_s, uint32_t read_timeout_s,
+                                     uint32_t ssl_mode, const std::string& ssl_ca,
+                                     const std::string& ssl_cert, const std::string& ssl_key,
+                                     bool allow_public_key_retrieval) {
   if (conn_.IsConnected()) {
     Disconnect();
   }
@@ -31,13 +32,15 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
   user_ = user;
   password_ = password;
   connect_timeout_s_ = connect_timeout_s;
+  read_timeout_s_ = read_timeout_s;
   ssl_mode_ = ssl_mode;
   ssl_ca_ = ssl_ca;
   ssl_cert_ = ssl_cert;
   ssl_key_ = ssl_key;
+  allow_public_key_retrieval_ = allow_public_key_retrieval;
 
-  return conn_.Connect(host, port, user, password, connect_timeout_s, 0 /* read_timeout */,
-                       ssl_mode, ssl_ca, ssl_cert, ssl_key);
+  return conn_.Connect(host, port, user, password, connect_timeout_s, read_timeout_s, ssl_mode,
+                       ssl_ca, ssl_cert, ssl_key, allow_public_key_retrieval);
 }
 
 void MetadataFetcher::Disconnect() {
@@ -63,12 +66,13 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return {};
   }
 
-  std::string key = MakeCacheKey(database, table);
-
   // Check cache
-  auto it = cache_.find(key);
-  if (it != cache_.end() && it->second.size() == expected_count) {
-    return it->second;
+  auto db_it = cache_.find(database);
+  if (db_it != cache_.end()) {
+    auto table_it = db_it->second.find(table);
+    if (table_it != db_it->second.end() && table_it->second.size() == expected_count) {
+      return table_it->second;
+    }
   }
 
   // Cache miss or count mismatch -- query MySQL.
@@ -96,8 +100,9 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     if (attempt == 1) {
       // Reconnect and retry
       conn_.Disconnect();
-      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, 0 /* read_timeout */,
-                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_) != MES_OK) {
+      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, read_timeout_s_,
+                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_,
+                        allow_public_key_retrieval_) != MES_OK) {
         break;
       }
     }
@@ -108,7 +113,7 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     }
   }
   if (!query_ok) {
-    cache_.erase(key);
+    if (db_it != cache_.end()) db_it->second.erase(table);
     StructuredLog()
         .Event("metadata_fetch_failed")
         .Field("db", database)
@@ -138,7 +143,7 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
 
   // Verify column count matches expectation
   if (infos.size() != expected_count) {
-    cache_.erase(key);
+    if (db_it != cache_.end()) db_it->second.erase(table);
     StructuredLog()
         .Event("metadata_fetch_column_count_mismatch")
         .Field("db", database)
@@ -149,19 +154,18 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return {};
   }
 
-  cache_[key] = infos;
+  cache_[database][table] = infos;
   return infos;
 }
 
 void MetadataFetcher::InvalidateCache(const std::string& database, const std::string& table) {
-  cache_.erase(MakeCacheKey(database, table));
+  auto db_it = cache_.find(database);
+  if (db_it == cache_.end()) return;
+  db_it->second.erase(table);
+  if (db_it->second.empty()) cache_.erase(db_it);
 }
 
 void MetadataFetcher::ClearCache() { cache_.clear(); }
-
-std::string MetadataFetcher::MakeCacheKey(const std::string& db, const std::string& table) {
-  return db + "." + table;
-}
 
 std::string MetadataFetcher::EscapeIdentifier(const std::string& id) {
   // Escape backticks within the identifier by doubling them.

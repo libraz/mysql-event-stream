@@ -3,8 +3,11 @@
 
 #include "row_decoder.h"
 
+#include <zlib.h>
+
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "binary_util.h"
 
@@ -82,6 +85,7 @@ size_t CountPresentColumns(const uint8_t* bitmap, size_t column_count) {
 bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& metadata,
                   size_t column_count, const uint8_t* columns_present, RowData* row) {
   size_t present_count = CountPresentColumns(columns_present, column_count);
+  if (present_count == 0) return false;
 
   // Null bitmap
   size_t null_bitmap_bytes = binary::BitmapBytes(present_count);
@@ -113,7 +117,7 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
     }
     null_bit_index++;
 
-    const uint16_t meta = col_info ? col_info->metadata : 0;
+    const uint32_t meta = col_info ? col_info->metadata : 0;
     const bool is_unsigned = col_info ? col_info->is_unsigned : false;
 
     size_t consumed = 0;
@@ -177,6 +181,65 @@ void AppendFractional(std::string& out, int usec) {
   out += buf;
 }
 
+// Column values are materialized in memory. Bound expansion independently of
+// the compact on-wire event so a malicious compressed field cannot turn a
+// small row event into an unbounded allocation.
+constexpr size_t kMaxDecompressedColumnBytes = 64U * 1024U * 1024U;
+
+bool DecodeMariaCompressedPayload(const uint8_t* data, size_t len, size_t field_limit,
+                                  std::string* output) {
+  output->clear();
+  if (len == 0) return true;  // MariaDB stores an empty value with no header.
+
+  const uint8_t header = data[0];
+  const uint8_t method = static_cast<uint8_t>(header >> 4);
+  if (method == 0) {
+    if (header != 0) return false;
+    output->assign(reinterpret_cast<const char*>(data + 1), len - 1);
+    return true;
+  }
+  if (method != 8) return false;
+
+  const size_t original_length_bytes = header & 0x07;
+  if (original_length_bytes == 0 || original_length_bytes > 4 || len < 1 + original_length_bytes) {
+    return false;
+  }
+  const uint64_t original_length = ReadBigEndian(data + 1, original_length_bytes);
+  const size_t safe_limit = std::min(field_limit, kMaxDecompressedColumnBytes);
+  if (original_length == 0 || original_length > safe_limit ||
+      original_length > std::numeric_limits<uInt>::max()) {
+    return false;
+  }
+
+  const size_t compressed_offset = 1 + original_length_bytes;
+  const size_t compressed_length = len - compressed_offset;
+  if (compressed_length == 0 || compressed_length > std::numeric_limits<uInt>::max()) {
+    return false;
+  }
+
+  output->resize(static_cast<size_t>(original_length));
+  z_stream stream{};
+  stream.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data + compressed_offset));
+  stream.avail_in = static_cast<uInt>(compressed_length);
+  stream.next_out = reinterpret_cast<Bytef*>(&(*output)[0]);
+  stream.avail_out = static_cast<uInt>(original_length);
+
+  const int window_bits = (header & 0x08) != 0 ? -MAX_WBITS : MAX_WBITS;
+  if (inflateInit2(&stream, window_bits) != Z_OK) {
+    output->clear();
+    return false;
+  }
+  const int inflate_result = inflate(&stream, Z_FINISH);
+  const bool ok =
+      inflate_result == Z_STREAM_END && stream.total_out == original_length && stream.avail_in == 0;
+  const int end_result = inflateEnd(&stream);
+  if (!ok || end_result != Z_OK) {
+    output->clear();
+    return false;
+  }
+  return true;
+}
+
 struct RowsContext {
   const uint8_t* ptr;
   size_t remaining;
@@ -198,7 +261,7 @@ bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& meta
 
 }  // namespace
 
-ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, const uint8_t* data,
+ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, const uint8_t* data,
                               size_t len, size_t* bytes_consumed) {
   *bytes_consumed = 0;
 
@@ -311,6 +374,21 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
           type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
     }
 
+    case ColumnType::kVarcharCompressed: {
+      const size_t prefix_size = meta > 255 ? 2 : 1;
+      if (len < prefix_size) return ColumnValue::Null(type);
+      const size_t payload_length =
+          prefix_size == 2 ? binary::ReadU16Le(data) : binary::ReadU8(data);
+      if (payload_length > len - prefix_size) return ColumnValue::Null(type);
+
+      std::string value;
+      if (!DecodeMariaCompressedPayload(data + prefix_size, payload_length, meta, &value)) {
+        return ColumnValue::Null(type);
+      }
+      *bytes_consumed = prefix_size + payload_length;
+      return ColumnValue::String(type, std::move(value));
+    }
+
     case ColumnType::kBlob:
     case ColumnType::kTinyBlob:
     case ColumnType::kMediumBlob:
@@ -329,10 +407,30 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       size_t prefix_consumed = 0;
       uint32_t blob_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
-      if (len < prefix_consumed + blob_len) return ColumnValue::Null(type);
+      if (blob_len > len - prefix_consumed) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + blob_len;
-      return ColumnValue::Bytes(
-          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + blob_len));
+      return ColumnValue::Bytes(type, data + prefix_consumed, blob_len);
+    }
+
+    case ColumnType::kBlobCompressed: {
+      const uint8_t pack_length = static_cast<uint8_t>(meta);
+      if (pack_length == 0 || pack_length > 4) return ColumnValue::Null(type);
+      size_t prefix_consumed = 0;
+      const uint32_t payload_length =
+          binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
+      if (prefix_consumed == 0 || payload_length > len - prefix_consumed) {
+        return ColumnValue::Null(type);
+      }
+
+      const size_t field_limit = pack_length == 4 ? std::numeric_limits<uint32_t>::max()
+                                                  : (size_t{1} << (pack_length * 8)) - 1;
+      std::string value;
+      if (!DecodeMariaCompressedPayload(data + prefix_consumed, payload_length, field_limit,
+                                        &value)) {
+        return ColumnValue::Null(type);
+      }
+      *bytes_consumed = prefix_consumed + payload_length;
+      return ColumnValue::Bytes(type, reinterpret_cast<const uint8_t*>(value.data()), value.size());
     }
 
     case ColumnType::kJson: {
@@ -342,11 +440,23 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       size_t prefix_consumed = 0;
       uint32_t json_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
-      if (len < prefix_consumed + json_len) return ColumnValue::Null(type);
+      if (json_len > len - prefix_consumed) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + json_len;
       // Store JSON as bytes (binary JSON format, not text)
-      return ColumnValue::Bytes(
-          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + json_len));
+      return ColumnValue::Bytes(type, data + prefix_consumed, json_len);
+    }
+
+    case ColumnType::kTypedArray: {
+      // Field_typed_array derives from Field_json. Its TABLE_MAP metadata
+      // describes the logical array element, but its row bytes use JSON's
+      // fixed four-byte BLOB length followed by MySQL binary JSON.
+      size_t prefix_consumed = 0;
+      const uint32_t json_len = binary::ReadVarLenPrefix(4, data, len, &prefix_consumed);
+      if (prefix_consumed == 0 || json_len > len - prefix_consumed) {
+        return ColumnValue::Null(type);
+      }
+      *bytes_consumed = prefix_consumed + json_len;
+      return ColumnValue::Bytes(type, data + prefix_consumed, json_len);
     }
 
     case ColumnType::kString: {
@@ -515,15 +625,19 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
         usec = frac * multiplier;
       }
 
-      int64_t packed = (intpart << 24) + usec;
+      // Multiplication is defined for negative operands; left-shifting a
+      // negative signed integer is undefined in C++17. Keep the magnitude
+      // unsigned as well so the minimum representable packed value is safe.
+      int64_t packed = intpart * (int64_t{1} << 24) + usec;
       bool negative = packed < 0;
-      if (negative) packed = -packed;
+      uint64_t magnitude =
+          negative ? uint64_t{0} - static_cast<uint64_t>(packed) : static_cast<uint64_t>(packed);
 
-      int64_t datetime = packed >> 24;
-      int micros = static_cast<int>(packed & 0xFFFFFF);
-      int64_t ymd = datetime >> 17;
-      int64_t hms = datetime & 0x1FFFF;
-      int64_t ym = ymd >> 5;
+      uint64_t datetime = magnitude >> 24;
+      int micros = static_cast<int>(magnitude & 0xFFFFFF);
+      uint64_t ymd = datetime >> 17;
+      uint64_t hms = datetime & 0x1FFFF;
+      uint64_t ym = ymd >> 5;
       int day = static_cast<int>(ymd & 0x1F);
       int month = static_cast<int>(ym % 13);
       int year = static_cast<int>(ym / 13);
@@ -606,7 +720,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
         usec = frac * multiplier;
       }
 
-      int64_t packed_time = (intpart << 24) + usec;
+      // Left-shifting negative signed values is undefined in C++17.
+      int64_t packed_time = intpart * (int64_t{1} << 24) + usec;
       bool negative = packed_time < 0;
       if (negative) packed_time = -packed_time;
 
@@ -661,10 +776,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, 
       size_t prefix_consumed = 0;
       uint32_t geo_len = binary::ReadVarLenPrefix(pack_length, data, len, &prefix_consumed);
       if (prefix_consumed == 0) return ColumnValue::Null(type);
-      if (len < prefix_consumed + geo_len) return ColumnValue::Null(type);
+      if (geo_len > len - prefix_consumed) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + geo_len;
-      return ColumnValue::Bytes(
-          type, std::vector<uint8_t>(data + prefix_consumed, data + prefix_consumed + geo_len));
+      return ColumnValue::Bytes(type, data + prefix_consumed, geo_len);
     }
 
     // Note: kEnum (0xF7) and kSet (0xF8) are handled within the kString case
@@ -686,11 +800,13 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
   rows->clear();
   rows->reserve(8);  // typical rows per event; avoids reallocation in common case
   while (ctx.remaining > 0) {
+    const size_t remaining_before = ctx.remaining;
     RowData row;
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
                       &row)) {
       return false;
     }
+    if (ctx.remaining >= remaining_before) return false;
     rows->push_back(std::move(row));
   }
   return true;
@@ -717,6 +833,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
   pairs->clear();
   pairs->reserve(8);
   while (ctx.remaining > 0) {
+    const size_t remaining_before = ctx.remaining;
     UpdatePair pair;
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
                       &pair.before)) {
@@ -726,6 +843,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
                       ctx.columns_present_update, &pair.after)) {
       return false;
     }
+    if (ctx.remaining >= remaining_before) return false;
     pairs->push_back(std::move(pair));
   }
   return true;

@@ -21,6 +21,71 @@ static void AttachColumnNames(RowData& row, const TableMetadata& meta) {
   }
 }
 
+namespace {
+
+bool IsSqlWhitespace(char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
+}
+
+/** Skip MySQL leading whitespace/comments and expose executable version comments. */
+bool SkipLeadingSqlTrivia(const char* stmt, size_t stmt_len, size_t* pos) {
+  for (;;) {
+    while (*pos < stmt_len && IsSqlWhitespace(stmt[*pos])) ++(*pos);
+    if (*pos >= stmt_len) return false;
+
+    if (stmt[*pos] == '#') {
+      while (*pos < stmt_len && stmt[*pos] != '\n' && stmt[*pos] != '\r') ++(*pos);
+      continue;
+    }
+
+    if (stmt_len - *pos >= 2 && stmt[*pos] == '-' && stmt[*pos + 1] == '-' &&
+        (stmt_len - *pos == 2 || IsSqlWhitespace(stmt[*pos + 2]))) {
+      *pos += 2;
+      while (*pos < stmt_len && stmt[*pos] != '\n' && stmt[*pos] != '\r') ++(*pos);
+      continue;
+    }
+
+    if (stmt_len - *pos >= 2 && stmt[*pos] == '/' && stmt[*pos + 1] == '*') {
+      const bool mysql_version_comment = stmt_len - *pos >= 3 && stmt[*pos + 2] == '!';
+      const bool mariadb_version_comment = stmt_len - *pos >= 4 &&
+                                           (stmt[*pos + 2] == 'M' || stmt[*pos + 2] == 'm') &&
+                                           stmt[*pos + 3] == '!';
+      if (mysql_version_comment || mariadb_version_comment) {
+        *pos += mysql_version_comment ? 3 : 4;
+        while (*pos < stmt_len && std::isdigit(static_cast<unsigned char>(stmt[*pos]))) ++(*pos);
+        while (*pos < stmt_len && IsSqlWhitespace(stmt[*pos])) ++(*pos);
+        return *pos < stmt_len;
+      }
+
+      const size_t comment_start = *pos;
+      *pos += 2;
+      bool closed = false;
+      while (stmt_len - *pos >= 2) {
+        if (stmt[*pos] == '*' && stmt[*pos + 1] == '/') {
+          *pos += 2;
+          closed = true;
+          break;
+        }
+        ++(*pos);
+      }
+      if (!closed) {
+        *pos = comment_start;
+        return false;
+      }
+      continue;
+    }
+
+    return true;
+  }
+}
+
+bool IsSqlIdentifierChar(char ch) {
+  const auto uch = static_cast<unsigned char>(ch);
+  return std::isalnum(uch) || ch == '_' || ch == '$';
+}
+
+}  // namespace
+
 // Extract the SQL statement from a QUERY_EVENT body and decide whether it is a
 // DDL statement that may alter table schema. QUERY_EVENT (v4) body layout:
 //   [0..4)  thread_id, [4..8) exec_time, [8] db_len, [9..11) error_code,
@@ -39,12 +104,8 @@ bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
   const char* stmt = reinterpret_cast<const char*>(body + stmt_offset);
   size_t stmt_len = body_len - stmt_offset;
 
-  // Skip leading whitespace.
   size_t pos = 0;
-  while (pos < stmt_len &&
-         (stmt[pos] == ' ' || stmt[pos] == '\t' || stmt[pos] == '\n' || stmt[pos] == '\r')) {
-    ++pos;
-  }
+  if (!SkipLeadingSqlTrivia(stmt, stmt_len, &pos)) return false;
 
   // Compare the first keyword case-insensitively against known DDL verbs.
   static constexpr std::array<const char*, 5> kDdlKeywords = {"ALTER", "RENAME", "DROP", "CREATE",
@@ -61,7 +122,7 @@ bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
         break;
       }
     }
-    if (match) {
+    if (match && (stmt_len - pos == keyword_len || !IsSqlIdentifierChar(stmt[pos + keyword_len]))) {
       return true;
     }
   }
@@ -154,22 +215,22 @@ mes_error_t CdcEngine::ErrorCode() const {
   if (stream_parser_.GetState() != ParserState::kError) {
     return MES_OK;
   }
-  return MES_ERR_PARSE;
+  return stream_parser_.ErrorCode();
 }
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
   include_databases_ = std::unordered_set<std::string>(databases.begin(), databases.end());
-  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
+  RebuildBlockedTableIds();
 }
 
 void CdcEngine::SetIncludeTables(const std::vector<std::string>& tables) {
   include_tables_ = std::unordered_set<std::string>(tables.begin(), tables.end());
-  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
+  RebuildBlockedTableIds();
 }
 
 void CdcEngine::SetExcludeTables(const std::vector<std::string>& tables) {
   exclude_tables_ = std::unordered_set<std::string>(tables.begin(), tables.end());
-  blocked_table_ids_.clear();  // Force re-evaluation on next TABLE_MAP
+  RebuildBlockedTableIds();
 }
 
 bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& table) const {
@@ -196,6 +257,15 @@ bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& t
   return true;
 }
 
+void CdcEngine::RebuildBlockedTableIds() {
+  blocked_table_ids_.clear();
+  table_registry_.ForEach([this](uint64_t table_id, const TableMetadata& metadata) {
+    if (!IsTableAllowed(metadata.database_name, metadata.table_name)) {
+      blocked_table_ids_.insert(table_id);
+    }
+  });
+}
+
 void CdcEngine::SetMetadataFetcher(MetadataFetcher* fetcher) { metadata_fetcher_ = fetcher; }
 
 void CdcEngine::SetMaxEventSize(uint32_t max_event_size) {
@@ -218,9 +288,19 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
 
   switch (header.type_code) {
     case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
-      if (body_len < 6) break;
+      if (body == nullptr || body_len < 6) {
+        last_error_ = MES_ERR_PARSE;
+        StructuredLog().Event("table_map_parse_failed").Field("reason", "body_too_short").Error();
+        break;
+      }
       uint64_t table_id = binary::ReadU48Le(body);
       if (!table_registry_.ProcessTableMapEvent(body, body_len)) {
+        last_error_ = MES_ERR_PARSE;
+        StructuredLog()
+            .Event("table_map_parse_failed")
+            .Field("table_id", table_id)
+            .Field("body_length", static_cast<uint64_t>(body_len))
+            .Error();
         break;
       }
       auto* meta = table_registry_.MutableLookup(table_id);
@@ -291,6 +371,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         table_registry_.Clear();
         blocked_table_ids_.clear();
         StructuredLog().Event("binlog_rotate").Field("file", position_.binlog_file).Debug();
+      } else {
+        last_error_ = MES_ERR_PARSE;
+        StructuredLog().Event("rotate_event_parse_failed").Error();
       }
       break;
     }
@@ -320,17 +403,26 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
 }
 
 void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
-  if (body == nullptr || body_len < 6) return;
+  if (body == nullptr || body_len < 6) {
+    last_error_ = MES_ERR_DECODE_ROW;
+    StructuredLog()
+        .Event("row_decode_failed")
+        .Field("kind", "row_event_header")
+        .Field("reason", "body_too_short")
+        .Warn();
+    return;
+  }
 
   // Extract table_id from the first 6 bytes of the body
   uint64_t table_id = binary::ReadU48Le(body);
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const TableMetadata* meta = table_registry_.Lookup(table_id);
   if (meta == nullptr) {
+    last_error_ = MES_ERR_DECODE_ROW;
     StructuredLog()
         .Event("rows_event_no_table_map")
         .Field("table_id", static_cast<uint64_t>(table_id))
-        .Warn();
+        .Error();
     return;
   }
 

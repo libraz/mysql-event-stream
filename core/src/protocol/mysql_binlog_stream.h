@@ -33,6 +33,9 @@ struct BinlogStreamConfig {
   uint16_t flags = 0;
 };
 
+/** @brief Build the COM_BINLOG_DUMP_GTID command payload for @p config. */
+std::vector<uint8_t> BuildComBinlogDumpGtidPayload(const BinlogStreamConfig& config);
+
 /**
  * @brief A single binlog event received from the replication stream
  *
@@ -49,6 +52,11 @@ struct BinlogEventPacket {
   size_t data_offset = 0;         ///< Offset of `data` within the caller's buffer
   bool is_heartbeat = false;      ///< True if this is a heartbeat event
 };
+
+/** Packet payload cap for an event, including the replication OK prefix. */
+constexpr size_t BinlogPacketPayloadLimit(uint32_t max_event_size) {
+  return static_cast<size_t>(max_event_size) + 1U;
+}
 
 /**
  * @brief Binlog replication stream reader
@@ -87,10 +95,12 @@ class BinlogStream {
    * @param sock    Socket handle used in Start()
    * @param buffer  Caller-owned scratch buffer reused across calls
    * @param result  Output: populated with event data or heartbeat flag
+   * @param max_event_size Maximum event bytes, excluding the one-byte MySQL
+   *                       OK prefix. Values are normalized by the caller.
    * @return MES_OK on success, MES_ERR_STREAM on error or stream end
    */
   mes_error_t FetchEvent(SocketHandle* sock, std::vector<uint8_t>* buffer,
-                         BinlogEventPacket* result);
+                         BinlogEventPacket* result, uint32_t max_event_size);
 
   /**
    * @brief Send COM_BINLOG_DUMP to start binlog streaming (MariaDB)

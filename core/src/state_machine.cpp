@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "binary_util.h"
+#include "crc32.h"
 #include "logger.h"
 
 namespace mes {
@@ -42,6 +44,7 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
       // Parse the header
       if (!ParseEventHeader(buffer_.data(), buffer_.size(), &current_header_)) {
         state_ = ParserState::kError;
+        error_code_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("parse_error")
             .Field("reason", "invalid_header")
@@ -54,6 +57,7 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
       size_t min_event_length = kEventHeaderSize + (has_checksum_ ? kChecksumSize : 0);
       if (current_header_.event_length < min_event_length) {
         state_ = ParserState::kError;
+        error_code_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("parse_error")
             .Field("reason", "invalid_event_length")
@@ -65,6 +69,7 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
 
       if (current_header_.event_length > max_event_size_) {
         state_ = ParserState::kError;
+        error_code_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("parse_error")
             .Field("reason", "event_too_large")
@@ -104,6 +109,19 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
             static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent)) {
       DetectChecksumFromFde();
     }
+    if (state_ == ParserState::kEventReady) {
+      DetectArtificialRotateChecksum();
+    }
+    if (state_ == ParserState::kEventReady && !VerifyChecksum()) {
+      state_ = ParserState::kError;
+      error_code_ = MES_ERR_CHECKSUM;
+      StructuredLog()
+          .Event("parse_error")
+          .Field("reason", "crc32_checksum_mismatch")
+          .Field("event_type", static_cast<int64_t>(current_header_.type_code))
+          .Field("event_length", static_cast<uint64_t>(buffer_.size()))
+          .Error();
+    }
   }
 
   return total_consumed;
@@ -118,7 +136,7 @@ void EventStreamParser::CurrentBody(const uint8_t** body_data, size_t* body_len)
     *body_data = buffer_.data() + kEventHeaderSize;
   }
   if (body_len != nullptr) {
-    *body_len = EventBodySize(current_header_, has_checksum_);
+    *body_len = EventBodySize(current_header_, current_has_checksum_);
   }
 }
 
@@ -127,13 +145,24 @@ const uint8_t* EventStreamParser::RawData() const { return buffer_.data(); }
 size_t EventStreamParser::RawSize() const { return buffer_.size(); }
 
 void EventStreamParser::Advance() {
-  buffer_.clear();
+  if (buffer_.capacity() > kRetainedBufferLimit) {
+    std::vector<uint8_t>().swap(buffer_);
+  } else {
+    buffer_.clear();
+  }
   current_header_ = EventHeader{};
   state_ = ParserState::kWaitingHeader;
   bytes_needed_ = kEventHeaderSize;
+  current_has_checksum_ = has_checksum_;
+  error_code_ = MES_OK;
 }
 
-void EventStreamParser::Reset() { Advance(); }
+void EventStreamParser::Reset() {
+  Advance();
+  // Reset is used for reconnect/error recovery, where retaining even a
+  // sub-threshold allocation has no locality benefit. Release it eagerly.
+  std::vector<uint8_t>().swap(buffer_);
+}
 
 ParserState EventStreamParser::GetState() const { return state_; }
 
@@ -142,49 +171,56 @@ void EventStreamParser::SetMaxEventSize(uint32_t max_event_size) {
   // default/unlimited elsewhere. The absolute hard cap still applies so a
   // malicious peer cannot force unbounded per-event allocation; "no limit"
   // therefore resolves to the largest value the parser will ever accept.
-  if (max_event_size == 0) {
-    max_event_size_ = kAbsoluteMaxEventSize;
-    return;
-  }
-  // Clamp to the valid range so the parser cannot be configured into
-  // an unusable state (e.g. smaller than a header+checksum, or large
-  // enough to enable a malicious peer to force huge allocations).
-  constexpr uint32_t kMinValid = static_cast<uint32_t>(kEventHeaderSize + kChecksumSize);
-  if (max_event_size < kMinValid) {
-    max_event_size_ = kMinValid;
-  } else if (max_event_size > kAbsoluteMaxEventSize) {
-    max_event_size_ = kAbsoluteMaxEventSize;
-  } else {
-    max_event_size_ = max_event_size;
-  }
+  max_event_size_ = NormalizeMaxEventSize(max_event_size);
 }
 
 uint32_t EventStreamParser::MaxEventSize() const { return max_event_size_; }
 
-void EventStreamParser::SetChecksumEnabled(bool enabled) { has_checksum_ = enabled; }
+void EventStreamParser::SetChecksumEnabled(bool enabled) {
+  has_checksum_ = enabled;
+  if (state_ == ParserState::kWaitingHeader) current_has_checksum_ = enabled;
+}
 
 bool EventStreamParser::ChecksumEnabled() const { return has_checksum_; }
 
+mes_error_t EventStreamParser::ErrorCode() const { return error_code_; }
+
 void EventStreamParser::DetectChecksumFromFde() {
-  // buffer_ holds the full FDE event: [19-byte header][body...]. Since MySQL
-  // 5.6+/MariaDB 10.0+ the FDE always carries a 1-byte checksum-algorithm
-  // descriptor after the event-type header-length array; when the algorithm is
-  // CRC32 it is followed by a 4-byte checksum. Detect CRC32 by inspecting the
-  // descriptor at offset (size - 5); otherwise look for an OFF descriptor as
-  // the final byte. On ambiguity, leave the current setting unchanged.
-  const size_t size = buffer_.size();
-  // Fixed FDE prefix after the common header: binlog_version(2) +
-  // server_version(50) + create_timestamp(4) + header_length(1) = 57.
-  constexpr size_t kFdePrefix = 57;
-  if (size < kEventHeaderSize + kFdePrefix + 1) {
-    return;  // Too short to be a valid FDE; keep current setting.
+  switch (DetectFormatDescriptionChecksum(buffer_.data(), buffer_.size())) {
+    case BinlogChecksumAlgorithm::kCrc32:
+      has_checksum_ = true;
+      current_has_checksum_ = true;
+      break;
+    case BinlogChecksumAlgorithm::kOff:
+      has_checksum_ = false;
+      current_has_checksum_ = false;
+      break;
+    case BinlogChecksumAlgorithm::kUnknown:
+      break;
   }
-  if (size >= kEventHeaderSize + kFdePrefix + 1 + kChecksumSize &&
-      buffer_[size - kChecksumSize - 1] == kBinlogChecksumAlgCrc32) {
-    has_checksum_ = true;
-  } else if (buffer_[size - 1] == kBinlogChecksumAlgOff) {
-    has_checksum_ = false;
+}
+
+bool EventStreamParser::VerifyChecksum() const {
+  if (!current_has_checksum_) return true;
+  if (buffer_.size() < kEventHeaderSize + kChecksumSize) return false;
+  const size_t data_length = buffer_.size() - kChecksumSize;
+  const uint32_t computed = ComputeCRC32(buffer_.data(), data_length);
+  const uint32_t stored = binary::ReadU32Le(buffer_.data() + data_length);
+  return computed == stored;
+}
+
+void EventStreamParser::DetectArtificialRotateChecksum() {
+  current_has_checksum_ = has_checksum_;
+  if (has_checksum_ ||
+      current_header_.type_code != static_cast<uint8_t>(BinlogEventType::kRotateEvent) ||
+      (current_header_.flags & kLogEventArtificialFlag) == 0 ||
+      buffer_.size() < kEventHeaderSize + kChecksumSize) {
+    return;
   }
+  const size_t data_length = buffer_.size() - kChecksumSize;
+  const uint32_t computed = ComputeCRC32(buffer_.data(), data_length);
+  const uint32_t stored = binary::ReadU32Le(buffer_.data() + data_length);
+  current_has_checksum_ = computed == stored;
 }
 
 }  // namespace mes

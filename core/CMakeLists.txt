@@ -17,8 +17,22 @@ find_package(OpenSSL REQUIRED)
 message(STATUS "OpenSSL found: ${OPENSSL_VERSION} (static=${MES_OPENSSL_STATIC})")
 
 # ZLIB (required for CRC32 checksum verification)
+option(MES_ZLIB_STATIC "Link ZLIB statically" OFF)
+if(MES_ZLIB_STATIC)
+  set(ZLIB_USE_STATIC_LIBS TRUE)
+  # ZLIB_USE_STATIC_LIBS was added in CMake 3.24. Restrict suffixes as well so
+  # older supported CMake versions cannot silently select a shared libz.
+  set(_MES_SAVED_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+endif()
 find_package(ZLIB REQUIRED)
-message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING}")
+if(MES_ZLIB_STATIC)
+  set(CMAKE_FIND_LIBRARY_SUFFIXES ${_MES_SAVED_LIBRARY_SUFFIXES})
+endif()
+message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING} (static=${MES_ZLIB_STATIC})")
+
+# Linux wheels use this to avoid a host libstdc++/libgcc runtime requirement.
+option(MES_PORTABLE_RUNTIME "Statically link the GNU C++ runtime into shared artifacts" OFF)
 
 # Protocol layer (MySQL wire protocol implementation)
 set(PROTOCOL_SOURCES
@@ -37,6 +51,7 @@ set(CLIENT_SOURCES
   src/client/capi_client.cpp
   src/client/metadata_fetcher.cpp
   src/client/event_queue.cpp
+  src/client/transaction_gtid_tracker.cpp
 )
 
 # OBJECT library: compile sources once, reuse in static and shared targets
@@ -139,6 +154,10 @@ set_target_properties(mes-shared PROPERTIES
 
 target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 
+if(MES_PORTABLE_RUNTIME AND UNIX AND NOT APPLE)
+  target_link_options(mes-shared PRIVATE -static-libgcc -static-libstdc++)
+endif()
+
 # Propagate sanitizer/coverage link flags to final targets
 if(MES_ENABLE_ASAN)
   target_link_options(mes-shared PRIVATE -fsanitize=address)
@@ -177,6 +196,8 @@ if(MES_ENABLE_FUZZ)
   target_link_options(fuzz_feed PRIVATE -fsanitize=fuzzer)
 endif()
 
-# Tests
-enable_testing()
-add_subdirectory(tests)
+# Tests are disabled for wheel/native artifact builds with BUILD_TESTING=OFF.
+if(BUILD_TESTING)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

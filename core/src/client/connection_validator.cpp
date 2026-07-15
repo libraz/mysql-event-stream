@@ -56,34 +56,47 @@ bool IsAllowedVariableName(const char* var_name) {
  * the compile-time constants enumerated in IsAllowedVariableName(); external
  * input MUST NOT be passed. The allow-list check enforces this at runtime.
  */
-mes_error_t QueryVariable(protocol::MysqlConnection* conn, const char* var_name,
-                          std::string& out_value) {
+struct VariableQueryResult {
+  detail::VariableQueryStatus status = detail::VariableQueryStatus::kQueryError;
+  mes_error_t query_error = MES_OK;
+  std::string value;
+};
+
+VariableQueryResult QueryVariable(protocol::MysqlConnection* conn, const char* var_name) {
+  VariableQueryResult result;
   if (!IsAllowedVariableName(var_name)) {
-    out_value.clear();
-    return MES_ERR_INVALID_ARG;
+    result.query_error = MES_ERR_INVALID_ARG;
+    return result;
   }
   std::string query = "SHOW VARIABLES WHERE Variable_name = '" + std::string(var_name) + "'";
 
   protocol::QueryResult qr;
   std::string err;
-  mes_error_t rc =
+  result.query_error =
       protocol::ExecuteQuery(conn->Socket(), query, &qr, &err, conn->DeprecateEofNegotiated());
-  if (rc != MES_OK) {
-    out_value.clear();
-    return rc;
+  result.status = detail::ClassifyVariableQueryResult(result.query_error, qr);
+  if (result.status == detail::VariableQueryStatus::kFound) {
+    result.value = qr.rows[0].values[1];
   }
-
-  if (qr.rows.empty() || qr.rows[0].values.size() < 2 || qr.rows[0].is_null.size() < 2 ||
-      qr.rows[0].is_null[1]) {
-    out_value.clear();
-    return MES_ERR_VALIDATION;
-  }
-
-  out_value = qr.rows[0].values[1];
-  return MES_OK;
+  return result;
 }
 
 }  // namespace
+
+namespace detail {
+
+VariableQueryStatus ClassifyVariableQueryResult(mes_error_t query_error,
+                                                const protocol::QueryResult& result) {
+  if (query_error != MES_OK) return VariableQueryStatus::kQueryError;
+  if (result.rows.empty()) return VariableQueryStatus::kNotFound;
+  if (result.rows[0].values.size() < 2 || result.rows[0].is_null.size() < 2 ||
+      result.rows[0].is_null[1]) {
+    return VariableQueryStatus::kMalformed;
+  }
+  return VariableQueryStatus::kFound;
+}
+
+}  // namespace detail
 
 ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
                                                ServerFlavor flavor) {
@@ -141,11 +154,10 @@ ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
 
 bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn, const char* var_name,
                                         const char* expected, ValidationResult* result) {
-  std::string value;
-  mes_error_t rc = QueryVariable(conn, var_name, value);
-  if (rc != MES_OK) {
+  VariableQueryResult query = QueryVariable(conn, var_name);
+  if (query.status != detail::VariableQueryStatus::kFound) {
     result->error = MES_ERR_VALIDATION;
-    if (rc == MES_ERR_VALIDATION) {
+    if (query.status == detail::VariableQueryStatus::kNotFound) {
       std::snprintf(result->message, sizeof(result->message), "Variable %s not found", var_name);
     } else {
       std::snprintf(result->message, sizeof(result->message), "Failed to query %s", var_name);
@@ -153,10 +165,10 @@ bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn, const c
     return false;
   }
 
-  bool match = EqualsIgnoreCase(value.c_str(), expected);
+  bool match = EqualsIgnoreCase(query.value.c_str(), expected);
   if (!match) {
     result->error = MES_ERR_VALIDATION;
-    std::string msg = std::string(var_name) + " must be " + expected + ", got " + value;
+    std::string msg = std::string(var_name) + " must be " + expected + ", got " + query.value;
     std::strncpy(result->message, msg.c_str(), sizeof(result->message) - 1);
     result->message[sizeof(result->message) - 1] = '\0';
   }
@@ -166,14 +178,18 @@ bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn, const c
 
 bool ConnectionValidator::CheckVariableNot(protocol::MysqlConnection* conn, const char* var_name,
                                            const char* rejected, ValidationResult* result) {
-  std::string value;
-  mes_error_t rc = QueryVariable(conn, var_name, value);
-  if (rc != MES_OK) {
-    // Variable may not exist on this MySQL version; that is acceptable
+  VariableQueryResult query = QueryVariable(conn, var_name);
+  if (query.status == detail::VariableQueryStatus::kNotFound) {
+    // Optional safety variables may not exist on an older supported server.
     return true;
   }
+  if (query.status != detail::VariableQueryStatus::kFound) {
+    result->error = MES_ERR_VALIDATION;
+    std::snprintf(result->message, sizeof(result->message), "Failed to query %s", var_name);
+    return false;
+  }
 
-  bool is_rejected = EqualsIgnoreCase(value.c_str(), rejected);
+  bool is_rejected = EqualsIgnoreCase(query.value.c_str(), rejected);
   if (is_rejected) {
     result->error = MES_ERR_VALIDATION;
     std::snprintf(result->message, sizeof(result->message), "%s must not be %s", var_name,

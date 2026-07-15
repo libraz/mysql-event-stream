@@ -34,7 +34,9 @@ class MetadataFetcher;
  * @brief Determine whether a QUERY_EVENT body carries a DDL statement.
  *
  * Parses the QUERY_EVENT body to locate the SQL statement and checks whether it
- * begins with a schema-altering verb (ALTER/RENAME/DROP/CREATE/TRUNCATE).
+ * begins with a schema-altering verb (ALTER/RENAME/DROP/CREATE/TRUNCATE),
+ * after MySQL whitespace, line comments, block comments, or a version-comment
+ * prefix.
  * Exposed for testing. Returns false for non-DDL statements (e.g. BEGIN) and
  * for malformed/too-short bodies.
  *
@@ -172,6 +174,7 @@ class CdcEngine {
   mes_error_t last_error_ = MES_OK;
 
   bool IsTableAllowed(const std::string& database, const std::string& table) const;
+  void RebuildBlockedTableIds();
 
   std::unordered_set<std::string> include_databases_;
   std::unordered_set<std::string> include_tables_;

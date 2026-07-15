@@ -26,35 +26,39 @@ namespace mes {
  * Only types relevant to MySQL 8.4 binlog row events are included.
  */
 enum class ColumnType : uint8_t {
-  kTiny = 0x01,        ///< MYSQL_TYPE_TINY (TINYINT)
-  kShort = 0x02,       ///< MYSQL_TYPE_SHORT (SMALLINT)
-  kLong = 0x03,        ///< MYSQL_TYPE_LONG (INT)
-  kFloat = 0x04,       ///< MYSQL_TYPE_FLOAT
-  kDouble = 0x05,      ///< MYSQL_TYPE_DOUBLE
-  kTimestamp = 0x07,   ///< MYSQL_TYPE_TIMESTAMP
-  kLongLong = 0x08,    ///< MYSQL_TYPE_LONGLONG (BIGINT)
-  kInt24 = 0x09,       ///< MYSQL_TYPE_INT24 (MEDIUMINT)
-  kDate = 0x0A,        ///< MYSQL_TYPE_DATE
-  kTime = 0x0B,        ///< MYSQL_TYPE_TIME
-  kDatetime = 0x0C,    ///< MYSQL_TYPE_DATETIME
-  kYear = 0x0D,        ///< MYSQL_TYPE_YEAR
-  kVarchar = 0x0F,     ///< MYSQL_TYPE_VARCHAR
-  kBit = 0x10,         ///< MYSQL_TYPE_BIT
-  kTimestamp2 = 0x11,  ///< MYSQL_TYPE_TIMESTAMP2 (with fractional seconds)
-  kDatetime2 = 0x12,   ///< MYSQL_TYPE_DATETIME2 (with fractional seconds)
-  kTime2 = 0x13,       ///< MYSQL_TYPE_TIME2 (with fractional seconds)
-  kVector = 0xF2,      ///< MYSQL_TYPE_VECTOR (MySQL 9.0+)
-  kJson = 0xF5,        ///< MYSQL_TYPE_JSON
-  kNewDecimal = 0xF6,  ///< MYSQL_TYPE_NEWDECIMAL
-  kEnum = 0xF7,        ///< MYSQL_TYPE_ENUM
-  kSet = 0xF8,         ///< MYSQL_TYPE_SET
-  kTinyBlob = 0xF9,    ///< MYSQL_TYPE_TINY_BLOB
-  kMediumBlob = 0xFA,  ///< MYSQL_TYPE_MEDIUM_BLOB
-  kLongBlob = 0xFB,    ///< MYSQL_TYPE_LONG_BLOB
-  kBlob = 0xFC,        ///< MYSQL_TYPE_BLOB
-  kVarString = 0xFD,   ///< MYSQL_TYPE_VAR_STRING
-  kString = 0xFE,      ///< MYSQL_TYPE_STRING
-  kGeometry = 0xFF,    ///< MYSQL_TYPE_GEOMETRY
+  kTiny = 0x01,               ///< MYSQL_TYPE_TINY (TINYINT)
+  kShort = 0x02,              ///< MYSQL_TYPE_SHORT (SMALLINT)
+  kLong = 0x03,               ///< MYSQL_TYPE_LONG (INT)
+  kFloat = 0x04,              ///< MYSQL_TYPE_FLOAT
+  kDouble = 0x05,             ///< MYSQL_TYPE_DOUBLE
+  kTimestamp = 0x07,          ///< MYSQL_TYPE_TIMESTAMP
+  kLongLong = 0x08,           ///< MYSQL_TYPE_LONGLONG (BIGINT)
+  kInt24 = 0x09,              ///< MYSQL_TYPE_INT24 (MEDIUMINT)
+  kDate = 0x0A,               ///< MYSQL_TYPE_DATE
+  kTime = 0x0B,               ///< MYSQL_TYPE_TIME
+  kDatetime = 0x0C,           ///< MYSQL_TYPE_DATETIME
+  kYear = 0x0D,               ///< MYSQL_TYPE_YEAR
+  kNewDate = 0x0E,            ///< MYSQL_TYPE_NEWDATE (typed-array element marker)
+  kVarchar = 0x0F,            ///< MYSQL_TYPE_VARCHAR
+  kBit = 0x10,                ///< MYSQL_TYPE_BIT
+  kTimestamp2 = 0x11,         ///< MYSQL_TYPE_TIMESTAMP2 (with fractional seconds)
+  kDatetime2 = 0x12,          ///< MYSQL_TYPE_DATETIME2 (with fractional seconds)
+  kTime2 = 0x13,              ///< MYSQL_TYPE_TIME2 (with fractional seconds)
+  kTypedArray = 0x14,         ///< MYSQL_TYPE_TYPED_ARRAY (binary JSON row payload)
+  kBlobCompressed = 0x8C,     ///< MariaDB MYSQL_TYPE_BLOB_COMPRESSED
+  kVarcharCompressed = 0x8D,  ///< MariaDB MYSQL_TYPE_VARCHAR_COMPRESSED
+  kVector = 0xF2,             ///< MYSQL_TYPE_VECTOR (MySQL 9.0+)
+  kJson = 0xF5,               ///< MYSQL_TYPE_JSON
+  kNewDecimal = 0xF6,         ///< MYSQL_TYPE_NEWDECIMAL
+  kEnum = 0xF7,               ///< MYSQL_TYPE_ENUM
+  kSet = 0xF8,                ///< MYSQL_TYPE_SET
+  kTinyBlob = 0xF9,           ///< MYSQL_TYPE_TINY_BLOB
+  kMediumBlob = 0xFA,         ///< MYSQL_TYPE_MEDIUM_BLOB
+  kLongBlob = 0xFB,           ///< MYSQL_TYPE_LONG_BLOB
+  kBlob = 0xFC,               ///< MYSQL_TYPE_BLOB
+  kVarString = 0xFD,          ///< MYSQL_TYPE_VAR_STRING
+  kString = 0xFE,             ///< MYSQL_TYPE_STRING
+  kGeometry = 0xFF,           ///< MYSQL_TYPE_GEOMETRY
 };
 
 /**
@@ -179,7 +183,12 @@ struct BinlogPosition {
 struct ColumnMetadata {
   ColumnType type = ColumnType::kLong;
   std::string name;
-  uint16_t metadata = 0;  ///< Type-specific metadata
+  uint32_t metadata = 0;  ///< Type-specific metadata
+  /// MySQL encodes multi-valued-index backing fields as TYPED_ARRAY plus
+  /// the logical element type/metadata. Their row payload is still the
+  /// Field_json representation (4-byte length + binary JSON).
+  bool is_array = false;
+  ColumnType array_element_type = ColumnType::kLong;
   bool is_nullable = true;
   bool is_unsigned = false;
 };

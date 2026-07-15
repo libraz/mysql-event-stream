@@ -140,6 +140,9 @@ class SocketHandle {
   /** @brief True after a successful TLS handshake. */
   bool tls_active_ = false;
 
+  /** Monotonic deadline budget used for TLS read/write retry loops. */
+  uint32_t read_timeout_s_ = 0;
+
   /** @brief Release all resources (SSL objects and socket). */
   void Close();
 };

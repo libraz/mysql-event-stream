@@ -78,9 +78,18 @@ class PacketBuffer {
  * @param sock        Socket to read from
  * @param payload     Output: reassembled payload bytes
  * @param sequence_id Output: sequence ID of the last packet header read
+ * @param max_payload_size Maximum reassembled payload bytes. This includes
+ *                         protocol marker bytes such as the binlog OK prefix.
  * @return MES_OK on success, MES_ERR_STREAM on socket errors
  */
-mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id);
+mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_t* sequence_id,
+                       size_t max_payload_size = 64u * 1024u * 1024u);
+
+/** Overflow-safe predicate used by packet reassembly before allocating. */
+constexpr bool PacketPayloadAppendFits(size_t current_size, size_t append_size,
+                                       size_t max_payload_size) {
+  return current_size <= max_payload_size && append_size <= max_payload_size - current_size;
+}
 
 /**
  * @brief Read a MySQL length-encoded integer from a buffer

@@ -40,6 +40,7 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   cfg.ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
   cfg.ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
   cfg.max_queue_size = config->max_queue_size;
+  cfg.allow_public_key_retrieval = config->allow_public_key_retrieval != 0;
 
   return c->client.Connect(cfg);
 }
@@ -85,6 +86,10 @@ MES_API int mes_client_is_connected(mes_client_t* c) {
   return c->client.IsConnected() ? 1 : 0;
 }
 
+MES_API int mes_client_is_streaming(mes_client_t* c) {
+  return c != nullptr && c->client.IsStreaming() ? 1 : 0;
+}
+
 MES_API const char* mes_client_last_error(mes_client_t* c) {
   if (c == nullptr) {
     return "";
@@ -97,6 +102,35 @@ MES_API const char* mes_client_current_gtid(mes_client_t* c) {
     return "";
   }
   return c->client.GetCurrentGtid();
+}
+
+MES_API int mes_client_checksum_enabled(mes_client_t* c) {
+  if (c == nullptr) return 0;
+  return c->client.ChecksumEnabled() ? 1 : 0;
+}
+
+MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* c, uint32_t max_event_size) {
+  if (c == nullptr) return MES_ERR_NULL_ARG;
+  c->client.SetMaxEventSize(max_event_size);
+  return MES_OK;
+}
+
+MES_API uint32_t mes_client_get_max_event_size(mes_client_t* c) {
+  return c == nullptr ? 0 : c->client.MaxEventSize();
+}
+
+MES_API mes_error_t mes_client_set_max_queue_bytes(mes_client_t* c, size_t max_queue_bytes) {
+  if (c == nullptr) return MES_ERR_NULL_ARG;
+  c->client.SetMaxQueueBytes(max_queue_bytes);
+  return MES_OK;
+}
+
+MES_API size_t mes_client_get_max_queue_bytes(mes_client_t* c) {
+  return c == nullptr ? 0 : c->client.MaxQueueBytes();
+}
+
+MES_API size_t mes_client_queued_bytes(mes_client_t* c) {
+  return c == nullptr ? 0 : c->client.QueuedBytes();
 }
 
 }  // extern "C"

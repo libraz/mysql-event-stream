@@ -9,11 +9,14 @@
 #include <cstdint>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <vector>
 
 #include "mes.h"
 
 namespace mes {
+
+constexpr size_t kDefaultEventQueueBytes = 256u * 1024u * 1024u;
 
 // Note: this queue intentionally uses std::queue + mutex + condition
 // variables rather than a lock-free SPSC ring buffer. Rationale:
@@ -31,14 +34,15 @@ namespace mes {
 
 /** @brief An event buffered in the EventQueue. */
 struct QueuedEvent {
-  std::vector<uint8_t> data;   ///< Owned binlog packet bytes (empty for heartbeat/error)
-  size_t data_offset = 0;      ///< Offset of the event payload within `data`
-                               ///< (used to skip the MySQL OK byte without
-                               ///< copying). Consumers read from
-                               ///< `data.data() + data_offset` with size
-                               ///< `data.size() - data_offset`.
-  mes_error_t error = MES_OK;  ///< MES_OK for real events; error code for poison pill
-  bool is_heartbeat = false;   ///< true for silent heartbeats from the server
+  std::vector<uint8_t> data;    ///< Owned binlog packet bytes (empty for heartbeat/error)
+  size_t data_offset = 0;       ///< Offset of the event payload within `data`
+                                ///< (used to skip the MySQL OK byte without
+                                ///< copying). Consumers read from
+                                ///< `data.data() + data_offset` with size
+                                ///< `data.size() - data_offset`.
+  mes_error_t error = MES_OK;   ///< MES_OK for real events; error code for poison pill
+  bool is_heartbeat = false;    ///< true for silent heartbeats from the server
+  std::string checkpoint_gtid;  ///< Committed GTID promoted after consumer finishes this event
 };
 
 /**
@@ -50,7 +54,9 @@ struct QueuedEvent {
  */
 class EventQueue {
  public:
-  explicit EventQueue(size_t max_size = 10000);
+  enum class PushResult { kPushed, kClosed, kEventTooLarge };
+
+  explicit EventQueue(size_t max_size = 10000, size_t max_bytes = kDefaultEventQueueBytes);
   ~EventQueue() = default;
 
   // Non-copyable, non-movable
@@ -62,6 +68,9 @@ class EventQueue {
    * Blocks if queue is full. Returns false if queue is closed.
    */
   bool Push(QueuedEvent event);
+
+  /** Push with a reason when the queue cannot accept the event. */
+  PushResult PushWithStatus(QueuedEvent event);
 
   /**
    * @brief Pop an event from the queue (consumer side).
@@ -78,6 +87,12 @@ class EventQueue {
   /** @brief Current number of events in the queue (approximate under concurrency). */
   size_t Size() const;
 
+  /** @brief Current charged payload bytes in the queue. */
+  size_t QueuedBytes() const;
+
+  /** @brief Configured queue byte budget. */
+  size_t MaxBytes() const;
+
   /** @brief Check if the queue has been closed. */
   bool IsClosed() const;
 
@@ -87,7 +102,11 @@ class EventQueue {
   std::condition_variable not_full_cv_;
   std::queue<QueuedEvent> queue_;
   size_t max_size_;
+  size_t max_bytes_;
+  size_t queued_bytes_ = 0;
   bool closed_ = false;
+
+  static size_t EventMemoryBytes(const QueuedEvent& event);
 };
 
 }  // namespace mes

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "event_header.h"
+#include "mes.h"
 
 namespace mes {
 
@@ -31,6 +32,15 @@ constexpr uint32_t kDefaultMaxEventSize = 64u * 1024u * 1024u;
 /// Matches MySQL's maximum max_allowed_packet. Attempts to set a
 /// larger value are rejected to avoid unbounded per-event allocation.
 constexpr uint32_t kAbsoluteMaxEventSize = 1024u * 1024u * 1024u;
+
+/** Normalize a public max-event-size value to the parser/client contract. */
+constexpr uint32_t NormalizeMaxEventSize(uint32_t max_event_size) {
+  constexpr uint32_t kMinValid = static_cast<uint32_t>(kEventHeaderSize + kChecksumSize);
+  if (max_event_size == 0 || max_event_size > kAbsoluteMaxEventSize) {
+    return kAbsoluteMaxEventSize;
+  }
+  return max_event_size < kMinValid ? kMinValid : max_event_size;
+}
 
 /// Parser state for streaming binlog data.
 enum class ParserState : uint8_t {
@@ -122,10 +132,25 @@ class EventStreamParser {
   /** @brief Whether the parser currently treats events as checksummed. */
   bool ChecksumEnabled() const;
 
+  /** @brief Specific parser failure, including MES_ERR_CHECKSUM. */
+  mes_error_t ErrorCode() const;
+
  private:
+  friend struct EventStreamParserTestAccess;
+
+  // Keep reusable storage for common events, but do not pin a large BLOB's
+  // allocation for the remainder of a long-lived stream.
+  static constexpr size_t kRetainedBufferLimit = 8u * 1024u * 1024u;
+
   /// Auto-detect the checksum algorithm from a buffered FORMAT_DESCRIPTION
   /// event and update has_checksum_ accordingly.
   void DetectChecksumFromFde();
+
+  /// Validate the trailing checksum of the complete buffered event.
+  bool VerifyChecksum() const;
+
+  /// Detect the checksummed synthetic ROTATE emitted before an FDE.
+  void DetectArtificialRotateChecksum();
 
   ParserState state_ = ParserState::kWaitingHeader;
   std::vector<uint8_t> buffer_;
@@ -133,6 +158,8 @@ class EventStreamParser {
   size_t bytes_needed_ = kEventHeaderSize;
   uint32_t max_event_size_ = kDefaultMaxEventSize;
   bool has_checksum_ = true;
+  bool current_has_checksum_ = true;
+  mes_error_t error_code_ = MES_OK;
 };
 
 }  // namespace mes

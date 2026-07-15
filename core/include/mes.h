@@ -403,6 +403,8 @@ typedef struct mes_client mes_client_t;
 
 /** @brief Default internal event queue size when max_queue_size is 0. */
 #define MES_DEFAULT_QUEUE_SIZE 10000u
+/** @brief Default total payload byte budget for the client event queue. */
+#define MES_DEFAULT_QUEUE_BYTES (256u * 1024u * 1024u)
 
 typedef struct {
   const char* host;
@@ -410,7 +412,7 @@ typedef struct {
   const char* user;
   const char* password;
   uint32_t server_id;
-  const char* start_gtid;
+  const char* start_gtid; /**< Empty/NULL = snapshot current executed GTID set at stream start. */
   uint32_t connect_timeout_s;
   uint32_t read_timeout_s;
   /* SSL/TLS options */
@@ -420,6 +422,9 @@ typedef struct {
   const char* ssl_key;     /**< Path to client private key file (NULL to skip) */
   /* Buffering */
   size_t max_queue_size; /**< @brief 0 = use MES_DEFAULT_QUEUE_SIZE */
+  /** Allow fetching an unauthenticated RSA key for plaintext caching_sha2 auth.
+   *  Disabled by default. Prefer verified TLS; opt-in remains MITM-sensitive. */
+  int allow_public_key_retrieval;
 } mes_client_config_t;
 
 /**
@@ -476,10 +481,12 @@ MES_API mes_error_t mes_client_start(mes_client_t* client);
  */
 MES_API mes_poll_result_t mes_client_poll(mes_client_t* client);
 
-/** @brief Request stop of a streaming client.
- *  @threadsafety Any-thread safe. Posts a stop signal and returns immediately;
- *                safe to invoke from a thread other than the poll/owner
- *                thread, including from a signal-safe context.
+/** @brief Synchronously stop a streaming client.
+ *  @threadsafety May be called from a thread other than the poll/owner thread
+ *                to unblock mes_client_poll(). The call acquires locks, shuts
+ *                down the socket, and joins the reader thread, so it may block
+ *                until that thread exits. It is NOT async-signal-safe and
+ *                must not be called from a signal handler.
  */
 MES_API void mes_client_stop(mes_client_t* client);
 
@@ -488,10 +495,24 @@ MES_API void mes_client_stop(mes_client_t* client);
  */
 MES_API void mes_client_disconnect(mes_client_t* client);
 
-/** @brief Check if client is connected. Returns 1 if connected, 0 otherwise.
- *  @threadsafety Single-owner thread.
+/** @brief Check whether the authenticated transport is still usable.
+ *
+ * Returns 0 after a terminal reader error, stop, or disconnect, even while a
+ * queued terminal error remains available from mes_client_poll(). Use
+ * mes_client_is_streaming() to decide whether Poll can still drain that state.
+ *  @threadsafety Thread-safe.
  */
 MES_API int mes_client_is_connected(mes_client_t* client);
+
+/**
+ * @brief Check whether mes_client_poll() can still yield data or a terminal error.
+ *
+ * False after stop/disconnect and after Poll consumes a terminal error. It can
+ * briefly remain true with is_connected=false so the owner can drain the
+ * queued error exactly once rather than busy-looping on MES_ERR_DISCONNECTED.
+ * @threadsafety Thread-safe.
+ */
+MES_API int mes_client_is_streaming(mes_client_t* client);
 
 /** @brief Get last error message. Returns empty string if no error.
  *  @threadsafety Single-owner thread. The returned pointer is valid until
@@ -499,8 +520,13 @@ MES_API int mes_client_is_connected(mes_client_t* client);
  */
 MES_API const char* mes_client_last_error(mes_client_t* client);
 
-/** @brief Get current GTID position. Returns empty string if unknown.
+/** @brief Get the delivered, committed GTID checkpoint candidate.
  *
+ *  The value advances only after a transaction commit event has been polled
+ *  and the caller requests the following event. It never advances merely
+ *  because the reader thread received or queued an event. This is an implicit
+ *  delivery acknowledgement, not a durable/exactly-once acknowledgement;
+ *  persist the checkpoint only after application processing succeeds.
  *  @note The returned pointer is valid until the next call to
  *        mes_client_current_gtid() on the same client instance, at which
  *        point the underlying buffer may be overwritten. Callers must copy
@@ -510,8 +536,64 @@ MES_API const char* mes_client_last_error(mes_client_t* client);
  */
 MES_API const char* mes_client_current_gtid(mes_client_t* client);
 
+/**
+ * @brief Return whether the connected binlog stream carries CRC32 trailers.
+ *
+ * Call after mes_client_start(). Pass the result to
+ * mes_set_checksum_enabled() on a raw engine consuming this client's poll
+ * results. FORMAT_DESCRIPTION_EVENT can subsequently update both layers.
+ *
+ * @return 1 for CRC32, 0 for checksum=NONE or a NULL client.
+ * @threadsafety Thread-safe.
+ */
+MES_API int mes_client_checksum_enabled(mes_client_t* client);
+
+/**
+ * @brief Set the maximum binlog event size accepted by the client reader.
+ *
+ * Keep this value aligned with mes_set_max_event_size() on the engine that
+ * consumes mes_client_poll() results. The reader accounts for MySQL's one-byte
+ * OK packet prefix separately, so an event exactly at the configured ceiling
+ * is accepted. Values use the same normalization as the engine: 0 resolves to
+ * the 1 GiB hard cap and other out-of-range values are clamped.
+ *
+ * Call before mes_client_start().
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* client, uint32_t max_event_size);
+
+/** @brief Get the client's normalized maximum binlog event size. */
+MES_API uint32_t mes_client_get_max_event_size(mes_client_t* client);
+
+/**
+ * @brief Set the total payload byte budget for the client event queue.
+ *
+ * The producer blocks when either max_queue_size events or this many charged
+ * bytes are queued. Charged bytes use the packet vector's allocated capacity
+ * plus non-empty checkpoint storage. 0 restores MES_DEFAULT_QUEUE_BYTES.
+ * The budget must be greater than the normalized max event size when
+ * mes_client_start() is called, otherwise start returns MES_ERR_INVALID_ARG.
+ *
+ * Call before mes_client_start().
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_client_set_max_queue_bytes(mes_client_t* client, size_t max_queue_bytes);
+
+/** @brief Get the configured total queue payload byte budget. */
+MES_API size_t mes_client_get_max_queue_bytes(mes_client_t* client);
+
+/**
+ * @brief Get the current charged payload bytes waiting in the event queue.
+ * @threadsafety Safe against the reader thread; do not race with stop/destroy.
+ */
+MES_API size_t mes_client_queued_bytes(mes_client_t* client);
+
 /** @brief Enable metadata queries for column name resolution.
- *  Uses a separate MySQL connection with the same credentials.
+ *  Uses a separate MySQL connection with the same credentials. TABLE_MAP
+ *  processing may synchronously execute SHOW COLUMNS; each network read is
+ *  bounded by config->read_timeout_s (0 delegates to the operating system and
+ *  can block indefinitely). A timeout leaves names unresolved for that event
+ *  and the metadata connection is retried once with the same timeout.
  *  @threadsafety NOT thread-safe with respect to the engine instance.
  */
 MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,

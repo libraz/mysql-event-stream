@@ -51,8 +51,9 @@ class MetadataFetcher {
    */
   mes_error_t Connect(const std::string& host, uint16_t port, const std::string& user,
                       const std::string& password, uint32_t connect_timeout_s,
-                      uint32_t ssl_mode = 0, const std::string& ssl_ca = "",
-                      const std::string& ssl_cert = "", const std::string& ssl_key = "");
+                      uint32_t read_timeout_s, uint32_t ssl_mode = 0,
+                      const std::string& ssl_ca = "", const std::string& ssl_cert = "",
+                      const std::string& ssl_key = "", bool allow_public_key_retrieval = false);
 
   /** @brief Disconnect and close the MySQL connection */
   void Disconnect();
@@ -89,7 +90,7 @@ class MetadataFetcher {
 
  private:
   protocol::MysqlConnection conn_;
-  std::unordered_map<std::string, std::vector<ColumnInfo>> cache_;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::vector<ColumnInfo>>> cache_;
 
   // Stored connection parameters for reconnection
   std::string host_;
@@ -97,12 +98,13 @@ class MetadataFetcher {
   std::string user_;
   std::string password_;
   uint32_t connect_timeout_s_ = 0;
+  uint32_t read_timeout_s_ = 0;
   uint32_t ssl_mode_ = 0;
   std::string ssl_ca_;
   std::string ssl_cert_;
   std::string ssl_key_;
+  bool allow_public_key_retrieval_ = false;
 
-  static std::string MakeCacheKey(const std::string& db, const std::string& table);
   std::string EscapeIdentifier(const std::string& id);
 };
 

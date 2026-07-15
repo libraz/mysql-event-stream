@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,9 @@ class TableMapRegistry {
 
   /** @brief Get number of registered tables. */
   size_t Size() const;
+
+  /** @brief Visit every registered table without exposing the registry container. */
+  void ForEach(const std::function<void(uint64_t, const TableMetadata&)>& visitor) const;
 
  private:
   std::unordered_map<uint64_t, TableMetadata> entries_;

@@ -72,7 +72,7 @@ bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& meta
  * @param[out] bytes_consumed Number of bytes consumed.
  * @return Decoded ColumnValue.
  */
-ColumnValue DecodeColumnValue(ColumnType type, uint16_t meta, bool is_unsigned, const uint8_t* data,
+ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, const uint8_t* data,
                               size_t len, size_t* bytes_consumed);
 
 }  // namespace mes

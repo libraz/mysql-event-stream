@@ -34,6 +34,7 @@ enum class BinlogEventType : uint8_t {
   kDeleteRowsEvent = 32,
   kGtidLogEvent = 33,
   kAnonymousGtidLogEvent = 34,
+  kPreviousGtidsEvent = 35,
 
   // MariaDB-specific event types (160+)
   kMariaDBAnnotateRowsEvent = 160,
@@ -60,6 +61,14 @@ inline constexpr size_t kChecksumSize = 4;
 /// Binlog checksum algorithm descriptor values (FORMAT_DESCRIPTION_EVENT).
 inline constexpr uint8_t kBinlogChecksumAlgOff = 0;
 inline constexpr uint8_t kBinlogChecksumAlgCrc32 = 1;
+/// LOG_EVENT_ARTIFICIAL_F: set on the synthetic ROTATE sent at dump start.
+inline constexpr uint16_t kLogEventArtificialFlag = 0x0020;
+
+enum class BinlogChecksumAlgorithm : uint8_t {
+  kUnknown,
+  kOff,
+  kCrc32,
+};
 
 /**
  * @brief Parse a 19-byte binlog event header.
@@ -102,6 +111,9 @@ bool IsRowEvent(uint8_t type_code);
  * @return Static string with the event type name, or "UNKNOWN" for unrecognized types.
  */
 const char* BinlogEventTypeName(uint8_t type_code);
+
+/** Detect the checksum descriptor carried by a complete FDE event. */
+BinlogChecksumAlgorithm DetectFormatDescriptionChecksum(const uint8_t* data, size_t len);
 
 }  // namespace mes
 

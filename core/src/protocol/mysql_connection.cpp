@@ -58,11 +58,13 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
                                      const std::string& user, const std::string& password,
                                      uint32_t connect_timeout_s, uint32_t read_timeout_s,
                                      uint32_t ssl_mode, const std::string& ssl_ca,
-                                     const std::string& ssl_cert, const std::string& ssl_key) {
+                                     const std::string& ssl_cert, const std::string& ssl_key,
+                                     bool allow_public_key_retrieval) {
   // Ensure clean state
   if (connected_) {
     Disconnect();
   }
+  allow_public_key_retrieval_ = allow_public_key_retrieval;
 
   // Step 1: TCP connect
   mes_error_t rc = socket_.Connect(host.c_str(), port, connect_timeout_s);
@@ -134,6 +136,7 @@ void MysqlConnection::Disconnect() {
 
   negotiated_caps_ = 0;
   server_flavor_ = ServerFlavor::kMySQL;
+  allow_public_key_retrieval_ = false;
 
   // Close socket by replacing with a default-constructed one
   socket_ = SocketHandle();
@@ -496,7 +499,17 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
             return MES_ERR_AUTH;
           }
         } else {
-          // No TLS: request server's RSA public key and encrypt password
+          // The key returned on this plaintext channel is unauthenticated: an
+          // active MITM can substitute its own key and recover the password.
+          // Require an explicit opt-in; verified TLS is the safe default.
+          if (!allow_public_key_retrieval_) {
+            last_error_ =
+                "caching_sha2_password full auth requires verified TLS; "
+                "unauthenticated public-key retrieval is disabled";
+            return MES_ERR_AUTH;
+          }
+
+          // Explicit opt-in: request server's RSA public key and encrypt password.
           std::vector<uint8_t> rsa_request = {0x02};
           rc = SendPacket(rsa_request);
           if (rc != MES_OK) {
