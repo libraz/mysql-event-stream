@@ -26,8 +26,9 @@ jobs:
           node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
 
-      # Trusted publishing (OIDC) needs a recent npm; the bundled one is too old.
-      - run: npm install -g npm@latest
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; pin to 11.x, since npm@latest
+      # (12.x) requires a newer Node patch than this job pins.
+      - run: npm install -g npm@11
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
 
