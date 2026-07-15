@@ -10,6 +10,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-15
+
+A client-side flow-control and packaging release. New C ABI surface is additive
+only — no symbols removed and no struct layout changes. One behavioral change:
+`mes_client_stop()` is now synchronous (see Changed).
+
+### Added
+
+- **`mes_client_set_max_queue_bytes()` / `mes_client_get_max_queue_bytes()` /
+  `mes_client_queued_bytes()`** (C ABI) — byte-budgeted backpressure on the
+  client event queue, complementing the existing event-count limit. `EventQueue`
+  charges packet capacity plus checkpoint storage against the budget. Exposed as
+  Node `maxQueueBytes` and Python `max_queue_bytes`
+- **`mes_client_set_max_event_size()` / `mes_client_get_max_event_size()`**
+  (C ABI) — clamp oversized binlog events at the client reader, mirroring the
+  engine cap. Exposed as Node `maxEventSize` and Python `max_event_size`
+- **`mes_client_is_streaming()`** (C ABI) — distinguishes a drainable terminal
+  state from `mes_client_is_connected()`, letting consumers read a queued
+  terminal error exactly once instead of busy-looping on `MES_ERR_DISCONNECTED`.
+  Exposed as Node `isStreaming` and Python `is_streaming`
+- **`mes_client_checksum_enabled()`** (C ABI) — reports CRC32 trailer detection
+  so a raw engine consuming the client's poll output can match its checksum
+  handling
+- **`TransactionGtidTracker`** — `mes_client_current_gtid()` now advances only
+  after a committed transaction is delivered, documented as a delivery
+  acknowledgement rather than a durable checkpoint. Exposed as Node `currentGtid`
+  and Python `current_gtid`
+- **`allow_public_key_retrieval`** — opt-in config for plaintext
+  `caching_sha2_password` public-key retrieval, disabled by default; surfaced in
+  both bindings
+- **Prebuilt distribution** — per-platform Node native packages
+  (`@libraz/mysql-event-stream-<platform>-<arch>`) with a loader that falls back
+  from a local build, and per-platform Python wheels, both built in CI against
+  pinned static dependencies
+
+### Changed
+
+- **`mes_client_stop()` is now synchronous** — it joins the reader thread before
+  returning and is therefore no longer async-signal-safe. Call it from a normal
+  thread, not a signal handler
+- `make format` now fans out to Biome (Node) and ruff (Python) alongside
+  clang-format
+- Node dev/runtime dependencies and Python dev-tool floors updated to current
+  releases
+- CI: documentation-only changes no longer trigger the build; sanitizer runs
+  moved to the develop branch and an on-demand safety workflow; the protocol
+  matrix and fuzz corpus gate publication
+
+### Fixed
+
+- Hardened protocol packet and socket I/O, state-machine buffering, TABLE_MAP
+  metadata parsing, row decoding, and connection-validation edge cases against
+  malformed or truncated input
+
 ## [1.4.0] - 2026-06-26
 
 A correctness-focused release resolving a commercial-quality audit: data-loss
@@ -236,7 +290,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/libraz/mysql-event-stream/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mysql-event-stream/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/libraz/mysql-event-stream/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/libraz/mysql-event-stream/compare/v1.3.0...v1.3.1

@@ -1,6 +1,6 @@
 {
   "name": "@libraz/mysql-event-stream",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MySQL 8.4+ / MariaDB 10.11+ CDC engine - Node.js binding (native N-API)",
   "type": "module",
   "main": "dist/index.js",
@@ -42,10 +42,10 @@
     "node": ">=22"
   },
   "optionalDependencies": {
-    "@libraz/mysql-event-stream-darwin-arm64": "1.4.0",
-    "@libraz/mysql-event-stream-darwin-x64": "1.4.0",
-    "@libraz/mysql-event-stream-linux-arm64": "1.4.0",
-    "@libraz/mysql-event-stream-linux-x64": "1.4.0"
+    "@libraz/mysql-event-stream-darwin-arm64": "1.5.0",
+    "@libraz/mysql-event-stream-darwin-x64": "1.5.0",
+    "@libraz/mysql-event-stream-linux-arm64": "1.5.0",
+    "@libraz/mysql-event-stream-linux-x64": "1.5.0"
   },
   "packageManager": "yarn@4.9.1",
   "workspaces": [

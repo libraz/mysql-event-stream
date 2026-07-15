@@ -1,6 +1,6 @@
 {
   "name": "@libraz/mysql-event-stream-darwin-arm64",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "macOS arm64 native addon for @libraz/mysql-event-stream",
   "main": "mes-node.node",
   "files": [

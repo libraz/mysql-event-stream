@@ -1,6 +1,6 @@
 {
   "name": "@libraz/mysql-event-stream-linux-arm64",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Linux arm64 native addon for @libraz/mysql-event-stream",
   "main": "mes-node.node",
   "files": [
