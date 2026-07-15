@@ -180,6 +180,9 @@ jobs:
           node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
 
+      # Trusted publishing (OIDC) needs a recent npm; the bundled one is too old.
+      - run: npm install -g npm@latest
+
       - uses: actions/download-artifact@v8
         with:
           pattern: node-prebuild-*
@@ -188,8 +191,6 @@ jobs:
 
       - name: Publish platform packages
         working-directory: bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           version="$(node -p "require('./package.json').version")"
           test "${GITHUB_REF_NAME#v}" = "$version"
@@ -214,6 +215,9 @@ jobs:
         with:
           node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) needs a recent npm; the bundled one is too old.
+      - run: npm install -g npm@latest
 
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
@@ -246,8 +250,6 @@ jobs:
 
       - name: Publish main package
         working-directory: bindings/node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           version="$(node -p "require('./package.json').version")"
           name="$(node -p "require('./package.json').name")"
@@ -338,6 +340,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # Tolerate re-runs where this version's files are already on PyPI.
+          skip-existing: true
 
   create-release:
     needs: [publish-npm, publish-pypi]
