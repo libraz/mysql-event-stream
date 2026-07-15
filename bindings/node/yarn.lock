@@ -232,25 +232,25 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@libraz/mysql-event-stream-darwin-arm64@npm:1.4.0, @libraz/mysql-event-stream-darwin-arm64@workspace:npm/darwin-arm64":
+"@libraz/mysql-event-stream-darwin-arm64@npm:1.5.0, @libraz/mysql-event-stream-darwin-arm64@workspace:npm/darwin-arm64":
   version: 0.0.0-use.local
   resolution: "@libraz/mysql-event-stream-darwin-arm64@workspace:npm/darwin-arm64"
   languageName: unknown
   linkType: soft
 
-"@libraz/mysql-event-stream-darwin-x64@npm:1.4.0, @libraz/mysql-event-stream-darwin-x64@workspace:npm/darwin-x64":
+"@libraz/mysql-event-stream-darwin-x64@npm:1.5.0, @libraz/mysql-event-stream-darwin-x64@workspace:npm/darwin-x64":
   version: 0.0.0-use.local
   resolution: "@libraz/mysql-event-stream-darwin-x64@workspace:npm/darwin-x64"
   languageName: unknown
   linkType: soft
 
-"@libraz/mysql-event-stream-linux-arm64@npm:1.4.0, @libraz/mysql-event-stream-linux-arm64@workspace:npm/linux-arm64":
+"@libraz/mysql-event-stream-linux-arm64@npm:1.5.0, @libraz/mysql-event-stream-linux-arm64@workspace:npm/linux-arm64":
   version: 0.0.0-use.local
   resolution: "@libraz/mysql-event-stream-linux-arm64@workspace:npm/linux-arm64"
   languageName: unknown
   linkType: soft
 
-"@libraz/mysql-event-stream-linux-x64@npm:1.4.0, @libraz/mysql-event-stream-linux-x64@workspace:npm/linux-x64":
+"@libraz/mysql-event-stream-linux-x64@npm:1.5.0, @libraz/mysql-event-stream-linux-x64@workspace:npm/linux-x64":
   version: 0.0.0-use.local
   resolution: "@libraz/mysql-event-stream-linux-x64@workspace:npm/linux-x64"
   languageName: unknown
@@ -261,10 +261,10 @@ __metadata:
   resolution: "@libraz/mysql-event-stream@workspace:."
   dependencies:
     "@biomejs/biome": "npm:^2.5.4"
-    "@libraz/mysql-event-stream-darwin-arm64": "npm:1.4.0"
-    "@libraz/mysql-event-stream-darwin-x64": "npm:1.4.0"
-    "@libraz/mysql-event-stream-linux-arm64": "npm:1.4.0"
-    "@libraz/mysql-event-stream-linux-x64": "npm:1.4.0"
+    "@libraz/mysql-event-stream-darwin-arm64": "npm:1.5.0"
+    "@libraz/mysql-event-stream-darwin-x64": "npm:1.5.0"
+    "@libraz/mysql-event-stream-linux-arm64": "npm:1.5.0"
+    "@libraz/mysql-event-stream-linux-x64": "npm:1.5.0"
     "@types/node": "npm:^26.1.1"
     "@vitest/coverage-v8": "npm:4"
     cmake-js: "npm:^8.0.0"
