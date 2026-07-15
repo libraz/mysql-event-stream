@@ -17,6 +17,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -174,6 +175,27 @@ TEST(E2ESSL, SslMultipleQueries) {
     EXPECT_EQ(result.rows[0].values[0], std::to_string(i));
   }
 
+  conn.Disconnect();
+}
+
+TEST(E2ESSL, SslReadTimeoutUsesMonotonicDeadline) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "SSL tests require MySQL with certificate configuration";
+  }
+  mes::protocol::MysqlConnection conn;
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, 1, 2, CaCert(), "", ""),
+            MES_OK)
+      << conn.GetLastError();
+
+  mes::protocol::QueryResult result;
+  std::string err;
+  auto started = std::chrono::steady_clock::now();
+  auto rc = mes::protocol::ExecuteQuery(conn.Socket(), "SELECT SLEEP(5)", &result, &err);
+  auto elapsed = std::chrono::steady_clock::now() - started;
+
+  EXPECT_NE(rc, MES_OK);
+  EXPECT_GE(elapsed, std::chrono::milliseconds(700));
+  EXPECT_LT(elapsed, std::chrono::seconds(3));
   conn.Disconnect();
 }
 

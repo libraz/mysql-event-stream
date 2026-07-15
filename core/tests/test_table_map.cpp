@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "binary_util.h"
@@ -204,6 +205,76 @@ TEST(TableMapTest, ParseMixedColumnTypes) {
   EXPECT_TRUE(metadata.columns[4].is_nullable);
 }
 
+TEST(TableMapTest, ParseMySqlTypedArrayMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(101);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("mvi");
+  builder.WriteColumnCount(3);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kTypedArray),
+                            static_cast<uint8_t>(ColumnType::kTypedArray),
+                            static_cast<uint8_t>(ColumnType::kLong)});
+  // VARCHAR array: element type + 3-byte LE length. NEWDECIMAL array:
+  // element type + precision + scale. INT consumes no metadata.
+  builder.WriteMetadataBlock({static_cast<uint8_t>(ColumnType::kVarchar), 0x34, 0x12, 0x00,
+                              static_cast<uint8_t>(ColumnType::kNewDecimal), 10, 2});
+  builder.WriteNullBitmap({0x07});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 3u);
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kTypedArray);
+  EXPECT_TRUE(metadata.columns[0].is_array);
+  EXPECT_EQ(metadata.columns[0].array_element_type, ColumnType::kVarchar);
+  EXPECT_EQ(metadata.columns[0].metadata, 0x1234u);
+  EXPECT_EQ(metadata.columns[1].type, ColumnType::kTypedArray);
+  EXPECT_TRUE(metadata.columns[1].is_array);
+  EXPECT_EQ(metadata.columns[1].array_element_type, ColumnType::kNewDecimal);
+  EXPECT_EQ(metadata.columns[1].metadata, (10u << 8) | 2u);
+  EXPECT_FALSE(metadata.columns[2].is_array);
+}
+
+TEST(TableMapTest, RejectsTruncatedOrUnknownTypedArrayMetadata) {
+  for (const auto& metadata_bytes :
+       std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(ColumnType::kVarchar), 0x10},
+                                         {static_cast<uint8_t>(ColumnType::kLong)}}) {
+    TableMapBuilder builder;
+    builder.WriteTableId(102);
+    builder.WriteFlags(0);
+    builder.WriteDatabaseName("db");
+    builder.WriteTableName("mvi");
+    builder.WriteColumnCount(1);
+    builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kTypedArray)});
+    builder.WriteMetadataBlock(metadata_bytes);
+    builder.WriteNullBitmap({0x01});
+
+    TableMetadata metadata;
+    EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  }
+}
+
+TEST(TableMapTest, ParseMariaDbCompressedMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(103);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("compressed");
+  builder.WriteColumnCount(2);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kBlobCompressed),
+                            static_cast<uint8_t>(ColumnType::kVarcharCompressed)});
+  builder.WriteMetadataBlock({0x03, 0x11, 0x01});
+  builder.WriteNullBitmap({0x03});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 2u);
+  EXPECT_EQ(metadata.columns[0].type, ColumnType::kBlobCompressed);
+  EXPECT_EQ(metadata.columns[0].metadata, 3u);
+  EXPECT_EQ(metadata.columns[1].type, ColumnType::kVarcharCompressed);
+  EXPECT_EQ(metadata.columns[1].metadata, 273u);
+}
+
 // --- Optional metadata (SIGNEDNESS / COLUMN_NAME) ---
 
 TEST(TableMapTest, ParseSignednessOptionalMetadata) {
@@ -283,6 +354,70 @@ TEST(TableMapTest, OptionalMetadataAbsentIsSafe) {
   EXPECT_FALSE(metadata.signedness_from_binlog);
   EXPECT_FALSE(metadata.columns[0].is_unsigned);
   EXPECT_TRUE(metadata.columns[0].name.empty());
+}
+
+TEST(TableMapTest, RejectsMetadataLengthUint64Max) {
+  TableMapBuilder builder;
+  builder.WriteTableId(10);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
+  builder.WriteRawBytes({0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+
+  TableMetadata metadata;
+  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+}
+
+TEST(TableMapTest, RejectsMetadataLengthSizeMax) {
+  TableMapBuilder builder;
+  builder.WriteTableId(11);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
+
+  test::EventBuilder packed_length;
+  packed_length.WriteU8(0xFE);
+  packed_length.WriteU64Le(std::numeric_limits<size_t>::max());
+  builder.WriteRawBytes(packed_length.Data());
+
+  TableMetadata metadata;
+  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+}
+
+TEST(TableMapTest, RejectsOptionalMetadataLengthUint64Max) {
+  TableMapBuilder builder;
+  builder.WriteTableId(12);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x01});
+  builder.WriteRawBytes({0x04, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+
+  TableMetadata metadata;
+  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+}
+
+TEST(TableMapTest, RejectsOverflowingColumnNameLength) {
+  TableMapBuilder builder;
+  builder.WriteTableId(13);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x01});
+  builder.WriteRawBytes({0x04, 0x09, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+
+  TableMetadata metadata;
+  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
 }
 
 TEST(TableMapTest, ParseTruncatedBuffer) {

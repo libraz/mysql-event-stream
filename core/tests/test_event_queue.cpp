@@ -328,4 +328,61 @@ TEST(EventQueueTest, SizeIsConsistent) {
   EXPECT_EQ(q.Size(), 0u);
 }
 
+TEST(EventQueueTest, ByteBudgetBlocksBeforeCountLimit) {
+  mes::EventQueue q(100, 5);
+  mes::QueuedEvent first;
+  first.data = {1, 2, 3, 4};
+  ASSERT_TRUE(q.Push(std::move(first)));
+  EXPECT_EQ(q.QueuedBytes(), 4u);
+
+  std::atomic<bool> pushed{false};
+  std::thread producer([&]() {
+    mes::QueuedEvent second;
+    second.data = {5, 6};
+    pushed.store(q.Push(std::move(second)));
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_FALSE(pushed.load());
+  EXPECT_EQ(q.Size(), 1u);
+  EXPECT_LE(q.QueuedBytes(), q.MaxBytes());
+
+  mes::QueuedEvent out;
+  ASSERT_TRUE(q.Pop(&out));
+  producer.join();
+  EXPECT_TRUE(pushed.load());
+  EXPECT_EQ(q.QueuedBytes(), 2u);
+}
+
+TEST(EventQueueTest, OversizedSingleEventIsRejectedWithoutBlocking) {
+  mes::EventQueue q(100, 4);
+  mes::QueuedEvent event;
+  event.data = {1, 2, 3, 4, 5};
+
+  EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kEventTooLarge);
+  EXPECT_EQ(q.Size(), 0u);
+  EXPECT_EQ(q.QueuedBytes(), 0u);
+}
+
+TEST(EventQueueTest, ClearResetsByteChargeAndUnblocksProducer) {
+  mes::EventQueue q(100, 4);
+  mes::QueuedEvent first;
+  first.data = {1, 2, 3, 4};
+  ASSERT_TRUE(q.Push(std::move(first)));
+
+  std::atomic<bool> pushed{false};
+  std::thread producer([&]() {
+    mes::QueuedEvent second;
+    second.data = {5};
+    pushed.store(q.Push(std::move(second)));
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_FALSE(pushed.load());
+
+  q.Clear();
+  producer.join();
+  EXPECT_TRUE(pushed.load());
+  EXPECT_EQ(q.QueuedBytes(), 1u);
+}
+
 }  // namespace

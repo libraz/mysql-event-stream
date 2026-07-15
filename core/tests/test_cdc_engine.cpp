@@ -8,6 +8,7 @@
 
 #include "cdc_engine.h"
 #include "client/metadata_fetcher.h"
+#include "crc32.h"
 #include "event_header.h"
 #include "test_helpers.h"
 
@@ -62,6 +63,39 @@ TEST(CdcEngineChecksumTest, DefaultStripsChecksum) {
   EXPECT_EQ(event.after.columns[0].int_val, 4242);
 }
 
+TEST(CdcEngineChecksumTest, CorruptedCrcReturnsChecksumErrorWithoutAdvancingPosition) {
+  CdcEngine engine;
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_FALSE(engine.IsError());
+  ASSERT_EQ(engine.CurrentPosition().offset, 100u);
+
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 4242));
+  write[kEventHeaderSize + 8] ^= 0x80;
+  EXPECT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_CHECKSUM);
+  EXPECT_EQ(engine.CurrentPosition().offset, 100u);
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineChecksumTest, ChecksumNoneArtificialRotateDoesNotPolluteFilename) {
+  CdcEngine engine;
+  engine.SetChecksumEnabled(false);
+  auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0,
+                           BuildRotateBody(4, "mysql-bin.000010"));
+  rotate[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
+  const uint32_t crc = ComputeCRC32(rotate.data(), rotate.size() - kChecksumSize);
+  std::memcpy(rotate.data() + rotate.size() - kChecksumSize, &crc, sizeof(crc));
+
+  EXPECT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000010");
+  EXPECT_EQ(engine.CurrentPosition().offset, 4u);
+}
+
 // --- DDL detection drives metadata cache invalidation ---
 
 TEST(CdcEngineDdlTest, DetectsDdlStatements) {
@@ -76,6 +110,33 @@ TEST(CdcEngineDdlTest, DetectsDdlStatements) {
 
   auto with_status = BuildQueryEventBody("testdb", "DROP TABLE t", /*status_vars_len=*/7);
   EXPECT_TRUE(IsDdlQueryEvent(with_status.data(), with_status.size()));
+}
+
+TEST(CdcEngineDdlTest, DetectsDdlAfterEveryMySqlLeadingCommentForm) {
+  const std::array<std::string, 8> statements = {
+      "/* audit */ ALTER TABLE t ADD COLUMN c INT",
+      "/* first */ /* second */ RENAME TABLE a TO b",
+      "-- audit\nDROP TABLE t",
+      "# audit\r\nCREATE TABLE t (id INT)",
+      "/*+ optimizer hint */ TRUNCATE TABLE t",
+      "/*!50100 ALTER TABLE t ADD COLUMN c INT */",
+      "/*! ALTER TABLE t ADD COLUMN c INT */",
+      "/*M!100100 RENAME TABLE a TO b */",
+  };
+  for (const auto& statement : statements) {
+    auto body = BuildQueryEventBody("testdb", statement);
+    EXPECT_TRUE(IsDdlQueryEvent(body.data(), body.size())) << statement;
+  }
+}
+
+TEST(CdcEngineDdlTest, RejectsCommentOnlyMalformedAndKeywordPrefixes) {
+  const std::array<std::string, 6> statements = {"/* unterminated", "/* comment only */",
+                                                 "-- comment only", "# comment only",
+                                                 "ALTERED TABLE t", "CREATE2 TABLE t"};
+  for (const auto& statement : statements) {
+    auto body = BuildQueryEventBody("testdb", statement);
+    EXPECT_FALSE(IsDdlQueryEvent(body.data(), body.size())) << statement;
+  }
 }
 
 // --- names_resolved surfaces metadata-fetch failures ---
@@ -274,9 +335,12 @@ TEST(CdcEngineTest, RotateClearsTableMapRegistry) {
 
   // The registry was cleared on rotate, so the stale table_id no longer
   // resolves and the row event produces nothing (rather than decoding against
-  // stale metadata). It is skipped without error.
+  // stale metadata). The missing map is explicit so the resume position cannot
+  // silently advance past the row event.
   EXPECT_FALSE(engine.HasEvents());
-  EXPECT_FALSE(engine.IsError());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_EQ(engine.CurrentPosition().offset, 4u);
 }
 
 TEST(CdcEngineTest, DecodeFailureDoesNotAdvancePosition) {
@@ -392,9 +456,10 @@ TEST(CdcEngineTest, Reset) {
   EXPECT_EQ(engine.CurrentPosition().offset, 0u);
   EXPECT_TRUE(engine.CurrentPosition().binlog_file.empty());
 
-  // After reset, row event without table map should be silently skipped
+  // After reset, row event without table map is an explicit state/decode error.
   engine.Feed(write_event.data(), write_event.size());
   EXPECT_FALSE(engine.HasEvents());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
 }
 
 TEST(CdcEngineTest, NextEventNullOutput) {
@@ -418,6 +483,9 @@ TEST(CdcEngineTest, RowEventWithoutTableMap) {
 
   engine.Feed(write_event.data(), write_event.size());
   EXPECT_FALSE(engine.HasEvents());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_EQ(engine.CurrentPosition().offset, 0u);
 }
 
 TEST(CdcEngineTest, TruncatedRowEventSetsDecodeError) {
@@ -719,12 +787,44 @@ TEST(CdcEngineTest, FilterResetClearsBlockedIds) {
   // Reset clears blocked set and filters remain
   engine.Reset();
 
-  // After reset, the table map is also cleared, so row event without table map is skipped
+  // After reset, the table map is also cleared, so this is a state/decode error.
   engine.Feed(w1.data(), w1.size());
   EXPECT_FALSE(engine.HasEvents());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
 }
 
-TEST(CdcEngineTest, TableMapTooShortBodyNoEvent) {
+TEST(CdcEngineTest, RuntimeFilterChangesReevaluateExistingTableMap) {
+  CdcEngine engine;
+
+  // Register the table exactly once. Runtime filter changes must update the
+  // derived table-id cache without waiting for another TABLE_MAP event.
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(1, "mydb", "users"));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+
+  engine.SetIncludeTables({"mydb.other"});
+  auto blocked = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                            BuildWriteRowsBody(1, 10));
+  EXPECT_EQ(engine.Feed(blocked.data(), blocked.size()), blocked.size());
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+
+  engine.SetIncludeTables({"mydb.users"});
+  auto allowed = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                            BuildWriteRowsBody(1, 20));
+  EXPECT_EQ(engine.Feed(allowed.data(), allowed.size()), allowed.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.database, "mydb");
+  EXPECT_EQ(event.table, "users");
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 20);
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+}
+
+TEST(CdcEngineTest, TableMapTooShortBodyIsParseError) {
   CdcEngine engine;
 
   // Build a TABLE_MAP event with a body that is too short (< 8 bytes)
@@ -735,7 +835,19 @@ TEST(CdcEngineTest, TableMapTooShortBodyNoEvent) {
   size_t consumed = engine.Feed(event.data(), event.size());
   EXPECT_EQ(consumed, event.size());
   EXPECT_FALSE(engine.HasEvents());
-  EXPECT_FALSE(engine.IsError());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_PARSE);
+  EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+}
+
+TEST(CdcEngineTest, RowBodyShorterThanTableIdIsDecodeError) {
+  CdcEngine engine;
+  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 100,
+                          {0x01, 0x02, 0x03});
+  EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_EQ(engine.CurrentPosition().offset, 0u);
 }
 
 }  // namespace

@@ -45,9 +45,13 @@ constexpr uint32_t kDmlNullToNonNullUpdate = 514;
 constexpr uint32_t kDmlNonNullToNullUpdate = 515;
 constexpr uint32_t kDmlEmptyStringVsNull = 516;
 constexpr uint32_t kDmlBooleanValues = 517;
+constexpr uint32_t kDmlMariaCompressedColumns = 518;
+constexpr uint32_t kDmlMysqlMultiValuedIndex = 519;
 constexpr uint32_t kDmlVectorInsert = 520;
 constexpr uint32_t kDmlVectorUpdate = 521;
 constexpr uint32_t kDmlVectorDelete = 522;
+constexpr uint32_t kDmlClientEventSizeLimit = 523;
+constexpr uint32_t kDmlClientQueueByteBudget = 524;
 }  // namespace server_ids
 
 // Connection defaults

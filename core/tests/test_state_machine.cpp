@@ -11,6 +11,15 @@
 #include "test_helpers.h"
 
 namespace mes {
+
+struct EventStreamParserTestAccess {
+  static size_t BufferCapacity(const EventStreamParser& parser) {
+    return parser.buffer_.capacity();
+  }
+
+  static size_t RetainedBufferLimit() { return EventStreamParser::kRetainedBufferLimit; }
+};
+
 namespace {
 
 // Convenience wrapper matching the old local signature (server_id=1, next_position=0)
@@ -169,6 +178,43 @@ TEST(StateMachineTest, AdvanceResetsForNextEvent) {
   parser.Advance();
   EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
   EXPECT_FALSE(parser.HasEvent());
+}
+
+TEST(StateMachineTest, AdvanceReleasesBufferAboveRetentionHighWaterMark) {
+  EventStreamParser parser;
+  const size_t payload_size = EventStreamParserTestAccess::RetainedBufferLimit() + 1;
+  std::vector<uint8_t> body(payload_size, 0xA5);
+  auto event = BuildEvent(30, body);
+
+  ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+  ASSERT_GT(EventStreamParserTestAccess::BufferCapacity(parser),
+            EventStreamParserTestAccess::RetainedBufferLimit());
+
+  parser.Advance();
+  EXPECT_EQ(EventStreamParserTestAccess::BufferCapacity(parser), 0u);
+
+  auto small_event = BuildEvent(30, {0x01});
+  EXPECT_EQ(parser.Feed(small_event.data(), small_event.size()), small_event.size());
+  EXPECT_TRUE(parser.HasEvent());
+  EXPECT_LE(EventStreamParserTestAccess::BufferCapacity(parser),
+            EventStreamParserTestAccess::RetainedBufferLimit());
+}
+
+TEST(StateMachineTest, ResetAlwaysReleasesRetainedBuffer) {
+  EventStreamParser parser;
+  std::vector<uint8_t> body(1024 * 1024, 0x5A);
+  auto event = BuildEvent(30, body);
+
+  ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+  ASSERT_GT(EventStreamParserTestAccess::BufferCapacity(parser), 0u);
+  ASSERT_LE(EventStreamParserTestAccess::BufferCapacity(parser),
+            EventStreamParserTestAccess::RetainedBufferLimit());
+
+  parser.Reset();
+  EXPECT_EQ(EventStreamParserTestAccess::BufferCapacity(parser), 0u);
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
 }
 
 TEST(StateMachineTest, FeedNullData) {
@@ -399,6 +445,15 @@ TEST(StateMachineTest, CorruptedChecksumDetected) {
   uint32_t stored = 0;
   std::memcpy(&stored, event.data() + data_len, sizeof(stored));
   EXPECT_NE(computed, stored) << "Corrupted event should have mismatched checksum";
+
+  EventStreamParser parser;
+  EXPECT_EQ(parser.Feed(event.data(), event.size()), event.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_EQ(parser.ErrorCode(), MES_ERR_CHECKSUM);
+  EXPECT_FALSE(parser.HasEvent());
+
+  parser.Reset();
+  EXPECT_EQ(parser.ErrorCode(), MES_OK);
 }
 
 TEST(StateMachineTest, MaxEventSizeDefaultIs64MiB) {
@@ -521,6 +576,25 @@ TEST(StateMachineChecksumTest, ExplicitSetterControlsBodySize) {
   size_t body_len = 0;
   parser.CurrentBody(&body_ptr, &body_len);
   EXPECT_EQ(body_len, body.size());
+}
+
+TEST(StateMachineChecksumTest, ChecksumNoneStillStripsChecksummedArtificialRotate) {
+  EventStreamParser parser;
+  parser.SetChecksumEnabled(false);
+  const auto body = test::BuildRotateBody(4, "mysql-bin.000010");
+  auto event = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, body);
+  event[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
+  const uint32_t crc = ComputeCRC32(event.data(), event.size() - kChecksumSize);
+  std::memcpy(event.data() + event.size() - kChecksumSize, &crc, sizeof(crc));
+
+  ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(parser.HasEvent());
+  const uint8_t* body_ptr = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+  EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
+  EXPECT_FALSE(parser.ChecksumEnabled());
 }
 
 }  // namespace

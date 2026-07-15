@@ -226,4 +226,33 @@ TEST(E2EBinlogDDL, DmlAfterMultipleSchemaChanges) {
   ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN c2");
 }
 
+TEST(E2EBinlogDDL, LeadingCommentsBeforeAlterAndRename) {
+  ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_test");
+  ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_renamed");
+  ASSERT_EQ(ExecuteDML("CREATE TABLE mes_test.comment_ddl_test (id INT PRIMARY KEY, c1 INT)"),
+            MES_OK);
+
+  const std::string gtid = GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(ExecuteDML("/* block audit */ ALTER TABLE mes_test.comment_ddl_test CHANGE c1 c2 INT"),
+            MES_OK);
+  ASSERT_EQ(ExecuteDML("-- line audit\nALTER TABLE mes_test.comment_ddl_test CHANGE c2 c3 INT"),
+            MES_OK);
+  ASSERT_EQ(ExecuteDML("# hash audit\nRENAME TABLE mes_test.comment_ddl_test TO "
+                       "mes_test.comment_ddl_renamed"),
+            MES_OK);
+  ASSERT_EQ(ExecuteDML("/*!100000 ALTER TABLE mes_test.comment_ddl_renamed CHANGE c3 c4 INT */"),
+            MES_OK);
+  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.comment_ddl_renamed VALUES (1, 44)"), MES_OK);
+
+  auto events = CaptureTableEvents(gtid, 408, "comment_ddl_renamed", 1);
+  auto filtered = FilterByTable(events, "comment_ddl_renamed");
+  ASSERT_GE(filtered.size(), 1u);
+  EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
+  EXPECT_EQ(filtered[0].after.size(), 2u);
+  EXPECT_EQ(filtered[0].after[1].int_val, 44);
+
+  ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_renamed");
+}
+
 }  // namespace

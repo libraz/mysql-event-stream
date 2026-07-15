@@ -86,17 +86,20 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
   ExecuteDML("GRANT SELECT ON *.* TO '" + temp_user + "'@'%'");
   ExecuteDML("FLUSH PRIVILEGES");
 
-  // Attempt connection without TLS. With RSA public key auth, this should
-  // succeed even with a cold cache.
-  mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout, 0,
-                         "", "", "");
+  // Plaintext key retrieval is rejected by default because the key itself is
+  // unauthenticated and can be replaced by an active MITM.
+  mes::protocol::MysqlConnection rejected;
+  auto rc = rejected.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
+                             0, "", "", "");
+  EXPECT_EQ(rc, MES_ERR_AUTH);
+  EXPECT_NE(rejected.GetLastError().find("public-key retrieval is disabled"), std::string::npos);
 
-  EXPECT_EQ(rc, MES_OK) << "RSA public key auth should succeed without TLS: "
-                        << conn.GetLastError();
-  if (conn.IsConnected()) {
-    conn.Disconnect();
-  }
+  // Legacy behavior remains available only through an explicit, documented opt-in.
+  mes::protocol::MysqlConnection opted_in;
+  rc = opted_in.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout, 0,
+                        "", "", "", true);
+  EXPECT_EQ(rc, MES_OK) << opted_in.GetLastError();
+  opted_in.Disconnect();
 
   // Clean up temp user
   ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");

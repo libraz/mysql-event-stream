@@ -15,11 +15,23 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+#include "client/gtid_encoder.h"
+#include "client/metadata_fetcher.h"
+#include "event_header.h"
 #include "mes.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
@@ -29,6 +41,163 @@
 namespace {
 
 using namespace e2e;
+
+std::vector<uint8_t> EncodeGtidSet(const std::string& gtid_set) {
+  std::vector<uint8_t> encoded;
+  EXPECT_EQ(mes::GtidEncoder::Encode(gtid_set.c_str(), &encoded), MES_OK);
+  return encoded;
+}
+
+#ifndef _WIN32
+
+class StallingMetadataProxy {
+ public:
+  StallingMetadataProxy() {
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener_ < 0) return;
+    int reuse = 1;
+    setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
+        listen(listener_, 4) != 0) {
+      close(listener_);
+      listener_ = -1;
+      return;
+    }
+
+    socklen_t address_len = sizeof(address);
+    if (getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &address_len) != 0) {
+      close(listener_);
+      listener_ = -1;
+      return;
+    }
+    port_ = ntohs(address.sin_port);
+    thread_ = std::thread([this]() { Run(); });
+  }
+
+  ~StallingMetadataProxy() {
+    stop_.store(true, std::memory_order_release);
+    if (listener_ >= 0) {
+      shutdown(listener_, SHUT_RDWR);
+      close(listener_);
+      listener_ = -1;
+    }
+    if (thread_.joinable()) thread_.join();
+  }
+
+  bool IsReady() const { return listener_ >= 0 && port_ != 0; }
+  uint16_t Port() const { return port_; }
+  int StalledQueryCount() const { return stalled_queries_.load(std::memory_order_acquire); }
+
+ private:
+  static void CloseSocket(int fd) {
+    if (fd >= 0) {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  }
+
+  static bool SendAll(int fd, const uint8_t* data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+#ifdef MSG_NOSIGNAL
+      const ssize_t rc = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
+#else
+      const ssize_t rc = send(fd, data + sent, len - sent, 0);
+#endif
+      if (rc <= 0) return false;
+      sent += static_cast<size_t>(rc);
+    }
+    return true;
+  }
+
+  static void ConfigureNoSigPipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int enabled = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#else
+    (void)fd;
+#endif
+  }
+
+  static int ConnectUpstream() {
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    ConfigureNoSigPipe(fd);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(kPort);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+      close(fd);
+      return -1;
+    }
+    return fd;
+  }
+
+  void HandleConnection(int client) {
+    ConfigureNoSigPipe(client);
+    const int upstream = ConnectUpstream();
+    if (upstream < 0) {
+      CloseSocket(client);
+      return;
+    }
+
+    std::atomic<bool> relay_done{false};
+    std::thread server_to_client([&]() {
+      uint8_t buffer[4096];
+      while (!relay_done.load(std::memory_order_acquire)) {
+        const ssize_t count = recv(upstream, buffer, sizeof(buffer), 0);
+        if (count <= 0 || !SendAll(client, buffer, static_cast<size_t>(count))) break;
+      }
+    });
+
+    bool stall = false;
+    std::string recent;
+    uint8_t buffer[4096];
+    while (!stop_.load(std::memory_order_acquire)) {
+      const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+      if (count <= 0) break;
+      if (!stall) {
+        recent.append(reinterpret_cast<const char*>(buffer), static_cast<size_t>(count));
+        if (recent.find("SHOW COLUMNS") != std::string::npos) {
+          stall = true;
+          stalled_queries_.fetch_add(1, std::memory_order_acq_rel);
+          continue;
+        }
+        if (recent.size() > 128) recent.erase(0, recent.size() - 128);
+        if (!SendAll(upstream, buffer, static_cast<size_t>(count))) break;
+      }
+      // Once SHOW COLUMNS is observed, continue reading/discarding. The
+      // client-side SO_RCVTIMEO must end the query and reconnect.
+    }
+
+    relay_done.store(true, std::memory_order_release);
+    CloseSocket(client);
+    CloseSocket(upstream);
+    server_to_client.join();
+  }
+
+  void Run() {
+    while (!stop_.load(std::memory_order_acquire)) {
+      const int client = accept(listener_, nullptr, nullptr);
+      if (client < 0) break;
+      HandleConnection(client);
+    }
+  }
+
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  std::atomic<int> stalled_queries_{0};
+};
+
+#endif
 
 // -- MysqlConnection tests --
 
@@ -45,7 +214,12 @@ TEST(E2EProtocol, ConnectWithNativePassword) {
 
 TEST(E2EProtocol, ConnectWithReplUser) {
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 0, "", "", "");
+  // This test exercises a plaintext replication-user connection. MySQL 8.4
+  // provisions it with caching_sha2_password, whose full-auth RSA key lookup
+  // now requires an explicit opt-in (the default rejection is covered by the
+  // dedicated cold-cache auth test).
+  auto rc =
+      conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 0, "", "", "", true);
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -227,10 +401,61 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
   auto rc = mes_client_connect(client, &config);
   ASSERT_EQ(rc, MES_OK) << mes_client_last_error(client);
   EXPECT_EQ(mes_client_is_connected(client), 1);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
+
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+  EXPECT_EQ(mes_client_is_connected(client), 1);
+  EXPECT_EQ(mes_client_is_streaming(client), 1);
+
+  mes_client_stop(client);
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
 
   mes_client_disconnect(client);
   EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
 
+  mes_client_destroy(client);
+}
+
+TEST(E2EProtocol, ShortReadTimeoutStaysAliveAcrossHeartbeatPeriods) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 113;
+  config.start_gtid = "";
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = 1;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  const std::string ca_path = e2e::DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  const auto started = std::chrono::steady_clock::now();
+  int heartbeat_count = 0;
+  for (int i = 0; i < 32 && heartbeat_count < 3; ++i) {
+    const mes_poll_result_t result = mes_client_poll(client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.is_heartbeat) ++heartbeat_count;
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+
+  EXPECT_EQ(heartbeat_count, 3);
+  EXPECT_EQ(mes_client_is_connected(client), 1);
+  EXPECT_EQ(mes_client_is_streaming(client), 1);
+  EXPECT_GE(elapsed.count(), 1000);
+  EXPECT_LT(elapsed.count(), 5000);
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
   mes_client_destroy(client);
 }
 
@@ -330,7 +555,411 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
   mes_destroy(engine);
 }
 
+TEST(E2EProtocol, EmptyStartGtidSnapshotsCurrentPosition) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MySQL COM_BINLOG_DUMP_GTID-specific contract";
+  }
+
+  mes::protocol::MysqlConnection data_conn;
+  ASSERT_EQ(
+      data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK);
+
+  const std::string suffix =
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const std::string before_name = "empty_gtid_before_" + suffix;
+  const std::string after_name = "empty_gtid_after_" + suffix;
+  mes::protocol::QueryResult qr;
+  std::string err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('" + before_name + "', 1)", &qr, &err),
+      MES_OK)
+      << err;
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 109;
+  config.start_gtid = "";  // Contract: snapshot current executed set in StartStream().
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = 5;
+  config.ssl_mode = MES_SSL_DISABLED;
+  config.allow_public_key_retrieval = true;
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('" + after_name + "', 2)", &qr, &err),
+      MES_OK)
+      << err;
+
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  ASSERT_EQ(mes_set_checksum_enabled(engine, mes_client_checksum_enabled(client)), MES_OK);
+  bool saw_before = false;
+  bool saw_after = false;
+  for (int poll_count = 0; poll_count < 100 && !saw_after; ++poll_count) {
+    mes_poll_result_t result = mes_client_poll(client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.is_heartbeat || result.data == nullptr) continue;
+
+    size_t consumed = 0;
+    ASSERT_EQ(mes_feed(engine, result.data, result.size, &consumed), MES_OK);
+    const mes_event_t* event = nullptr;
+    while (mes_next_event(engine, &event) == MES_OK) {
+      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+        continue;
+      }
+      std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+      saw_before = saw_before || name == before_name;
+      saw_after = saw_after || name == after_name;
+    }
+  }
+
+  EXPECT_FALSE(saw_before) << "empty start_gtid replayed a pre-start transaction";
+  EXPECT_TRUE(saw_after) << "empty start_gtid did not deliver a post-start transaction";
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+  mes_destroy(engine);
+  data_conn.Disconnect();
+}
+
+TEST(E2EProtocol, CurrentGtidDoesNotAdvanceWhileTransactionIsOnlyQueued) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MySQL GTID event layout-specific assertion";
+  }
+
+  mes::protocol::MysqlConnection data_conn;
+  ASSERT_EQ(
+      data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK);
+  mes::protocol::QueryResult qr;
+  std::string err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT @@GLOBAL.gtid_executed", &qr, &err),
+      MES_OK);
+  const std::string initial_gtid = qr.rows[0].values[0];
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 110;
+  config.start_gtid = initial_gtid.c_str();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = 5;
+  config.ssl_mode = MES_SSL_DISABLED;
+  config.max_queue_size = 10000;
+  config.allow_public_key_retrieval = true;
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('queued_checkpoint', 3)", &qr, &err),
+      MES_OK)
+      << err;
+  // Let the reader thread receive and queue the complete transaction without
+  // allowing the consumer to poll any of it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_EQ(EncodeGtidSet(mes_client_current_gtid(client)), EncodeGtidSet(initial_gtid));
+
+  bool saw_xid = false;
+  for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
+    mes_poll_result_t result = mes_client_poll(client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    }
+  }
+  ASSERT_TRUE(saw_xid);
+  // Poll returned the commit marker, but it is not acknowledged until the
+  // caller asks for the following event.
+  EXPECT_EQ(EncodeGtidSet(mes_client_current_gtid(client)), EncodeGtidSet(initial_gtid));
+
+  mes_poll_result_t following = mes_client_poll(client);
+  ASSERT_EQ(following.error, MES_OK) << mes_client_last_error(client);
+  EXPECT_NE(EncodeGtidSet(mes_client_current_gtid(client)), EncodeGtidSet(initial_gtid));
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+  data_conn.Disconnect();
+}
+
+TEST(E2EProtocol, DeliveredCheckpointPreservesCompleteMultiSidSet) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MySQL multi-SID GTID set test";
+  }
+
+  mes::protocol::MysqlConnection data_conn;
+  ASSERT_EQ(
+      data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+      MES_OK)
+      << data_conn.GetLastError();
+
+  mes::protocol::QueryResult qr;
+  std::string err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT UUID(), @@server_uuid", &qr, &err),
+      MES_OK)
+      << err;
+  ASSERT_EQ(qr.rows.size(), 1u);
+  ASSERT_EQ(qr.rows[0].values.size(), 2u);
+  const std::string failover_sid = qr.rows[0].values[0];
+  const std::string source_sid = qr.rows[0].values[1];
+  const std::string failover_gtid = failover_sid + ":1";
+
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                data_conn.Socket(), "SET @@SESSION.GTID_NEXT = '" + failover_gtid + "'", &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                data_conn.Socket(),
+                "INSERT INTO mes_test.items (name, value) VALUES ('multi_sid_seed_" +
+                    failover_sid.substr(0, 8) + "', 1)",
+                &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SET @@SESSION.GTID_NEXT = 'AUTOMATIC'",
+                                        &qr, &err),
+            MES_OK)
+      << err;
+
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT @@GLOBAL.gtid_executed", &qr, &err),
+      MES_OK)
+      << err;
+  ASSERT_EQ(qr.rows.size(), 1u);
+  const std::string initial_gtid = qr.rows[0].values[0];
+  ASSERT_NE(initial_gtid.find(failover_gtid), std::string::npos);
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 111;
+  config.start_gtid = initial_gtid.c_str();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = 5;
+  config.ssl_mode = MES_SSL_DISABLED;
+  config.max_queue_size = 10000;
+  config.allow_public_key_retrieval = true;
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('multi_sid_after', 2)", &qr, &err),
+      MES_OK)
+      << err;
+
+  bool saw_xid = false;
+  for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
+    mes_poll_result_t result = mes_client_poll(client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    }
+  }
+  ASSERT_TRUE(saw_xid);
+  mes_poll_result_t following = mes_client_poll(client);
+  ASSERT_EQ(following.error, MES_OK) << mes_client_last_error(client);
+
+  const std::string checkpoint = mes_client_current_gtid(client);
+  EXPECT_NE(checkpoint, initial_gtid);
+  EXPECT_NE(checkpoint.find(failover_gtid), std::string::npos);
+  EXPECT_NE(checkpoint.find(source_sid + ":"), std::string::npos);
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+  data_conn.Disconnect();
+}
+
+TEST(E2EProtocol, MariaDBDeliveredCheckpointPreservesAllDomains) {
+  if (!e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MariaDB multi-domain GTID set test";
+  }
+
+  mes::protocol::MysqlConnection data_conn;
+  ASSERT_EQ(data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                              MES_SSL_DISABLED, "", "", ""),
+            MES_OK)
+      << data_conn.GetLastError();
+
+  mes::protocol::QueryResult qr;
+  std::string err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SET @@SESSION.gtid_domain_id = 7001",
+                                        &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('domain_7001_seed', 1)", &qr, &err),
+      MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SET @@SESSION.gtid_domain_id = 7002",
+                                        &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('domain_7002_seed', 1)", &qr, &err),
+      MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SELECT @@GLOBAL.gtid_current_pos", &qr,
+                                        &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(qr.rows.size(), 1u);
+  const std::string initial_gtid = qr.rows[0].values[0];
+  ASSERT_NE(initial_gtid.find("7001-"), std::string::npos);
+  ASSERT_NE(initial_gtid.find("7002-"), std::string::npos);
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 112;
+  config.start_gtid = initial_gtid.c_str();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = 5;
+  config.ssl_mode = MES_SSL_DISABLED;
+  config.max_queue_size = 10000;
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SET @@SESSION.gtid_domain_id = 7001",
+                                        &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(
+      mes::protocol::ExecuteQuery(
+          data_conn.Socket(),
+          "INSERT INTO mes_test.items (name, value) VALUES ('domain_7001_after', 2)", &qr, &err),
+      MES_OK)
+      << err;
+
+  bool saw_xid = false;
+  for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
+    mes_poll_result_t result = mes_client_poll(client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    }
+  }
+  ASSERT_TRUE(saw_xid);
+  mes_poll_result_t following = mes_client_poll(client);
+  ASSERT_EQ(following.error, MES_OK) << mes_client_last_error(client);
+
+  const std::string checkpoint = mes_client_current_gtid(client);
+  EXPECT_NE(checkpoint, initial_gtid);
+  EXPECT_NE(checkpoint.find("7001-"), std::string::npos);
+  EXPECT_NE(checkpoint.find("7002-"), std::string::npos);
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+  data_conn.Disconnect();
+}
+
 // -- MetadataFetcher via C ABI --
+
+TEST(E2EProtocol, MetadataFetcherReadTimeoutAppliesAfterReconnect) {
+#ifdef _WIN32
+  GTEST_SKIP() << "The test proxy currently uses POSIX sockets";
+#else
+  if (!e2e::IsMariaDB()) {
+    GTEST_SKIP() << "The plaintext proxy test uses MariaDB authentication";
+  }
+
+  StallingMetadataProxy proxy;
+  ASSERT_TRUE(proxy.IsReady());
+
+  mes::MetadataFetcher fetcher;
+  ASSERT_EQ(fetcher.Connect(kHost, proxy.Port(), kRootUser, kRootPass, kTimeout,
+                            1 /* read_timeout_s */, MES_SSL_DISABLED),
+            MES_OK);
+
+  const auto started = std::chrono::steady_clock::now();
+  const auto columns = fetcher.FetchColumnInfo("mes_test", "items", 3);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - started);
+
+  EXPECT_TRUE(columns.empty());
+  EXPECT_EQ(proxy.StalledQueryCount(), 2);  // initial query + one reconnect retry
+  EXPECT_GE(elapsed.count(), 1500);
+  EXPECT_LT(elapsed.count(), 5000);
+  fetcher.Disconnect();
+#endif
+}
+
+TEST(E2EProtocol, MetadataCacheSeparatesDottedIdentifiers) {
+  mes::protocol::MysqlConnection conn;
+  const std::string ca_path = e2e::DefaultCa();
+  ASSERT_EQ(conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                         e2e::DefaultSslMode(), ca_path, "", ""),
+            MES_OK);
+  mes::protocol::QueryResult qr;
+  std::string err;
+  auto execute = [&](const std::string& sql) {
+    return mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err,
+                                       conn.DeprecateEofNegotiated());
+  };
+
+  execute("DROP DATABASE IF EXISTS `mes_cache_a`");
+  execute("DROP DATABASE IF EXISTS `mes_cache_a.b`");
+  ASSERT_EQ(execute("CREATE DATABASE `mes_cache_a`"), MES_OK) << err;
+  ASSERT_EQ(execute("CREATE DATABASE `mes_cache_a.b`"), MES_OK) << err;
+  ASSERT_EQ(execute("CREATE TABLE `mes_cache_a`.`b.c` (`left_name` INT)"), MES_OK) << err;
+  ASSERT_EQ(execute("CREATE TABLE `mes_cache_a.b`.`c` (`right_name` BIGINT UNSIGNED)"), MES_OK)
+      << err;
+
+  mes::MetadataFetcher fetcher;
+  ASSERT_EQ(fetcher.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                            e2e::DefaultSslMode(), ca_path),
+            MES_OK);
+  const auto left = fetcher.FetchColumnInfo("mes_cache_a", "b.c", 1);
+  const auto right = fetcher.FetchColumnInfo("mes_cache_a.b", "c", 1);
+
+  ASSERT_EQ(left.size(), 1u);
+  EXPECT_EQ(left[0].name, "left_name");
+  EXPECT_FALSE(left[0].is_unsigned);
+  ASSERT_EQ(right.size(), 1u);
+  EXPECT_EQ(right[0].name, "right_name");
+  EXPECT_TRUE(right[0].is_unsigned);
+
+  fetcher.Disconnect();
+  ASSERT_EQ(execute("DROP DATABASE `mes_cache_a`"), MES_OK) << err;
+  ASSERT_EQ(execute("DROP DATABASE `mes_cache_a.b`"), MES_OK) << err;
+  conn.Disconnect();
+}
 
 TEST(E2EProtocol, MetadataFetcherColumnNames) {
   if (e2e::IsMariaDB()) {

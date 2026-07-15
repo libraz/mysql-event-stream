@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
+#include <zlib.h>
 
 #include <cmath>
 #include <cstring>
@@ -23,6 +24,40 @@ class BinaryWriter : public test::EventBuilder {
  public:
   const uint8_t* Data() const { return DataPtr(); }
 };
+
+std::vector<uint8_t> BuildMariaZlibPayload(const std::string& input, bool raw_stream) {
+  size_t length_bytes = 1;
+  while (length_bytes < 4 && input.size() >= (size_t{1} << (length_bytes * 8))) {
+    ++length_bytes;
+  }
+
+  std::vector<uint8_t> result;
+  result.push_back(static_cast<uint8_t>(0x80 | length_bytes | (raw_stream ? 0x08 : 0)));
+  for (size_t i = 0; i < length_bytes; ++i) {
+    const size_t shift = (length_bytes - i - 1) * 8;
+    result.push_back(static_cast<uint8_t>(input.size() >> shift));
+  }
+
+  z_stream stream{};
+  const int window_bits = raw_stream ? -MAX_WBITS : MAX_WBITS;
+  if (deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits, 8,
+                   Z_DEFAULT_STRATEGY) != Z_OK) {
+    return {};
+  }
+  const size_t payload_offset = result.size();
+  result.resize(payload_offset + compressBound(static_cast<uLong>(input.size())));
+  stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+  stream.avail_in = static_cast<uInt>(input.size());
+  stream.next_out = result.data() + payload_offset;
+  stream.avail_out = static_cast<uInt>(result.size() - payload_offset);
+  const int deflate_result = deflate(&stream, Z_FINISH);
+  const size_t compressed_size = stream.total_out;
+  const int end_result = deflateEnd(&stream);
+  const bool ok = deflate_result == Z_STREAM_END && end_result == Z_OK;
+  if (!ok) return {};
+  result.resize(payload_offset + compressed_size);
+  return result;
+}
 
 // --- DecodeColumnValue tests ---
 
@@ -393,6 +428,44 @@ TEST(DecodeColumnValueTest, Time2NegativeWholeSecondNoFrac) {
   auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
   EXPECT_EQ(result.string_val, "-00:00:01.000000");
+}
+
+TEST(DecodeColumnValueTest, Time2NegativeAllFractionalPrecisions) {
+  struct Case {
+    uint16_t fsp;
+    int micros;
+    const char* expected;
+  };
+  const Case cases[] = {
+      {1, 100000, "-05:15:30.100000"}, {2, 120000, "-05:15:30.120000"},
+      {3, 123000, "-05:15:30.123000"}, {4, 123400, "-05:15:30.123400"},
+      {5, 123450, "-05:15:30.123450"}, {6, 123456, "-05:15:30.123456"},
+  };
+
+  const int64_t hms = (int64_t{5} << 12) | (15 << 6) | 30;
+  for (const auto& test_case : cases) {
+    const size_t frac_bytes = (test_case.fsp + 1) / 2;
+    const int64_t complement = int64_t{1} << (frac_bytes * 8);
+    const int64_t multiplier = frac_bytes == 1 ? 10000 : (frac_bytes == 2 ? 100 : 1);
+    const uint32_t stored_intpart = static_cast<uint32_t>(-hms - 1 + 0x800000);
+    const uint32_t stored_frac = static_cast<uint32_t>(complement - test_case.micros / multiplier);
+
+    BinaryWriter w;
+    w.WriteU24Be(stored_intpart);
+    if (frac_bytes == 1) {
+      w.WriteU8(static_cast<uint8_t>(stored_frac));
+    } else if (frac_bytes == 2) {
+      w.WriteU16Be(static_cast<uint16_t>(stored_frac));
+    } else {
+      w.WriteU24Be(stored_frac);
+    }
+
+    size_t consumed = 0;
+    auto result =
+        DecodeColumnValue(ColumnType::kTime2, test_case.fsp, false, w.Data(), w.Size(), &consumed);
+    EXPECT_EQ(consumed, 3u + frac_bytes) << "fsp=" << test_case.fsp;
+    EXPECT_EQ(result.string_val, test_case.expected) << "fsp=" << test_case.fsp;
+  }
 }
 
 TEST(DecodeColumnValueTest, Time2WithFrac3) {
@@ -978,6 +1051,111 @@ TEST(DecodeColumnValueTest, JsonInvalidPackLength) {
   EXPECT_TRUE(result.is_null);
 }
 
+TEST(DecodeColumnValueTest, TypedArrayUsesBinaryJsonStorage) {
+  BinaryWriter w;
+  const std::vector<uint8_t> binary_json = {0x02, 0x01, 0x00, 0x05, 0x2A};
+  w.WriteU32Le(static_cast<uint32_t>(binary_json.size()));
+  w.WriteBytes(binary_json);
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kTypedArray, 0, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u + binary_json.size());
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.type, ColumnType::kTypedArray);
+  ASSERT_EQ(result.bytes_size(), binary_json.size());
+  EXPECT_EQ(std::memcmp(result.bytes_data(), binary_json.data(), binary_json.size()), 0);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedVarcharUncompressedPayload) {
+  BinaryWriter w;
+  w.WriteU8(6);  // compressed-field payload length
+  w.WriteU8(0);  // method 0
+  w.WriteString("hello");
+
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kVarcharCompressed, 100, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 7u);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.string_val, "hello");
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedBlobEmptyPayload) {
+  const uint8_t data[] = {0};  // one-byte BLOB length, empty payload
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kBlobCompressed, 1, false, data, sizeof(data), &consumed);
+  EXPECT_EQ(consumed, 1u);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.bytes_size(), 0u);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedVarcharWrappedZlibPayload) {
+  const std::string expected(1000, 'a');
+  const auto payload = BuildMariaZlibPayload(expected, false);
+  ASSERT_FALSE(payload.empty());
+
+  BinaryWriter w;
+  w.WriteU16Le(static_cast<uint16_t>(payload.size()));
+  w.WriteBytes(payload);
+
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kVarcharCompressed, 1001, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 2u + payload.size());
+  EXPECT_FALSE(result.is_null);
+  EXPECT_EQ(result.string_val, expected);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedBlobRawZlibPayload) {
+  const std::string expected(4096, '\x7F');
+  const auto payload = BuildMariaZlibPayload(expected, true);
+  ASSERT_FALSE(payload.empty());
+
+  BinaryWriter w;
+  w.WriteU16Le(static_cast<uint16_t>(payload.size()));
+  w.WriteBytes(payload);
+
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kBlobCompressed, 2, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 2u + payload.size());
+  EXPECT_FALSE(result.is_null);
+  ASSERT_EQ(result.bytes_size(), expected.size());
+  EXPECT_EQ(std::memcmp(result.bytes_data(), expected.data(), expected.size()), 0);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedPayloadRejectsUnknownMethod) {
+  const uint8_t data[] = {1, 0x90};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kVarcharCompressed, 100, false, data, sizeof(data), &consumed);
+  EXPECT_TRUE(result.is_null);
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedPayloadRejectsExpansionOverLimit) {
+  BinaryWriter w;
+  w.WriteU32Le(5);  // compressed-field payload length
+  w.WriteU8(0x84);  // wrapped zlib, four-byte original length
+  w.WriteU32Be(64U * 1024U * 1024U + 1U);
+
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kBlobCompressed, 4, false, w.Data(), w.Size(), &consumed);
+  EXPECT_TRUE(result.is_null);
+  EXPECT_EQ(consumed, 0u);
+}
+
+TEST(DecodeColumnValueTest, MariaCompressedPayloadRejectsCorruptZlib) {
+  const uint8_t data[] = {4, 0x81, 0x03, 0x00, 0x01};
+  size_t consumed = 0;
+  auto result =
+      DecodeColumnValue(ColumnType::kVarcharCompressed, 100, false, data, sizeof(data), &consumed);
+  EXPECT_TRUE(result.is_null);
+  EXPECT_EQ(consumed, 0u);
+}
+
 // --- ENUM/SET standalone type tests ---
 // Note: In MySQL binlog, ENUM/SET are always transmitted as MYSQL_TYPE_STRING
 // with the real type in the metadata high byte. Standalone kEnum/kSet column
@@ -1216,6 +1394,47 @@ TEST(DecodeWriteRowsTest, RejectsColumnCountMismatch) {
 
   std::vector<RowData> rows;
   EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+}
+
+TEST(DecodeWriteRowsTest, RejectsEmptyColumnsPresentBitmapWithTrailingData) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(1);
+  metadata.columns[0].type = ColumnType::kLong;
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(1);     // column_count
+  w.WriteU8(0x00);  // no columns present
+  w.WriteU8(0xAA);  // trailing data previously caused an unbounded row loop
+
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+  EXPECT_TRUE(rows.empty());
+}
+
+TEST(DecodeUpdateRowsTest, RejectsEmptyAfterImageBitmapWithTrailingData) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(1);
+  metadata.columns[0].type = ColumnType::kLong;
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(1);     // column_count
+  w.WriteU8(0x01);  // before image has one column
+  w.WriteU8(0x00);  // after image has no columns
+  w.WriteU8(0x00);  // before-image null bitmap
+  w.WriteU32Le(42);
+  w.WriteU8(0xAA);  // trailing data
+
+  std::vector<UpdatePair> pairs;
+  EXPECT_FALSE(DecodeUpdateRows(w.Data(), w.Size(), metadata, true, &pairs));
+  EXPECT_TRUE(pairs.empty());
 }
 
 // --- DecodeUpdateRows null pointers and V1 ---
@@ -1578,6 +1797,29 @@ TEST(DecodeColumnValueTest, JsonCalcFieldSizeUsesBufferLength) {
   EXPECT_FALSE(val.is_null);
   EXPECT_EQ(consumed, 9u);  // 4 + 5
   EXPECT_EQ(val.bytes_size(), 5u);
+}
+
+TEST(DecodeColumnValueTest, LargeBinaryPayloadsPreserveExactBytes) {
+  constexpr size_t kPayloadSize = 4 * 1024 * 1024;
+  std::vector<uint8_t> encoded(sizeof(uint32_t) + kPayloadSize);
+  const uint32_t payload_size = static_cast<uint32_t>(kPayloadSize);
+  encoded[0] = static_cast<uint8_t>(payload_size);
+  encoded[1] = static_cast<uint8_t>(payload_size >> 8);
+  encoded[2] = static_cast<uint8_t>(payload_size >> 16);
+  encoded[3] = static_cast<uint8_t>(payload_size >> 24);
+  for (size_t i = 0; i < kPayloadSize; ++i) {
+    encoded[sizeof(uint32_t) + i] = static_cast<uint8_t>((i * 31u) & 0xFFu);
+  }
+
+  for (ColumnType type : {ColumnType::kBlob, ColumnType::kJson, ColumnType::kGeometry}) {
+    size_t consumed = 0;
+    ColumnValue value =
+        DecodeColumnValue(type, 4, false, encoded.data(), encoded.size(), &consumed);
+    ASSERT_FALSE(value.is_null);
+    EXPECT_EQ(consumed, encoded.size());
+    ASSERT_EQ(value.bytes_size(), kPayloadSize);
+    EXPECT_EQ(std::memcmp(value.bytes_data(), encoded.data() + sizeof(uint32_t), kPayloadSize), 0);
+  }
 }
 
 TEST(DecodeColumnValueTest, BlobTruncatedPrefix) {

@@ -253,6 +253,31 @@ TEST(DecodeDecimalTest, Zero) {
   EXPECT_EQ(consumed, 5u);
 }
 
+TEST(DecodeDecimalTest, OmitsLeadingZeroRemainderBeforeFullGroup) {
+  // DECIMAL(10,0)=1 has a one-digit remainder group followed by one
+  // nine-digit group. The zero remainder is capacity, not a display digit.
+  uint8_t data[] = {0x80, 0x00, 0x00, 0x00, 0x01};
+  size_t consumed = 0;
+  EXPECT_EQ(DecodeDecimal(data, sizeof(data), 10, 0, consumed), "1");
+  EXPECT_EQ(consumed, sizeof(data));
+}
+
+TEST(DecodeDecimalTest, OmitsLeadingZeroFullGroups) {
+  // DECIMAL(18,0)=1 occupies two full groups; only the significant group is
+  // emitted, without a nine-zero prefix.
+  uint8_t data[] = {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+  size_t consumed = 0;
+  EXPECT_EQ(DecodeDecimal(data, sizeof(data), 18, 0, consumed), "1");
+  EXPECT_EQ(consumed, sizeof(data));
+}
+
+TEST(DecodeDecimalTest, NegativeSmallValueOmitsCapacityZeros) {
+  uint8_t data[] = {0x7F, 0xFF, 0xFF, 0xFF, 0xFE};
+  size_t consumed = 0;
+  EXPECT_EQ(DecodeDecimal(data, sizeof(data), 10, 0, consumed), "-1");
+  EXPECT_EQ(consumed, sizeof(data));
+}
+
 TEST(DecodeDecimalTest, WithFraction) {
   // DECIMAL(10,2) = "12345678.12"
   // intg=8, intg_rem=8, intg0=0, frac0=0, frac_rem=2

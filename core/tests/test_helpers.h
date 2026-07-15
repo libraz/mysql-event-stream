@@ -106,8 +106,8 @@ inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
   // Body
   b.WriteBytes(body);
 
-  // Fake checksum (4 zero bytes)
-  b.WriteU32Le(0);
+  // Valid CRC32 checksum over header + body.
+  b.WriteU32Le(ComputeCRC32(b.Data().data(), b.Data().size()));
 
   return b.Data();
 }
@@ -287,7 +287,7 @@ inline void WriteDatetime2(Writer& w, int year, int month, int day, int hour, in
 template <typename Writer>
 inline void WriteDatetime2Packed(Writer& w, int64_t signed_packed, int fsp) {
   int64_t intpart = signed_packed >> 24;  // arithmetic shift (floors)
-  int frac = static_cast<int>(signed_packed - (intpart << 24));
+  int frac = static_cast<int>(signed_packed - intpart * (int64_t{1} << 24));
   int64_t stored = intpart + 0x8000000000LL;
   for (int i = 4; i >= 0; --i) {
     w.WriteU8(static_cast<uint8_t>((stored >> (i * 8)) & 0xFF));

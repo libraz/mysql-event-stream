@@ -25,8 +25,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mes.h"
@@ -416,6 +418,105 @@ TEST(E2EBinlogDML, LargeBlobValue) {
   e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id = 2");
 }
 
+TEST(E2EBinlogDML, ClientEventSizeLimitRejectsLargeBlobPacket) {
+  e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id = 3");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.large_data WHERE id = 3");
+
+  const std::string gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.large_data (id, big_blob) VALUES "
+                            "(3, UNHEX(REPEAT('42', 100000)))"),
+            MES_OK);
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  ASSERT_EQ(mes_client_set_max_event_size(client, 4096), MES_OK);
+
+  mes_client_config_t config{};
+  config.host = e2e::kHost;
+  config.port = e2e::kPort;
+  config.user = e2e::kReplUser;
+  config.password = e2e::kReplPass;
+  config.server_id = e2e::server_ids::kDmlClientEventSizeLimit;
+  config.start_gtid = gtid.c_str();
+  config.connect_timeout_s = e2e::kTimeout;
+  config.read_timeout_s = 3;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  const std::string ca_path = e2e::DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
+  ASSERT_EQ(mes_client_start(client), MES_OK);
+
+  for (int i = 0; i < 100 && mes_client_is_connected(client) != 0; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 1);
+
+  mes_error_t terminal_error = MES_OK;
+  for (int i = 0; i < 32 && terminal_error == MES_OK; ++i) {
+    terminal_error = mes_client_poll(client).error;
+  }
+  EXPECT_EQ(terminal_error, MES_ERR_STREAM);
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
+
+  mes_client_stop(client);
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+}
+
+TEST(E2EBinlogDML, ClientQueueByteBudgetBackpressuresLargeBlobBurst) {
+  constexpr size_t kEventLimit = 200u * 1024u;
+  constexpr size_t kQueueBudget = 250u * 1024u;
+  e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id BETWEEN 30 AND 37");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.large_data WHERE id BETWEEN 30 AND 37");
+
+  const std::string gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  for (int id = 30; id <= 37; ++id) {
+    ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.large_data (id, big_blob) VALUES (" +
+                              std::to_string(id) + ", UNHEX(REPEAT('43', 100000)))"),
+              MES_OK);
+  }
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  ASSERT_EQ(mes_client_set_max_event_size(client, kEventLimit), MES_OK);
+  ASSERT_EQ(mes_client_set_max_queue_bytes(client, kQueueBudget), MES_OK);
+
+  mes_client_config_t config{};
+  config.host = e2e::kHost;
+  config.port = e2e::kPort;
+  config.user = e2e::kReplUser;
+  config.password = e2e::kReplPass;
+  config.server_id = e2e::server_ids::kDmlClientQueueByteBudget;
+  config.start_gtid = gtid.c_str();
+  config.connect_timeout_s = e2e::kTimeout;
+  config.read_timeout_s = 3;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  const std::string ca_path = e2e::DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
+  ASSERT_EQ(mes_client_start(client), MES_OK);
+
+  size_t queued_bytes = 0;
+  for (int i = 0; i < 100 && queued_bytes < 100000; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    queued_bytes = mes_client_queued_bytes(client);
+  }
+  EXPECT_GE(queued_bytes, 100000u);
+  EXPECT_LE(queued_bytes, kQueueBudget);
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+}
+
 // ---- UnicodeAndEmoji ----
 
 TEST(E2EBinlogDML, UnicodeAndEmoji) {
@@ -638,6 +739,66 @@ TEST(E2EBinlogDML, BooleanValues) {
 
   // Cleanup
   e2e::ExecuteDML("DELETE FROM mes_test.users WHERE id IN (1017, 1018)");
+}
+
+TEST(E2EBinlogDML, MariaCompressedColumns) {
+  if (!e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MariaDB COMPRESSED columns are flavor-specific";
+  }
+
+  ASSERT_EQ(e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.compressed_values"), MES_OK);
+  e2e::ScopedCleanup cleanup("DROP TABLE IF EXISTS mes_test.compressed_values");
+  ASSERT_EQ(e2e::ExecuteDML("CREATE TABLE mes_test.compressed_values ("
+                            "id INT PRIMARY KEY, short_value VARCHAR(100) COMPRESSED, "
+                            "long_value VARCHAR(10000) COMPRESSED, blob_value BLOB COMPRESSED)"),
+            MES_OK);
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.compressed_values VALUES "
+                            "(1, 'short', REPEAT('x', 4096), REPEAT('b', 4096))"),
+            MES_OK);
+
+  const auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlMariaCompressedColumns,
+                                              "compressed_values", 1);
+  const auto filtered = e2e::FilterByTable(events, "compressed_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_EQ(filtered[0].after.size(), 4u);
+  EXPECT_EQ(filtered[0].after[0].int_val, 1);
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[1].str_data, "short");
+  EXPECT_EQ(filtered[0].after[2].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[2].str_data, std::string(4096, 'x'));
+  EXPECT_EQ(filtered[0].after[3].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[3].str_data, std::string(4096, 'b'));
+}
+
+TEST(E2EBinlogDML, MysqlMultiValuedIndex) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MySQL multi-valued indexes are flavor-specific";
+  }
+
+  ASSERT_EQ(e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.mvi_values"), MES_OK);
+  e2e::ScopedCleanup cleanup("DROP TABLE IF EXISTS mes_test.mvi_values");
+  ASSERT_EQ(e2e::ExecuteDML("CREATE TABLE mes_test.mvi_values ("
+                            "id BIGINT PRIMARY KEY, doc JSON NOT NULL, "
+                            "INDEX tags_idx ((CAST(doc->'$.tags' AS UNSIGNED ARRAY))))"),
+            MES_OK);
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.mvi_values VALUES "
+                            "(1, JSON_OBJECT('tags', JSON_ARRAY(1, 2, 3)))"),
+            MES_OK);
+
+  const auto events =
+      e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlMysqlMultiValuedIndex, "mvi_values", 1);
+  const auto filtered = e2e::FilterByTable(events, "mvi_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_GE(filtered[0].after.size(), 2u);
+  EXPECT_EQ(filtered[0].after[0].int_val, 1);
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_BYTES);
+  EXPECT_FALSE(filtered[0].after[1].str_data.empty());
 }
 
 // ---- VECTOR type tests (MySQL 9.0+) ----

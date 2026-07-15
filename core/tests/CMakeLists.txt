@@ -34,7 +34,7 @@ mes_add_gtest(test_rotate_event test_rotate_event.cpp)
 mes_add_gtest(test_state_machine test_state_machine.cpp)
 
 # test_row_decoder
-mes_add_gtest(test_row_decoder test_row_decoder.cpp)
+mes_add_gtest(test_row_decoder test_row_decoder.cpp ZLIB::ZLIB)
 
 # test_cdc_engine
 mes_add_gtest(test_cdc_engine test_cdc_engine.cpp)
@@ -59,6 +59,12 @@ mes_add_gtest(test_mysql_binlog_stream test_mysql_binlog_stream.cpp)
 
 # test_event_queue
 mes_add_gtest(test_event_queue test_event_queue.cpp)
+
+# test_transaction_gtid_tracker
+mes_add_gtest(test_transaction_gtid_tracker test_transaction_gtid_tracker.cpp)
+
+# test_connection_validator
+mes_add_gtest(test_connection_validator test_connection_validator.cpp)
 
 # test_crc32
 mes_add_gtest(test_crc32 test_crc32.cpp ZLIB::ZLIB)

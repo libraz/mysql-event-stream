@@ -514,6 +514,42 @@ TEST(CApi, FeedReturnsParseErrorOnInvalidData) {
   mes_destroy(engine);
 }
 
+TEST(CApi, FeedReturnsChecksumErrorOnCorruptedEvent) {
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                          BuildTableMapBody(1, "db", "t"));
+  event[mes::kEventHeaderSize + 1] ^= 0x40;
+
+  size_t consumed = 123;
+  EXPECT_EQ(mes_feed(engine, event.data(), event.size(), &consumed), MES_ERR_CHECKSUM);
+  EXPECT_EQ(consumed, 0u);
+  EXPECT_EQ(mes_has_events(engine), 0);
+
+  mes_destroy(engine);
+}
+
+TEST(CApi, ChecksumOverrideSupportsNoChecksumStream) {
+  EXPECT_EQ(mes_set_checksum_enabled(nullptr, 0), MES_ERR_NULL_ARG);
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  ASSERT_EQ(mes_set_checksum_enabled(engine, 0), MES_OK);
+
+  auto table_map =
+      mes::test::BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                      100, BuildTableMapBody(1, "db", "t"));
+  auto write = mes::test::BuildEventNoChecksum(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, BuildWriteRowsBody(1, 42));
+  std::vector<uint8_t> stream = table_map;
+  stream.insert(stream.end(), write.begin(), write.end());
+
+  size_t consumed = 0;
+  EXPECT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+  EXPECT_EQ(mes_has_events(engine), 1);
+  mes_destroy(engine);
+}
+
 // ---- Reset after error recovers ----
 
 TEST(CApi, ResetAfterErrorRecovers) {
@@ -732,6 +768,44 @@ TEST(CApi, MaxEventSizeZeroMeansNoLimit) {
   EXPECT_EQ(mes_set_max_event_size(engine, 0), MES_OK);
   EXPECT_EQ(mes_get_max_event_size(engine), 1024u * 1024u * 1024u);
   mes_destroy(engine);
+}
+
+TEST(CApi, ClientMaxEventSizeDefaultAndRoundTrip) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
+  EXPECT_EQ(mes_client_get_max_event_size(client), 64u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_set_max_event_size(client, 128u * 1024u * 1024u), MES_OK);
+  EXPECT_EQ(mes_client_get_max_event_size(client), 128u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_set_max_event_size(client, 0), MES_OK);
+  EXPECT_EQ(mes_client_get_max_event_size(client), 1024u * 1024u * 1024u);
+  mes_client_destroy(client);
+}
+
+TEST(CApi, ClientMaxEventSizeNull) {
+  EXPECT_EQ(mes_client_set_max_event_size(nullptr, 1024), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_client_get_max_event_size(nullptr), 0u);
+  EXPECT_EQ(mes_client_is_connected(nullptr), 0);
+  EXPECT_EQ(mes_client_is_streaming(nullptr), 0);
+}
+
+TEST(CApi, ClientMaxQueueBytesDefaultAndRoundTrip) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 256u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_queued_bytes(client), 0u);
+  EXPECT_EQ(mes_client_set_max_queue_bytes(client, 512u * 1024u * 1024u), MES_OK);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 512u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_set_max_queue_bytes(client, 0), MES_OK);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 256u * 1024u * 1024u);
+  mes_client_destroy(client);
+}
+
+TEST(CApi, ClientMaxQueueBytesNull) {
+  EXPECT_EQ(mes_client_set_max_queue_bytes(nullptr, 1024), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(nullptr), 0u);
+  EXPECT_EQ(mes_client_queued_bytes(nullptr), 0u);
 }
 
 }  // namespace
