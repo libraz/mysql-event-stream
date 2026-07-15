@@ -7,6 +7,7 @@ import contextlib
 import random
 import warnings
 
+from ._ffi import MES_ERR_AUTH, MES_ERR_VALIDATION
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
@@ -43,6 +44,9 @@ class CdcStream:
         ssl_cert: str = "",
         ssl_key: str = "",
         max_queue_size: int = 0,
+        max_queue_bytes: int = 256 * 1024 * 1024,
+        max_event_size: int = 64 * 1024 * 1024,
+        allow_public_key_retrieval: bool = False,
         lib_path: str | None = None,
         max_reconnect_attempts: int = 10,
     ) -> None:
@@ -62,7 +66,13 @@ class CdcStream:
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
-            max_queue_size: Maximum event queue size (0 = unlimited).
+            max_queue_size: Maximum event queue size (0 = default 10000).
+            max_queue_bytes: Total queued payload byte budget (default 256 MiB;
+                0 restores the default).
+            max_event_size: Maximum binlog event size accepted by the client
+                and parser (default 64 MiB; 0 = 1 GiB hard cap).
+            allow_public_key_retrieval: Permit unauthenticated RSA key retrieval
+                without TLS. MITM-sensitive; prefer verified TLS.
             lib_path: Explicit path to libmes shared library.
             max_reconnect_attempts: Maximum reconnection attempts
                 (default 10, 0 = disabled).
@@ -83,6 +93,9 @@ class CdcStream:
         self._ssl_cert = ssl_cert
         self._ssl_key = ssl_key
         self._max_queue_size = max_queue_size
+        self._max_queue_bytes = max_queue_bytes
+        self._max_event_size = max_event_size
+        self._allow_public_key_retrieval = allow_public_key_retrieval
         self._lib_path = lib_path
         self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_attempts = 0
@@ -94,6 +107,7 @@ class CdcStream:
         # Tracks an in-flight poll() worker so close() can await its completion
         # before destroying the client (prevents a use-after-free).
         self._poll_task: asyncio.Task[PollResult] | None = None
+        self._backoff_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> CdcStream:
         return self
@@ -138,6 +152,9 @@ class CdcStream:
             "ssl_cert": "_ssl_cert",
             "ssl_key": "_ssl_key",
             "max_queue_size": "_max_queue_size",
+            "max_queue_bytes": "_max_queue_bytes",
+            "max_event_size": "_max_event_size",
+            "allow_public_key_retrieval": "_allow_public_key_retrieval",
             "lib_path": "_lib_path",
             "max_reconnect_attempts": "_max_reconnect_attempts",
         }
@@ -157,8 +174,14 @@ class CdcStream:
         if self._closed:
             raise StopAsyncIteration
 
-        if not self._started:
-            await self._start()
+        while not self._started:
+            try:
+                await self._start()
+            except Exception as err:
+                await self._consume_retry(err)
+                await self._wait_for_backoff()
+                if self._closed:
+                    raise StopAsyncIteration from err
 
         # Explicit checks over `assert`: _start() guarantees both are set
         # when it returns normally, but assertions vanish under `python -O`
@@ -193,27 +216,26 @@ class CdcStream:
             except (RuntimeError, ConnectionError) as err:
                 if self._closed:
                     raise StopAsyncIteration from err
-                if self._max_reconnect_attempts == 0:
-                    await self.close()
-                    raise
-
-                self._reconnect_attempts += 1
-                if self._reconnect_attempts > self._max_reconnect_attempts:
-                    await self.close()
-                    raise RuntimeError(
-                        f"Max reconnect attempts "
-                        f"({self._max_reconnect_attempts}) exceeded"
-                    ) from err
-
-                try:
-                    await self._reconnect()
-                except Exception:
-                    await self.close()
-                    raise
+                reconnect_error: Exception = err
+                while True:
+                    await self._consume_retry(reconnect_error)
+                    try:
+                        await self._reconnect()
+                    except Exception as next_error:
+                        if self._closed:
+                            raise StopAsyncIteration from next_error
+                        reconnect_error = next_error
+                        continue
+                    if self._closed:
+                        raise StopAsyncIteration from reconnect_error
+                    break
                 continue
 
             if result.data:
                 self._engine.feed(result.data)
+                # A real protocol event proves progress. connect()/start()
+                # alone do not reset the outage budget.
+                self._reconnect_attempts = 0
 
     async def close(self) -> None:
         """Stop the stream and release all resources."""
@@ -221,6 +243,12 @@ class CdcStream:
             return
         self._closed = True
         self._started = False
+        backoff_task = getattr(self, "_backoff_task", None)
+        if backoff_task is not None and not backoff_task.done():
+            backoff_task.cancel()
+            with contextlib.suppress(BaseException):
+                await backoff_task
+        self._backoff_task = None
         # Unblock and await any in-flight poll() before destroying the client so
         # the worker thread is not still inside the C poll() call during destroy.
         poll_task = getattr(self, "_poll_task", None)
@@ -240,13 +268,17 @@ class CdcStream:
 
     @property
     def current_gtid(self) -> str:
-        """Get the current GTID position."""
+        """Get the delivered, committed checkpoint candidate.
+
+        The stream is at-least-once, not exactly-once. Persist this value only
+        after application processing succeeds.
+        """
         if self._client is None:
             return ""
         return self._client.current_gtid
 
     async def _reconnect(self) -> None:
-        """Reconnect with linear backoff using last known GTID."""
+        """Perform one reconnect attempt using the last known GTID."""
         if self._closed:
             return
         gtid = self.current_gtid
@@ -255,11 +287,7 @@ class CdcStream:
             self._client.close()
             self._client = None
 
-        max_delay_s = 10.0
-        base_delay = min(float(self._reconnect_attempts), max_delay_s)
-        # 50%-100% jitter to prevent thundering herd (aligned with Node.js binding)
-        delay = base_delay * (0.5 + random.random() * 0.5)
-        await asyncio.sleep(delay)
+        await self._wait_for_backoff()
 
         # Re-check after sleep: close() may have been called while we slept.
         if self._closed:
@@ -282,6 +310,9 @@ class CdcStream:
             ssl_cert=self._ssl_cert,
             ssl_key=self._ssl_key,
             max_queue_size=self._max_queue_size,
+            max_queue_bytes=self._max_queue_bytes,
+            max_event_size=self._max_event_size,
+            allow_public_key_retrieval=self._allow_public_key_retrieval,
             lib_path=self._lib_path,
         )
         # Explicit check instead of `assert`: assertions are stripped when
@@ -291,6 +322,7 @@ class CdcStream:
         if self._engine is None:
             raise RuntimeError("Internal error: engine missing during reconnect")
         self._engine.reset()
+        self._engine.set_max_event_size(self._max_event_size)
         # Metadata is optional; column names fall back to indices
         with contextlib.suppress(RuntimeError):
             self._engine.enable_metadata(
@@ -304,14 +336,50 @@ class CdcStream:
                 ssl_ca=self._ssl_ca,
                 ssl_cert=self._ssl_cert,
                 ssl_key=self._ssl_key,
+                allow_public_key_retrieval=self._allow_public_key_retrieval,
             )
         await asyncio.to_thread(self._client.connect)
         await asyncio.to_thread(self._client.start)
+        self._engine.set_checksum_enabled(self._client.checksum_enabled)
         # Do NOT reset _reconnect_attempts here. The counter should only
         # reset when a real event is successfully received (in __anext__),
         # not when a reconnection completes. Otherwise, a server that
         # accepts connections but immediately drops the stream would
         # trigger infinite reconnections regardless of max_reconnect_attempts.
+
+    async def _consume_retry(self, error: Exception) -> None:
+        """Charge one retry to the shared construct/connect/start/poll budget."""
+        code = getattr(error, "code", None)
+        if (
+            self._max_reconnect_attempts == 0
+            or isinstance(error, ValueError)
+            or code in (MES_ERR_AUTH, MES_ERR_VALIDATION)
+        ):
+            await self.close()
+            raise error
+
+        self._reconnect_attempts += 1
+        if self._reconnect_attempts > self._max_reconnect_attempts:
+            await self.close()
+            raise RuntimeError(
+                f"Max reconnect attempts ({self._max_reconnect_attempts}) exceeded"
+            ) from error
+
+    async def _wait_for_backoff(self) -> None:
+        """Wait for jittered backoff, interruptible by close()."""
+        max_delay_s = 10.0
+        base_delay = min(float(self._reconnect_attempts), max_delay_s)
+        delay = base_delay * (0.5 + random.random() * 0.5)
+        task = asyncio.create_task(asyncio.sleep(delay))
+        self._backoff_task = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not self._closed:
+                raise
+        finally:
+            if self._backoff_task is task:
+                self._backoff_task = None
 
     async def _start(self) -> None:
         """Create client and engine, connect and start streaming."""
@@ -329,9 +397,13 @@ class CdcStream:
             ssl_cert=self._ssl_cert,
             ssl_key=self._ssl_key,
             max_queue_size=self._max_queue_size,
+            max_queue_bytes=self._max_queue_bytes,
+            max_event_size=self._max_event_size,
+            allow_public_key_retrieval=self._allow_public_key_retrieval,
             lib_path=self._lib_path,
         )
         self._engine = CdcEngine(lib_path=self._lib_path)
+        self._engine.set_max_event_size(self._max_event_size)
         try:
             try:
                 self._engine.enable_metadata(
@@ -345,6 +417,7 @@ class CdcStream:
                     ssl_ca=self._ssl_ca,
                     ssl_cert=self._ssl_cert,
                     ssl_key=self._ssl_key,
+                    allow_public_key_retrieval=self._allow_public_key_retrieval,
                 )
             except RuntimeError as exc:
                 warnings.warn(
@@ -354,8 +427,8 @@ class CdcStream:
                 )
             await asyncio.to_thread(self._client.connect)
             await asyncio.to_thread(self._client.start)
+            self._engine.set_checksum_enabled(self._client.checksum_enabled)
             self._started = True
-            self._reconnect_attempts = 0
         except Exception:
             if self._engine is not None:
                 self._engine.close()

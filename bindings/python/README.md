@@ -19,9 +19,9 @@ pip install mysql-event-stream
 ```
 
 Platform wheels are available for:
-- Linux x86_64
-- Linux aarch64
-- macOS ARM64 (Apple Silicon)
+
+- Linux x86_64 and aarch64 (recommended for server deployments)
+- macOS 15.0 or newer on x86_64 and arm64 (development use)
 
 ## Usage
 
@@ -31,6 +31,9 @@ Platform wheels are available for:
 from mysql_event_stream import CdcEngine
 
 engine = CdcEngine()
+
+# Only needed when a checksum=NONE byte stream starts after its FDE:
+# engine.set_checksum_enabled(False)
 
 # Feed raw binlog bytes
 engine.feed(binlog_chunk)

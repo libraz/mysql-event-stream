@@ -83,6 +83,9 @@ class BinlogClient:
         ssl_cert: str = "",
         ssl_key: str = "",
         max_queue_size: int = 0,
+        max_queue_bytes: int = 256 * 1024 * 1024,
+        max_event_size: int = 64 * 1024 * 1024,
+        allow_public_key_retrieval: bool = False,
         lib_path: str | None = None,
     ) -> None:
         """Create a new BinlogClient.
@@ -105,6 +108,12 @@ class BinlogClient:
             ssl_key: Path to client private key file (empty to skip).
             max_queue_size: Maximum internal event queue size. 0 selects the
                 default of 10000.
+            max_queue_bytes: Total queued payload byte budget. Defaults to
+                256 MiB; 0 restores that default.
+            max_event_size: Maximum binlog event size. Defaults to 64 MiB;
+                0 resolves to the 1 GiB hard cap.
+            allow_public_key_retrieval: Permit unauthenticated RSA key retrieval
+                without TLS. MITM-sensitive; prefer verified TLS.
             lib_path: Explicit path to libmes shared library.
 
         Raises:
@@ -139,6 +148,9 @@ class BinlogClient:
                 ssl_cert=ssl_cert,
                 ssl_key=ssl_key,
                 max_queue_size=max_queue_size,
+                max_queue_bytes=max_queue_bytes,
+                max_event_size=max_event_size,
+                allow_public_key_retrieval=allow_public_key_retrieval,
             )
         # Serializes poll() against close()/destroy(). poll() holds this lock
         # for the duration of the blocking C call (and the result copy), so
@@ -158,6 +170,25 @@ class BinlogClient:
             RuntimeError: If client has been closed.
         """
         self._check_open()
+
+        if self._config.max_event_size < 0 or self._config.max_event_size > 0xFFFFFFFF:
+            raise ValueError(
+                f"max_event_size must fit in uint32, got {self._config.max_event_size}"
+            )
+        limit_rc = self._lib.mes_client_set_max_event_size(
+            self._handle, self._config.max_event_size
+        )
+        if limit_rc != MES_OK:
+            raise RuntimeError(f"mes_client_set_max_event_size failed with error code {limit_rc}")
+        if self._config.max_queue_bytes < 0:
+            raise ValueError(
+                f"max_queue_bytes must be non-negative, got {self._config.max_queue_bytes}"
+            )
+        limit_rc = self._lib.mes_client_set_max_queue_bytes(
+            self._handle, self._config.max_queue_bytes
+        )
+        if limit_rc != MES_OK:
+            raise RuntimeError(f"mes_client_set_max_queue_bytes failed with error code {limit_rc}")
 
         # Keep explicit references to encoded bytes so they are not
         # garbage-collected before the C call completes (matters on
@@ -184,13 +215,17 @@ class BinlogClient:
             ssl_cert=ssl_cert_b,
             ssl_key=ssl_key_b,
             max_queue_size=self._config.max_queue_size,
+            allow_public_key_retrieval=int(self._config.allow_public_key_retrieval),
         )
 
         rc = self._lib.mes_client_connect(self._handle, ctypes.byref(config))
         if rc != MES_OK:
             error_msg = self._get_last_error()
             base_msg = _ERROR_MESSAGES.get(rc, f"Error code {rc}")
-            raise ConnectionError(f"{base_msg}: {error_msg}")
+            error = ConnectionError(f"{base_msg}: {error_msg}")
+            # Stable native error category used by the stream retry policy.
+            error.code = rc  # type: ignore[attr-defined]
+            raise error
 
     def start(self) -> None:
         """Start binlog streaming.
@@ -203,7 +238,10 @@ class BinlogClient:
         if rc != MES_OK:
             error_msg = self._get_last_error()
             base_msg = _ERROR_MESSAGES.get(rc, f"Error code {rc}")
-            raise RuntimeError(f"{base_msg}: {error_msg}")
+            error = RuntimeError(f"{base_msg}: {error_msg}")
+            # Stable native error category used by the stream retry policy.
+            error.code = rc  # type: ignore[attr-defined]
+            raise error
 
     def poll(self) -> PollResult:
         """Poll for next binlog event (blocking).
@@ -267,18 +305,36 @@ class BinlogClient:
 
     @property
     def is_connected(self) -> bool:
-        """Check if client is connected."""
+        """Check whether the authenticated transport is still usable."""
         if self._handle is None:
             return False
         return bool(self._lib.mes_client_is_connected(self._handle) != 0)
 
     @property
+    def is_streaming(self) -> bool:
+        """Check whether poll() can still drain data or a terminal error."""
+        if self._handle is None:
+            return False
+        return bool(self._lib.mes_client_is_streaming(self._handle) != 0)
+
+    @property
     def current_gtid(self) -> str:
-        """Get current GTID position."""
+        """Get the delivered, committed checkpoint candidate.
+
+        The value advances after polling past a commit boundary. It is not a
+        durable acknowledgement; persist it only after processing succeeds.
+        """
         if self._handle is None:
             return ""
         raw = self._lib.mes_client_current_gtid(self._handle)
         return raw.decode("utf-8") if raw else ""
+
+    @property
+    def checksum_enabled(self) -> bool:
+        """Return the checksum mode for events produced by :meth:`poll`."""
+        if self._handle is None:
+            return False
+        return bool(self._lib.mes_client_checksum_enabled(self._handle))
 
     def __enter__(self) -> BinlogClient:
         return self

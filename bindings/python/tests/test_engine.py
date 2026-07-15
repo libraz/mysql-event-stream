@@ -4,13 +4,14 @@ import ctypes
 
 import pytest
 
-from mysql_event_stream import CdcEngine, EventType
+from mysql_event_stream import CdcEngine, ChecksumError, EventType
 from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_INT, MES_COL_STRING, MESColumn
 from mysql_event_stream.engine import _convert_columns
 
 from .helpers import (
     build_delete_rows_body,
     build_event,
+    build_event_no_checksum,
     build_rotate_body,
     build_table_map_body,
     build_update_rows_body,
@@ -51,10 +52,29 @@ class TestFeed:
             assert engine.next_event() is None
 
     def test_negative_max_queue_size_rejected(self, lib_path: str) -> None:
-        with CdcEngine(lib_path=lib_path) as engine, pytest.raises(
-            ValueError, match="non-negative"
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(ValueError, match="non-negative"),
         ):
             engine.set_max_queue_size(-1)
+
+    def test_checksum_none_override(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine:
+            engine.set_checksum_enabled(False)
+            tm = build_event_no_checksum(19, 1000, build_table_map_body(1, "db", "t"))
+            wr = build_event_no_checksum(30, 1000, build_write_rows_body(1, 73))
+            assert engine.feed(tm + wr) == len(tm + wr)
+            event = engine.next_event()
+            assert event is not None
+            assert event.after is not None
+            assert event.after["0"] == 73
+
+    def test_corrupted_checksum_is_typed_error(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine:
+            event = bytearray(build_event(19, 1000, build_table_map_body(1, "db", "t")))
+            event[20] ^= 0x40
+            with pytest.raises(ChecksumError, match="checksum mismatch"):
+                engine.feed(event)
 
 
 class TestInsertEvent:

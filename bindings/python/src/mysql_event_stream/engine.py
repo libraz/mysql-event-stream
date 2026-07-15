@@ -224,9 +224,7 @@ class CdcEngine:
         """
         self._check_open()
         if max_event_size < 0 or max_event_size > 0xFFFFFFFF:
-            raise ValueError(
-                f"max_event_size must fit in uint32, got {max_event_size}"
-            )
+            raise ValueError(f"max_event_size must fit in uint32, got {max_event_size}")
         rc = self._lib.mes_set_max_event_size(self._handle, max_event_size)
         if rc != MES_OK:
             raise RuntimeError(f"mes_set_max_event_size failed with error code {rc}")
@@ -240,6 +238,27 @@ class CdcEngine:
         self._check_open()
         result: int = self._lib.mes_get_max_event_size(self._handle)
         return result
+
+    def set_checksum_enabled(self, enabled: bool) -> None:
+        """Set whether raw binlog events carry a trailing CRC32 checksum.
+
+        Disable this for ``binlog_checksum=NONE`` streams that begin after the
+        format-description event. A later format-description event overrides
+        this setting with its on-wire checksum descriptor.
+
+        Args:
+            enabled: ``True`` for CRC32 trailers, ``False`` for no trailer.
+
+        Raises:
+            TypeError: If enabled is not a bool.
+            RuntimeError: If the engine is closed or the native call fails.
+        """
+        self._check_open()
+        if not isinstance(enabled, bool):
+            raise TypeError(f"enabled must be bool, got {type(enabled).__name__}")
+        rc = self._lib.mes_set_checksum_enabled(self._handle, int(enabled))
+        if rc != MES_OK:
+            _raise_for_rc(rc, "mes_set_checksum_enabled")
 
     def reset(self) -> None:
         """Reset the engine, clearing all state.
@@ -304,9 +323,7 @@ class CdcEngine:
         Raises:
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._set_string_filter(
-            self._lib.mes_set_include_tables, tables, "mes_set_include_tables"
-        )
+        self._set_string_filter(self._lib.mes_set_include_tables, tables, "mes_set_include_tables")
 
     def set_exclude_tables(self, tables: list[str]) -> None:
         """Set table exclude filter.
@@ -321,9 +338,7 @@ class CdcEngine:
         Raises:
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._set_string_filter(
-            self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables"
-        )
+        self._set_string_filter(self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables")
 
     def enable_metadata(
         self,
@@ -339,6 +354,7 @@ class CdcEngine:
         ssl_ca: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
+        allow_public_key_retrieval: bool = False,
     ) -> None:
         """Enable metadata queries for column name resolution.
 
@@ -359,6 +375,8 @@ class CdcEngine:
             ssl_ca: Path to CA certificate file (empty to skip).
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
+            allow_public_key_retrieval: Permit unauthenticated RSA key retrieval
+                without TLS. MITM-sensitive; prefer verified TLS.
 
         Raises:
             RuntimeError: If the engine is closed, client API is unavailable,
@@ -394,6 +412,7 @@ class CdcEngine:
         cfg.ssl_ca = ssl_ca_b
         cfg.ssl_cert = ssl_cert_b
         cfg.ssl_key = ssl_key_b
+        cfg.allow_public_key_retrieval = int(allow_public_key_retrieval)
 
         rc = self._lib.mes_engine_set_metadata_conn(self._handle, ctypes.byref(cfg))
         if rc != MES_OK:

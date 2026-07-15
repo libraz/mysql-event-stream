@@ -149,6 +149,12 @@ class ClientConfig:
         ssl_key: Path to client private key file (empty to skip).
         max_queue_size: Maximum internal event queue size. 0 selects the
             default of 10000.
+        max_queue_bytes: Total queued payload byte budget. Defaults to 256 MiB;
+            0 restores that default.
+        max_event_size: Maximum binlog event size accepted by the client and
+            parser. Defaults to 64 MiB; 0 resolves to the 1 GiB hard cap.
+        allow_public_key_retrieval: Permit unauthenticated RSA key retrieval
+            without TLS. MITM-sensitive; prefer verified TLS.
     """
 
     host: str = "127.0.0.1"
@@ -164,6 +170,9 @@ class ClientConfig:
     ssl_cert: str = ""
     ssl_key: str = ""
     max_queue_size: int = 0
+    max_queue_bytes: int = 256 * 1024 * 1024
+    max_event_size: int = 64 * 1024 * 1024
+    allow_public_key_retrieval: bool = False
 
 
 @dataclass(frozen=True, slots=True)

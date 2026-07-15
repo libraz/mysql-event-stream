@@ -28,10 +28,10 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "mypy>=1.11",
-    "ruff>=0.7",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "mypy>=2.3",
+    "ruff>=0.15",
 ]
 
 [project.urls]
@@ -42,15 +42,15 @@ Issues = "https://github.com/libraz/mysql-event-stream/issues"
 [tool.rye]
 managed = true
 dev-dependencies = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "pytest-timeout>=2.2",
-    "pymysql>=1.1",
-    "ruff>=0.8",
-    "mypy>=1.13",
-    "wheel>=0.46.3",
-    "hatchling>=1.29.0",
-    "cryptography>=46.0.7",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-timeout>=2.4",
+    "pymysql>=1.2",
+    "ruff>=0.15",
+    "mypy>=2.3",
+    "wheel>=0.47",
+    "hatchling>=1.31",
+    "cryptography>=49.0",
 ]
 
 [tool.rye.scripts]
@@ -63,6 +63,27 @@ e2e = "pytest e2e/tests -v --timeout=120"
 packages = ["src/mysql_event_stream"]
 artifacts = ["src/mysql_event_stream/*.dylib", "src/mysql_event_stream/*.so", "src/mysql_event_stream/*.so.*"]
 
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+[tool.cibuildwheel]
+build = "cp311-*"
+skip = "*-musllinux*"
+test-requires = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+test-command = [
+    "python -c \"from mysql_event_stream import CdcEngine; engine = CdcEngine(); engine.feed(b''); engine.close()\"",
+    "pytest {project}/bindings/python/tests -x -q",
+]
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
+before-all = "yum install -y perl-core make curl tar gzip && python3 -m pip install 'cmake>=3.20,<5' && bash {package}/../../.github/scripts/build-static-deps.sh /opt/mes-deps && MES_DEPS_PREFIX=/opt/mes-deps bash {package}/build_native.sh"
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel} && auditwheel show {dest_dir}/*.whl"
+
+[tool.cibuildwheel.macos]
+before-all = "bash {package}/../../.github/scripts/build-static-deps.sh /tmp/mes-deps-$MACOSX_DEPLOYMENT_TARGET && MES_DEPS_PREFIX=/tmp/mes-deps-$MACOSX_DEPLOYMENT_TARGET bash {package}/build_native.sh"
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel} && delocate-listdeps {dest_dir}/*.whl"
+
 [tool.hatch.build.targets.sdist]
 include = ["src/", "tests/", "README.md", "pyproject.toml"]
 
@@ -73,6 +94,7 @@ markers = [
     "insert: INSERT event tests",
     "update: UPDATE event tests",
     "delete: DELETE event tests",
+    "streaming: live binlog streaming tests",
     "types: Column type tests",
 ]
 

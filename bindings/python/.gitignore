@@ -4,3 +4,7 @@ __pycache__/
 dist/
 *.egg-info/
 .mypy_cache/
+# Locally built wheels; release wheels are produced by the publish workflow.
+wheelhouse/
+wheelhouse-repaired/
+*.whl

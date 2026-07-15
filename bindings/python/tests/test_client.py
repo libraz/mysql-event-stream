@@ -38,9 +38,7 @@ class TestClientClose:
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")
-    def test_close_idempotent(
-        self, mock_load: MagicMock, mock_load_client: MagicMock
-    ) -> None:
+    def test_close_idempotent(self, mock_load: MagicMock, mock_load_client: MagicMock) -> None:
         lib = MagicMock()
         lib.mes_client_create.return_value = 0xDEAD
         mock_load.return_value = lib
@@ -50,6 +48,56 @@ class TestClientClose:
         client.close()  # Second call should be a no-op
 
         lib.mes_client_destroy.assert_called_once()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_checksum_mode_property(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_checksum_enabled.return_value = 1
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        assert client.checksum_enabled is True
+        lib.mes_client_checksum_enabled.assert_called_once_with(0xDEAD)
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_connection_and_streaming_states_are_separate(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_is_connected.return_value = 0
+        lib.mes_client_is_streaming.return_value = 1
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        assert client.is_connected is False
+        assert client.is_streaming is True
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_connect_propagates_event_and_queue_byte_limits(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_set_max_event_size.return_value = 0
+        lib.mes_client_set_max_queue_bytes.return_value = 0
+        lib.mes_client_connect.return_value = 0
+        mock_load.return_value = lib
+
+        client = BinlogClient(max_event_size=128 * 1024 * 1024, max_queue_bytes=512 * 1024 * 1024)
+        client.connect()
+
+        lib.mes_client_set_max_event_size.assert_called_once_with(0xDEAD, 128 * 1024 * 1024)
+        lib.mes_client_set_max_queue_bytes.assert_called_once_with(0xDEAD, 512 * 1024 * 1024)
+        client.close()
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")

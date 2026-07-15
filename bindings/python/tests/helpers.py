@@ -5,6 +5,7 @@ to Python using struct.pack for binary construction.
 """
 
 import struct
+import zlib
 
 
 def build_event(type_code: int, timestamp: int, body: bytes) -> bytes:
@@ -28,8 +29,15 @@ def build_event(type_code: int, timestamp: int, body: bytes) -> bytes:
         0,  # next_position, 4 bytes LE
         0,  # flags, 2 bytes LE
     )
-    checksum = b"\x00\x00\x00\x00"
-    return header + body + checksum
+    event = header + body
+    return event + struct.pack("<I", zlib.crc32(event))
+
+
+def build_event_no_checksum(type_code: int, timestamp: int, body: bytes) -> bytes:
+    """Build a complete binlog event without a checksum trailer."""
+    event_length = 19 + len(body)
+    header = struct.pack("<IBIIIH", timestamp, type_code, 1, event_length, 0, 0)
+    return header + body
 
 
 def _write_u48_le(value: int) -> bytes:

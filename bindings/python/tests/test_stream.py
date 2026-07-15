@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -45,8 +46,6 @@ class TestStreamClose:
     async def test_close_awaits_inflight_poll(self) -> None:
         # When a poll() task is in flight, close() must stop the client to
         # unblock it and await its completion before destroying the client.
-        import asyncio
-
         stream = CdcStream.__new__(CdcStream)
         stream._closed = False
         stream._engine = MagicMock()
@@ -101,6 +100,24 @@ class TestStreamStartFailure:
         mock_client.close.assert_called_once()
         assert stream._client is None
         assert stream._engine is None
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_start_propagates_client_checksum_mode(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client.checksum_enabled = False
+        mock_client_cls.return_value = mock_client
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+
+        stream = CdcStream(host="127.0.0.1")
+        await stream._start()
+
+        mock_engine.set_checksum_enabled.assert_called_once_with(False)
+        await stream.close()
         assert not stream._started
 
     @pytest.mark.asyncio
@@ -229,3 +246,73 @@ class TestReconnectAttempts:
 
         # No reconnect should be attempted; stream should be closed
         assert stream._closed
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_constructor_failures_share_budget_with_immediate_poll_drop(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        client.poll.side_effect = RuntimeError("immediate drop")
+        mock_client_cls.side_effect = [
+            ConnectionError("connect refused 1"),
+            ConnectionError("connect refused 2"),
+            client,
+        ]
+        engine = MagicMock()
+        engine.next_event.return_value = None
+        mock_engine_cls.return_value = engine
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=2)
+
+        with (
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()),
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+        ):
+            await stream.__anext__()
+
+        assert mock_client_cls.call_count == 3
+        client.connect.assert_called_once()
+        client.start.assert_called_once()
+        client.poll.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_connect_failures_remain_inside_retry_loop(self) -> None:
+        stream = CdcStream.__new__(CdcStream)
+        stream._closed = False
+        stream._started = True
+        stream._max_reconnect_attempts = 3
+        stream._reconnect_attempts = 0
+        stream._backoff_task = None
+        stream._poll_task = None
+
+        engine = MagicMock()
+        engine.next_event.return_value = None
+        stream._engine = engine
+        stream._client = MagicMock()
+        reconnect = AsyncMock(
+            side_effect=[ConnectionError("connect 1"), ConnectionError("connect 2"), None]
+        )
+
+        with (
+            patch.object(stream, "_reconnect", reconnect),
+            patch("asyncio.to_thread", side_effect=RuntimeError("poll drop")),
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+        ):
+            await stream.__anext__()
+
+        assert reconnect.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_close_interrupts_backoff(self) -> None:
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=10)
+        stream._client = MagicMock()
+        stream._engine = MagicMock()
+        stream._reconnect_attempts = 10
+
+        backoff = asyncio.create_task(stream._wait_for_backoff())
+        await asyncio.sleep(0)
+        await stream.close()
+
+        assert backoff.done()
+        assert stream._backoff_task is None

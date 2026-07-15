@@ -102,6 +102,7 @@ class MESClientConfig(ctypes.Structure):
         ("ssl_cert", ctypes.c_char_p),
         ("ssl_key", ctypes.c_char_p),
         ("max_queue_size", ctypes.c_size_t),
+        ("allow_public_key_retrieval", ctypes.c_int32),
     ]
 
 
@@ -189,11 +190,12 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
 
     # mes_client_config_t has no C-side sizeof helper; validate the known
     # 64-bit layout directly (7 pointers + uint16 w/pad + 4x uint32 +
-    # enum w/pad + size_t = 96). On 32-bit platforms the size differs and
+    # enum w/pad + size_t + int w/pad = 104). On 32-bit platforms the size differs and
     # the layout is exercised at call time instead.
     import struct as _struct
+
     if _struct.calcsize("P") == 8:
-        expected_config = 96
+        expected_config = 104
         config_size = ctypes.sizeof(MESClientConfig)
         if config_size != expected_config:
             raise RuntimeError(
@@ -276,6 +278,10 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.mes_get_max_event_size.restype = ctypes.c_uint32
     lib.mes_get_max_event_size.argtypes = [ctypes.c_void_p]
 
+    # mes_set_checksum_enabled
+    lib.mes_set_checksum_enabled.restype = ctypes.c_int32
+    lib.mes_set_checksum_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
     # mes_set_log_callback
     lib.mes_set_log_callback.restype = None
     lib.mes_set_log_callback.argtypes = [MES_LOG_CALLBACK, ctypes.c_int32, ctypes.c_void_p]
@@ -349,8 +355,15 @@ _CLIENT_SYMBOLS = [
     "mes_client_stop",
     "mes_client_disconnect",
     "mes_client_is_connected",
+    "mes_client_is_streaming",
     "mes_client_last_error",
     "mes_client_current_gtid",
+    "mes_client_checksum_enabled",
+    "mes_client_set_max_event_size",
+    "mes_client_get_max_event_size",
+    "mes_client_set_max_queue_bytes",
+    "mes_client_get_max_queue_bytes",
+    "mes_client_queued_bytes",
     "mes_engine_set_metadata_conn",
 ]
 
@@ -423,11 +436,32 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
         lib.mes_client_is_connected.restype = ctypes.c_int32
         lib.mes_client_is_connected.argtypes = [ctypes.c_void_p]
 
+        lib.mes_client_is_streaming.restype = ctypes.c_int32
+        lib.mes_client_is_streaming.argtypes = [ctypes.c_void_p]
+
         lib.mes_client_last_error.restype = ctypes.c_char_p
         lib.mes_client_last_error.argtypes = [ctypes.c_void_p]
 
+        lib.mes_client_set_max_event_size.restype = ctypes.c_int32
+        lib.mes_client_set_max_event_size.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+
+        lib.mes_client_get_max_event_size.restype = ctypes.c_uint32
+        lib.mes_client_get_max_event_size.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_set_max_queue_bytes.restype = ctypes.c_int32
+        lib.mes_client_set_max_queue_bytes.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+
+        lib.mes_client_get_max_queue_bytes.restype = ctypes.c_size_t
+        lib.mes_client_get_max_queue_bytes.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_queued_bytes.restype = ctypes.c_size_t
+        lib.mes_client_queued_bytes.argtypes = [ctypes.c_void_p]
+
         lib.mes_client_current_gtid.restype = ctypes.c_char_p
         lib.mes_client_current_gtid.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_checksum_enabled.restype = ctypes.c_int32
+        lib.mes_client_checksum_enabled.argtypes = [ctypes.c_void_p]
 
         lib.mes_engine_set_metadata_conn.restype = ctypes.c_int32
         lib.mes_engine_set_metadata_conn.argtypes = [

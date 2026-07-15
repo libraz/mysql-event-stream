@@ -158,6 +158,8 @@ class TestClientConfig:
         # 0 is the sentinel that selects the engine default (10000);
         # it does not mean "unlimited" for the client config.
         assert ClientConfig().max_queue_size == 0
+        assert ClientConfig().max_queue_bytes == 256 * 1024 * 1024
+        assert ClientConfig().max_event_size == 64 * 1024 * 1024
 
     def test_max_queue_size_docstring_documents_default(self) -> None:
         assert ClientConfig.__doc__ is not None

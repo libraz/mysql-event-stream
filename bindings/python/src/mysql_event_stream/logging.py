@@ -8,9 +8,9 @@ diagnostics that are otherwise invisible from the bindings.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from enum import IntEnum
-from typing import Any
 
 from ._ffi import (
     MES_LOG_CALLBACK,
@@ -33,13 +33,28 @@ class LogLevel(IntEnum):
     DEBUG = MES_LOG_DEBUG
 
 
-# The native library stores the callback pointer process-wide, so the ctypes
-# trampoline must outlive this call. Keep a module-level reference; without it
-# the closure would be garbage-collected and the C side would call freed
-# memory. Reassigned on each set_log_callback() call; cleared when disabled.
-# Typed as Any: it holds a ctypes CFUNCTYPE instance, whose factory is not a
-# valid static type annotation.
-_active_callback: Any = None
+# StructuredLog instances in the C++ core retain immutable callback snapshots,
+# so a callback pointer may be invoked after a later set/unset call. Keep one
+# CFUNCTYPE trampoline alive for the entire module lifetime and swap only the
+# Python handler behind it. The RLock is held through handler invocation: a
+# completed replacement/unset therefore guarantees no old handler remains in
+# flight, while still allowing a handler to reconfigure logging recursively.
+_callback_lock = threading.RLock()
+_active_handler: Callable[[LogLevel, str], None] | None = None
+
+
+def _dispatch(c_level: int, message: bytes | None, _userdata: object) -> None:
+    with _callback_lock:
+        if _active_handler is None:
+            return
+        try:
+            text = message.decode("utf-8", "replace") if message else ""
+            _active_handler(LogLevel(c_level), text)
+        except Exception:  # noqa: BLE001 - a logging handler must not crash the core
+            pass
+
+
+_stable_callback = MES_LOG_CALLBACK(_dispatch)
 
 
 def set_log_callback(
@@ -62,24 +77,10 @@ def set_log_callback(
         Exceptions raised inside ``callback`` are swallowed: a logging handler
         must never disrupt the C core's stream processing.
     """
-    global _active_callback
+    global _active_handler
 
     lib = get_library()
-
-    if callback is None:
-        # Detach: install a null pointer and drop our retained trampoline.
-        lib.mes_set_log_callback(MES_LOG_CALLBACK(0), int(level), None)
-        _active_callback = None
-        return
-
-    def _trampoline(c_level: int, message: bytes | None, _userdata: object) -> None:
-        try:
-            text = message.decode("utf-8", "replace") if message else ""
-            callback(LogLevel(c_level), text)
-        except Exception:  # noqa: BLE001 - a logging handler must not crash the core
-            pass
-
-    trampoline = MES_LOG_CALLBACK(_trampoline)
-    # Retain BEFORE handing the pointer to C so a GC pause cannot free it.
-    _active_callback = trampoline
-    lib.mes_set_log_callback(trampoline, int(level), None)
+    with _callback_lock:
+        _active_handler = callback
+        native_callback = _stable_callback if callback is not None else MES_LOG_CALLBACK(0)
+        lib.mes_set_log_callback(native_callback, int(level), None)
