@@ -111,7 +111,10 @@ if(MES_ENABLE_UBSAN)
 endif()
 
 if(MES_ENABLE_COVERAGE)
-  target_compile_options(mes-objects PRIVATE --coverage)
+  # -fprofile-update=atomic keeps gcov counters correct under the multithreaded
+  # reader/consumer tests; without it concurrent updates race and geninfo rejects
+  # the resulting negative counts.
+  target_compile_options(mes-objects PRIVATE --coverage -fprofile-update=atomic)
 endif()
 
 # Core static library
