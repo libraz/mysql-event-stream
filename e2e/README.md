@@ -12,6 +12,17 @@ servers in Docker.
 The C++ and Python suites share a single database container per target; the
 Node.js suite uses its own container, so the two never collide on a port.
 
+## CI and release gates
+
+- Pull requests run all three surfaces against MySQL 8.4 and MariaDB 11.4.
+- The scheduled workflow runs the full MySQL 8.4/9.1 and MariaDB 10.11/11.4
+  matrix.
+- Tag publication calls the same full workflow first; Node prebuilds and Python
+  wheels declare that E2E job as a dependency, so no registry publication can
+  begin after a protocol-matrix failure.
+- A separate nightly safety workflow runs ASan, UBSan, TSan, and a three-minute
+  libFuzzer parser corpus.
+
 ## Quick start
 
 ```bash

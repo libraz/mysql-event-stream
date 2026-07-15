@@ -40,27 +40,30 @@ graph TD
 ### Node.js
 
 ```typescript
-import { MesEngine } from "@libraz/mysql-event-stream";
+import { CdcEngine } from "@libraz/mysql-event-stream";
 
-const engine = new MesEngine();
+const engine = new CdcEngine();
 
 // Feed raw binlog bytes from your replication stream
 engine.feed(binlogChunk);
 
 while (engine.hasEvents()) {
   const event = engine.nextEvent();
+  if (event === null) break;
   console.log(event.type, event.database, event.table);
   console.log("before:", event.before);
   console.log("after:", event.after);
 }
+
+engine.destroy();
 ```
 
 ### Python
 
 ```python
-from mysql_event_stream import MesEngine
+from mysql_event_stream import CdcEngine
 
-engine = MesEngine()
+engine = CdcEngine()
 
 # Feed raw binlog bytes
 engine.feed(binlog_chunk)
@@ -70,6 +73,8 @@ while engine.has_events():
     print(event.type, event.database, event.table)
     print("before:", event.before)
     print("after:", event.after)
+
+engine.close()
 ```
 
 ### C API
@@ -131,7 +136,7 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 ## Features
 
 - **Lightweight** - No external MySQL client library dependency, small binary size
-- **Zero native dependencies** - Ships as a self-contained binary; no libmysqlclient required (only OpenSSL)
+- **Self-contained packages** - No libmysqlclient dependency; release artifacts statically link OpenSSL and zlib
 - **Streaming** - Process events incrementally as bytes arrive
 - **Multi-language** - C/C++, Node.js (N-API), and Python (ctypes) bindings
 - **MySQL 8.4+** - Supports LTS and Innovation releases
@@ -244,13 +249,15 @@ const stream = new CdcStream({
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
 - OpenSSL development libraries
+- zlib development libraries
+- macOS 15.0+ for macOS prebuilt packages (Linux is recommended for servers)
 
 ```bash
 # macOS
-brew install cmake openssl
+brew install cmake openssl zlib
 
 # Ubuntu / Debian
-sudo apt install cmake build-essential libssl-dev pkg-config
+sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 
 # Clone
 git clone https://github.com/libraz/mysql-event-stream.git

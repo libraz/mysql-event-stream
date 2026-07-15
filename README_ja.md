@@ -40,27 +40,30 @@ graph TD
 ### Node.js
 
 ```typescript
-import { MesEngine } from "@libraz/mysql-event-stream";
+import { CdcEngine } from "@libraz/mysql-event-stream";
 
-const engine = new MesEngine();
+const engine = new CdcEngine();
 
 // レプリケーションストリームから受信した binlog バイト列を投入
 engine.feed(binlogChunk);
 
 while (engine.hasEvents()) {
   const event = engine.nextEvent();
+  if (event === null) break;
   console.log(event.type, event.database, event.table);
   console.log("before:", event.before);
   console.log("after:", event.after);
 }
+
+engine.destroy();
 ```
 
 ### Python
 
 ```python
-from mysql_event_stream import MesEngine
+from mysql_event_stream import CdcEngine
 
-engine = MesEngine()
+engine = CdcEngine()
 
 # binlog バイト列を投入
 engine.feed(binlog_chunk)
@@ -70,6 +73,8 @@ while engine.has_events():
     print(event.type, event.database, event.table)
     print("before:", event.before)
     print("after:", event.after)
+
+engine.close()
 ```
 
 ### C API
@@ -130,7 +135,7 @@ mes_destroy(engine);
 
 ## 特徴
 
-- **外部依存なし** - MySQL クライアントライブラリ不要。ワイヤープロトコルを自前実装した自己完結バイナリ
+- **自己完結パッケージ** - MySQL クライアントライブラリ不要。配布物は OpenSSL と zlib を静的リンク
 - **ストリーミング処理** - バイト列の到着に合わせて逐次的にイベントを処理
 - **多言語対応** - C/C++、Node.js (N-API)、Python (ctypes) バインディング
 - **MySQL 8.4+** - LTS および Innovation リリースに対応
@@ -241,13 +246,15 @@ const stream = new CdcStream({
 - CMake 3.20+
 - C++17 コンパイラ (GCC 9+ または Clang 10+)
 - OpenSSL 開発ライブラリ
+- zlib 開発ライブラリ
+- macOS向けビルド済みパッケージはmacOS 15.0以降（サーバー用途はLinuxを推奨）
 
 ```bash
 # macOS
-brew install cmake openssl
+brew install cmake openssl zlib
 
 # Ubuntu / Debian
-sudo apt install cmake build-essential libssl-dev pkg-config
+sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 
 # クローン
 git clone https://github.com/libraz/mysql-event-stream.git
