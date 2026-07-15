@@ -14,6 +14,7 @@ namespace mes_node {
 constexpr uint16_t kDefaultPort = 3306;
 constexpr uint32_t kDefaultServerId = 1;
 constexpr uint32_t kDefaultConnectTimeoutS = 10;
+constexpr uint32_t kDefaultReadTimeoutS = 30;
 
 /** Holds std::string values whose lifetime must outlive the mes_client_config_t
  *  that references them via c_str() pointers. */
@@ -65,6 +66,13 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
   }
   cfg.password = strings.password.c_str();
 
+  Napi::Value read_timeout_v = config.Get("readTimeoutS");
+  if (read_timeout_v.IsNumber()) {
+    cfg.read_timeout_s = read_timeout_v.As<Napi::Number>().Uint32Value();
+  } else {
+    cfg.read_timeout_s = kDefaultReadTimeoutS;
+  }
+
   Napi::Value server_id_v = config.Get("serverId");
   if (server_id_v.IsNumber()) {
     cfg.server_id = server_id_v.As<Napi::Number>().Uint32Value();
@@ -89,6 +97,10 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
     }
   }
   cfg.ssl_mode = static_cast<mes_ssl_mode_t>(ssl_mode);
+
+  Napi::Value allow_key_v = config.Get("allowPublicKeyRetrieval");
+  cfg.allow_public_key_retrieval =
+      allow_key_v.IsBoolean() && allow_key_v.As<Napi::Boolean>().Value() ? 1 : 0;
 
   Napi::Value ssl_ca_v = config.Get("sslCa");
   if (ssl_ca_v.IsString()) {

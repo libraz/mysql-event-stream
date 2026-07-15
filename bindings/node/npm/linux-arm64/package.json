@@ -1,0 +1,27 @@
+{
+  "name": "@libraz/mysql-event-stream-linux-arm64",
+  "version": "1.4.0",
+  "description": "Linux arm64 native addon for @libraz/mysql-event-stream",
+  "main": "mes-node.node",
+  "files": [
+    "mes-node.node"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/libraz/mysql-event-stream.git",
+    "directory": "bindings/node"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

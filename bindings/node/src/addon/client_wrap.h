@@ -27,8 +27,10 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   void Disconnect(const Napi::CallbackInfo& info);
   void Destroy(const Napi::CallbackInfo& info);
   Napi::Value GetIsConnected(const Napi::CallbackInfo& info);
+  Napi::Value GetIsStreaming(const Napi::CallbackInfo& info);
   Napi::Value GetLastError(const Napi::CallbackInfo& info);
   Napi::Value GetCurrentGtid(const Napi::CallbackInfo& info);
+  Napi::Value GetChecksumEnabled(const Napi::CallbackInfo& info);
 
   /** @brief Finalize deferred destroy if no workers remain in flight. */
   void MaybeFinalizeDeferredDestroy();

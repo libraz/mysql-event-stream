@@ -66,6 +66,7 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
                       InstanceMethod<&EngineWrap::SetMaxQueueSize>("setMaxQueueSize"),
                       InstanceMethod<&EngineWrap::SetMaxEventSize>("setMaxEventSize"),
                       InstanceMethod<&EngineWrap::GetMaxEventSize>("getMaxEventSize"),
+                      InstanceMethod<&EngineWrap::SetChecksumEnabled>("setChecksumEnabled"),
                       InstanceMethod<&EngineWrap::SetIncludeDatabases>("setIncludeDatabases"),
                       InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
                       InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
@@ -333,6 +334,24 @@ Napi::Value EngineWrap::GetMaxEventSize(const Napi::CallbackInfo& info) {
   return Napi::Number::New(env, static_cast<double>(value));
 }
 
+void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    return;
+  }
+  if (info.Length() < 1 || !info[0].IsBoolean()) {
+    Napi::TypeError::New(env, "Expected boolean argument").ThrowAsJavaScriptException();
+    return;
+  }
+  mes_error_t err = mes_set_checksum_enabled(engine_, info[0].As<Napi::Boolean>().Value() ? 1 : 0);
+  if (err != MES_OK) {
+    mes_node::MakeMesError(
+        env, std::string("mes_set_checksum_enabled failed: ") + MesErrorString(err), err)
+        .ThrowAsJavaScriptException();
+  }
+}
+
 // Helper to extract a string array from a JS Array argument.
 static std::vector<std::string> ExtractStringArray(Napi::Env env, const Napi::Value& val) {
   std::vector<std::string> result;
@@ -495,7 +514,13 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
         break;
     }
 
-    record.Set(key, val);
+    // Define an own data property instead of performing ordinary [[Set]].
+    // In particular, "__proto__" must remain a legal column key rather than
+    // invoking Object.prototype.__proto__ and changing this row's prototype.
+    record.DefineProperty(Napi::PropertyDescriptor::Value(
+        key, val,
+        static_cast<napi_property_attributes>(napi_writable | napi_enumerable |
+                                              napi_configurable)));
   }
 
   return record;

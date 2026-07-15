@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# Locally built native addon; prebuilt platform packages are produced in CI.
+*.node
+npm/*/*.node
 .yarn/*
 !.yarn/releases
 !.yarn/plugins

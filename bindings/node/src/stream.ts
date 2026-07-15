@@ -36,6 +36,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   private engine: CdcEngine | null = null;
   private closed = false;
   private iterator: AsyncGenerator<ChangeEvent> | null = null;
+  private cancelBackoff: (() => void) | null = null;
 
   constructor(config: StreamConfig) {
     this.config = config;
@@ -71,6 +72,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   /** Stop the stream and release all resources. */
   async close(): Promise<void> {
     this.closed = true;
+    this.cancelBackoff?.();
+    // A generator blocked in client.poll() cannot process iterator.return()
+    // until the native poll is interrupted. Stop first, then wait for the
+    // generator's finally block to release the remaining resources.
+    this.client?.stop();
     if (this.iterator) {
       await this.iterator.return(undefined);
       this.iterator = null;
@@ -78,7 +84,10 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     this.cleanup();
   }
 
-  /** Get the current GTID position. */
+  /**
+   * Get the delivered, committed checkpoint candidate. Persist it only after
+   * application processing succeeds; the stream does not provide exactly-once delivery.
+   */
   get currentGtid(): string {
     return this.client?.currentGtid ?? "";
   }
@@ -97,6 +106,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
   private async *generate(): AsyncGenerator<ChangeEvent> {
     this.engine = new CdcEngine();
+    this.engine.setMaxEventSize(this.config.maxEventSize ?? 64 * 1024 * 1024);
     this.enableMetadataSafe();
 
     let reconnectAttempts = 0;
@@ -104,7 +114,6 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
     try {
       while (!this.closed) {
-        this.client = new BinlogClient(this.config);
         // Bytes the engine declined to consume on the previous feed (e.g. when
         // a queue limit applies backpressure). They are prepended to the next
         // chunk so no data is lost. Scoped per-connection: on reconnect the
@@ -112,8 +121,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         // from the dropped connection must not carry over.
         let leftover: Uint8Array | null = null;
         try {
+          // Construction performs connect(), so it belongs to the same retry
+          // budget as start() and poll().
+          this.client = new BinlogClient(this.config);
           this.client.start();
-          reconnectAttempts = 0;
+          this.engine!.setChecksumEnabled(this.client.checksumEnabled);
 
           while (!this.closed) {
             const result = await this.client.poll();
@@ -130,6 +142,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
             const consumed = this.engine!.feed(chunk);
             leftover = consumed < chunk.length ? chunk.subarray(consumed) : null;
+            if (result.data) {
+              // A real protocol event proves the connection made progress.
+              // Merely accepting the connection/start command does not.
+              reconnectAttempts = 0;
+            }
 
             for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
               yield ev;
@@ -147,7 +164,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
             throw err;
           }
 
-          const gtid = this.client.currentGtid;
+          const gtid = this.client?.currentGtid ?? "";
           this.cleanupClient();
 
           reconnectAttempts++;
@@ -160,7 +177,8 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           const kJitterMin = 0.5;
           const baseDelay = Math.min(kBaseDelayMs * reconnectAttempts, kMaxDelayMs);
           const delay = baseDelay * (kJitterMin + Math.random() * (1 - kJitterMin));
-          await new Promise((resolve) => setTimeout(resolve, delay));
+          await this.waitForBackoff(delay);
+          if (this.closed) break;
 
           this.engine!.reset();
           if (gtid) {
@@ -177,6 +195,20 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
       // via .return() (break in for-await), or via .throw().
       this.cleanup();
     }
+  }
+
+  private waitForBackoff(delayMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = () => {
+        clearTimeout(timer);
+        if (this.cancelBackoff === cancel) this.cancelBackoff = null;
+        resolve();
+      };
+      const cancel = () => finish();
+      this.cancelBackoff = cancel;
+      timer = setTimeout(finish, delayMs);
+    });
   }
 
   private cleanupClient(): void {

@@ -1,10 +1,8 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createRequire } from "node:module";
+import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
-
-const require = createRequire(import.meta.url);
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -25,6 +23,7 @@ interface NativeEngine {
   setMaxQueueSize(maxSize: number): void;
   setMaxEventSize(maxEventSize: number): void;
   getMaxEventSize(): number;
+  setChecksumEnabled(enabled: boolean): void;
   setIncludeDatabases(databases: string[]): void;
   setIncludeTables(tables: string[]): void;
   setExcludeTables(tables: string[]): void;
@@ -32,7 +31,7 @@ interface NativeEngine {
   enableMetadata(config: ClientConfig): void;
 }
 
-const addon: NativeAddon = require("../build/Release/mes-node.node");
+const addon = loadNativeAddon<NativeAddon>();
 
 /** Native N-API based CDC engine for parsing MySQL 8.4 binlog streams. */
 export class CdcEngine {
@@ -100,6 +99,16 @@ export class CdcEngine {
   getMaxEventSize(): number {
     this.ensureNotDestroyed();
     return this.engine!.getMaxEventSize();
+  }
+
+  /**
+   * Set whether raw events carry a trailing CRC32 checksum. Disable this for
+   * checksum=NONE streams that begin after the format-description event. A
+   * later format-description event overrides the setting with its descriptor.
+   */
+  setChecksumEnabled(enabled: boolean): void {
+    this.ensureNotDestroyed();
+    this.engine!.setChecksumEnabled(enabled);
   }
 
   /** Set database include filter. Only events from these databases are processed. Empty array = all. */

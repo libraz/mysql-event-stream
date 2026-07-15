@@ -113,6 +113,7 @@ export interface ClientConfig {
   user?: string;
   password?: string;
   serverId?: number;
+  /** Empty/omitted snapshots the server's current executed set at stream start. */
   startGtid?: string;
   connectTimeoutS?: number;
   readTimeoutS?: number;
@@ -124,8 +125,20 @@ export interface ClientConfig {
   sslCert?: string;
   /** Path to client private key file. */
   sslKey?: string;
+  /**
+   * Permit unauthenticated RSA key retrieval without TLS (default false).
+   * This is MITM-sensitive; prefer VerifyCa or VerifyIdentity TLS.
+   */
+  allowPublicKeyRetrieval?: boolean;
   /** Maximum internal event queue size (0 = default 10000). */
   maxQueueSize?: number;
+  /** Total queued payload byte budget (default 256 MiB; 0 restores default). */
+  maxQueueBytes?: number;
+  /**
+   * Maximum binlog event size accepted by both the client and parser
+   * (default 64 MiB; 0 resolves to the 1 GiB hard cap).
+   */
+  maxEventSize?: number;
 }
 
 /** CdcStream configuration options (extends ClientConfig). */

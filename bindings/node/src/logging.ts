@@ -1,15 +1,13 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
+import { loadNativeAddon } from "./native.js";
 
 interface LogAddon {
   setLogCallback(callback: ((level: number, message: string) => void) | null, level: number): void;
 }
 
-const addon: LogAddon = require("../build/Release/mes-node.node");
+const addon = loadNativeAddon<LogAddon>();
 
 /**
  * Severity levels for native log messages (mirrors the C ABI
@@ -33,8 +31,11 @@ export type LogHandler = (level: LogLevel, message: string) => void;
  *
  * The handler is global to the loaded addon — not per-engine or per-client —
  * matching the C ABI. Messages are marshalled from the core's reader thread to
- * the JS event loop, so the handler always runs on the main thread. Under heavy
- * load some messages may be dropped rather than block stream processing.
+ * the JS event loop, so the handler always runs on the environment's JS
+ * thread. The native queue holds at most 256 pending records; overflow is
+ * dropped rather than blocking stream processing, then reported as one
+ * `event=node_log_queue_overflow dropped=N` warning when delivery resumes.
+ * A registered handler does not keep a process or Worker alive by itself.
  *
  * @param handler Called as `handler(level, message)` for each record, or `null`
  *   to remove the current handler.

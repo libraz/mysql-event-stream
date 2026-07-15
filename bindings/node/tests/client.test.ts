@@ -11,13 +11,24 @@ describe("BinlogClient", () => {
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999 })).toThrow();
   });
 
+  it("rejects invalid byte and event limits before connecting", () => {
+    expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxQueueBytes: -1 })).toThrow(
+      /maxQueueBytes must be non-negative/,
+    );
+    expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxEventSize: -1 })).toThrow(
+      /maxEventSize must fit in uint32/,
+    );
+  });
+
   it("should expose readonly properties after failed construction", () => {
     // Even when construction throws, the class interface is correct
     const client = Object.create(BinlogClient.prototype);
     // Accessing properties on a prototype-only object returns defaults
     expect(client.isConnected).toBe(false);
+    expect(client.isStreaming).toBe(false);
     expect(client.lastError).toBe("");
     expect(client.currentGtid).toBe("");
+    expect(client.checksumEnabled).toBe(false);
   });
 
   it("destroy should be idempotent", () => {

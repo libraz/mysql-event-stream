@@ -16,6 +16,9 @@ const mocks = vi.hoisted(() => ({
   // Records the chunk fed and returns the number of bytes consumed. Default:
   // consume everything. Tests simulating backpressure override this.
   feedImpl: vi.fn((chunk: Uint8Array) => chunk.length),
+  checksumImpl: vi.fn(),
+  maxEventSizeImpl: vi.fn(),
+  stopImpl: vi.fn(),
 }));
 
 vi.mock("../src/client.js", () => ({
@@ -32,7 +35,12 @@ vi.mock("../src/client.js", () => ({
     get currentGtid(): string {
       return "";
     }
-    stop(): void {}
+    get checksumEnabled(): boolean {
+      return true;
+    }
+    stop(): void {
+      mocks.stopImpl();
+    }
     disconnect(): void {}
     destroy(): void {}
   },
@@ -46,6 +54,12 @@ vi.mock("../src/engine.js", () => ({
     }
     nextEvent(): null {
       return null;
+    }
+    setChecksumEnabled(enabled: boolean): void {
+      mocks.checksumImpl(enabled);
+    }
+    setMaxEventSize(maxEventSize: number): void {
+      mocks.maxEventSizeImpl(maxEventSize);
     }
     reset(): void {}
     destroy(): void {}
@@ -82,6 +96,77 @@ describe("CdcStream", () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     await stream.close();
     await expect(stream.close()).resolves.toBeUndefined();
+  });
+
+  it("propagates the client checksum mode to the raw engine", async () => {
+    mocks.checksumImpl.mockReset();
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5)),
+    );
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.checksumImpl).toHaveBeenCalledWith(true));
+    await stream.close();
+    await next;
+  });
+
+  it("propagates one event-size limit to the client and raw engine", async () => {
+    mocks.clientCtor.mockClear();
+    mocks.maxEventSizeImpl.mockClear();
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) => setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5)),
+    );
+
+    const stream = new CdcStream({
+      host: "127.0.0.1",
+      maxEventSize: 128 * 1024 * 1024,
+      maxQueueBytes: 512 * 1024 * 1024,
+    });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => {
+      expect(mocks.clientCtor).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxEventSize: 128 * 1024 * 1024,
+          maxQueueBytes: 512 * 1024 * 1024,
+        }),
+      );
+      expect(mocks.maxEventSizeImpl).toHaveBeenCalledWith(128 * 1024 * 1024);
+    });
+    await stream.close();
+    await next;
+  });
+
+  it("close stops a pending idle poll before waiting for iterator return", async () => {
+    mocks.clientCtor.mockClear();
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.stopImpl.mockReset();
+
+    let releasePoll: (() => void) | undefined;
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePoll = () => resolve({ data: null, isHeartbeat: false });
+        }),
+    );
+    mocks.stopImpl.mockImplementation(() => releasePoll?.());
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const iterator = stream[Symbol.asyncIterator]();
+    const nextPromise = iterator.next();
+    await vi.waitFor(() => expect(mocks.pollImpl).toHaveBeenCalledTimes(1));
+
+    await expect(stream.close()).resolves.toBeUndefined();
+    await expect(nextPromise).resolves.toEqual({ done: true, value: undefined });
+    expect(mocks.stopImpl).toHaveBeenCalled();
   });
 
   it("should implement AsyncDisposable", () => {
@@ -193,6 +278,78 @@ describe("CdcStream", () => {
       // With one allowed retry, start() runs the initial attempt plus one retry.
       expect(attempts).toBe(2);
       await stream.close();
+    });
+
+    it("charges constructor failures to the same retry budget", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.pollImpl.mockReset();
+      let constructorAttempts = 0;
+      mocks.clientCtor.mockImplementation(() => {
+        constructorAttempts++;
+        if (constructorAttempts <= 2) throw new Error("connect refused");
+      });
+      mocks.startImpl.mockImplementation(() => {
+        const err: Error & { code?: number } = new Error("auth failed");
+        err.code = MesErrorCode.Auth;
+        throw err;
+      });
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        maxReconnectAttempts: 2,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("auth failed");
+
+      expect(constructorAttempts).toBe(3);
+      expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not reset the budget after accept then immediate poll failure", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {});
+      mocks.pollImpl.mockReset();
+      mocks.pollImpl.mockRejectedValue(new Error("immediate drop"));
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        maxReconnectAttempts: 1,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("immediate drop");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+      expect(mocks.startImpl).toHaveBeenCalledTimes(2);
+      expect(mocks.pollImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("close interrupts reconnect backoff", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {
+        throw new Error("temporary outage");
+      });
+      mocks.pollImpl.mockReset();
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        maxReconnectAttempts: 10,
+      });
+      const iterator = stream[Symbol.asyncIterator]();
+      const nextPromise = iterator.next();
+      await vi.waitFor(() => expect(mocks.startImpl).toHaveBeenCalledTimes(1));
+
+      await expect(stream.close()).resolves.toBeUndefined();
+      await expect(nextPromise).resolves.toEqual({ done: true, value: undefined });
+      expect(mocks.startImpl).toHaveBeenCalledTimes(1);
     });
   });
 });

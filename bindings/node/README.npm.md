@@ -12,15 +12,20 @@ Lightweight CDC (Change Data Capture) engine for Node.js supporting MySQL 8.4+ a
 npm install @libraz/mysql-event-stream
 ```
 
-Requires CMake, a C++17 compiler, and OpenSSL dev headers to build the native addon:
+The package installs a matching prebuilt N-API addon through an optional
+platform dependency. Build tools and native development headers are not needed.
 
-```bash
-# macOS
-brew install cmake openssl
+Published prebuilds support:
 
-# Ubuntu / Debian
-sudo apt install cmake build-essential libssl-dev pkg-config
-```
+- Linux x64 and arm64 with glibc 2.28 or newer
+- macOS 15.0 or newer on x64 and arm64 (development use)
+
+Optional dependencies must remain enabled. Alpine/musl, Windows, and other
+targets are not currently published.
+
+OpenSSL 3.5 and ZLIB are statically linked into every prebuild. Linux prebuilds
+also statically link the GNU C++ and GCC runtimes and are built in a glibc 2.28
+container; macOS prebuilds depend only on Apple system libraries at runtime.
 
 ## Usage
 
@@ -49,6 +54,8 @@ for await (const event of stream) {
 import { CdcEngine } from "@libraz/mysql-event-stream";
 
 const engine = new CdcEngine();
+// Only needed when a checksum=NONE byte stream starts after its FDE:
+// engine.setChecksumEnabled(false);
 engine.feed(binlogChunk);
 
 while (engine.hasEvents()) {
@@ -58,6 +65,20 @@ while (engine.hasEvents()) {
 
 engine.destroy();
 ```
+
+### Structured logging
+
+```typescript
+import { LogLevel, setLogCallback } from "@libraz/mysql-event-stream";
+
+setLogCallback((level, message) => console.error(level, message), LogLevel.Warn);
+```
+
+The callback is process-wide, but does not keep a process or Worker alive by
+itself. Native delivery is bounded to 256 pending records. If the JavaScript
+thread falls behind, excess diagnostics are dropped and the next delivered
+record is preceded by `event=node_log_queue_overflow dropped=N`. Call
+`setLogCallback(null)` when the handler is no longer needed.
 
 ### SSL/TLS
 
@@ -107,7 +128,7 @@ any-thread cancellation path and may be used to unblock a pending poll/iterator.
 ## Features
 
 - **Native performance** -- C++ core with N-API binding, >100k events/sec
-- **No libmysqlclient** -- MySQL / MariaDB wire protocol implemented directly; only OpenSSL required
+- **No libmysqlclient** -- MySQL / MariaDB wire protocol implemented directly; OpenSSL and ZLIB are bundled
 - **Streaming** -- Process events incrementally as bytes arrive
 - **MySQL 8.4+ and MariaDB 10.11+** -- Auto-detects server flavor and negotiates the appropriate binlog protocol
 - **GTID support** -- BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)

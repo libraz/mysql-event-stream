@@ -6,6 +6,7 @@ import { CdcEngine } from "../src/engine.js";
 import {
   buildDeleteRowsBody,
   buildEvent,
+  buildEventNoChecksum,
   buildRotateBody,
   buildTableMapBody,
   buildUpdateRowsBody,
@@ -62,6 +63,43 @@ describe("CdcEngine", () => {
     // Standalone mode (no metadata connection): name resolution is not
     // attempted, so namesResolved is reported as true.
     expect(event!.namesResolved).toBe(true);
+  });
+
+  it("keeps prototype-like column names as own data properties", async () => {
+    engine = await CdcEngine.create();
+
+    for (const [index, columnName] of ["__proto__", "constructor", "prototype"].entries()) {
+      const tableId = index + 10;
+      const tm = buildEvent(
+        TABLE_MAP_EVENT,
+        1000,
+        buildTableMapBody(tableId, "testdb", "special_names", columnName),
+      );
+      const wr = buildEvent(WRITE_ROWS_EVENT, 1000, buildWriteRowsBody(tableId, 40 + index));
+      engine.feed(concat(tm, wr));
+
+      const row = engine.nextEvent()?.after;
+      expect(row).not.toBeNull();
+      expect(Object.hasOwn(row, columnName)).toBe(true);
+      expect(row?.[columnName]).toBe(40 + index);
+      expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    }
+  });
+
+  it("should parse checksum=NONE events after an explicit override", async () => {
+    engine = await CdcEngine.create();
+    engine.setChecksumEnabled(false);
+    const tm = buildEventNoChecksum(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "db", "t"));
+    const wr = buildEventNoChecksum(WRITE_ROWS_EVENT, 1000, buildWriteRowsBody(1, 73));
+    engine.feed(concat(tm, wr));
+    expect(engine.nextEvent()?.after?.["0"]).toBe(73);
+  });
+
+  it("should reject a corrupted CRC32 event", async () => {
+    engine = await CdcEngine.create();
+    const event = buildEvent(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "db", "t"));
+    event[20] ^= 0x40;
+    expect(() => engine.feed(event)).toThrow("checksum mismatch");
   });
 
   it("should parse UPDATE event", async () => {

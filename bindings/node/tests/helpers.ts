@@ -23,13 +23,49 @@ export function buildEvent(typeCode: number, timestamp: number, body: Uint8Array
   // Body
   buf.set(body, 19);
 
-  // Checksum (4 zero bytes, already zero from Uint8Array initialization)
+  // CRC32 checksum over header + body.
+  view.setUint32(eventLength - 4, crc32(buf.subarray(0, eventLength - 4)), true);
 
   return buf;
 }
 
+/** Build a complete binlog event without a checksum trailer. */
+export function buildEventNoChecksum(
+  typeCode: number,
+  timestamp: number,
+  body: Uint8Array,
+): Uint8Array {
+  const eventLength = 19 + body.length;
+  const buf = new Uint8Array(eventLength);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, timestamp, true);
+  buf[4] = typeCode;
+  view.setUint32(5, 1, true);
+  view.setUint32(9, eventLength, true);
+  view.setUint32(13, 0, true);
+  view.setUint16(17, 0, true);
+  buf.set(body, 19);
+  return buf;
+}
+
+function crc32(data: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 /** Build a TABLE_MAP_EVENT body with a single INT column. */
-export function buildTableMapBody(tableId: number, db: string, tableName: string): Uint8Array {
+export function buildTableMapBody(
+  tableId: number,
+  db: string,
+  tableName: string,
+  columnName?: string,
+): Uint8Array {
   const parts: number[] = [];
 
   // table_id (6 bytes LE)
@@ -59,6 +95,13 @@ export function buildTableMapBody(tableId: number, db: string, tableName: string
   parts.push(0);
   // null_bitmap: 1 byte, bit 0 = 1 (nullable)
   parts.push(0x01);
+
+  if (columnName !== undefined) {
+    const nameBytes = new TextEncoder().encode(columnName);
+    // Optional metadata COLUMN_NAME (type 4): field length followed by a
+    // length-encoded string for each column (one column in this helper).
+    parts.push(0x04, nameBytes.length + 1, nameBytes.length, ...nameBytes);
+  }
 
   return new Uint8Array(parts);
 }

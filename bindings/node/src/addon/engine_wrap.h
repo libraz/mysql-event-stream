@@ -23,6 +23,7 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   void SetMaxQueueSize(const Napi::CallbackInfo& info);
   void SetMaxEventSize(const Napi::CallbackInfo& info);
   Napi::Value GetMaxEventSize(const Napi::CallbackInfo& info);
+  void SetChecksumEnabled(const Napi::CallbackInfo& info);
   void SetIncludeDatabases(const Napi::CallbackInfo& info);
   void SetIncludeTables(const Napi::CallbackInfo& info);
   void SetExcludeTables(const Napi::CallbackInfo& info);

@@ -5,7 +5,6 @@ export default defineConfig({
     include: ["e2e/tests/**/*.e2e.test.ts"],
     testTimeout: 120_000,
     sequence: { concurrent: false },
-    poolOptions: { threads: { maxThreads: 1 } },
     fileParallelism: false,
   },
 });

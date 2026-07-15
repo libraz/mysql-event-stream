@@ -86,8 +86,10 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
                       InstanceMethod<&ClientWrap::Disconnect>("disconnect"),
                       InstanceMethod<&ClientWrap::Destroy>("destroy"),
                       InstanceAccessor<&ClientWrap::GetIsConnected>("isConnected"),
+                      InstanceAccessor<&ClientWrap::GetIsStreaming>("isStreaming"),
                       InstanceAccessor<&ClientWrap::GetLastError>("lastError"),
                       InstanceAccessor<&ClientWrap::GetCurrentGtid>("currentGtid"),
+                      InstanceAccessor<&ClientWrap::GetChecksumEnabled>("checksumEnabled"),
                   });
 
   exports.Set("BinlogClient", func);
@@ -136,14 +138,6 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     c_config.start_gtid = strings.start_gtid.c_str();
   }
 
-  constexpr uint32_t kDefaultReadTimeoutS = 30;
-  Napi::Value read_timeout_v = config.Get("readTimeoutS");
-  if (read_timeout_v.IsNumber()) {
-    c_config.read_timeout_s = read_timeout_v.As<Napi::Number>().Uint32Value();
-  } else {
-    c_config.read_timeout_s = kDefaultReadTimeoutS;
-  }
-
   Napi::Value max_queue_size_v = config.Get("maxQueueSize");
   if (max_queue_size_v.IsNumber()) {
     // max_queue_size is size_t (64-bit) in the C ABI. Read via Int64Value() to
@@ -154,6 +148,40 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
       return;
     }
     c_config.max_queue_size = static_cast<size_t>(max_queue_size);
+  }
+
+  uint32_t max_event_size = 64u * 1024u * 1024u;
+  Napi::Value max_event_size_v = config.Get("maxEventSize");
+  if (max_event_size_v.IsNumber()) {
+    int64_t raw = max_event_size_v.As<Napi::Number>().Int64Value();
+    if (raw < 0 || raw > UINT32_MAX) {
+      Napi::RangeError::New(env, "maxEventSize must fit in uint32").ThrowAsJavaScriptException();
+      return;
+    }
+    max_event_size = static_cast<uint32_t>(raw);
+  }
+  mes_error_t limit_err = mes_client_set_max_event_size(client_, max_event_size);
+  if (limit_err != MES_OK) {
+    mes_node::MakeMesError(env, "mes_client_set_max_event_size failed", limit_err)
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  size_t max_queue_bytes = 256u * 1024u * 1024u;
+  Napi::Value max_queue_bytes_v = config.Get("maxQueueBytes");
+  if (max_queue_bytes_v.IsNumber()) {
+    int64_t raw = max_queue_bytes_v.As<Napi::Number>().Int64Value();
+    if (raw < 0) {
+      Napi::RangeError::New(env, "maxQueueBytes must be non-negative").ThrowAsJavaScriptException();
+      return;
+    }
+    max_queue_bytes = static_cast<size_t>(raw);
+  }
+  limit_err = mes_client_set_max_queue_bytes(client_, max_queue_bytes);
+  if (limit_err != MES_OK) {
+    mes_node::MakeMesError(env, "mes_client_set_max_queue_bytes failed", limit_err)
+        .ThrowAsJavaScriptException();
+    return;
   }
 
   mes_error_t err = mes_client_connect(client_, &c_config);
@@ -270,6 +298,12 @@ Napi::Value ClientWrap::GetIsConnected(const Napi::CallbackInfo& info) {
   return Napi::Boolean::New(env, mes_client_is_connected(client_) == 1);
 }
 
+Napi::Value ClientWrap::GetIsStreaming(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!client_) return Napi::Boolean::New(env, false);
+  return Napi::Boolean::New(env, mes_client_is_streaming(client_) == 1);
+}
+
 Napi::Value ClientWrap::GetLastError(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (!client_) return Napi::String::New(env, "");
@@ -282,4 +316,9 @@ Napi::Value ClientWrap::GetCurrentGtid(const Napi::CallbackInfo& info) {
   if (!client_) return Napi::String::New(env, "");
   const char* gtid = mes_client_current_gtid(client_);
   return Napi::String::New(env, gtid ? gtid : "");
+}
+
+Napi::Value ClientWrap::GetChecksumEnabled(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  return Napi::Boolean::New(env, client_ != nullptr && mes_client_checksum_enabled(client_) != 0);
 }

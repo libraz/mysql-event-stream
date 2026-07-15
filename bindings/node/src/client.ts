@@ -1,10 +1,8 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { createRequire } from "node:module";
+import { loadNativeAddon } from "./native.js";
 import type { ClientConfig, PollResult } from "./types.js";
-
-const require = createRequire(import.meta.url);
 
 interface NativeAddon {
   BinlogClient?: new () => NativeClient;
@@ -19,11 +17,13 @@ interface NativeClient {
   disconnect(): void;
   destroy(): void;
   readonly isConnected: boolean;
+  readonly isStreaming: boolean;
   readonly lastError: string;
   readonly currentGtid: string;
+  readonly checksumEnabled: boolean;
 }
 
-const addon: NativeAddon = require("../build/Release/mes-node.node");
+const addon = loadNativeAddon<NativeAddon>();
 
 /** BinlogClient for connecting to MySQL and streaming binlog events. */
 export class BinlogClient {
@@ -93,14 +93,27 @@ export class BinlogClient {
     return this.client?.isConnected ?? false;
   }
 
+  /** Whether poll() can still drain events or one queued terminal error. */
+  get isStreaming(): boolean {
+    return this.client?.isStreaming ?? false;
+  }
+
   /** Get the last error message. */
   get lastError(): string {
     return this.client?.lastError ?? "";
   }
 
-  /** Get the current GTID position. */
+  /**
+   * Get the delivered, committed checkpoint candidate. This advances only
+   * after the caller polls past a commit boundary; it is not a durable ack.
+   */
   get currentGtid(): string {
     return this.client?.currentGtid ?? "";
+  }
+
+  /** Checksum mode negotiated for events returned by poll(). */
+  get checksumEnabled(): boolean {
+    return this.client?.checksumEnabled ?? false;
   }
 
   private ensureNotDestroyed(): void {
