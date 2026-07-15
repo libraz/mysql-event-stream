@@ -10,7 +10,167 @@ permissions:
   id-token: write
 
 jobs:
-  publish-npm:
+  e2e-release:
+    uses: ./.github/workflows/e2e.yml
+    with:
+      targets_json: '["mysql:8.4","mysql:9.1","mariadb:10.11","mariadb:11.4"]'
+
+  node-prebuild-linux:
+    needs: [e2e-release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x64
+            target: linux-x64
+            container: quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            target: linux-arm64
+            container: quay.io/pypa/manylinux_2_28_aarch64:2026.06.04-1
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build tools
+        run: |
+          dnf install -y perl-core make curl tar gzip
+          /opt/python/cp311-cp311/bin/python -m pip install 'cmake>=3.20,<5'
+          echo '/opt/python/cp311-cp311/bin' >> "$GITHUB_PATH"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.22.1'
+
+      - run: corepack enable
+      - run: corepack prepare yarn@4.9.1 --activate
+
+      - name: Build pinned static dependencies
+        run: .github/scripts/build-static-deps.sh /opt/mes-deps
+
+      - name: Build native addon
+        working-directory: bindings/node
+        run: |
+          yarn install --immutable
+          yarn cmake-js compile \
+            --CDMES_BUNDLE_DEPENDENCIES=ON \
+            --CDCMAKE_PREFIX_PATH=/opt/mes-deps
+          yarn build:js
+
+      - name: Verify Linux linkage policy
+        working-directory: bindings/node
+        run: |
+          ldd build/Release/mes-node.node
+          if ldd build/Release/mes-node.node | grep -E 'lib(ssl|crypto|z|stdc\+\+|gcc_s)\.so'; then
+            echo 'Unexpected dynamic dependency in Linux prebuild' >&2
+            exit 1
+          fi
+          if readelf --version-info build/Release/mes-node.node | grep -E 'GLIBC_2\.(29|[3-9][0-9])'; then
+            echo 'Linux prebuild requires glibc newer than 2.28' >&2
+            exit 1
+          fi
+          strings build/Release/mes-node.node > "$RUNNER_TEMP/mes-node.strings"
+          grep -q 'OpenSSL 3.5.7' "$RUNNER_TEMP/mes-node.strings"
+
+      - name: Pack and clean-install smoke test
+        working-directory: bindings/node
+        run: |
+          mkdir -p "$RUNNER_TEMP/node-packages" npm/${{ matrix.target }}
+          cp build/Release/mes-node.node npm/${{ matrix.target }}/mes-node.node
+          npm pack ./npm/${{ matrix.target }} --pack-destination "$RUNNER_TEMP/node-packages"
+          npm pack . --pack-destination "$RUNNER_TEMP/node-packages"
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          npm init -y
+          npm install --ignore-scripts --offline \
+            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-${{ matrix.target }}-*.tgz \
+            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-[0-9]*.tgz
+          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: node-prebuild-${{ matrix.target }}
+          path: ${{ runner.temp }}/node-packages/*mysql-event-stream-${{ matrix.target }}-*.tgz
+
+  node-prebuild-macos:
+    needs: [e2e-release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x64
+            target: darwin-x64
+          - os: macos-15
+            arch: arm64
+            target: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.22.1'
+
+      - run: brew install cmake
+      - run: corepack enable
+      - run: corepack prepare yarn@4.9.1 --activate
+
+      - name: Build pinned static dependencies
+        run: .github/scripts/build-static-deps.sh "$RUNNER_TEMP/mes-deps"
+
+      - name: Build and test native addon
+        working-directory: bindings/node
+        run: |
+          yarn install --immutable
+          yarn cmake-js compile \
+            --CDMES_BUNDLE_DEPENDENCIES=ON \
+            --CDCMAKE_PREFIX_PATH="$RUNNER_TEMP/mes-deps" \
+            --CDCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+          yarn build:js
+          yarn check
+          yarn test
+
+      - name: Verify macOS linkage policy
+        working-directory: bindings/node
+        run: |
+          test "$(sw_vers -productVersion | cut -d. -f1)" = "${MACOSX_DEPLOYMENT_TARGET%%.*}"
+          otool -L build/Release/mes-node.node
+          if otool -L build/Release/mes-node.node | grep -E '/(opt|usr/local)/|lib(ssl|crypto|z)\.'; then
+            echo 'Unexpected non-system dynamic dependency in macOS prebuild' >&2
+            exit 1
+          fi
+          otool -l build/Release/mes-node.node > "$RUNNER_TEMP/mes-node-load-commands.txt"
+          grep -A5 LC_BUILD_VERSION "$RUNNER_TEMP/mes-node-load-commands.txt" | grep -q 'minos 15.0'
+          strings build/Release/mes-node.node > "$RUNNER_TEMP/mes-node.strings"
+          grep -q 'OpenSSL 3.5.7' "$RUNNER_TEMP/mes-node.strings"
+
+      - name: Pack and clean-install smoke test
+        working-directory: bindings/node
+        run: |
+          mkdir -p "$RUNNER_TEMP/node-packages" npm/${{ matrix.target }}
+          cp build/Release/mes-node.node npm/${{ matrix.target }}/mes-node.node
+          npm pack ./npm/${{ matrix.target }} --pack-destination "$RUNNER_TEMP/node-packages"
+          npm pack . --pack-destination "$RUNNER_TEMP/node-packages"
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          npm init -y
+          npm install --ignore-scripts --offline \
+            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-${{ matrix.target }}-*.tgz \
+            "$RUNNER_TEMP/node-packages"/*mysql-event-stream-[0-9]*.tgz
+          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: node-prebuild-${{ matrix.target }}
+          path: ${{ runner.temp }}/node-packages/*mysql-event-stream-${{ matrix.target }}-*.tgz
+
+  publish-npm-platforms:
+    needs: [node-prebuild-linux, node-prebuild-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,128 +180,147 @@ jobs:
           node-version: '22.22.1'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm install -g npm@latest
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: node-prebuild-*
+          path: prebuilds/
+          merge-multiple: true
+
+      - name: Publish platform packages
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME#v}" = "$version"
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            name="$(node -p "require('./npm/$target/package.json').name")"
+            package_file="$(find ../../prebuilds -name "*mysql-event-stream-$target-$version.tgz" -print -quit)"
+            test -n "$package_file"
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "::notice::$name@$version already published, skipping"
+            else
+              npm publish "$package_file" --access public --provenance
+            fi
+          done
+
+  publish-npm:
+    needs: [publish-npm-platforms]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.22.1'
+          registry-url: 'https://registry.npmjs.org'
+
       - run: corepack enable
       - run: corepack prepare yarn@4.9.1 --activate
 
-      - uses: actions/cache@v6
+      - uses: actions/download-artifact@v8
         with:
-          path: |
-            bindings/node/.yarn/cache
-            bindings/node/node_modules
-          key: ${{ runner.os }}-yarn-${{ hashFiles('bindings/node/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-yarn-
+          name: node-prebuild-linux-x64
+          path: prebuild/
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential libssl-dev pkg-config
-
-      - name: Build and test C++ core
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel
-
-      - name: Build and test Node.js binding
+      - name: Install and test
         working-directory: bindings/node
         run: |
           yarn install --immutable
-          yarn build
+          mkdir -p build/Release
+          tar -xzf ../../prebuild/*linux-x64-*.tgz -C build/Release --strip-components=1 package/mes-node.node
+          yarn build:js
           yarn check
           yarn test
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          name: Release ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to npm
+      - name: Pack and verify registry install
         working-directory: bindings/node
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          NAME=$(node -p "require('./package.json').name")
-          if npm view "${NAME}@${VERSION}" version > /dev/null 2>&1; then
-            echo "::notice::${NAME}@${VERSION} already published, skipping"
+          mkdir -p "$RUNNER_TEMP/main-package"
+          npm pack . --pack-destination "$RUNNER_TEMP/main-package"
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          npm init -y
+          npm install --ignore-scripts "$RUNNER_TEMP/main-package"/*.tgz
+          node --input-type=module -e "import { CdcEngine } from '@libraz/mysql-event-stream'; const engine = new CdcEngine(); engine.feed(new Uint8Array()); engine.destroy();"
+
+      - name: Publish main package
+        working-directory: bindings/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::notice::$name@$version already published, skipping"
           else
             npm publish --access public --provenance
           fi
 
   python-wheels:
+    needs: [e2e-release]
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             arch: x86_64
-            plat_tag: manylinux_2_17_x86_64
-            lib_name: libmes.so
+            deployment_target: ''
           - os: ubuntu-24.04-arm
             arch: aarch64
-            plat_tag: manylinux_2_17_aarch64
-            lib_name: libmes.so
+            deployment_target: ''
           - os: macos-15-intel
             arch: x86_64
-            plat_tag: macosx_10_15_x86_64
-            lib_name: libmes.dylib
-          - os: macos-latest
+            deployment_target: '15.0'
+          - os: macos-15
             arch: arm64
-            plat_tag: macosx_11_0_arm64
-            lib_name: libmes.dylib
+            deployment_target: '15.0'
     runs-on: ${{ matrix.os }}
+    env:
+      CIBW_ARCHS: ${{ matrix.arch }}
+      CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=${{ matrix.deployment_target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install OpenSSL (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config cmake build-essential
-
-      - name: Install OpenSSL (macOS)
+      - name: Install CMake (macOS)
         if: runner.os == 'macOS'
-        run: brew install openssl cmake
+        run: brew install cmake
 
-      - uses: actions/setup-python@v6
+      - name: Build and validate wheels
+        uses: pypa/cibuildwheel@v4.1.0
         with:
-          python-version: '3.13'
+          package-dir: bindings/python
+          output-dir: wheelhouse
+          config-file: bindings/python/pyproject.toml
 
-      - name: Build shared library (OpenSSL static)
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DMES_OPENSSL_STATIC=ON -DBUILD_TESTING=OFF
-          cmake --build build --config Release -j
-
-      - name: Copy shared library
-        run: cp build/core/${{ matrix.lib_name }} bindings/python/src/mysql_event_stream/
-
-      - name: Fix dylib install name (macOS)
+      - name: Verify and clean-install macOS wheel on minimum runtime
         if: runner.os == 'macOS'
-        run: install_name_tool -id @loader_path/libmes.dylib bindings/python/src/mysql_event_stream/libmes.dylib
-
-      - name: Build wheel
         run: |
-          cd bindings/python
-          pip install wheel hatchling
-          pip wheel . --no-deps -w dist/
-          python3 -m wheel tags --platform-tag ${{ matrix.plat_tag }} --remove dist/*.whl
+          host_major="$(sw_vers -productVersion | cut -d. -f1)"
+          target_major="${MACOSX_DEPLOYMENT_TARGET%%.*}"
+          test "$host_major" = "$target_major"
 
-      - name: Test wheel
-        run: |
-          pip install bindings/python/dist/*.whl pytest pytest-asyncio
-          python3 -c "import mysql_event_stream; print('OK')"
-          MES_LIB_PATH=$(python3 -c "import mysql_event_stream._ffi as f; print(f._find_library())") \
-            python3 -m pytest bindings/python/tests/ -x -q
+          wheel="$(find wheelhouse -name "*macosx_15_0_${{ matrix.arch }}.whl" -print -quit)"
+          test -n "$wheel"
+          inspect_dir="$(mktemp -d)"
+          unzip -q "$wheel" -d "$inspect_dir"
+          library="$(find "$inspect_dir" -name 'libmes.dylib' -print -quit)"
+          test -n "$library"
+          otool -l "$library" > "$RUNNER_TEMP/libmes-load-commands.txt"
+          grep -A5 LC_BUILD_VERSION "$RUNNER_TEMP/libmes-load-commands.txt" | grep -q 'minos 15.0'
+
+          python3 -m venv "$RUNNER_TEMP/wheel-smoke"
+          "$RUNNER_TEMP/wheel-smoke/bin/pip" install "$wheel"
+          "$RUNNER_TEMP/wheel-smoke/bin/python" -c "from mysql_event_stream import CdcEngine; engine = CdcEngine(); engine.feed(b''); engine.close()"
 
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.arch }}
-          path: bindings/python/dist/*.whl
+          path: wheelhouse/*.whl
 
   publish-pypi:
     needs: [python-wheels]
-    if: always() && needs.python-wheels.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -159,3 +338,16 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  create-release:
+    needs: [publish-npm, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

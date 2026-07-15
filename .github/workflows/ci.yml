@@ -80,6 +80,7 @@ jobs:
             cmake \
             build-essential \
             libssl-dev \
+            zlib1g-dev \
             pkg-config \
             ccache
 
@@ -153,6 +154,8 @@ jobs:
       - name: Run tests
         working-directory: bindings/node
         run: yarn test
+      - name: Verify root README Node quick starts
+        run: python3 .github/scripts/check-readme-quickstarts.py --node
 
   python-test:
     runs-on: ubuntu-latest
@@ -164,7 +167,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev cmake build-essential pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev zlib1g-dev cmake build-essential pkg-config
       - name: Build shared library
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -175,24 +178,5 @@ jobs:
       - name: Run tests
         working-directory: bindings/python
         run: pytest tests/ -v
-
-  sanitizers:
-    runs-on: ubuntu-latest
-    if: needs.changes.outputs.core == 'true' || needs.changes.outputs.tests == 'true'
-    needs: changes
-    strategy:
-      matrix:
-        sanitizer:
-          - { name: asan, cmake_flag: MES_ENABLE_ASAN }
-          - { name: ubsan, cmake_flag: MES_ENABLE_UBSAN }
-          - { name: tsan, cmake_flag: MES_ENABLE_TSAN }
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
-      - name: Build with ${{ matrix.sanitizer.name }}
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug -D${{ matrix.sanitizer.cmake_flag }}=ON
-          cmake --build build --parallel
-      - name: Run tests
-        run: cd build && ctest --output-on-failure --parallel $(nproc) -E "E2E"
+      - name: Verify root README Python quick starts
+        run: python3 .github/scripts/check-readme-quickstarts.py --python

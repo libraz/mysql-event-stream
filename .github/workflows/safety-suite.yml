@@ -1,0 +1,70 @@
+name: Safety Suite
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sanitizers:
+    name: ${{ matrix.name }} full unit suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan
+            flag: MES_ENABLE_ASAN
+          - name: UBSan
+            flag: MES_ENABLE_UBSAN
+          - name: TSan
+            flag: MES_ENABLE_TSAN
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev zlib1g-dev
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -D${{ matrix.flag }}=ON
+          cmake --build build --parallel "$(nproc)"
+      - name: Run unit suite
+        run: ctest --test-dir build --output-on-failure --parallel "$(nproc)" -E E2E
+
+  parser-fuzz:
+    name: Parser fuzz corpus (ASan + UBSan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libclang-rt-dev libssl-dev zlib1g-dev
+      - name: Build libFuzzer harness
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build-fuzz \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMES_ENABLE_FUZZ=ON \
+            -DMES_ENABLE_ASAN=ON \
+            -DMES_ENABLE_UBSAN=ON
+          cmake --build build-fuzz --target fuzz_feed --parallel "$(nproc)"
+      - name: Run regression corpus and mutate
+        run: |
+          ./build-fuzz/core/fuzz_feed core/tests/fuzz/corpus \
+            -max_total_time=180 \
+            -timeout=10 \
+            -rss_limit_mb=2048 \
+            -print_final_stats=1
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: parser-fuzz-crash
+          path: |
+            crash-*
+            timeout-*
+            oom-*
+          if-no-files-found: ignore

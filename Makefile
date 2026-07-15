@@ -28,7 +28,7 @@ help:
 	@echo "  make install        - Install library"
 	@echo "  make uninstall      - Uninstall library"
 	@echo "  make configure      - Configure CMake (for changing options)"
-	@echo "  make format         - Format C++ code with clang-format"
+	@echo "  make format         - Format C++ (clang-format), Node.js (Biome) and Python (ruff)"
 	@echo "  make format-check   - Check C++ code formatting (CI)"
 	@echo ""
 	@echo "Node.js binding:"
@@ -90,7 +90,7 @@ uninstall:
 # Formatting
 # ============================================================================
 
-format:
+format: node-fix py-format
 	@echo "Formatting C++ code..."
 	@find core/src core/include core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) -i
 	@echo "Format complete!"
