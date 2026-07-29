@@ -9,13 +9,19 @@ from .types import (
     ChangeEvent,
     ChecksumError,
     ClientConfig,
-    ColumnType,
-    ColumnValue,
     DecodeError,
     EventType,
+    MesErrorCode,
     ParseError,
     PollResult,
+    ServerFlavor,
     SslMode,
+)
+from .types import (
+    ColumnType as ColumnType,
+)
+from .types import (
+    ColumnValue as ColumnValue,
 )
 
 __all__ = [
@@ -26,13 +32,13 @@ __all__ = [
     "ChangeEvent",
     "ChecksumError",
     "ClientConfig",
-    "ColumnType",
-    "ColumnValue",
     "DecodeError",
     "EventType",
     "LogLevel",
+    "MesErrorCode",
     "ParseError",
     "PollResult",
+    "ServerFlavor",
     "SslMode",
     "set_log_callback",
 ]

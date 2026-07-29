@@ -26,6 +26,18 @@ from ._ffi import (
 )
 from .types import BinlogPosition, ChangeEvent, EventType, exception_for_rc
 
+# ctypes' ``from_buffer`` deliberately rejects immutable bytes. CPython does
+# guarantee that a bytes object's storage is contiguous and stable for its
+# lifetime, however, so borrow that storage for the duration of mes_feed()
+# instead of allocating a same-sized temporary copy.
+_pybytes_as_string = ctypes.pythonapi.PyBytes_AsString
+_pybytes_as_string.argtypes = [ctypes.py_object]
+_pybytes_as_string.restype = ctypes.c_void_p
+
+
+def _borrow_bytes(data: bytes) -> Any:
+    return ctypes.cast(_pybytes_as_string(data), ctypes.POINTER(ctypes.c_uint8))
+
 
 def _raise_for_rc(rc: int, op: str) -> None:
     """Translate a C-ABI error code into the best-fitting Python exception.
@@ -71,6 +83,7 @@ class CdcEngine:
         """
         self._lib = get_library(lib_path)
         self._client_lib_loaded = False
+        self._column_name_cache: dict[bytes, str] = {}
         self._handle: int | None = self._lib.mes_create()
         if self._handle is None:
             raise RuntimeError("Failed to create CDC engine")
@@ -124,7 +137,7 @@ class CdcEngine:
         if isinstance(data, bytearray):
             buf = (ctypes.c_uint8 * len(data)).from_buffer(data)
         else:
-            buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+            buf = _borrow_bytes(data)
         consumed = ctypes.c_size_t(0)
         rc = self._lib.mes_feed(self._handle, buf, len(data), ctypes.byref(consumed))
         if rc != MES_OK:
@@ -149,11 +162,7 @@ class CdcEngine:
                 return None
             if rc != MES_OK:
                 _raise_for_rc(rc, "mes_next_event")
-            result = _convert_event(event_ptr.contents)
-            if result is not None:
-                return result
-            # Unknown event type was skipped; drain next event from the C queue
-            continue
+            return _convert_event(event_ptr.contents, self._column_name_cache)
 
     def has_events(self) -> bool:
         """Check if there are pending events.
@@ -316,6 +325,7 @@ class CdcEngine:
         clears the filter (all tables are allowed).
 
         Each entry is "database.table" or just "table" (matches any database).
+        A trailing ``*`` performs a case-sensitive prefix match.
 
         Args:
             tables: List of table names.
@@ -331,6 +341,7 @@ class CdcEngine:
         Events from these tables are skipped.
 
         Each entry is "database.table" or just "table" (matches any database).
+        A trailing ``*`` performs a case-sensitive prefix match.
 
         Args:
             tables: List of table names.
@@ -350,7 +361,7 @@ class CdcEngine:
         server_id: int = 1,
         connect_timeout_s: int = 10,
         read_timeout_s: int = 30,
-        ssl_mode: int = 0,
+        ssl_mode: int = 1,
         ssl_ca: str = "",
         ssl_cert: str = "",
         ssl_key: str = "",
@@ -419,7 +430,9 @@ class CdcEngine:
             raise RuntimeError(f"Failed to connect metadata (error code {rc})")
 
 
-def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any]:
+def _convert_columns(
+    cols: ctypes.Array[MESColumn], count: int, name_cache: dict[bytes, str] | None = None
+) -> dict[str, Any]:
     """Convert C mes_column_t array to a Python dict."""
     result: dict[str, Any] = {}
     for i in range(count):
@@ -428,7 +441,16 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
         # Key: column name if available, otherwise string index
         # Defensive: C API says col_name is never NULL, but guard against
         # edge cases in MariaDB or future server implementations.
-        name = col.col_name.decode("utf-8") if col.col_name else ""
+        raw_name = col.col_name or b""
+        if raw_name and name_cache is not None:
+            name = name_cache.get(raw_name)
+            if name is None:
+                if len(name_cache) >= 8192:
+                    name_cache.clear()
+                name = raw_name.decode("utf-8")
+                name_cache[raw_name] = name
+        else:
+            name = raw_name.decode("utf-8") if raw_name else ""
         key = name if name else str(i)
 
         col_type = col.type
@@ -465,37 +487,32 @@ def _convert_columns(cols: ctypes.Array[MESColumn], count: int) -> dict[str, Any
     return result
 
 
-def _convert_event(raw: MESEvent) -> ChangeEvent | None:
+def _convert_event(raw: MESEvent, name_cache: dict[bytes, str] | None = None) -> ChangeEvent:
     """Convert C mes_event_t to Python ChangeEvent.
 
-    Returns None only when the event type is unrecognized (future MySQL type).
-    Callers must distinguish this from "queue empty" via the C-layer return code.
+    An unknown C-ABI event type is a parse failure. It is not skipped because
+    consumers must never advance a checkpoint past an unrepresentable change.
     """
     try:
         event_type = EventType(raw.type)
     except ValueError:
-        import warnings
-
-        warnings.warn(
-            f"Unknown event type {raw.type}; skipping event",
-            stacklevel=2,
-        )
-        return None
+        raise exception_for_rc(MES_ERR_PARSE, f"Unknown event type: {raw.type}") from None
 
     before: dict[str, Any] | None = None
     # Both conditions are needed: count guards array iteration, pointer
     # null-check prevents dereference. Order is safe because Python `and`
     # short-circuits on False (if count is 0, pointer is not checked).
     if raw.before_count > 0 and raw.before_columns:
-        before = _convert_columns(raw.before_columns, raw.before_count)
+        before = _convert_columns(raw.before_columns, raw.before_count, name_cache)
 
     after: dict[str, Any] | None = None
     if raw.after_count > 0 and raw.after_columns:  # same guard pattern as above
-        after = _convert_columns(raw.after_columns, raw.after_count)
+        after = _convert_columns(raw.after_columns, raw.after_count, name_cache)
 
     db = raw.database.decode("utf-8") if raw.database else ""
     table = raw.table.decode("utf-8") if raw.table else ""
     binlog_file = raw.binlog_file.decode("utf-8") if raw.binlog_file else ""
+    source_sql = raw.source_sql.decode("utf-8", errors="replace") if raw.source_sql else ""
 
     return ChangeEvent(
         type=event_type,
@@ -506,4 +523,5 @@ def _convert_event(raw: MESEvent) -> ChangeEvent | None:
         timestamp=raw.timestamp,
         position=BinlogPosition(file=binlog_file, offset=raw.binlog_offset),
         names_resolved=bool(raw.names_resolved),
+        source_sql=source_sql,
     )

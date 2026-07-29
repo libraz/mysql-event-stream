@@ -60,6 +60,8 @@ _stable_callback = MES_LOG_CALLBACK(_dispatch)
 def set_log_callback(
     callback: Callable[[LogLevel, str], None] | None,
     level: LogLevel = LogLevel.WARN,
+    *,
+    lib_path: str | None = None,
 ) -> None:
     """Install (or clear) a process-wide handler for native log messages.
 
@@ -72,14 +74,18 @@ def set_log_callback(
         callback: Called as ``callback(level, message)`` for each log record.
             Pass ``None`` to remove the current handler.
         level: Maximum verbosity to deliver. Ignored when ``callback`` is None.
+        lib_path: Optional path to the libmes instance whose process-wide
+            callback should be configured. Defaults to the standard loader.
 
     Note:
         Exceptions raised inside ``callback`` are swallowed: a logging handler
-        must never disrupt the C core's stream processing.
+        must never disrupt the C core's stream processing. The callback can run
+        on the native reader thread; do not call ``BinlogClient.stop()``,
+        ``close()``, ``poll()``, or any other client/engine operation from it.
     """
     global _active_handler
 
-    lib = get_library()
+    lib = get_library(lib_path)
     with _callback_lock:
         _active_handler = callback
         native_callback = _stable_callback if callback is not None else MES_LOG_CALLBACK(0)

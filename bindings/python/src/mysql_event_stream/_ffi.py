@@ -42,6 +42,7 @@ class MESEvent(ctypes.Structure):
         ("binlog_file", ctypes.c_char_p),
         ("binlog_offset", ctypes.c_uint64),
         ("names_resolved", ctypes.c_int32),
+        ("source_sql", ctypes.c_char_p),
     ]
 
 
@@ -62,6 +63,9 @@ MES_ERR_AUTH = 401
 MES_ERR_VALIDATION = 402
 MES_ERR_STREAM = 403
 MES_ERR_DISCONNECTED = 404
+MES_ERR_GTID_PURGED = 405
+MES_ERR_GTID_TAGGED_UNSUPPORTED = 406
+MES_ABI_VERSION = 2
 
 # Log levels
 MES_LOG_ERROR = 0
@@ -103,6 +107,9 @@ class MESClientConfig(ctypes.Structure):
         ("ssl_key", ctypes.c_char_p),
         ("max_queue_size", ctypes.c_size_t),
         ("allow_public_key_retrieval", ctypes.c_int32),
+        ("start_position_mode", ctypes.c_int32),
+        ("binlog_file", ctypes.c_char_p),
+        ("binlog_position", ctypes.c_uint64),
     ]
 
 
@@ -190,12 +197,12 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
 
     # mes_client_config_t has no C-side sizeof helper; validate the known
     # 64-bit layout directly (7 pointers + uint16 w/pad + 4x uint32 +
-    # enum w/pad + size_t + int w/pad = 104). On 32-bit platforms the size differs and
+    # enum + pointer + uint64 = 120). On 32-bit platforms the size differs and
     # the layout is exercised at call time instead.
     import struct as _struct
 
     if _struct.calcsize("P") == 8:
-        expected_config = 104
+        expected_config = 120
         config_size = ctypes.sizeof(MESClientConfig)
         if config_size != expected_config:
             raise RuntimeError(
@@ -220,6 +227,19 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     path = lib_path or _find_library()
     lib = ctypes.CDLL(path)
 
+    lib.mes_version.restype = ctypes.c_char_p
+    lib.mes_version.argtypes = []
+    lib.mes_abi_version.restype = ctypes.c_uint32
+    lib.mes_abi_version.argtypes = []
+    abi_version = lib.mes_abi_version()
+    if abi_version != MES_ABI_VERSION:
+        raw_version = lib.mes_version()
+        version = raw_version.decode("utf-8", errors="replace") if raw_version else "unknown"
+        raise RuntimeError(
+            f"libmes ABI {abi_version} (version {version}) is incompatible with "
+            f"this binding (requires ABI {MES_ABI_VERSION})"
+        )
+
     # mes_create
     lib.mes_create.restype = ctypes.c_void_p
     lib.mes_create.argtypes = []
@@ -227,6 +247,10 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     # mes_destroy
     lib.mes_destroy.restype = None
     lib.mes_destroy.argtypes = [ctypes.c_void_p]
+
+    # mes_error_string
+    lib.mes_error_string.restype = ctypes.c_char_p
+    lib.mes_error_string.argtypes = [ctypes.c_int32]
 
     # mes_feed
     lib.mes_feed.restype = ctypes.c_int32
@@ -352,10 +376,12 @@ _CLIENT_SYMBOLS = [
     "mes_client_connect",
     "mes_client_start",
     "mes_client_poll",
+    "mes_client_poll_batch",
     "mes_client_stop",
     "mes_client_disconnect",
     "mes_client_is_connected",
     "mes_client_is_streaming",
+    "mes_client_flavor",
     "mes_client_last_error",
     "mes_client_current_gtid",
     "mes_client_checksum_enabled",
@@ -364,6 +390,7 @@ _CLIENT_SYMBOLS = [
     "mes_client_set_max_queue_bytes",
     "mes_client_get_max_queue_bytes",
     "mes_client_queued_bytes",
+    "mes_client_crc_errors",
     "mes_engine_set_metadata_conn",
 ]
 
@@ -427,6 +454,14 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
         lib.mes_client_poll.restype = MESPollResult
         lib.mes_client_poll.argtypes = [ctypes.c_void_p]
 
+        lib.mes_client_poll_batch.restype = ctypes.c_int32
+        lib.mes_client_poll_batch.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(MESPollResult),
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+
         lib.mes_client_stop.restype = None
         lib.mes_client_stop.argtypes = [ctypes.c_void_p]
 
@@ -438,6 +473,9 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
 
         lib.mes_client_is_streaming.restype = ctypes.c_int32
         lib.mes_client_is_streaming.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_flavor.restype = ctypes.c_int32
+        lib.mes_client_flavor.argtypes = [ctypes.c_void_p]
 
         lib.mes_client_last_error.restype = ctypes.c_char_p
         lib.mes_client_last_error.argtypes = [ctypes.c_void_p]
@@ -456,6 +494,9 @@ def load_client_library(lib: ctypes.CDLL) -> bool:
 
         lib.mes_client_queued_bytes.restype = ctypes.c_size_t
         lib.mes_client_queued_bytes.argtypes = [ctypes.c_void_p]
+
+        lib.mes_client_crc_errors.restype = ctypes.c_uint64
+        lib.mes_client_crc_errors.argtypes = [ctypes.c_void_p]
 
         lib.mes_client_current_gtid.restype = ctypes.c_char_p
         lib.mes_client_current_gtid.argtypes = [ctypes.c_void_p]

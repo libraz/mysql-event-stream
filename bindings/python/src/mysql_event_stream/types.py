@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any
 
@@ -23,6 +23,36 @@ class SslMode(IntEnum):
     REQUIRED = 2
     VERIFY_CA = 3
     VERIFY_IDENTITY = 4
+
+
+class ServerFlavor(IntEnum):
+    """Database server flavor reported after connection."""
+
+    MYSQL = 0
+    MARIADB = 1
+
+
+class MesErrorCode(IntEnum):
+    """Numeric error codes returned by the native C ABI."""
+
+    OK = 0
+    NULL_ARG = 1
+    INVALID_ARG = 2
+    INTERNAL = 99
+    PARSE = 100
+    CHECKSUM = 101
+    DECODE = 200
+    DECODE_COLUMN = 201
+    DECODE_ROW = 202
+    NO_EVENT = 300
+    QUEUE_FULL = 301
+    CONNECT = 400
+    AUTH = 401
+    VALIDATION = 402
+    STREAM = 403
+    DISCONNECTED = 404
+    GTID_PURGED = 405
+    GTID_TAGGED_UNSUPPORTED = 406
 
 
 class ColumnType(Enum):
@@ -101,7 +131,11 @@ class ChangeEvent:
     When column names are unavailable (standalone mode without metadata),
     string indices ("0", "1", ...) are used as keys.
 
-    Values are typed as: None, int, float, str, or bytes.
+    Values are typed as: None, int, float, str, or bytes. TINYINT through
+    BIGINT within signed 64-bit range, YEAR, TIMESTAMP, ENUM, SET, and BIT
+    are ``int``; FLOAT and DOUBLE are ``float``. DECIMAL and temporal values
+    are ``str``. BIGINT UNSIGNED, SET, and BIT values above signed 64-bit
+    range are exact decimal ``str`` values rather than overflowing integers.
 
     Special MySQL column types surface as follows:
 
@@ -111,12 +145,22 @@ class ChangeEvent:
     - ENUM columns arrive as the 1-based numeric index (``int``) into the
       column's value list, not the string label.
     - SET columns arrive as a numeric bitmask (``int``); bit i (LSB first)
-      is set when the i-th member of the SET definition is present.
-    - BIT columns arrive as an integer (``int``) holding the bit value.
+      is set when the i-th member of the SET definition is present. Values
+      above ``INT64_MAX`` arrive as exact decimal ``str`` values.
+    - BIT columns arrive as an integer (``int``) holding the bit value; values
+      above ``INT64_MAX`` arrive as exact decimal ``str`` values.
+    - Character columns (including TEXT) arrive as ``str``; binary columns
+      (including BINARY/VARBINARY/BLOB) arrive as ``bytes``. This distinction
+      uses TABLE_MAP charset metadata. With ``binlog_row_metadata=NO_LOG``,
+      BLOB-family columns conservatively remain ``bytes``.
+      Invalid UTF-8 bytes use Python's ``surrogateescape`` handler, so a later
+      ``value.encode("utf-8", errors="surrogateescape")`` round-trips the
+      original bytes. Such strings are not directly JSON-serializable.
 
-    ``names_resolved`` is False when column names could not be resolved for
-    this event's table (e.g. the metadata side-connection failed). In that
-    case column keys fall back to string indices ("0", "1", ...).
+    ``names_resolved`` is False when any column name could not be resolved for
+    this event's table (for example, no metadata side-connection is configured
+    or it failed). In that case column keys fall back to string indices
+    ("0", "1", ...).
     """
 
     type: EventType
@@ -127,6 +171,7 @@ class ChangeEvent:
     timestamp: int
     position: BinlogPosition
     names_resolved: bool = True
+    source_sql: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,20 +184,27 @@ class ClientConfig:
         user: MySQL user.
         password: MySQL password.
         server_id: Unique replica server ID.
-        start_gtid: GTID to start from (empty = current position).
+        start_gtid: GTID set to start from. ``None`` snapshots the current
+            server position; ``""`` explicitly starts from the empty GTID set.
+        start_binlog_file: Binlog file for an exact file/offset start. Requires
+            start_binlog_position and cannot be combined with start_gtid.
+        start_binlog_position: Binlog offset for an exact file/offset start;
+            must be at least 4.
         connect_timeout_s: Connection timeout in seconds.
         read_timeout_s: Read timeout in seconds.
         ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,
             1=preferred, 2=required, 3=verify_ca, 4=verify_identity).
-        ssl_ca: Path to CA certificate file (empty to skip).
+        ssl_ca: Path to CA certificate file (empty uses the OS trust store in
+            certificate-verification modes).
         ssl_cert: Path to client certificate file (empty to skip).
         ssl_key: Path to client private key file (empty to skip).
         max_queue_size: Maximum internal event queue size. 0 selects the
             default of 10000.
-        max_queue_bytes: Total queued payload byte budget. Defaults to 256 MiB;
+        max_queue_bytes: Total queued payload byte budget. Defaults to 48 MiB;
             0 restores that default.
         max_event_size: Maximum binlog event size accepted by the client and
-            parser. Defaults to 64 MiB; 0 resolves to the 1 GiB hard cap.
+            parser. Defaults to 32 MiB; 0 resolves to the 1 GiB hard cap.
+            Raise max_queue_bytes when raising this limit.
         allow_public_key_retrieval: Permit unauthenticated RSA key retrieval
             without TLS. MITM-sensitive; prefer verified TLS.
     """
@@ -160,18 +212,20 @@ class ClientConfig:
     host: str = "127.0.0.1"
     port: int = 3306
     user: str = "root"
-    password: str = ""
+    password: str = field(default="", repr=False)
     server_id: int = 1
-    start_gtid: str = ""
+    start_gtid: str | None = None
+    start_binlog_file: str | None = None
+    start_binlog_position: int = 0
     connect_timeout_s: int = 10
     read_timeout_s: int = 30
-    ssl_mode: int = 0
+    ssl_mode: int = 1
     ssl_ca: str = ""
     ssl_cert: str = ""
     ssl_key: str = ""
     max_queue_size: int = 0
-    max_queue_bytes: int = 256 * 1024 * 1024
-    max_event_size: int = 64 * 1024 * 1024
+    max_queue_bytes: int = 48 * 1024 * 1024
+    max_event_size: int = 32 * 1024 * 1024
     allow_public_key_retrieval: bool = False
 
 
@@ -234,9 +288,14 @@ def exception_for_rc(rc: int, message: str) -> RuntimeError:
     )
 
     if rc == MES_ERR_CHECKSUM:
-        return ChecksumError(message)
-    if rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
-        return DecodeError(message)
-    if rc == MES_ERR_PARSE:
-        return ParseError(message)
-    return RuntimeError(message)
+        error: RuntimeError = ChecksumError(message)
+    elif rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+        error = DecodeError(message)
+    elif rc == MES_ERR_PARSE:
+        error = ParseError(message)
+    else:
+        error = RuntimeError(message)
+    # Keep the C ABI category on every error path (including poll/feed), so
+    # high-level retry policy never has to infer permanence from text.
+    error.code = rc  # type: ignore[attr-defined]
+    return error
