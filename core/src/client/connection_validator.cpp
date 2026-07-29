@@ -42,6 +42,7 @@ bool IsAllowedVariableName(const char* var_name) {
       "binlog_row_image",
       "binlog_transaction_compression",
       "binlog_row_value_options",
+      "log_bin_compress",
   };
   if (var_name == nullptr) return false;
   for (const char* allowed : kAllowed) {
@@ -56,29 +57,28 @@ bool IsAllowedVariableName(const char* var_name) {
  * the compile-time constants enumerated in IsAllowedVariableName(); external
  * input MUST NOT be passed. The allow-list check enforces this at runtime.
  */
-struct VariableQueryResult {
-  detail::VariableQueryStatus status = detail::VariableQueryStatus::kQueryError;
-  mes_error_t query_error = MES_OK;
-  std::string value;
-};
-
-VariableQueryResult QueryVariable(protocol::MysqlConnection* conn, const char* var_name) {
-  VariableQueryResult result;
+detail::VariableValue QueryVariable(protocol::MysqlConnection* conn, const char* var_name) {
+  detail::VariableValue result;
   if (!IsAllowedVariableName(var_name)) {
-    result.query_error = MES_ERR_INVALID_ARG;
+    result.error_message = "Variable name is not allowed";
     return result;
   }
   std::string query = "SHOW VARIABLES WHERE Variable_name = '" + std::string(var_name) + "'";
 
   protocol::QueryResult qr;
   std::string err;
-  result.query_error =
+  const mes_error_t query_error =
       protocol::ExecuteQuery(conn->Socket(), query, &qr, &err, conn->DeprecateEofNegotiated());
-  result.status = detail::ClassifyVariableQueryResult(result.query_error, qr);
+  result.error_message = std::move(err);
+  result.status = detail::ClassifyVariableQueryResult(query_error, qr);
   if (result.status == detail::VariableQueryStatus::kFound) {
     result.value = qr.rows[0].values[1];
   }
   return result;
+}
+
+detail::VariableValue LookupConnectionVariable(void* context, const char* var_name) {
+  return QueryVariable(static_cast<protocol::MysqlConnection*>(context), var_name);
 }
 
 }  // namespace
@@ -96,6 +96,60 @@ VariableQueryStatus ClassifyVariableQueryResult(mes_error_t query_error,
   return VariableQueryStatus::kFound;
 }
 
+ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* context,
+                                             ServerFlavor flavor) {
+  ValidationResult result;
+  auto check_equal = [&](const char* var_name, const char* expected) {
+    const VariableValue query = lookup(context, var_name);
+    if (query.status != VariableQueryStatus::kFound) {
+      result.error = MES_ERR_VALIDATION;
+      if (query.status == VariableQueryStatus::kNotFound) {
+        std::snprintf(result.message, sizeof(result.message), "Variable %s not found", var_name);
+      } else {
+        std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s", var_name,
+                      query.error_message.empty() ? "unknown error" : query.error_message.c_str());
+      }
+      return false;
+    }
+    if (!EqualsIgnoreCase(query.value.c_str(), expected)) {
+      result.error = MES_ERR_VALIDATION;
+      std::snprintf(result.message, sizeof(result.message), "%s must be %s, got %s", var_name,
+                    expected, query.value.c_str());
+      return false;
+    }
+    return true;
+  };
+  auto check_not_equal = [&](const char* var_name, const char* rejected) {
+    const VariableValue query = lookup(context, var_name);
+    if (query.status == VariableQueryStatus::kNotFound) return true;
+    if (query.status != VariableQueryStatus::kFound) {
+      result.error = MES_ERR_VALIDATION;
+      std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s", var_name,
+                    query.error_message.empty() ? "unknown error" : query.error_message.c_str());
+      return false;
+    }
+    if (EqualsIgnoreCase(query.value.c_str(), rejected)) {
+      result.error = MES_ERR_VALIDATION;
+      std::snprintf(result.message, sizeof(result.message), "%s must not be %s", var_name,
+                    rejected);
+      return false;
+    }
+    return true;
+  };
+
+  if (!check_equal("log_bin", "ON")) return result;
+  if (flavor != ServerFlavor::kMariaDB && !check_equal("gtid_mode", "ON")) return result;
+  if (!check_equal("binlog_format", "ROW")) return result;
+  if (!check_equal("binlog_row_image", "FULL")) return result;
+  if (flavor == ServerFlavor::kMariaDB) {
+    if (!check_not_equal("log_bin_compress", "ON")) return result;
+  } else {
+    if (!check_not_equal("binlog_transaction_compression", "ON")) return result;
+    if (!check_not_equal("binlog_row_value_options", "PARTIAL_JSON")) return result;
+  }
+  return result;
+}
+
 }  // namespace detail
 
 ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
@@ -108,95 +162,7 @@ ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
     return result;
   }
 
-  // 1. log_bin must be ON
-  if (!CheckVariable(conn, "log_bin", "ON", &result)) {
-    return result;
-  }
-
-  // 2. gtid_mode must be ON (MySQL only; MariaDB GTID is always active)
-  if (flavor != ServerFlavor::kMariaDB) {
-    if (!CheckVariable(conn, "gtid_mode", "ON", &result)) {
-      return result;
-    }
-  }
-
-  // 3. binlog_format must be ROW
-  if (!CheckVariable(conn, "binlog_format", "ROW", &result)) {
-    return result;
-  }
-
-  // 4. binlog_row_image must be FULL
-  if (!CheckVariable(conn, "binlog_row_image", "FULL", &result)) {
-    return result;
-  }
-
-  // 5. binlog_transaction_compression must NOT be ON
-  // (MariaDB doesn't have this variable)
-  if (flavor != ServerFlavor::kMariaDB) {
-    CheckVariableNot(conn, "binlog_transaction_compression", "ON", &result);
-    if (result.error != MES_OK) {
-      return result;
-    }
-  }
-
-  // 6. binlog_row_value_options must NOT be PARTIAL_JSON (MySQL only).
-  // PARTIAL_JSON emits JSON column updates as partial diff payloads rather than
-  // full values, which the row decoder cannot interpret; reject it up front.
-  if (flavor != ServerFlavor::kMariaDB) {
-    CheckVariableNot(conn, "binlog_row_value_options", "PARTIAL_JSON", &result);
-    if (result.error != MES_OK) {
-      return result;
-    }
-  }
-
-  return result;
-}
-
-bool ConnectionValidator::CheckVariable(protocol::MysqlConnection* conn, const char* var_name,
-                                        const char* expected, ValidationResult* result) {
-  VariableQueryResult query = QueryVariable(conn, var_name);
-  if (query.status != detail::VariableQueryStatus::kFound) {
-    result->error = MES_ERR_VALIDATION;
-    if (query.status == detail::VariableQueryStatus::kNotFound) {
-      std::snprintf(result->message, sizeof(result->message), "Variable %s not found", var_name);
-    } else {
-      std::snprintf(result->message, sizeof(result->message), "Failed to query %s", var_name);
-    }
-    return false;
-  }
-
-  bool match = EqualsIgnoreCase(query.value.c_str(), expected);
-  if (!match) {
-    result->error = MES_ERR_VALIDATION;
-    std::string msg = std::string(var_name) + " must be " + expected + ", got " + query.value;
-    std::strncpy(result->message, msg.c_str(), sizeof(result->message) - 1);
-    result->message[sizeof(result->message) - 1] = '\0';
-  }
-
-  return match;
-}
-
-bool ConnectionValidator::CheckVariableNot(protocol::MysqlConnection* conn, const char* var_name,
-                                           const char* rejected, ValidationResult* result) {
-  VariableQueryResult query = QueryVariable(conn, var_name);
-  if (query.status == detail::VariableQueryStatus::kNotFound) {
-    // Optional safety variables may not exist on an older supported server.
-    return true;
-  }
-  if (query.status != detail::VariableQueryStatus::kFound) {
-    result->error = MES_ERR_VALIDATION;
-    std::snprintf(result->message, sizeof(result->message), "Failed to query %s", var_name);
-    return false;
-  }
-
-  bool is_rejected = EqualsIgnoreCase(query.value.c_str(), rejected);
-  if (is_rejected) {
-    result->error = MES_ERR_VALIDATION;
-    std::snprintf(result->message, sizeof(result->message), "%s must not be %s", var_name,
-                  rejected);
-  }
-
-  return !is_rejected;
+  return detail::ValidateServerConfiguration(LookupConnectionVariable, conn, flavor);
 }
 
 }  // namespace mes

@@ -12,6 +12,7 @@
 #ifndef MES_CLIENT_METADATA_FETCHER_H_
 #define MES_CLIENT_METADATA_FETCHER_H_
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -91,6 +92,10 @@ class MetadataFetcher {
  private:
   protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::vector<ColumnInfo>>> cache_;
+  // Server-side SQL failures (for example missing SELECT privilege) are
+  // stable until DDL/cache invalidation. Remember the expected column count
+  // so repeated TABLE_MAP events do not cause a query/reconnect storm.
+  std::unordered_map<std::string, std::unordered_map<std::string, size_t>> negative_cache_;
 
   // Stored connection parameters for reconnection
   std::string host_;
@@ -104,7 +109,10 @@ class MetadataFetcher {
   std::string ssl_cert_;
   std::string ssl_key_;
   bool allow_public_key_retrieval_ = false;
+  std::chrono::steady_clock::time_point next_reconnect_attempt_{};
 
+  size_t CacheEntryCount() const;
+  bool Reconnect();
   std::string EscapeIdentifier(const std::string& id);
 };
 

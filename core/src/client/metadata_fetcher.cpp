@@ -12,6 +12,16 @@
 
 namespace mes {
 
+namespace {
+
+// Match TableMapRegistry's bounded clear-on-overflow policy. Metadata is an
+// optional enhancement, so a cold refetch is preferable to unbounded growth
+// in long-lived multi-tenant streams.
+constexpr size_t kMaxMetadataCacheEntries = 8192;
+constexpr auto kReconnectRetryInterval = std::chrono::seconds(1);
+
+}  // namespace
+
 MetadataFetcher::MetadataFetcher() = default;
 
 MetadataFetcher::~MetadataFetcher() { Disconnect(); }
@@ -38,6 +48,7 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
   ssl_cert_ = ssl_cert;
   ssl_key_ = ssl_key;
   allow_public_key_retrieval_ = allow_public_key_retrieval;
+  next_reconnect_attempt_ = {};
 
   return conn_.Connect(host, port, user, password, connect_timeout_s, read_timeout_s, ssl_mode,
                        ssl_ca, ssl_cert, ssl_key, allow_public_key_retrieval);
@@ -45,6 +56,8 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
 
 void MetadataFetcher::Disconnect() {
   cache_.clear();
+  negative_cache_.clear();
+  next_reconnect_attempt_ = {};
   conn_.Disconnect();
 
   // Scrub the retained plaintext password. It is held between Connect() and
@@ -63,7 +76,7 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
                                                          const std::string& table,
                                                          size_t expected_count) {
   if (!conn_.IsConnected()) {
-    return {};
+    if (!Reconnect()) return {};
   }
 
   // Check cache
@@ -72,6 +85,15 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     auto table_it = db_it->second.find(table);
     if (table_it != db_it->second.end() && table_it->second.size() == expected_count) {
       return table_it->second;
+    }
+  }
+
+  auto negative_db_it = negative_cache_.find(database);
+  if (negative_db_it != negative_cache_.end()) {
+    auto negative_table_it = negative_db_it->second.find(table);
+    if (negative_table_it != negative_db_it->second.end() &&
+        negative_table_it->second == expected_count) {
+      return {};
     }
   }
 
@@ -96,24 +118,40 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
   protocol::QueryResult qr;
   std::string err;
   bool query_ok = false;
+  mes_error_t query_rc = MES_OK;
   for (int attempt = 0; attempt < 2; attempt++) {
     if (attempt == 1) {
       // Reconnect and retry
       conn_.Disconnect();
-      if (conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, read_timeout_s_,
-                        ssl_mode_, ssl_ca_, ssl_cert_, ssl_key_,
-                        allow_public_key_retrieval_) != MES_OK) {
+      if (!Reconnect()) {
         break;
       }
     }
-    if (protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err, conn_.DeprecateEofNegotiated()) ==
-        MES_OK) {
+    query_rc =
+        protocol::ExecuteQuery(conn_.Socket(), query, &qr, &err, conn_.DeprecateEofNegotiated());
+    if (query_rc == MES_OK) {
       query_ok = true;
+      break;
+    }
+    // A server ERR (notably SELECT privilege failures) is permanent until
+    // schema/privilege changes. Do not disconnect and reconnect for it.
+    if (query_rc != MES_ERR_STREAM && query_rc != MES_ERR_DISCONNECTED &&
+        query_rc != MES_ERR_CONNECT) {
       break;
     }
   }
   if (!query_ok) {
     if (db_it != cache_.end()) db_it->second.erase(table);
+    if (query_rc == MES_ERR_VALIDATION) {
+      if (negative_db_it == negative_cache_.end() ||
+          negative_db_it->second.find(table) == negative_db_it->second.end()) {
+        if (CacheEntryCount() >= kMaxMetadataCacheEntries) {
+          StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
+          ClearCache();
+        }
+      }
+      negative_cache_[database][table] = expected_count;
+    }
     StructuredLog()
         .Event("metadata_fetch_failed")
         .Field("db", database)
@@ -154,18 +192,70 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return {};
   }
 
+  const bool already_cached =
+      db_it != cache_.end() && db_it->second.find(table) != db_it->second.end();
+  if (!already_cached && CacheEntryCount() >= kMaxMetadataCacheEntries) {
+    StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
+    ClearCache();
+  }
   cache_[database][table] = infos;
+  negative_db_it = negative_cache_.find(database);
+  if (negative_db_it != negative_cache_.end()) {
+    negative_db_it->second.erase(table);
+    if (negative_db_it->second.empty()) negative_cache_.erase(negative_db_it);
+  }
   return infos;
 }
 
 void MetadataFetcher::InvalidateCache(const std::string& database, const std::string& table) {
   auto db_it = cache_.find(database);
-  if (db_it == cache_.end()) return;
-  db_it->second.erase(table);
-  if (db_it->second.empty()) cache_.erase(db_it);
+  if (db_it != cache_.end()) {
+    db_it->second.erase(table);
+    if (db_it->second.empty()) cache_.erase(db_it);
+  }
+  auto negative_db_it = negative_cache_.find(database);
+  if (negative_db_it != negative_cache_.end()) {
+    negative_db_it->second.erase(table);
+    if (negative_db_it->second.empty()) negative_cache_.erase(negative_db_it);
+  }
 }
 
-void MetadataFetcher::ClearCache() { cache_.clear(); }
+void MetadataFetcher::ClearCache() {
+  cache_.clear();
+  negative_cache_.clear();
+}
+
+size_t MetadataFetcher::CacheEntryCount() const {
+  size_t count = 0;
+  for (const auto& [database, tables] : cache_) {
+    (void)database;
+    count += tables.size();
+  }
+  for (const auto& [database, tables] : negative_cache_) {
+    (void)database;
+    count += tables.size();
+  }
+  return count;
+}
+
+bool MetadataFetcher::Reconnect() {
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next_reconnect_attempt_) return false;
+
+  const mes_error_t rc =
+      conn_.Connect(host_, port_, user_, password_, connect_timeout_s_, read_timeout_s_, ssl_mode_,
+                    ssl_ca_, ssl_cert_, ssl_key_, allow_public_key_retrieval_);
+  if (rc == MES_OK) {
+    next_reconnect_attempt_ = {};
+    return true;
+  }
+  next_reconnect_attempt_ = now + kReconnectRetryInterval;
+  StructuredLog()
+      .Event("metadata_reconnect_failed")
+      .Field("error_code", static_cast<int64_t>(rc))
+      .Warn();
+  return false;
+}
 
 std::string MetadataFetcher::EscapeIdentifier(const std::string& id) {
   // Escape backticks within the identifier by doubling them.

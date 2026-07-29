@@ -9,12 +9,20 @@
 #ifndef MES_CLIENT_CONNECTION_VALIDATOR_H_
 #define MES_CLIENT_CONNECTION_VALIDATOR_H_
 
+#include <string>
+
 #include "mes.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
 #include "server_flavor.h"
 
 namespace mes {
+
+/** @brief Result of server configuration validation. */
+struct ValidationResult {
+  mes_error_t error = MES_OK;
+  char message[256] = {};
+};
 
 namespace detail {
 
@@ -29,15 +37,20 @@ enum class VariableQueryStatus {
 VariableQueryStatus ClassifyVariableQueryResult(mes_error_t query_error,
                                                 const protocol::QueryResult& result);
 
-}  // namespace detail
-
-/**
- * @brief Result of server configuration validation
- */
-struct ValidationResult {
-  mes_error_t error = MES_OK;
-  char message[256] = {};
+/** A variable lookup result used by configuration validation. */
+struct VariableValue {
+  VariableQueryStatus status = VariableQueryStatus::kQueryError;
+  std::string value;
+  std::string error_message;
 };
+
+using VariableLookup = VariableValue (*)(void* context, const char* variable_name);
+
+/** Validate required binlog variables using a caller-provided lookup function. */
+ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* context,
+                                             ServerFlavor flavor);
+
+}  // namespace detail
 
 /**
  * @brief Validates MySQL server configuration for binlog streaming
@@ -58,12 +71,6 @@ class ConnectionValidator {
    */
   static ValidationResult Validate(protocol::MysqlConnection* conn,
                                    ServerFlavor flavor = ServerFlavor::kMySQL);
-
- private:
-  static bool CheckVariable(protocol::MysqlConnection* conn, const char* var_name,
-                            const char* expected, ValidationResult* result);
-  static bool CheckVariableNot(protocol::MysqlConnection* conn, const char* var_name,
-                               const char* rejected, ValidationResult* result);
 };
 
 }  // namespace mes
