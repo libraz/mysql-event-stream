@@ -14,6 +14,12 @@ namespace mes::protocol {
 
 namespace {
 
+// Result sets are retained in memory because callers need random access to
+// the completed response. Bound both dimensions so a malicious or broken
+// server cannot make the connection caller allocate indefinitely.
+constexpr size_t kMaxResultRows = 100000;
+constexpr size_t kMaxResultBytes = 64u * 1024u * 1024u;
+
 /** @brief Skip a length-encoded string at the current position */
 void SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
   uint64_t str_len = ReadLenEncInt(data, len, pos);
@@ -71,7 +77,10 @@ std::string ParseColumnName(const std::vector<uint8_t>& payload) {
  * be reported as a parse failure rather than fabricating NULLs, otherwise a
  * corrupt or partially-decoded payload would silently surface as missing data.
  */
-bool ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, QueryResultRow* row) {
+}  // namespace
+
+bool ParseTextResultRow(const std::vector<uint8_t>& payload, size_t column_count,
+                        QueryResultRow* row) {
   const uint8_t* data = payload.data();
   size_t data_size = payload.size();
   size_t pos = 0;
@@ -110,10 +119,16 @@ bool ParseRowData(const std::vector<uint8_t>& payload, size_t column_count, Quer
   return true;
 }
 
-}  // namespace
-
 mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResult* result,
                          std::string* error_msg, bool deprecate_eof) {
+  // A malformed or partially consumed result set leaves packet boundaries
+  // ambiguous. Do not allow the next COM_QUERY to consume its remaining
+  // packets; force callers to reconnect instead.
+  const auto fail_after_response = [sock](mes_error_t error) {
+    sock->Poison();
+    return error;
+  };
+
   // Build COM_QUERY payload: command byte + query bytes
   std::vector<uint8_t> cmd_payload;
   cmd_payload.reserve(1 + query.size());
@@ -128,7 +143,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   mes_error_t rc = sock->WriteAll(pkt_buf.Data(), pkt_buf.Size());
   if (rc != MES_OK) {
     *error_msg = "Failed to send COM_QUERY packet";
-    return rc;
+    return fail_after_response(rc);
   }
 
   // Read first response packet
@@ -136,12 +151,12 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   rc = ReadPacket(sock, &payload, &seq_id);
   if (rc != MES_OK) {
     *error_msg = "Failed to read query response";
-    return rc;
+    return fail_after_response(rc);
   }
 
   if (payload.empty()) {
     *error_msg = "Empty response from server";
-    return MES_ERR_STREAM;
+    return fail_after_response(MES_ERR_STREAM);
   }
 
   uint8_t first_byte = payload[0];
@@ -164,7 +179,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
   if (column_count > kMaxColumnCount) {
     *error_msg = "Column count exceeds maximum (" + std::to_string(column_count) + ")";
-    return MES_ERR_PARSE;
+    return fail_after_response(MES_ERR_PARSE);
   }
 
   // Read column definition packets
@@ -173,7 +188,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     rc = ReadPacket(sock, &payload, &seq_id);
     if (rc != MES_OK) {
       *error_msg = "Failed to read column definition";
-      return rc;
+      return fail_after_response(rc);
     }
     result->column_names[i] = ParseColumnName(payload);
   }
@@ -183,22 +198,23 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     rc = ReadPacket(sock, &payload, &seq_id);
     if (rc != MES_OK) {
       *error_msg = "Failed to read intermediate EOF packet";
-      return rc;
+      return fail_after_response(rc);
     }
     // Verify it's actually an EOF packet (0xFE with < 9 bytes)
     if (payload.empty() || payload[0] != kPacketEOF || payload.size() >= 9) {
       *error_msg = "Expected intermediate EOF packet";
-      return MES_ERR_STREAM;
+      return fail_after_response(MES_ERR_STREAM);
     }
   }
 
   // Read row data packets until end-of-rows marker.
   result->rows.clear();
+  size_t result_bytes = 0;
   for (;;) {
     rc = ReadPacket(sock, &payload, &seq_id);
     if (rc != MES_OK) {
       *error_msg = "Failed to read row data";
-      return rc;
+      return fail_after_response(rc);
     }
 
     if (payload.empty()) {
@@ -208,8 +224,10 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     // End-of-rows detection depends on CLIENT_DEPRECATE_EOF negotiation
     if (payload[0] == kPacketEOF) {
       if (deprecate_eof) {
-        // OK-replacing-EOF: 0xFE with >= 7 bytes
-        if (payload.size() >= 7) break;
+        // A text row can begin with 0xFE only when its first length-encoded
+        // field is at least 16 MiB. MySQL reserves 0xFE packets below the
+        // maximum packet payload length for the OK-replacing-EOF marker.
+        if (payload.size() < 0xFFFFFFu) break;
       } else {
         // Traditional EOF: 0xFE with < 9 bytes (typically 5)
         if (payload.size() < 9) break;
@@ -219,15 +237,27 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     // ERR packet during row reading
     if (payload[0] == kPacketErr) {
       ParseErrPacket(payload, error_msg);
-      return MES_ERR_STREAM;
+      return MES_ERR_VALIDATION;
     }
 
     // Parse row data. A truncated row (insufficient bytes for the declared
     // column count/length) is a parse failure, not silently-missing data.
     QueryResultRow row;
-    if (!ParseRowData(payload, static_cast<size_t>(column_count), &row)) {
+    if (!ParseTextResultRow(payload, static_cast<size_t>(column_count), &row)) {
       *error_msg = "Truncated result-set row";
-      return MES_ERR_PARSE;
+      return fail_after_response(MES_ERR_PARSE);
+    }
+    if (result->rows.size() == kMaxResultRows) {
+      *error_msg = "Result set row count exceeds maximum (" + std::to_string(kMaxResultRows) + ")";
+      return fail_after_response(MES_ERR_QUEUE_FULL);
+    }
+    for (const auto& value : row.values) {
+      if (value.size() > kMaxResultBytes - result_bytes) {
+        *error_msg =
+            "Result set byte size exceeds maximum (" + std::to_string(kMaxResultBytes) + ")";
+        return fail_after_response(MES_ERR_QUEUE_FULL);
+      }
+      result_bytes += value.size();
     }
     result->rows.push_back(std::move(row));
   }

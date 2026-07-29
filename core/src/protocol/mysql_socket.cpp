@@ -201,8 +201,11 @@ int WaitForSocket(int fd, bool want_read, SteadyClock::time_point deadline, bool
     if (rc < 0 && errno == EINTR) continue;
 #endif
     if (rc <= 0) return rc;
-    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) return -1;
     if ((pfd.revents & pfd.events) != 0) return 1;
+    // A peer can send its final TLS record and hang up in the same poll
+    // notification. Consume readable/writable data first; report HUP only
+    // when the requested direction is not ready.
+    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) return -1;
   }
 }
 
@@ -215,31 +218,39 @@ SocketHandle::SocketHandle() = default;
 SocketHandle::~SocketHandle() { Close(); }
 
 SocketHandle::SocketHandle(SocketHandle&& other) noexcept
-    : fd_(other.fd_),
+    : fd_(other.fd_.exchange(-1)),
       ssl_ctx_(other.ssl_ctx_),
       ssl_(other.ssl_),
       tls_active_(other.tls_active_),
-      read_timeout_s_(other.read_timeout_s_) {
-  other.fd_ = -1;
+      read_timeout_s_(other.read_timeout_s_),
+      read_ahead_(other.read_ahead_),
+      read_ahead_begin_(other.read_ahead_begin_),
+      read_ahead_end_(other.read_ahead_end_) {
   other.ssl_ctx_ = nullptr;
   other.ssl_ = nullptr;
   other.tls_active_ = false;
   other.read_timeout_s_ = 0;
+  other.read_ahead_begin_ = 0;
+  other.read_ahead_end_ = 0;
 }
 
 SocketHandle& SocketHandle::operator=(SocketHandle&& other) noexcept {
   if (this != &other) {
     Close();
-    fd_ = other.fd_;
+    fd_.store(other.fd_.exchange(-1));
     ssl_ctx_ = other.ssl_ctx_;
     ssl_ = other.ssl_;
     tls_active_ = other.tls_active_;
     read_timeout_s_ = other.read_timeout_s_;
-    other.fd_ = -1;
+    read_ahead_ = other.read_ahead_;
+    read_ahead_begin_ = other.read_ahead_begin_;
+    read_ahead_end_ = other.read_ahead_end_;
     other.ssl_ctx_ = nullptr;
     other.ssl_ = nullptr;
     other.tls_active_ = false;
     other.read_timeout_s_ = 0;
+    other.read_ahead_begin_ = 0;
+    other.read_ahead_end_ = 0;
   }
   return *this;
 }
@@ -280,18 +291,18 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
   // Try each resolved address until one succeeds.
   mes_error_t connect_err = MES_ERR_CONNECT;
   for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
-    fd_ = static_cast<int>(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
-    if (fd_ < 0) continue;
+    fd_.store(static_cast<int>(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)));
+    if (fd_.load() < 0) continue;
 
     if (timeout_s > 0) {
       // Non-blocking connect with timeout via poll().
-      if (SetNonBlocking(fd_, true) < 0) {
-        CloseSocket(fd_);
-        fd_ = -1;
+      if (SetNonBlocking(fd_.load(), true) < 0) {
+        CloseSocket(fd_.load());
+        fd_.store(-1);
         continue;
       }
 
-      rc = ::connect(fd_, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+      rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
       if (rc < 0) {
 #ifdef _WIN32
         int err = WSAGetLastError();
@@ -300,14 +311,14 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
         int err = errno;
         if (err != EINPROGRESS) {
 #endif
-          CloseSocket(fd_);
-          fd_ = -1;
+          CloseSocket(fd_.load());
+          fd_.store(-1);
           continue;
         }
 
         // Wait for connect to complete.
         struct pollfd pfd {};
-        pfd.fd = fd_;
+        pfd.fd = fd_.load();
         pfd.events = POLLOUT;
 
 #ifdef _WIN32
@@ -329,32 +340,32 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
               .Field("port", static_cast<int>(port))
               .Field("timeout_s", static_cast<int>(timeout_s))
               .Error();
-          CloseSocket(fd_);
-          fd_ = -1;
+          CloseSocket(fd_.load());
+          fd_.store(-1);
           continue;
         }
 
         // Check for connect error.
-        int sock_err = GetSocketError(fd_);
+        int sock_err = GetSocketError(fd_.load());
         if (sock_err != 0) {
-          CloseSocket(fd_);
-          fd_ = -1;
+          CloseSocket(fd_.load());
+          fd_.store(-1);
           continue;
         }
       }
 
       // Restore blocking mode.
-      if (SetNonBlocking(fd_, false) < 0) {
-        CloseSocket(fd_);
-        fd_ = -1;
+      if (SetNonBlocking(fd_.load(), false) < 0) {
+        CloseSocket(fd_.load());
+        fd_.store(-1);
         continue;
       }
     } else {
       // Blocking connect (no timeout).
-      rc = ::connect(fd_, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+      rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
       if (rc < 0) {
-        CloseSocket(fd_);
-        fd_ = -1;
+        CloseSocket(fd_.load());
+        fd_.store(-1);
         continue;
       }
     }
@@ -363,7 +374,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
 #if defined(__APPLE__)
     // Prevent SIGPIPE on write to a closed peer socket (macOS).
     int optval = 1;
-    setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval));
+    setsockopt(fd_.load(), SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval));
 #endif
     connect_err = MES_OK;
     break;
@@ -377,7 +388,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
         .Field("host", host)
         .Field("port", static_cast<int>(port))
         .Error();
-    fd_ = -1;
+    fd_.store(-1);
   } else {
     StructuredLog()
         .Event("socket_connected")
@@ -396,7 +407,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
   // Mode 0 = disabled: nothing to do.
   if (ssl_mode == 0) return MES_OK;
 
-  if (fd_ < 0) return MES_ERR_CONNECT;
+  if (fd_.load() < 0) return MES_ERR_CONNECT;
 
   // Create SSL context.
   ssl_ctx_ = SSL_CTX_new(TLS_client_method());
@@ -408,12 +419,24 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
   // Require TLS 1.2 as minimum.
   SSL_CTX_set_min_proto_version(ssl_ctx_, TLS1_2_VERSION);
 
-  // Load CA certificate for server verification.
+  // Load an explicit CA bundle, or the operating system trust store for
+  // verification modes. Without either, SSL_VERIFY_PEER has no anchors and
+  // managed services using public CAs cannot be authenticated.
   if (ssl_ca != nullptr && ssl_ca[0] != '\0') {
     if (SSL_CTX_load_verify_locations(ssl_ctx_, ssl_ca, nullptr) != 1) {
       StructuredLog()
           .Event("ssl_ca_load_failed")
           .Field("path", ssl_ca)
+          .Field("error", GetOpenSSLError())
+          .Error();
+      SSL_CTX_free(ssl_ctx_);
+      ssl_ctx_ = nullptr;
+      return MES_ERR_CONNECT;
+    }
+  } else if (ssl_mode >= MES_SSL_VERIFY_CA) {
+    if (SSL_CTX_set_default_verify_paths(ssl_ctx_) != 1) {
+      StructuredLog()
+          .Event("ssl_default_verify_paths_failed")
           .Field("error", GetOpenSSLError())
           .Error();
       SSL_CTX_free(ssl_ctx_);
@@ -479,7 +502,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
     return MES_ERR_CONNECT;
   }
 
-  SSL_set_fd(ssl_, fd_);
+  SSL_set_fd(ssl_, fd_.load());
 
   // Classify the peer name so verify_identity can bind to the correct SAN
   // entry and SNI is only sent for DNS names (RFC 6066 forbids IP-literal SNI).
@@ -530,16 +553,39 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
     SSL_set_tlsext_host_name(ssl_, hostname);
   }
 
-  // Perform TLS handshake.
-  int ret = SSL_connect(ssl_);
-  if (ret != 1) {
-    int ssl_err = SSL_get_error(ssl_, ret);
-    const std::string reason = GetOpenSSLError();
-    StructuredLog()
-        .Event("ssl_handshake_failed")
-        .Field("ssl_error", ssl_err)
-        .Field("error", reason)
-        .Error();
+  // Perform the TLS handshake under the same deadline already installed for
+  // the greeting/authentication path. SSL_connect() otherwise performs an
+  // unbounded blocking syscall when a peer accepts TCP but never speaks TLS.
+  const bool has_deadline = read_timeout_s_ > 0;
+  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
+  if (has_deadline && SetNonBlocking(fd_.load(), true) != 0) {
+    StructuredLog().Event("ssl_handshake_nonblocking_setup_failed").Error();
+    SSL_free(ssl_);
+    ssl_ = nullptr;
+    SSL_CTX_free(ssl_ctx_);
+    ssl_ctx_ = nullptr;
+    return MES_ERR_CONNECT;
+  }
+  [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
+  for (;;) {
+    int ret = SSL_connect(ssl_);
+    if (ret == 1) break;
+    const int ssl_err = SSL_get_error(ssl_, ret);
+    if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+      const int wait_rc =
+          WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+      if (wait_rc > 0) continue;
+      StructuredLog()
+          .Event(wait_rc == 0 ? "ssl_handshake_timeout" : "ssl_handshake_wait_error")
+          .Field("timeout_s", static_cast<uint64_t>(read_timeout_s_))
+          .Error();
+    } else {
+      StructuredLog()
+          .Event("ssl_handshake_failed")
+          .Field("ssl_error", ssl_err)
+          .Field("error", GetOpenSSLError())
+          .Error();
+    }
     SSL_free(ssl_);
     ssl_ = nullptr;
     SSL_CTX_free(ssl_ctx_);
@@ -590,19 +636,26 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
 // --- Timeout ---
 
 mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
-  if (fd_ < 0) return MES_ERR_CONNECT;
+  if (fd_.load() < 0) return MES_ERR_CONNECT;
 
 #ifdef _WIN32
   DWORD tv = (timeout_s > 4294967U) ? MAXDWORD : static_cast<DWORD>(timeout_s) * 1000;
-  if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv)) !=
-      0) {
+  if (setsockopt(fd_.load(), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv),
+                 sizeof(tv)) != 0) {
+    return MES_ERR_CONNECT;
+  }
+  if (setsockopt(fd_.load(), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv),
+                 sizeof(tv)) != 0) {
     return MES_ERR_CONNECT;
   }
 #else
   struct timeval tv {};
   tv.tv_sec = static_cast<time_t>(timeout_s);
   tv.tv_usec = 0;
-  if (setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+  if (setsockopt(fd_.load(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+    return MES_ERR_CONNECT;
+  }
+  if (setsockopt(fd_.load(), SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
     return MES_ERR_CONNECT;
   }
 #endif
@@ -610,7 +663,7 @@ mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
   // OpenSSL must not perform an unbounded blocking syscall before it can
   // report WANT_READ/WANT_WRITE. Drive TLS sockets with poll and a monotonic
   // deadline instead of relying on SO_RCVTIMEO/BIO retry behavior.
-  if (tls_active_ && SetNonBlocking(fd_, timeout_s > 0) != 0) {
+  if (tls_active_ && SetNonBlocking(fd_.load(), timeout_s > 0) != 0) {
     return MES_ERR_CONNECT;
   }
   read_timeout_s_ = timeout_s;
@@ -622,45 +675,25 @@ mes_error_t SocketHandle::SetReadTimeout(uint32_t timeout_s) {
 
 mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
   if (buf == nullptr) return MES_ERR_NULL_ARG;
-  if (fd_ < 0) return MES_ERR_STREAM;
+  if (fd_.load() < 0) return MES_ERR_STREAM;
 
   size_t total = 0;
-  const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
-  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
-  while (total < len) {
-    int n;
-    if (tls_active_) {
-      n = SSL_read(ssl_, buf + total,
-                   static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
-      if (n <= 0) {
-        int ssl_err = SSL_get_error(ssl_, n);
-        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          int wait_rc = WaitForSocket(fd_, ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
-          if (wait_rc > 0) continue;
-          StructuredLog()
-              .Event(wait_rc == 0 ? "ssl_read_timeout" : "ssl_read_wait_error")
-              .Field("timeout_s", static_cast<uint64_t>(read_timeout_s_))
-              .Error();
-          return MES_ERR_STREAM;
-        }
-        // SSL_ERROR_ZERO_RETURN means clean shutdown (EOF).
-        if (ssl_err == SSL_ERROR_ZERO_RETURN) {
-          StructuredLog().Event("socket_read_eof").Debug();
-        } else {
-          StructuredLog()
-              .Event("ssl_read_error")
-              .Field("ssl_error", ssl_err)
-              .Field("error", GetOpenSSLError())
-              .Error();
-        }
-        return MES_ERR_STREAM;
+  if (!tls_active_) {
+    while (total < len) {
+      const size_t available = read_ahead_end_ - read_ahead_begin_;
+      if (available > 0) {
+        const size_t copied = std::min(available, len - total);
+        std::memcpy(buf + total, read_ahead_.data() + read_ahead_begin_, copied);
+        read_ahead_begin_ += copied;
+        total += copied;
+        continue;
       }
-    } else {
+
 #ifdef _WIN32
-      n = recv(fd_, reinterpret_cast<char*>(buf + total),
-               static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))), 0);
+      const int n = recv(fd_.load(), reinterpret_cast<char*>(read_ahead_.data()),
+                         static_cast<int>(read_ahead_.size()), 0);
 #else
-      n = static_cast<int>(recv(fd_, buf + total, len - total, 0));
+      const int n = static_cast<int>(recv(fd_.load(), read_ahead_.data(), read_ahead_.size(), 0));
 #endif
       if (n < 0) {
         if (errno == EINTR) continue;
@@ -675,6 +708,41 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
         StructuredLog().Event("socket_read_eof").Debug();
         return MES_ERR_STREAM;
       }
+      read_ahead_begin_ = 0;
+      read_ahead_end_ = static_cast<size_t>(n);
+    }
+    return MES_OK;
+  }
+
+  const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
+  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
+  while (total < len) {
+    [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
+    const int n = SSL_read(ssl_, buf + total,
+                           static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
+    if (n <= 0) {
+      int ssl_err = SSL_get_error(ssl_, n);
+      if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+        int wait_rc =
+            WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+        if (wait_rc > 0) continue;
+        StructuredLog()
+            .Event(wait_rc == 0 ? "ssl_read_timeout" : "ssl_read_wait_error")
+            .Field("timeout_s", static_cast<uint64_t>(read_timeout_s_))
+            .Error();
+        return MES_ERR_STREAM;
+      }
+      // SSL_ERROR_ZERO_RETURN means clean shutdown (EOF).
+      if (ssl_err == SSL_ERROR_ZERO_RETURN) {
+        StructuredLog().Event("socket_read_eof").Debug();
+      } else {
+        StructuredLog()
+            .Event("ssl_read_error")
+            .Field("ssl_error", ssl_err)
+            .Field("error", GetOpenSSLError())
+            .Error();
+      }
+      return MES_ERR_STREAM;
     }
     total += static_cast<size_t>(n);
   }
@@ -684,7 +752,7 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
 
 mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   if (buf == nullptr) return MES_ERR_NULL_ARG;
-  if (fd_ < 0) return MES_ERR_STREAM;
+  if (fd_.load() < 0) return MES_ERR_STREAM;
 
   // The plain send() path is already SIGPIPE-safe (MSG_NOSIGNAL / SO_NOSIGPIPE);
   // guard only the TLS path, where SSL_write() offers no such protection.
@@ -702,7 +770,8 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          int wait_rc = WaitForSocket(fd_, ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+          int wait_rc =
+              WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
           if (wait_rc > 0) continue;
           StructuredLog()
               .Event(wait_rc == 0 ? "ssl_write_timeout" : "ssl_write_wait_error")
@@ -719,12 +788,12 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
       }
     } else {
 #ifdef _WIN32
-      n = send(fd_, reinterpret_cast<const char*>(buf + total),
+      n = send(fd_.load(), reinterpret_cast<const char*>(buf + total),
                static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))), 0);
 #elif defined(__linux__)
-      n = static_cast<int>(send(fd_, buf + total, len - total, MSG_NOSIGNAL));
+      n = static_cast<int>(send(fd_.load(), buf + total, len - total, MSG_NOSIGNAL));
 #else
-      n = static_cast<int>(send(fd_, buf + total, len - total, 0));
+      n = static_cast<int>(send(fd_.load(), buf + total, len - total, 0));
 #endif
       if (n < 0) {
         if (errno == EINTR) continue;
@@ -749,20 +818,30 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
 // --- Shutdown / Close ---
 
 void SocketHandle::Shutdown() {
-  if (fd_ >= 0) {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  const int fd = fd_.load();
+  if (fd >= 0) {
 #ifdef _WIN32
-    shutdown(fd_, SD_BOTH);
+    shutdown(fd, SD_BOTH);
 #else
-    shutdown(fd_, SHUT_RDWR);
+    shutdown(fd, SHUT_RDWR);
 #endif
   }
 }
 
-bool SocketHandle::IsValid() const { return fd_ >= 0; }
+bool SocketHandle::IsValid() const { return fd_.load() >= 0; }
 
 bool SocketHandle::IsTlsActive() const { return tls_active_; }
 
+void SocketHandle::Poison() {
+  // Interrupt any protocol I/O first. Close() then releases the descriptor and
+  // TLS state, making accidental reuse impossible.
+  Shutdown();
+  Close();
+}
+
 void SocketHandle::Close() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (ssl_ != nullptr) {
     // Attempt a clean TLS shutdown; ignore errors (we are tearing down).
     // SSL_shutdown() writes close_notify and can raise SIGPIPE if the peer has
@@ -782,10 +861,12 @@ void SocketHandle::Close() {
 
   tls_active_ = false;
   read_timeout_s_ = 0;
+  read_ahead_begin_ = 0;
+  read_ahead_end_ = 0;
 
-  if (fd_ >= 0) {
-    CloseSocket(fd_);
-    fd_ = -1;
+  const int fd = fd_.exchange(-1);
+  if (fd >= 0) {
+    CloseSocket(fd);
   }
 }
 

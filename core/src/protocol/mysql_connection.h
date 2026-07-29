@@ -73,7 +73,8 @@ class MysqlConnection {
    * @param read_timeout_s    Socket read timeout in seconds (0 = no timeout)
    * @param ssl_mode        TLS mode: 0=disabled, 1=preferred, 2=required,
    *                        3=verify_ca, 4=verify_identity
-   * @param ssl_ca          Path to CA certificate file (empty to skip)
+   * @param ssl_ca          Path to CA certificate file (empty uses the OS trust
+   *                        store in verify modes)
    * @param ssl_cert        Path to client certificate file (empty to skip)
    * @param ssl_key         Path to client private key file (empty to skip)
    * @return MES_OK on success, MES_ERR_CONNECT on TCP failure,
@@ -126,6 +127,7 @@ class MysqlConnection {
   ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
   int auth_switch_count_ = 0;
   bool allow_public_key_retrieval_ = false;
+  uint32_t ssl_mode_ = MES_SSL_DISABLED;
 
   /**
    * @brief Parse the server's Initial Handshake Packet (protocol v10)

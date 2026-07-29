@@ -47,10 +47,12 @@ std::vector<uint8_t> BuildComBinlogDumpGtidPayload(const BinlogStreamConfig& con
  * owner can recover the event bytes via `buffer.data() + data_offset`.
  */
 struct BinlogEventPacket {
-  const uint8_t* data = nullptr;  ///< Event data (after OK byte)
-  size_t size = 0;                ///< Size of event data in bytes
-  size_t data_offset = 0;         ///< Offset of `data` within the caller's buffer
-  bool is_heartbeat = false;      ///< True if this is a heartbeat event
+  const uint8_t* data = nullptr;   ///< Event data (after OK byte)
+  size_t size = 0;                 ///< Size of event data in bytes
+  size_t data_offset = 0;          ///< Offset of `data` within the caller's buffer
+  bool is_heartbeat = false;       ///< True if this is a heartbeat event
+  uint16_t server_error_code = 0;  ///< MySQL ERR packet code, if one was received
+  std::string error_message;       ///< Detailed stream failure description
 };
 
 /** Packet payload cap for an event, including the replication OK prefix. */
@@ -97,7 +99,7 @@ class BinlogStream {
    * @param result  Output: populated with event data or heartbeat flag
    * @param max_event_size Maximum event bytes, excluding the one-byte MySQL
    *                       OK prefix. Values are normalized by the caller.
-   * @return MES_OK on success, MES_ERR_STREAM on error or stream end
+   * @return MES_OK on success, or a stream/disconnect/GTID error
    */
   mes_error_t FetchEvent(SocketHandle* sock, std::vector<uint8_t>* buffer,
                          BinlogEventPacket* result, uint32_t max_event_size);

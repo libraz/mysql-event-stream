@@ -76,6 +76,8 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   result->size = 0;
   result->data_offset = 0;
   result->is_heartbeat = false;
+  result->server_error_code = 0;
+  result->error_message.clear();
 
   uint8_t seq_id = 0;
   // The replication packet contains a one-byte OK marker before the event.
@@ -84,6 +86,7 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   const size_t max_packet_payload = BinlogPacketPayloadLimit(max_event_size);
   mes_error_t rc = ReadPacket(sock, buffer, &seq_id, max_packet_payload);
   if (rc != MES_OK) {
+    result->error_message = "Failed to read binlog stream packet";
     return rc;
   }
 
@@ -100,17 +103,24 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
     uint16_t err_code = 0;
     std::string msg;
     ParseErrPacketPayload(buffer->data(), buffer->size(), &err_code, &msg);
+    result->server_error_code = err_code;
+    result->error_message = "MySQL server error " + std::to_string(err_code);
+    if (!msg.empty()) result->error_message += ": " + msg;
     StructuredLog()
         .Event("binlog_stream_server_error")
         .Field("error_code", static_cast<uint64_t>(err_code))
         .Field("message", msg)
         .Error();
-    return MES_ERR_STREAM;
+    // ER_MASTER_FATAL_ERROR_READING_BINLOG is sent when the requested GTID
+    // interval has been purged. Reconnecting cannot recover that position.
+    return err_code == 1236 ? MES_ERR_GTID_PURGED : MES_ERR_STREAM;
   }
 
   // EOF packet - stream ended
   if (status_byte == 0xFE) {
-    return MES_ERR_STREAM;
+    result->error_message = "Binlog stream ended (EOF packet)";
+    StructuredLog().Event("binlog_stream_eof").Warn();
+    return MES_ERR_DISCONNECTED;
   }
 
   // OK packet - binlog event follows after the status byte
@@ -136,6 +146,8 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   }
 
   // Unexpected status byte - treat as error
+  result->error_message = "Unexpected binlog stream packet status " +
+                          std::to_string(static_cast<unsigned int>(status_byte));
   return MES_ERR_STREAM;
 }
 

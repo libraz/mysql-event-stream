@@ -65,12 +65,26 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
     Disconnect();
   }
   allow_public_key_retrieval_ = allow_public_key_retrieval;
+  ssl_mode_ = ssl_mode;
 
   // Step 1: TCP connect
   mes_error_t rc = socket_.Connect(host.c_str(), port, connect_timeout_s);
   if (rc != MES_OK) {
     last_error_ = "Failed to connect to " + host + ":" + std::to_string(port);
     return rc;
+  }
+
+  // Apply the read deadline before the greeting. TCP connection completion
+  // does not guarantee that a peer will send a MySQL handshake; without this,
+  // a black-holed proxy can block Connect() indefinitely before connected_ is
+  // set and before callers can tear the connection down normally.
+  if (read_timeout_s > 0) {
+    rc = socket_.SetReadTimeout(read_timeout_s);
+    if (rc != MES_OK) {
+      last_error_ = "Failed to set handshake read timeout";
+      socket_ = SocketHandle();
+      return rc;
+    }
   }
 
   // Step 2: Read server handshake
@@ -108,7 +122,9 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
     return rc;
   }
 
-  // Step 6: Set read timeout
+  // Step 6: Reapply the read timeout after an optional TLS upgrade. The
+  // handshake deadline above also drives SSL_connect(), while this call makes
+  // the final post-auth transport mode explicit.
   if (read_timeout_s > 0) {
     rc = socket_.SetReadTimeout(read_timeout_s);
     if (rc != MES_OK) {
@@ -137,6 +153,7 @@ void MysqlConnection::Disconnect() {
   negotiated_caps_ = 0;
   server_flavor_ = ServerFlavor::kMySQL;
   allow_public_key_retrieval_ = false;
+  ssl_mode_ = MES_SSL_DISABLED;
 
   // Close socket by replacing with a default-constructed one
   socket_ = SocketHandle();
@@ -488,12 +505,13 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
 
       if (status == kCachingSha2FullAuthRequired) {
         // Full authentication required
-        if (socket_.IsTlsActive()) {
-          // Send cleartext password + NUL terminator over TLS
+        if (socket_.IsTlsActive() && ssl_mode_ >= MES_SSL_VERIFY_CA) {
+          // Send cleartext password only over certificate-verified TLS.
           std::vector<uint8_t> cleartext_payload(password.begin(), password.end());
           cleartext_payload.push_back(0);
 
           rc = SendPacket(cleartext_payload);
+          OPENSSL_cleanse(cleartext_payload.data(), cleartext_payload.size());
           if (rc != MES_OK) {
             last_error_ = "Failed to send cleartext password";
             return MES_ERR_AUTH;
@@ -504,7 +522,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           // Require an explicit opt-in; verified TLS is the safe default.
           if (!allow_public_key_retrieval_) {
             last_error_ =
-                "caching_sha2_password full auth requires verified TLS; "
+                "caching_sha2_password full auth requires certificate-verified TLS; "
                 "unauthenticated public-key retrieval is disabled";
             return MES_ERR_AUTH;
           }

@@ -37,6 +37,15 @@ struct QueryResult {
 };
 
 /**
+ * @brief Parse one text-protocol result-set row payload.
+ *
+ * Exposed for focused parser tests and fuzzing. The input is the payload after
+ * MySQL packet framing, not a complete wire packet.
+ */
+bool ParseTextResultRow(const std::vector<uint8_t>& payload, size_t column_count,
+                        QueryResultRow* row);
+
+/**
  * @brief Execute a COM_QUERY and store the full result set
  *
  * Sends the query as a COM_QUERY command and reads the entire result set.
@@ -55,7 +64,13 @@ struct QueryResult {
  * @param error_msg      Output: MySQL error message on failure
  * @param deprecate_eof  Whether CLIENT_DEPRECATE_EOF is negotiated (default:
  *                       true)
- * @return MES_OK on success, MES_ERR_STREAM on protocol or MySQL error
+ * @return MES_OK on success, MES_ERR_VALIDATION when MySQL returns an ERR
+ *         packet, MES_ERR_STREAM on transport/protocol failure;
+ *         MES_ERR_QUEUE_FULL when the 100,000-row or 64 MiB retained-result
+ *         limit is exceeded. A transport, framing, row-decoding, or limit
+ *         failure closes @p sock because
+ *         a partially consumed result set cannot be safely followed by another
+ *         command; reconnect before calling ExecuteQuery again.
  */
 mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResult* result,
                          std::string* error_msg, bool deprecate_eof = true);

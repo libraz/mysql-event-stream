@@ -9,8 +9,11 @@
 #ifndef MES_PROTOCOL_MYSQL_SOCKET_H_
 #define MES_PROTOCOL_MYSQL_SOCKET_H_
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 #include "mes.h"
 
@@ -68,7 +71,8 @@ class SocketHandle {
    *
    * @param ssl_mode  0=disabled (no-op), 1=preferred, 2=required,
    *                  3=verify_ca, 4=verify_identity.
-   * @param ssl_ca    Path to CA certificate file (NULL to skip).
+   * @param ssl_ca    Path to CA certificate file. In verify modes, NULL/empty
+   *                  uses the operating system trust store.
    * @param ssl_cert  Path to client certificate file (NULL to skip).
    * @param ssl_key   Path to client private key file (NULL to skip).
    * @param hostname  Server hostname for SNI and verify_identity checks
@@ -79,9 +83,9 @@ class SocketHandle {
                            const char* ssl_key, const char* hostname);
 
   /**
-   * @brief Set the read timeout on the underlying socket.
+   * @brief Set the I/O timeout on the underlying socket.
    *
-   * Applies SO_RCVTIMEO so that blocking recv/SSL_read calls will time
+   * Applies SO_RCVTIMEO and SO_SNDTIMEO so blocking receive/send calls time
    * out instead of blocking indefinitely.
    *
    * @param timeout_s Timeout in seconds (0 = no timeout).
@@ -127,9 +131,24 @@ class SocketHandle {
   /** @brief Returns true if a TLS session is active on this socket. */
   bool IsTlsActive() const;
 
+  /**
+   * @brief Permanently close a connection whose protocol state is no longer usable.
+   *
+   * Unlike a normal MySQL disconnect this does not send COM_QUIT. Use it after
+   * a malformed or partially consumed server response so a later command
+   * cannot interpret leftover packets as its own response. The handle is
+   * invalid after this call.
+   */
+  void Poison();
+
  private:
   /** @brief Platform socket descriptor (-1 when invalid). */
-  int fd_ = -1;
+  std::atomic<int> fd_{-1};
+
+  // Serializes shutdown() with Close(). Without it, a Stop() thread can
+  // observe an old descriptor, while Disconnect() closes it and a subsequent
+  // Connect() reuses the same number for an unrelated socket.
+  mutable std::mutex lifecycle_mutex_;
 
   /** @brief OpenSSL context (owned, may be null). */
   SSL_CTX* ssl_ctx_ = nullptr;
@@ -142,6 +161,15 @@ class SocketHandle {
 
   /** Monotonic deadline budget used for TLS read/write retry loops. */
   uint32_t read_timeout_s_ = 0;
+
+  // Plain-TCP read-ahead prevents packet framing from issuing one recv() for
+  // the 4-byte header and another for its payload. TLS has its own encrypted
+  // record buffering inside OpenSSL, so this buffer is intentionally bypassed
+  // for tls_active_ connections.
+  static constexpr size_t kReadAheadCapacity = 64u * 1024u;
+  std::array<uint8_t, kReadAheadCapacity> read_ahead_{};
+  size_t read_ahead_begin_ = 0;
+  size_t read_ahead_end_ = 0;
 
   /** @brief Release all resources (SSL objects and socket). */
   void Close();
