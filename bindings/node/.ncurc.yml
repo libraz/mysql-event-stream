@@ -1,6 +1,6 @@
+# npm-check-updates configuration. Run `ncu` to list updates, `ncu -u` to apply.
 reject:
-  # Platform prebuild packages are published per release; version is bumped by the release tooling.
-  - '@libraz/mysql-event-stream-*'
   # TypeScript 7 (native port) drops lib/_tsc.js, which Yarn's builtin typescript
   # compat patch requires; the install fails until Yarn ships a compatible patch.
+  # Revisit together with the pinned yarn version in packageManager.
   - typescript

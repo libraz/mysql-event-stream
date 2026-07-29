@@ -95,6 +95,11 @@ failure behaviors changed — see Changed before upgrading.
   `log_bin_compress=ON` is rejected during validation, and "start at current"
   prefers `@@GLOBAL.gtid_binlog_pos`
 - The Python package is classified as Beta
+- The Python development environment is managed with rye alone:
+  `requirements.lock` / `requirements-dev.lock` replace `uv.lock`, the toolchain
+  pin is tracked, and CI installs from the lockfiles instead of resolving with
+  pip
+- Node and Python development dependencies updated to current releases
 
 ### Fixed
 
