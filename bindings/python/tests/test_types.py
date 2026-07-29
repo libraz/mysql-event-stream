@@ -2,6 +2,7 @@
 
 import ctypes
 
+import mysql_event_stream
 from mysql_event_stream import (
     BinlogPosition,
     ChangeEvent,
@@ -9,6 +10,7 @@ from mysql_event_stream import (
     ColumnType,
     ColumnValue,
     EventType,
+    MesErrorCode,
 )
 from mysql_event_stream._ffi import (
     MES_ERR_CHECKSUM,
@@ -16,6 +18,7 @@ from mysql_event_stream._ffi import (
     MES_ERR_DECODE,
     MES_ERR_DECODE_COLUMN,
     MES_ERR_DECODE_ROW,
+    MES_ERR_GTID_TAGGED_UNSUPPORTED,
     MES_ERR_PARSE,
 )
 from mysql_event_stream.types import (
@@ -152,21 +155,38 @@ class TestExceptionForRc:
         for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
             assert isinstance(exception_for_rc(code, "x"), RuntimeError)
 
+    def test_every_exception_carries_its_native_code(self) -> None:
+        for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
+            assert exception_for_rc(code, "x").code == code  # type: ignore[attr-defined]
+
+
+def test_public_error_code_matches_c_abi_values() -> None:
+    assert MesErrorCode.AUTH == MES_ERR_CONNECT + 1
+    assert MesErrorCode.GTID_PURGED == 405
+    assert MesErrorCode.GTID_TAGGED_UNSUPPORTED == MES_ERR_GTID_TAGGED_UNSUPPORTED
+
 
 class TestClientConfig:
     def test_max_queue_size_default_is_zero(self) -> None:
         # 0 is the sentinel that selects the engine default (10000);
         # it does not mean "unlimited" for the client config.
         assert ClientConfig().max_queue_size == 0
-        assert ClientConfig().max_queue_bytes == 256 * 1024 * 1024
-        assert ClientConfig().max_event_size == 64 * 1024 * 1024
+        assert ClientConfig().max_queue_bytes == 48 * 1024 * 1024
+        assert ClientConfig().max_event_size == 32 * 1024 * 1024
 
     def test_max_queue_size_docstring_documents_default(self) -> None:
         assert ClientConfig.__doc__ is not None
         assert "10000" in ClientConfig.__doc__
 
+    def test_password_is_not_in_repr(self) -> None:
+        assert "secret" not in repr(ClientConfig(password="secret"))
+
 
 class TestDeprecatedTypes:
+    def test_legacy_helpers_are_not_star_exports(self) -> None:
+        assert "ColumnType" not in mysql_event_stream.__all__
+        assert "ColumnValue" not in mysql_event_stream.__all__
+
     def test_column_type_marked_deprecated(self) -> None:
         assert ColumnType.__doc__ is not None
         assert "deprecated" in ColumnType.__doc__.lower()

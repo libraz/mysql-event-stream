@@ -7,7 +7,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mysql_event_stream._ffi import (
+    MES_ERR_GTID_PURGED,
+    MES_ERR_GTID_TAGGED_UNSUPPORTED,
+    MES_ERR_PARSE,
+    MES_ERR_QUEUE_FULL,
+)
 from mysql_event_stream.stream import CdcStream
+from mysql_event_stream.types import PollResult, exception_for_rc
+
+
+async def _run_in_test(func: object, *args: object) -> object:
+    """Execute a to_thread target synchronously while preserving its arguments."""
+    return func(*args)  # type: ignore[operator]
 
 
 class TestStreamClose:
@@ -31,6 +43,30 @@ class TestStreamClose:
         mock_client.disconnect.assert_not_called()
         assert stream._client is None
         assert stream._engine is None
+
+    def test_filters_are_applied_to_the_engine(self) -> None:
+        stream = CdcStream(
+            include_databases=["mydb"],
+            include_tables=["mydb.orders"],
+            exclude_tables=["mydb.audit_log"],
+        )
+        engine = MagicMock()
+        stream._engine = engine
+
+        stream._apply_filters()
+
+        engine.set_include_databases.assert_called_once_with(["mydb"])
+        engine.set_include_tables.assert_called_once_with(["mydb.orders"])
+        engine.set_exclude_tables.assert_called_once_with(["mydb.audit_log"])
+
+    def test_metadata_error_callback_receives_failures(self) -> None:
+        callback = MagicMock()
+        stream = CdcStream(on_metadata_error=callback)
+        error = RuntimeError("metadata connection refused")
+
+        stream._report_metadata_error(error)
+
+        callback.assert_called_once_with(error)
 
     @pytest.mark.asyncio
     async def test_close_idempotent(self) -> None:
@@ -72,6 +108,51 @@ class TestStreamClose:
         mock_client.stop.assert_called_once()
         mock_client.close.assert_called_once()
         assert stream._poll_task is None
+
+
+class TestStreamConfigure:
+    def test_rejects_invalid_runtime_values_without_mutating_stream(self) -> None:
+        stream = CdcStream()
+        with pytest.raises(ValueError, match="server_id"):
+            stream.configure(server_id=0)
+        with pytest.raises(TypeError, match="read_timeout_s"):
+            stream.configure(read_timeout_s="fast")
+        with pytest.raises(TypeError, match="allow_public_key_retrieval"):
+            stream.configure(allow_public_key_retrieval=1)
+        with pytest.raises(TypeError, match="Unknown config key"):
+            stream.configure(not_a_setting=True)
+        assert stream._server_id == 1
+
+    def test_accepts_every_runtime_option_shape(self) -> None:
+        stream = CdcStream()
+        stream.configure(
+            host="mysql.example",
+            port=3307,
+            user="replica",
+            password="secret",
+            server_id=2,
+            start_gtid="",
+            start_binlog_file=None,
+            start_binlog_position=0,
+            connect_timeout_s=0,
+            read_timeout_s=1,
+            ssl_mode=4,
+            ssl_ca="ca.pem",
+            ssl_cert="cert.pem",
+            ssl_key="key.pem",
+            max_queue_size=1,
+            max_queue_bytes=1,
+            max_event_size=1,
+            include_databases=["db"],
+            include_tables=["db.t"],
+            exclude_tables=["db.skip"],
+            allow_public_key_retrieval=True,
+            lib_path=None,
+            max_reconnect_attempts=0,
+            on_metadata_error=None,
+        )
+        assert stream._port == 3307
+        assert stream._include_tables == ["db.t"]
 
 
 class TestStreamStartFailure:
@@ -123,6 +204,23 @@ class TestStreamStartFailure:
     @pytest.mark.asyncio
     @patch("mysql_event_stream.stream.CdcEngine")
     @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_start_forwards_read_timeout_to_metadata_connection(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+
+        stream = CdcStream(host="127.0.0.1", read_timeout_s=7)
+        await stream._start()
+
+        assert mock_engine.enable_metadata.call_args.kwargs["read_timeout_s"] == 7
+        await stream.close()
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
     async def test_start_cleanup_on_start_failure(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
@@ -151,6 +249,30 @@ class TestReconnectAttempts:
     With the > check, max_reconnect_attempts=N allows N reconnect attempts.
     max_reconnect_attempts=1 means try one reconnect, then give up.
     """
+
+    @pytest.mark.asyncio
+    async def test_reconnect_passes_an_empty_checkpoint_explicitly(self) -> None:
+        stream = CdcStream(start_binlog_file="binlog.000001", start_binlog_position=4)
+        previous_client = MagicMock()
+        previous_client.current_gtid = ""
+        stream._client = previous_client
+        stream._engine = MagicMock()
+        replacement_client = MagicMock()
+        replacement_client.checksum_enabled = True
+
+        with (
+            patch.object(stream, "_wait_for_backoff", new=AsyncMock()),
+            patch(
+                "mysql_event_stream.stream.BinlogClient", return_value=replacement_client
+            ) as client_cls,
+            patch("asyncio.to_thread", new=AsyncMock()),
+        ):
+            await stream._reconnect()
+
+        kwargs = client_cls.call_args.kwargs
+        assert kwargs["start_gtid"] == ""
+        assert kwargs["start_binlog_file"] is None
+        assert kwargs["start_binlog_position"] == 0
 
     @pytest.mark.asyncio
     async def test_max_reconnect_attempts_one_allows_one_retry(self) -> None:
@@ -254,6 +376,7 @@ class TestReconnectAttempts:
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         client = MagicMock()
+        client.poll.return_value = PollResult(b"bad event", False)
         client.poll.side_effect = RuntimeError("immediate drop")
         mock_client_cls.side_effect = [
             ConnectionError("connect refused 1"),
@@ -316,3 +439,61 @@ class TestReconnectAttempts:
 
         assert backoff.done()
         assert stream._backoff_task is None
+
+
+class TestEngineFailures:
+    """Engine failures must follow the same cleanup/retry policy as poll failures."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error_code",
+        [MES_ERR_PARSE, MES_ERR_QUEUE_FULL, MES_ERR_GTID_PURGED, MES_ERR_GTID_TAGGED_UNSUPPORTED],
+    )
+    async def test_feed_permanent_error_closes_stream_without_retrying(
+        self, error_code: int
+    ) -> None:
+        client = MagicMock()
+        client.poll.return_value = PollResult(b"abcdef", False)
+        engine = MagicMock()
+        engine.next_event.return_value = None
+        permanent_error = exception_for_rc(error_code, "permanent error")
+        engine.feed.side_effect = permanent_error
+
+        stream = CdcStream.__new__(CdcStream)
+        stream._closed = False
+        stream._started = True
+        stream._max_reconnect_attempts = 10
+        stream._reconnect_attempts = 0
+        stream._backoff_task = None
+        stream._poll_task = None
+        stream._client = client
+        stream._engine = engine
+
+        with (
+            patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)),
+            pytest.raises(type(permanent_error), match="permanent error"),
+        ):
+            await stream.__anext__()
+
+        client.close.assert_called_once()
+        engine.close.assert_called_once()
+        assert stream._closed
+
+    @pytest.mark.asyncio
+    async def test_feed_retains_unconsumed_packet_suffix(self) -> None:
+        client = MagicMock()
+        client.poll.return_value = PollResult(b"abcdef", False)
+        engine = MagicMock()
+        decoded = MagicMock()
+        engine.next_event.side_effect = [None, decoded]
+        engine.feed.return_value = 2
+        stream = CdcStream(host="127.0.0.1")
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)):
+            assert await stream.__anext__() is decoded
+
+        engine.feed.assert_called_once_with(b"abcdef")
+        assert stream._leftover == b"cdef"

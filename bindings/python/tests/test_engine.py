@@ -4,9 +4,9 @@ import ctypes
 
 import pytest
 
-from mysql_event_stream import CdcEngine, ChecksumError, EventType
-from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_INT, MES_COL_STRING, MESColumn
-from mysql_event_stream.engine import _convert_columns
+from mysql_event_stream import CdcEngine, ChecksumError, EventType, ParseError
+from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_INT, MES_COL_STRING, MESColumn, MESEvent
+from mysql_event_stream.engine import _convert_columns, _convert_event
 
 from .helpers import (
     build_delete_rows_body,
@@ -98,9 +98,9 @@ class TestInsertEvent:
             assert len(event.after) == 1
             assert event.after["0"] == 42
             assert event.timestamp == 1000
-            # Standalone mode (no metadata connection): resolution is not
-            # attempted, so names_resolved is reported as True.
-            assert event.names_resolved is True
+            # Standalone mode (no metadata connection): the TABLE_MAP has no
+            # names, so positional keys are not reported as resolved names.
+            assert event.names_resolved is False
 
             assert engine.next_event() is None
 
@@ -158,6 +158,12 @@ class TestReset:
 
             assert engine.has_events()
             engine.reset()
+            # reset clears parser state but deliberately retains already
+            # decoded events so callers can drain them after a feed error.
+            event = engine.next_event()
+            assert event is not None
+            assert event.after is not None
+            assert event.after["0"] == 1
             assert not engine.has_events()
 
 
@@ -214,6 +220,28 @@ def _make_bytes_column(data: bytes) -> MESColumn:
     col.col_name = None
     col._keep_alive = (buf,)  # type: ignore[attr-defined]
     return col
+
+
+class TestConvertEvent:
+    """Test conversion of C ABI event types."""
+
+    def test_unknown_event_type_raises_parse_error(self) -> None:
+        raw = MESEvent()
+        raw.type = 99
+
+        with pytest.raises(ParseError, match="Unknown event type: 99") as error:
+            _convert_event(raw)
+        assert error.value.code == 100
+
+    def test_source_sql_is_exposed(self) -> None:
+        raw = MESEvent()
+        raw.type = 0
+        raw.database = b"testdb"
+        raw.table = b"users"
+        raw.source_sql = b"INSERT INTO users VALUES (42)"
+
+        event = _convert_event(raw)
+        assert event.source_sql == "INSERT INTO users VALUES (42)"
 
 
 class TestConvertColumns:
@@ -316,3 +344,47 @@ class TestSpecialColumnRepresentations:
         result = _convert_columns(arr, 1)
         assert result["0"] == 0xFF
         assert isinstance(result["0"], int)
+
+    def test_enum_set_and_bit_are_decoded_from_real_binlog_rows(self, lib_path: str) -> None:
+        def table_map_body(table_id: int, column_type: int, metadata: bytes) -> bytes:
+            body = bytearray(table_id.to_bytes(6, "little"))
+            body.extend(b"\x00\x00\x02db\x00\x01t\x00\x01")
+            body.append(column_type)
+            body.append(len(metadata))
+            body.extend(metadata)
+            body.append(0x01)
+            return bytes(body)
+
+        def write_rows_body(table_id: int, value: bytes) -> bytes:
+            return table_id.to_bytes(6, "little") + b"\x00\x00\x02\x00\x01\x01\x00" + value
+
+        # ENUM and SET arrive as MYSQL_TYPE_STRING with their real type in
+        # TABLE_MAP metadata; BIT has its native wire type and bit width.
+        cases = [
+            (71, 0xFE, b"\xf7\x01", b"\x02", 2),
+            (72, 0xFE, b"\xf8\x01", b"\x05", 5),
+            (73, 0x10, b"\x01\x00", b"\xff", 255),
+        ]
+        with CdcEngine(lib_path=lib_path) as engine:
+            engine.set_checksum_enabled(False)
+            for table_id, column_type, metadata, raw_value, expected in cases:
+                engine.feed(
+                    build_event_no_checksum(19, 1, table_map_body(table_id, column_type, metadata))
+                )
+                engine.feed(build_event_no_checksum(30, 2, write_rows_body(table_id, raw_value)))
+                event = engine.next_event()
+                assert event is not None and event.after is not None
+                assert event.after["0"] == expected
+                assert isinstance(event.after["0"], int)
+
+
+def test_column_name_cache_is_reused_across_rows() -> None:
+    col = _make_int_column(7)
+    col.col_name = b"id"
+    arr = (MESColumn * 1)(col)
+    cache: dict[bytes, str] = {}
+
+    assert _convert_columns(arr, 1, cache) == {"id": 7}
+    cached_name = cache[b"id"]
+    assert _convert_columns(arr, 1, cache) == {"id": 7}
+    assert cache[b"id"] is cached_name

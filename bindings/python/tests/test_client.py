@@ -2,14 +2,112 @@
 
 from __future__ import annotations
 
+import ctypes
 import threading
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from mysql_event_stream._ffi import MESPollResult
 from mysql_event_stream.client import BinlogClient
+from mysql_event_stream.types import ServerFlavor
+
+
+def test_client_ffi_signatures_are_applied_to_the_real_library(lib_path: str) -> None:
+    """Exercise load_client_library instead of replacing both FFI layers with mocks."""
+    from mysql_event_stream._ffi import (
+        MESClientConfig,
+        MESPollResult,
+        load_client_library,
+        load_library,
+    )
+
+    lib = load_library(lib_path)
+    assert load_client_library(lib) is True
+    assert lib.mes_client_create.restype is ctypes.c_void_p
+    assert lib.mes_client_create.argtypes == []
+    assert lib.mes_client_connect.restype is ctypes.c_int32
+    assert lib.mes_client_connect.argtypes == [ctypes.c_void_p, ctypes.POINTER(MESClientConfig)]
+    assert lib.mes_client_poll.restype is MESPollResult
+    assert lib.mes_client_poll.argtypes == [ctypes.c_void_p]
+    assert lib.mes_client_poll_batch.restype is ctypes.c_int32
+    assert lib.mes_client_poll_batch.argtypes == [
+        ctypes.c_void_p,
+        ctypes.POINTER(MESPollResult),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    assert lib.mes_client_queued_bytes.restype is ctypes.c_size_t
+
+
+def test_constructor_rejects_zero_server_id() -> None:
+    with pytest.raises(ValueError, match="server_id must be non-zero"):
+        BinlogClient(server_id=0)
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_poll_batch_copies_all_native_results(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    lib = MagicMock()
+    lib.mes_client_create.return_value = 0xDEAD
+    payload = (ctypes.c_uint8 * 3)(0x01, 0x02, 0x03)
+
+    def poll_batch(
+        handle: object,
+        results: ctypes.POINTER(MESPollResult),
+        capacity: int,
+        result_count: ctypes.POINTER(ctypes.c_size_t),
+    ) -> int:
+        assert handle == 0xDEAD
+        assert capacity == 4
+        results[0].error = 0
+        results[0].data = ctypes.cast(payload, ctypes.POINTER(ctypes.c_uint8))
+        results[0].size = len(payload)
+        results[0].is_heartbeat = 0
+        results[1].error = 0
+        results[1].data = None
+        results[1].size = 0
+        results[1].is_heartbeat = 1
+        ctypes.cast(result_count, ctypes.POINTER(ctypes.c_size_t))[0] = 2
+        return 0
+
+    lib.mes_client_poll_batch.side_effect = poll_batch
+    mock_load.return_value = lib
+
+    client = BinlogClient()
+    actual = client.poll_batch(4)
+    assert [(result.data, result.is_heartbeat) for result in actual] == [
+        (b"\x01\x02\x03", False),
+        (None, True),
+    ]
+    with pytest.raises(ValueError, match="positive"):
+        client.poll_batch(0)
+    client.close()
 
 
 class TestClientClose:
     """Verify that close() calls stop, disconnect, and destroy in order."""
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_constructor_defers_connect_until_explicit_call(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_set_max_event_size.return_value = 0
+        lib.mes_client_set_max_queue_bytes.return_value = 0
+        lib.mes_client_connect.return_value = 0
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        lib.mes_client_connect.assert_not_called()
+
+        client.connect()
+        lib.mes_client_connect.assert_called_once()
+        client.close()
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")
@@ -66,6 +164,40 @@ class TestClientClose:
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")
+    def test_flavor_property_uses_the_native_value(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_flavor.return_value = ServerFlavor.MARIADB
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        assert client.flavor is ServerFlavor.MARIADB
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_queue_and_crc_observability_properties(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_queued_bytes.return_value = 123
+        lib.mes_client_get_max_queue_bytes.return_value = 456
+        lib.mes_client_get_max_event_size.return_value = 789
+        lib.mes_client_crc_errors.return_value = 2
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        assert client.queued_bytes == 123
+        assert client.max_queue_bytes == 456
+        assert client.max_event_size == 789
+        assert client.crc_errors == 2
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
     def test_connection_and_streaming_states_are_separate(
         self, mock_load: MagicMock, mock_load_client: MagicMock
     ) -> None:
@@ -98,6 +230,55 @@ class TestClientClose:
         lib.mes_client_set_max_event_size.assert_called_once_with(0xDEAD, 128 * 1024 * 1024)
         lib.mes_client_set_max_queue_bytes.assert_called_once_with(0xDEAD, 512 * 1024 * 1024)
         client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_connect_distinguishes_current_empty_gtid_and_file_position(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_set_max_event_size.return_value = 0
+        lib.mes_client_set_max_queue_bytes.return_value = 0
+        lib.mes_client_connect.return_value = 0
+        mock_load.return_value = lib
+
+        current = BinlogClient()
+        current.connect()
+        current_config = lib.mes_client_connect.call_args.args[1]._obj
+        assert current_config.start_position_mode == 0
+        current.close()
+
+        lib.mes_client_connect.reset_mock()
+        empty = BinlogClient(start_gtid="")
+        empty.connect()
+        empty_config = lib.mes_client_connect.call_args.args[1]._obj
+        assert empty_config.start_position_mode == 1
+        assert empty_config.start_gtid == b""
+        empty.close()
+
+        lib.mes_client_connect.reset_mock()
+        position = BinlogClient(start_binlog_file="binlog.000123", start_binlog_position=9876)
+        position.connect()
+        position_config = lib.mes_client_connect.call_args.args[1]._obj
+        assert position_config.start_position_mode == 2
+        assert position_config.binlog_file == b"binlog.000123"
+        assert position_config.binlog_position == 9876
+        position.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_connect_rejects_conflicting_or_invalid_file_position(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        mock_load.return_value = lib
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            BinlogClient(start_gtid="uuid:1-1", start_binlog_file="binlog.000001").connect()
+        with pytest.raises(ValueError, match="4 through"):
+            BinlogClient(start_binlog_file="binlog.000001", start_binlog_position=3).connect()
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")
@@ -169,5 +350,52 @@ class TestClosePollRace:
         poller.join(timeout=5)
 
         assert not destroy_during_poll.is_set(), "destroy() ran while poll() was in flight"
+        lib.mes_client_destroy.assert_called_once()
+        assert client._handle is None
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_close_waits_for_inflight_current_gtid_read(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        """A property read must not touch a handle after close() destroys it."""
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        mock_load.return_value = lib
+
+        read_entered = threading.Event()
+        release_read = threading.Event()
+        destroy_during_read = threading.Event()
+        in_read = threading.Event()
+
+        def fake_current_gtid(_handle: object) -> bytes:
+            in_read.set()
+            read_entered.set()
+            release_read.wait(timeout=5)
+            in_read.clear()
+            return b"uuid:1-2"
+
+        def fake_destroy(_handle: object) -> None:
+            if in_read.is_set():
+                destroy_during_read.set()
+
+        lib.mes_client_current_gtid.side_effect = fake_current_gtid
+        lib.mes_client_destroy.side_effect = fake_destroy
+        client = BinlogClient()
+
+        reader = threading.Thread(target=lambda: client.current_gtid)
+        reader.start()
+        assert read_entered.wait(timeout=5)
+
+        closer = threading.Thread(target=client.close)
+        closer.start()
+        # close() must wait for the property call's handle lock, not destroy
+        # the native client while mes_client_current_gtid() is in flight.
+        assert closer.is_alive()
+        release_read.set()
+        reader.join(timeout=5)
+        closer.join(timeout=5)
+
+        assert not destroy_during_read.is_set()
         lib.mes_client_destroy.assert_called_once()
         assert client._handle is None

@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import threading
+from unittest.mock import MagicMock
+
+import pytest
 
 import mysql_event_stream.logging as logmod
-from mysql_event_stream import LogLevel, set_log_callback
+from mysql_event_stream import CdcEngine, LogLevel, ParseError, set_log_callback
+
+
+def _oversized_event_header() -> bytes:
+    event = bytearray(23)
+    event[4] = 19  # TABLE_MAP_EVENT
+    event[5:9] = (1).to_bytes(4, "little")
+    event[9:13] = (1024 * 1024 * 1024).to_bytes(4, "little")
+    return bytes(event)
 
 
 class TestLogLevel:
@@ -41,6 +52,19 @@ class TestSetLogCallback:
         assert logmod._active_handler is None
         assert logmod._stable_callback is stable
 
+    def test_explicit_library_path_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        lib = MagicMock()
+        seen: list[str | None] = []
+
+        def get_specific(path: str | None = None) -> MagicMock:
+            seen.append(path)
+            return lib
+
+        monkeypatch.setattr(logmod, "get_library", get_specific)
+        set_log_callback(lambda level, message: None, lib_path="/tmp/libmes-test.dylib")
+        assert seen == ["/tmp/libmes-test.dylib"]
+        lib.mes_set_log_callback.assert_called_once()
+
     def test_reinstall_replaces_handler_not_trampoline(self) -> None:
         def first_handler(level: LogLevel, message: str) -> None:
             pass
@@ -65,6 +89,18 @@ class TestSetLogCallback:
 
         assert old_messages == ["old"]
         assert new_messages == ["new"]
+
+    def test_native_engine_error_reaches_python_handler(self) -> None:
+        messages: list[tuple[LogLevel, str]] = []
+        set_log_callback(lambda level, message: messages.append((level, message)), LogLevel.DEBUG)
+
+        with CdcEngine() as engine, pytest.raises(ParseError):
+            engine.feed(_oversized_event_header())
+
+        assert any(
+            level == LogLevel.ERROR and "event=parse_error reason=event_too_large" in message
+            for level, message in messages
+        )
 
     def test_concurrent_replace_and_unset_stress(self) -> None:
         stop = threading.Event()
