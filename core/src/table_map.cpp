@@ -3,6 +3,8 @@
 
 #include "table_map.h"
 
+#include <algorithm>
+
 #include "binary_util.h"
 
 namespace mes {
@@ -21,7 +23,6 @@ constexpr size_t kMaxColumns = 4096;
 // A simple single-threshold flush is preferred over strict LRU because it
 // keeps the hot path allocation-free and the worst case affects at most
 // one stale table_id per cleared entry.
-constexpr size_t kMaxTableMapEntries = 8192;
 
 struct MetadataValue {
   uint32_t value = 0;
@@ -179,12 +180,14 @@ enum class OptionalMetadataFieldType : uint8_t {
   kColumnVisibility = 12,
 };
 
-// Numeric column types that carry a SIGNEDNESS bit (one bit per such column,
-// in column order, MSB-first within each byte).
+// MySQL's Field::has_signedness_information_type() decides which TABLE_MAP
+// columns receive a SIGNEDNESS bit. This is deliberately based on the actual
+// binlog column type: TYPED_ARRAY itself has no bit, even when its element
+// type is numeric.
 bool IsNumericColumnType(const ColumnMetadata& column) {
-  const uint8_t col_type =
-      static_cast<uint8_t>(column.is_array ? column.array_element_type : column.type);
+  const uint8_t col_type = static_cast<uint8_t>(column.type);
   switch (col_type) {
+    case static_cast<uint8_t>(ColumnType::kDecimal):
     case static_cast<uint8_t>(ColumnType::kTiny):
     case static_cast<uint8_t>(ColumnType::kShort):
     case static_cast<uint8_t>(ColumnType::kInt24):
@@ -193,15 +196,24 @@ bool IsNumericColumnType(const ColumnMetadata& column) {
     case static_cast<uint8_t>(ColumnType::kNewDecimal):
     case static_cast<uint8_t>(ColumnType::kFloat):
     case static_cast<uint8_t>(ColumnType::kDouble):
+    case static_cast<uint8_t>(ColumnType::kYear):
       return true;
     default:
       return false;
   }
 }
 
-// Apply a SIGNEDNESS bitmap to the numeric columns of `metadata`.
-void ApplySignedness(const uint8_t* bitmap, size_t bitmap_len, TableMetadata* metadata) {
-  metadata->signedness_from_binlog = true;
+// Apply a complete SIGNEDNESS bitmap to the relevant columns of `metadata`.
+// A truncated bitmap is malformed; do not claim that signedness is
+// authoritative when values would otherwise silently retain their defaults.
+bool ApplySignedness(const uint8_t* bitmap, size_t bitmap_len, TableMetadata* metadata) {
+  const size_t numeric_count = static_cast<size_t>(
+      std::count_if(metadata->columns.begin(), metadata->columns.end(), IsNumericColumnType));
+  const size_t required_bytes = (numeric_count + 7) / 8;
+  if (bitmap_len < required_bytes) {
+    return false;
+  }
+
   size_t numeric_index = 0;
   for (auto& column : metadata->columns) {
     if (!IsNumericColumnType(column)) {
@@ -216,6 +228,8 @@ void ApplySignedness(const uint8_t* bitmap, size_t bitmap_len, TableMetadata* me
     column.is_unsigned = (bitmap[byte_index] & bit) != 0;
     ++numeric_index;
   }
+  metadata->signedness_from_binlog = true;
+  return true;
 }
 
 // Apply COLUMN_NAME entries (one length-encoded string per column).
@@ -239,6 +253,74 @@ bool ApplyColumnNames(const uint8_t* data, size_t value_len, TableMetadata* meta
   return pos == value_len;
 }
 
+bool IsCharacterColumnType(ColumnType type) {
+  switch (type) {
+    case ColumnType::kVarchar:
+    case ColumnType::kVarcharCompressed:
+    case ColumnType::kVarString:
+    case ColumnType::kString:
+    case ColumnType::kBlob:
+    case ColumnType::kBlobCompressed:
+    case ColumnType::kTinyBlob:
+    case ColumnType::kMediumBlob:
+    case ColumnType::kLongBlob:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ReadPackedField(const uint8_t* data, size_t len, size_t* offset, uint32_t* value) {
+  if (*offset >= len) return false;
+  size_t packed_bytes = 0;
+  const uint64_t packed = binary::ReadPackedInt(data + *offset, len - *offset, packed_bytes);
+  if (packed_bytes == 0 || packed_bytes > len - *offset || packed > UINT32_MAX) return false;
+  *offset += packed_bytes;
+  *value = static_cast<uint32_t>(packed);
+  return true;
+}
+
+std::vector<ColumnMetadata*> CharacterColumns(TableMetadata* metadata) {
+  std::vector<ColumnMetadata*> columns;
+  for (auto& column : metadata->columns) {
+    if (IsCharacterColumnType(column.type)) columns.push_back(&column);
+  }
+  return columns;
+}
+
+bool ApplyDefaultCharset(const uint8_t* data, size_t len, TableMetadata* metadata) {
+  size_t offset = 0;
+  uint32_t default_charset = 0;
+  if (!ReadPackedField(data, len, &offset, &default_charset)) return false;
+  auto columns = CharacterColumns(metadata);
+  for (auto* column : columns) {
+    column->charset_id = default_charset;
+    column->charset_known = true;
+  }
+  while (offset < len) {
+    uint32_t column_index = 0;
+    uint32_t charset = 0;
+    if (!ReadPackedField(data, len, &offset, &column_index) ||
+        !ReadPackedField(data, len, &offset, &charset) || column_index >= columns.size()) {
+      return false;
+    }
+    columns[column_index]->charset_id = charset;
+  }
+  return offset == len;
+}
+
+bool ApplyColumnCharset(const uint8_t* data, size_t len, TableMetadata* metadata) {
+  size_t offset = 0;
+  auto columns = CharacterColumns(metadata);
+  for (auto* column : columns) {
+    uint32_t charset = 0;
+    if (!ReadPackedField(data, len, &offset, &charset)) return false;
+    column->charset_id = charset;
+    column->charset_known = true;
+  }
+  return offset == len;
+}
+
 // Parse the optional metadata block following the null bitmap. Unknown field
 // types are skipped, but every TLV must be structurally complete.
 bool ParseOptionalMetadata(const uint8_t* data, size_t offset, size_t len,
@@ -259,7 +341,13 @@ bool ParseOptionalMetadata(const uint8_t* data, size_t offset, size_t len,
 
     switch (static_cast<OptionalMetadataFieldType>(field_type)) {
       case OptionalMetadataFieldType::kSignedness:
-        ApplySignedness(value, field_size, metadata);
+        if (!ApplySignedness(value, field_size, metadata)) return false;
+        break;
+      case OptionalMetadataFieldType::kDefaultCharset:
+        if (!ApplyDefaultCharset(value, field_size, metadata)) return false;
+        break;
+      case OptionalMetadataFieldType::kColumnCharset:
+        if (!ApplyColumnCharset(value, field_size, metadata)) return false;
         break;
       case OptionalMetadataFieldType::kColumnName:
         if (!ApplyColumnNames(value, field_size, metadata)) return false;
@@ -394,50 +482,82 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   return ParseOptionalMetadata(data, offset, len, metadata);
 }
 
-bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len) {
+bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len,
+                                            uint64_t* evicted_table_id, bool* unchanged) {
+  if (unchanged != nullptr) *unchanged = false;
+  if (data == nullptr || len < 6) return false;
+  const uint64_t table_id = binary::ReadU48Le(data);
+  auto existing = entries_.find(table_id);
+  if (existing != entries_.end() && existing->second.raw_body.size() == len &&
+      std::memcmp(existing->second.raw_body.data(), data, len) == 0) {
+    Touch(existing);
+    if (unchanged != nullptr) *unchanged = true;
+    return true;
+  }
+
   TableMetadata metadata;
   if (!ParseTableMapEvent(data, len, &metadata)) {
     return false;
   }
-  uint64_t table_id = metadata.table_id;
-  // Bound registry growth. Clearing on overflow is acceptable because each
-  // ROWS event is always preceded by a TABLE_MAP event that re-registers the
-  // table; after a flush, the first subsequent ROWS event for any table will
-  // see a fresh TABLE_MAP before decoding begins.
   auto it = entries_.find(table_id);
-  if (entries_.size() >= kMaxTableMapEntries && it == entries_.end()) {
-    entries_.clear();
-    it = entries_.end();  // invalidated by clear(), but we'll insert below
+  if (it != entries_.end()) {
+    it->second.metadata = std::make_shared<TableMetadata>(std::move(metadata));
+    it->second.raw_body.assign(data, data + len);
+    Touch(it);
+    return true;
   }
-  // insert_or_assign avoids the second hash lookup that operator[] would
-  // perform when the key is absent.
-  entries_.insert_or_assign(table_id, std::move(metadata));
+  if (entries_.size() == kMaxEntries) {
+    const uint64_t evicted = lru_.back();
+    lru_.pop_back();
+    entries_.erase(evicted);
+    if (evicted_table_id != nullptr) *evicted_table_id = evicted;
+  }
+  lru_.push_front(table_id);
+  entries_.emplace(table_id, Entry{std::make_shared<TableMetadata>(std::move(metadata)),
+                                   std::vector<uint8_t>(data, data + len), lru_.begin()});
   return true;
 }
 
-const TableMetadata* TableMapRegistry::Lookup(uint64_t table_id) const {
+void TableMapRegistry::Touch(std::unordered_map<uint64_t, Entry>::iterator it) {
+  lru_.splice(lru_.begin(), lru_, it->second.lru_position);
+  it->second.lru_position = lru_.begin();
+}
+
+const TableMetadata* TableMapRegistry::Lookup(uint64_t table_id) {
   auto it = entries_.find(table_id);
   if (it == entries_.end()) {
     return nullptr;
   }
-  return &it->second;
+  Touch(it);
+  return it->second.metadata.get();
 }
 
-void TableMapRegistry::Clear() { entries_.clear(); }
+std::shared_ptr<const TableMetadata> TableMapRegistry::SharedLookup(uint64_t table_id) {
+  auto it = entries_.find(table_id);
+  if (it == entries_.end()) return {};
+  Touch(it);
+  return it->second.metadata;
+}
+
+void TableMapRegistry::Clear() {
+  entries_.clear();
+  lru_.clear();
+}
 
 size_t TableMapRegistry::Size() const { return entries_.size(); }
 
 void TableMapRegistry::ForEach(
     const std::function<void(uint64_t, const TableMetadata&)>& visitor) const {
-  for (const auto& [table_id, metadata] : entries_) {
-    visitor(table_id, metadata);
+  for (const auto& [table_id, entry] : entries_) {
+    visitor(table_id, *entry.metadata);
   }
 }
 
 TableMetadata* TableMapRegistry::MutableLookup(uint64_t table_id) {
   auto it = entries_.find(table_id);
   if (it == entries_.end()) return nullptr;
-  return &it->second;
+  Touch(it);
+  return it->second.metadata.get();
 }
 
 }  // namespace mes

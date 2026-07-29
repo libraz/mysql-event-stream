@@ -56,6 +56,9 @@ const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2, 
   size_t bitmap_bytes = binary::BitmapBytes(col_count);
   if (left < bitmap_bytes) return nullptr;
   *columns_present = ptr;
+  for (uint64_t i = 0; i < col_count; ++i) {
+    if (!binary::BitmapIsSet(*columns_present, static_cast<size_t>(i))) return nullptr;
+  }
   ptr += bitmap_bytes;
   left -= bitmap_bytes;
 
@@ -63,6 +66,9 @@ const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2, 
   if (is_update) {
     if (left < bitmap_bytes) return nullptr;
     *columns_present_update = ptr;
+    for (uint64_t i = 0; i < col_count; ++i) {
+      if (!binary::BitmapIsSet(*columns_present_update, static_cast<size_t>(i))) return nullptr;
+    }
     ptr += bitmap_bytes;
     left -= bitmap_bytes;
   }
@@ -83,8 +89,8 @@ size_t CountPresentColumns(const uint8_t* bitmap, size_t column_count) {
 
 // Decode a single row from the data pointer. Advances ptr and remaining.
 bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& metadata,
-                  size_t column_count, const uint8_t* columns_present, RowData* row) {
-  size_t present_count = CountPresentColumns(columns_present, column_count);
+                  size_t column_count, size_t present_count, const uint8_t* columns_present,
+                  RowData* row) {
   if (present_count == 0) return false;
 
   // Null bitmap
@@ -105,9 +111,9 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
     const ColumnType col_type = col_info ? col_info->type : ColumnType::kLong;
 
     if (!binary::BitmapIsSet(columns_present, i)) {
-      // Column not present in this event
-      row->columns[i] = ColumnValue::Null(col_type);
-      continue;
+      // ParseRowsPostHeader rejects partial row images because the public C
+      // ABI has no "absent" state distinct from SQL NULL.
+      return false;
     }
 
     if (binary::BitmapIsSet(null_bitmap, null_bit_index)) {
@@ -119,9 +125,12 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
 
     const uint32_t meta = col_info ? col_info->metadata : 0;
     const bool is_unsigned = col_info ? col_info->is_unsigned : false;
+    const bool charset_known = col_info ? col_info->charset_known : false;
+    const bool binary_charset = charset_known && col_info->charset_id == 63;
 
     size_t consumed = 0;
-    row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed);
+    row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed,
+                                        charset_known, binary_charset);
     if (consumed == 0) {
       // consumed=0 serves a dual purpose — it signals
       // either a decode error OR a legitimate zero-size DECIMAL(0,0).
@@ -174,10 +183,12 @@ int FracToMicroseconds(int frac, uint16_t meta) {
   }
 }
 
-// Format fractional part as ".FFFFFF" string, trimming nothing (always 6 digits).
-void AppendFractional(std::string& out, int usec) {
+// Format the fractional part at the column's declared precision.
+void AppendFractional(std::string& out, int usec, uint16_t fsp) {
+  if (fsp == 0) return;
+  static constexpr int kDivisor[] = {1, 100000, 10000, 1000, 100, 10, 1};
   char buf[16];
-  std::snprintf(buf, sizeof(buf), ".%06d", usec);
+  std::snprintf(buf, sizeof(buf), ".%0*d", static_cast<int>(fsp), usec / kDivisor[fsp]);
   out += buf;
 }
 
@@ -244,6 +255,8 @@ struct RowsContext {
   const uint8_t* ptr;
   size_t remaining;
   size_t column_count;
+  size_t present_count;
+  size_t present_count_update;
   const uint8_t* columns_present;
   const uint8_t* columns_present_update;
 };
@@ -256,13 +269,18 @@ bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& meta
       ParseRowsPostHeader(data, len, is_v2, is_update, &ctx->column_count, &ctx->columns_present,
                           &ctx->columns_present_update, &ctx->remaining);
   if (ctx->ptr == nullptr) return false;
-  return ctx->column_count == metadata.columns.size();
+  if (ctx->column_count != metadata.columns.size()) return false;
+  ctx->present_count = CountPresentColumns(ctx->columns_present, ctx->column_count);
+  ctx->present_count_update =
+      is_update ? CountPresentColumns(ctx->columns_present_update, ctx->column_count) : 0;
+  return ctx->present_count > 0 && (!is_update || ctx->present_count_update > 0);
 }
 
 }  // namespace
 
 ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, const uint8_t* data,
-                              size_t len, size_t* bytes_consumed) {
+                              size_t len, size_t* bytes_consumed, bool charset_known,
+                              bool binary_charset) {
   *bytes_consumed = 0;
 
   switch (type) {
@@ -370,6 +388,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       }
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
+      if (binary_charset) {
+        return ColumnValue::Bytes(type, data + prefix_size, str_len);
+      }
       return ColumnValue::String(
           type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
     }
@@ -409,6 +430,10 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (prefix_consumed == 0) return ColumnValue::Null(type);
       if (blob_len > len - prefix_consumed) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + blob_len;
+      if (charset_known && !binary_charset) {
+        return ColumnValue::String(
+            type, std::string(reinterpret_cast<const char*>(data + prefix_consumed), blob_len));
+      }
       return ColumnValue::Bytes(type, data + prefix_consumed, blob_len);
     }
 
@@ -488,6 +513,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
         for (uint32_t i = 0; i < size; i++) {
           val |= static_cast<uint64_t>(data[i]) << (i * 8);
         }
+        if (val > static_cast<uint64_t>(INT64_MAX)) {
+          return ColumnValue::String(ColumnType::kSet, std::to_string(val));
+        }
         return ColumnValue::Int(ColumnType::kSet, static_cast<int64_t>(val));
       }
 
@@ -512,6 +540,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       }
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
+      if (binary_charset) {
+        return ColumnValue::Bytes(type, data + prefix_size, str_len);
+      }
       return ColumnValue::String(
           type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
     }
@@ -557,7 +588,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (len < 4) return ColumnValue::Null(type);
       *bytes_consumed = 4;
       uint32_t val = binary::ReadU32Le(data);
-      return ColumnValue::Int(type, static_cast<int64_t>(val));
+      return ColumnValue::String(type, std::to_string(val));
     }
 
     case ColumnType::kDatetime: {
@@ -583,6 +614,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
     }
 
     case ColumnType::kDatetime2: {
+      if (meta > 6) return ColumnValue::Null(type);
       size_t frac_bytes = (meta + 1) / 2;
       size_t total = 5 + frac_bytes;
       if (len < total) return ColumnValue::Null(type);
@@ -653,13 +685,14 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       result += buf;
 
       if (frac_bytes > 0) {
-        AppendFractional(result, micros);
+        AppendFractional(result, micros, static_cast<uint16_t>(meta));
       }
 
       return ColumnValue::String(type, result);
     }
 
     case ColumnType::kTimestamp2: {
+      if (meta > 6) return ColumnValue::Null(type);
       size_t frac_bytes = (meta + 1) / 2;
       size_t total = 4 + frac_bytes;
       if (len < total) return ColumnValue::Null(type);
@@ -671,15 +704,14 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (meta > 0 && frac_bytes > 0) {
         int frac = static_cast<int>(ReadBigEndian(data + 4, frac_bytes));
         int usec = FracToMicroseconds(frac, meta);
-        char frac_buf[16];
-        std::snprintf(frac_buf, sizeof(frac_buf), ".%06d", usec);
-        result += frac_buf;
+        AppendFractional(result, usec, static_cast<uint16_t>(meta));
       }
 
       return ColumnValue::String(type, result);
     }
 
     case ColumnType::kTime2: {
+      if (meta > 6) return ColumnValue::Null(type);
       size_t frac_bytes = (meta + 1) / 2;
       size_t total = 3 + frac_bytes;
       if (len < total) return ColumnValue::Null(type);
@@ -738,7 +770,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       result += buf;
 
       if (frac_bytes > 0) {
-        AppendFractional(result, micros);
+        AppendFractional(result, micros, static_cast<uint16_t>(meta));
       }
 
       return ColumnValue::String(type, result);
@@ -766,6 +798,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (len < total_bytes) return ColumnValue::Null(type);
       *bytes_consumed = total_bytes;
       uint64_t val = ReadBigEndian(data, total_bytes);
+      if (val > static_cast<uint64_t>(INT64_MAX)) {
+        return ColumnValue::String(type, std::to_string(val));
+      }
       return ColumnValue::Int(type, static_cast<int64_t>(val));
     }
 
@@ -802,8 +837,8 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
   while (ctx.remaining > 0) {
     const size_t remaining_before = ctx.remaining;
     RowData row;
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
-                      &row)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count,
+                      ctx.columns_present, &row)) {
       return false;
     }
     if (ctx.remaining >= remaining_before) return false;
@@ -835,11 +870,11 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
   while (ctx.remaining > 0) {
     const size_t remaining_before = ctx.remaining;
     UpdatePair pair;
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.columns_present,
-                      &pair.before)) {
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count,
+                      ctx.columns_present, &pair.before)) {
       return false;
     }
-    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count,
+    if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count_update,
                       ctx.columns_present_update, &pair.after)) {
       return false;
     }

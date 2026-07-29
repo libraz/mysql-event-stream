@@ -13,7 +13,10 @@
 #define MES_CORE_SRC_TYPES_H_
 
 #include <cstdint>
+#include <memory>
+#include <memory_resource>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -26,6 +29,7 @@ namespace mes {
  * Only types relevant to MySQL 8.4 binlog row events are included.
  */
 enum class ColumnType : uint8_t {
+  kDecimal = 0x00,            ///< MYSQL_TYPE_DECIMAL (legacy)
   kTiny = 0x01,               ///< MYSQL_TYPE_TINY (TINYINT)
   kShort = 0x02,              ///< MYSQL_TYPE_SHORT (SMALLINT)
   kLong = 0x03,               ///< MYSQL_TYPE_LONG (INT)
@@ -78,7 +82,9 @@ enum class EventType : uint8_t {
  * used depending on the column type.
  *
  * @note `string_val` holds both textual (e.g. VARCHAR, DECIMAL) and
- *       binary (BLOB, JSON, GEOMETRY) payloads. std::string is used
+ *       binary payloads. `is_binary` records which interpretation applies;
+ *       TABLE_MAP charset metadata distinguishes text BLOB columns from
+ *       binary BLOB columns. std::string is used
  *       uniformly as the backing container because its storage layout
  *       is byte-addressable and permits embedded NULs, so it is a
  *       strict superset of what a std::vector<uint8_t> would offer.
@@ -91,13 +97,15 @@ enum class EventType : uint8_t {
 struct ColumnValue {
   ColumnType type = ColumnType::kLong;
   bool is_null = true;
-  std::string name;  ///< Column name (empty = unknown)
+  /// True when string_val is an opaque byte sequence rather than text.
+  bool is_binary = false;
+  std::string_view name;  ///< Column name (empty = unknown; owned by ChangeEvent metadata)
 
   int64_t int_val = 0;     ///< kTiny, kShort, kLong, kLongLong, kInt24, kYear
   double real_val = 0.0;   ///< kFloat, kDouble
   std::string string_val;  ///< STRING, BLOB, JSON, DECIMAL, DATETIME, etc. (binary-safe)
 
-  /** @brief Raw byte pointer for binary payloads (BLOB/JSON/GEOMETRY). */
+  /** @brief Raw byte pointer for binary payloads. */
   const uint8_t* bytes_data() const { return reinterpret_cast<const uint8_t*>(string_val.data()); }
 
   /** @brief Size of the byte payload (same as `string_val.size()`). */
@@ -152,6 +160,7 @@ struct ColumnValue {
     ColumnValue v;
     v.type = t;
     v.is_null = false;
+    v.is_binary = true;
     v.string_val.assign(reinterpret_cast<const char*>(data), len);
     return v;
   }
@@ -163,10 +172,25 @@ struct ColumnValue {
 };
 
 /**
+ * @brief Process-lifetime allocator for decoded row column arrays.
+ *
+ * A row is moved into a ChangeEvent and can outlive the decoder that produced
+ * it, so a per-decode arena would either dangle or require copying.  A
+ * synchronized pool keeps that ownership model intact while reusing the
+ * small, same-shaped allocations made by RowData::columns across events and
+ * consumer threads.  Individual string/blob payloads retain their normal
+ * ownership and are bounded by the parser and column decoders.
+ */
+inline std::pmr::memory_resource* RowColumnMemoryResource() {
+  static std::pmr::synchronized_pool_resource resource;
+  return &resource;
+}
+
+/**
  * @brief A row of column values
  */
 struct RowData {
-  std::vector<ColumnValue> columns;
+  std::pmr::vector<ColumnValue> columns{RowColumnMemoryResource()};
 };
 
 /**
@@ -191,6 +215,9 @@ struct ColumnMetadata {
   ColumnType array_element_type = ColumnType::kLong;
   bool is_nullable = true;
   bool is_unsigned = false;
+  /// TABLE_MAP collation ID, when optional charset metadata was present.
+  uint32_t charset_id = 0;
+  bool charset_known = false;
 };
 
 /**
@@ -205,11 +232,10 @@ struct TableMetadata {
   /// metadata (authoritative). When false, signedness may be filled from a
   /// metadata side-connection as a fallback.
   bool signedness_from_binlog = false;
-  /// True when column names are known (either carried in the binlog or
-  /// resolved via the metadata side-connection). False when names were needed
-  /// but could not be resolved (e.g. the side-connection failed), in which
-  /// case emitted events carry empty column names.
-  bool names_resolved = true;
+  /// True only when every column name is known (either carried in the binlog
+  /// or resolved via the metadata side-connection). Otherwise emitted events
+  /// carry empty names for the unresolved columns.
+  bool names_resolved = false;
 };
 
 /**
@@ -223,10 +249,14 @@ struct ChangeEvent {
   RowData after;   ///< Populated for INSERT and UPDATE
   uint32_t timestamp = 0;
   BinlogPosition position;
+  /// Original MariaDB SQL from the preceding ANNOTATE_ROWS event, if present.
+  std::string source_sql;
   /// False when column names could not be resolved for this row's table, so
   /// column names in @ref before / @ref after are empty. See
   /// TableMetadata::names_resolved.
-  bool names_resolved = true;
+  bool names_resolved = false;
+  /// Keeps the TABLE_MAP names alive for the string_view fields in rows.
+  std::shared_ptr<const TableMetadata> table_metadata;
 };
 
 }  // namespace mes

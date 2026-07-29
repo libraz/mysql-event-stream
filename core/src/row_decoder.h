@@ -73,7 +73,8 @@ bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& meta
  * @return Decoded ColumnValue.
  */
 ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, const uint8_t* data,
-                              size_t len, size_t* bytes_consumed);
+                              size_t len, size_t* bytes_consumed, bool charset_known = false,
+                              bool binary_charset = false);
 
 }  // namespace mes
 

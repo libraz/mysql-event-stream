@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <list>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,19 +41,24 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
  */
 class TableMapRegistry {
  public:
+  static constexpr size_t kMaxEntries = 8192;
   /**
    * @brief Process a TABLE_MAP_EVENT body and register the table.
    * @param data Pointer to the event body (after header).
    * @param len Length of the event body (excluding checksum).
    * @return true if successfully parsed and registered.
    */
-  bool ProcessTableMapEvent(const uint8_t* data, size_t len);
+  bool ProcessTableMapEvent(const uint8_t* data, size_t len, uint64_t* evicted_table_id = nullptr,
+                            bool* unchanged = nullptr);
 
   /**
    * @brief Look up table metadata by table_id.
    * @return Pointer to metadata, or nullptr if not found.
    */
-  const TableMetadata* Lookup(uint64_t table_id) const;
+  const TableMetadata* Lookup(uint64_t table_id);
+
+  /** @brief Look up metadata with lifetime retained for queued ChangeEvents. */
+  std::shared_ptr<const TableMetadata> SharedLookup(uint64_t table_id);
 
   /**
    * @brief Look up mutable table metadata by table_id.
@@ -69,7 +76,16 @@ class TableMapRegistry {
   void ForEach(const std::function<void(uint64_t, const TableMetadata&)>& visitor) const;
 
  private:
-  std::unordered_map<uint64_t, TableMetadata> entries_;
+  struct Entry {
+    std::shared_ptr<TableMetadata> metadata;
+    std::vector<uint8_t> raw_body;
+    std::list<uint64_t>::iterator lru_position;
+  };
+
+  void Touch(std::unordered_map<uint64_t, Entry>::iterator it);
+
+  std::unordered_map<uint64_t, Entry> entries_;
+  std::list<uint64_t> lru_;  // Most recently used at the front.
 };
 
 }  // namespace mes
