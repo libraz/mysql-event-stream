@@ -53,6 +53,22 @@ describe("setLogCallback", () => {
     expect(() => setLogCallback(42)).toThrow();
   });
 
+  it("contains exceptions thrown by a log handler", async () => {
+    setLogCallback(() => {
+      throw new Error("log sink failed");
+    }, LogLevel.Debug);
+    const engine = new CdcEngine();
+
+    try {
+      expect(() => engine.feed(oversizedEventHeader())).toThrow();
+      // Allow the thread-safe callback to run. The test itself must complete
+      // without an uncaughtException from the user-provided log handler.
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    } finally {
+      engine.destroy();
+    }
+  });
+
   it("does not keep a child process alive when a handler remains registered", () => {
     const child = spawnSync(
       process.execPath,

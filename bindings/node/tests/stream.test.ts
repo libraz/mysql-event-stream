@@ -18,7 +18,13 @@ const mocks = vi.hoisted(() => ({
   feedImpl: vi.fn((chunk: Uint8Array) => chunk.length),
   checksumImpl: vi.fn(),
   maxEventSizeImpl: vi.fn(),
+  maxQueueSizeImpl: vi.fn(),
+  includeDatabasesImpl: vi.fn(),
+  includeTablesImpl: vi.fn(),
+  excludeTablesImpl: vi.fn(),
   stopImpl: vi.fn(),
+  currentGtidImpl: vi.fn(() => ""),
+  nextEventImpl: vi.fn(() => null),
 }));
 
 vi.mock("../src/client.js", () => ({
@@ -32,8 +38,11 @@ vi.mock("../src/client.js", () => ({
     poll(): Promise<{ data: Uint8Array | null; isHeartbeat: boolean }> {
       return mocks.pollImpl();
     }
+    pollBatch(): Promise<Array<{ data: Uint8Array | null; isHeartbeat: boolean }>> {
+      return this.poll().then((result) => [result]);
+    }
     get currentGtid(): string {
-      return "";
+      return mocks.currentGtidImpl();
     }
     get checksumEnabled(): boolean {
       return true;
@@ -52,14 +61,26 @@ vi.mock("../src/engine.js", () => ({
     feed(chunk: Uint8Array): number {
       return mocks.feedImpl(chunk);
     }
-    nextEvent(): null {
-      return null;
+    nextEvent(): unknown {
+      return mocks.nextEventImpl();
     }
     setChecksumEnabled(enabled: boolean): void {
       mocks.checksumImpl(enabled);
     }
     setMaxEventSize(maxEventSize: number): void {
       mocks.maxEventSizeImpl(maxEventSize);
+    }
+    setMaxQueueSize(maxQueueSize: number): void {
+      mocks.maxQueueSizeImpl(maxQueueSize);
+    }
+    setIncludeDatabases(databases: string[]): void {
+      mocks.includeDatabasesImpl(databases);
+    }
+    setIncludeTables(tables: string[]): void {
+      mocks.includeTablesImpl(tables);
+    }
+    setExcludeTables(tables: string[]): void {
+      mocks.excludeTablesImpl(tables);
     }
     reset(): void {}
     destroy(): void {}
@@ -76,15 +97,82 @@ describe("CdcStream", () => {
     expect(stream).toBeDefined();
   });
 
+  it("does not enumerate credentials with the stream object", () => {
+    const stream = new CdcStream({ host: "127.0.0.1", password: "not-for-logs" });
+    expect(Object.keys(stream)).not.toContain("config");
+    expect(JSON.stringify(stream)).not.toContain("not-for-logs");
+  });
+
+  it("applies exact-match filters when starting", async () => {
+    mocks.includeDatabasesImpl.mockClear();
+    mocks.includeTablesImpl.mockClear();
+    mocks.excludeTablesImpl.mockClear();
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false });
+    mocks.nextEventImpl.mockReset();
+    mocks.nextEventImpl.mockReturnValueOnce({ type: "INSERT" }).mockReturnValue(null);
+
+    const stream = new CdcStream({
+      host: "127.0.0.1",
+      includeDatabases: ["mydb"],
+      includeTables: ["mydb.orders"],
+      excludeTables: ["mydb.audit_log"],
+    });
+    for await (const _ of stream) break;
+
+    expect(mocks.includeDatabasesImpl).toHaveBeenCalledWith(["mydb"]);
+    expect(mocks.includeTablesImpl).toHaveBeenCalledWith(["mydb.orders"]);
+    expect(mocks.excludeTablesImpl).toHaveBeenCalledWith(["mydb.audit_log"]);
+  });
+
   it("configure should update config before streaming", () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     // configure before iteration should not throw
     expect(() => stream.configure({ port: 3307 })).not.toThrow();
   });
 
+  it("configure rejects unknown runtime keys", () => {
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    expect(() => stream.configure({ unknown: true } as never)).toThrow("Unknown config key");
+  });
+
   it("currentGtid should return empty string before streaming", () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     expect(stream.currentGtid).toBe("");
+  });
+
+  it("retains currentGtid after a for-await break cleans up the client", async () => {
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false });
+    mocks.feedImpl.mockReset();
+    mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
+    mocks.nextEventImpl.mockReset();
+    const event = {
+      type: "INSERT",
+      database: "db",
+      table: "t",
+      before: null,
+      after: { id: 1 },
+      timestamp: 0,
+      position: { file: "binlog.000001", offset: 4 },
+      namesResolved: true,
+    };
+    mocks.nextEventImpl.mockReturnValueOnce(event).mockReturnValue(null);
+    mocks.currentGtidImpl.mockReset();
+    mocks.currentGtidImpl.mockReturnValue("uuid:1-42");
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    for await (const received of stream) {
+      expect(received).toEqual(event);
+      break;
+    }
+
+    expect(stream.currentGtid).toBe("uuid:1-42");
+    mocks.currentGtidImpl.mockReturnValue("");
   });
 
   it("close should be safe before streaming starts", async () => {
@@ -118,6 +206,7 @@ describe("CdcStream", () => {
   it("propagates one event-size limit to the client and raw engine", async () => {
     mocks.clientCtor.mockClear();
     mocks.maxEventSizeImpl.mockClear();
+    mocks.maxQueueSizeImpl.mockClear();
     mocks.pollImpl.mockReset();
     mocks.pollImpl.mockImplementation(
       () =>
@@ -138,6 +227,7 @@ describe("CdcStream", () => {
         }),
       );
       expect(mocks.maxEventSizeImpl).toHaveBeenCalledWith(128 * 1024 * 1024);
+      expect(mocks.maxQueueSizeImpl).toHaveBeenCalledWith(0);
     });
     await stream.close();
     await next;
@@ -251,6 +341,37 @@ describe("CdcStream", () => {
       await stream.close();
     });
 
+    it.each([
+      MesErrorCode.InvalidArg,
+      MesErrorCode.Parse,
+      MesErrorCode.DecodeRow,
+      MesErrorCode.QueueFull,
+      MesErrorCode.GtidPurged,
+      MesErrorCode.GtidTaggedUnsupported,
+    ])("fails fast on a permanent stream error (%i)", async (code) => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {
+        const err: Error & { code?: number } = new Error("permanent stream error");
+        err.code = code;
+        throw err;
+      });
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        maxReconnectAttempts: 10,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("permanent stream error");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
+      expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+      await stream.close();
+    });
+
     it("retries a transient (non-auth) error", async () => {
       mocks.clientCtor.mockClear();
       mocks.startImpl.mockReset();
@@ -329,6 +450,33 @@ describe("CdcStream", () => {
       expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
       expect(mocks.startImpl).toHaveBeenCalledTimes(2);
       expect(mocks.pollImpl).toHaveBeenCalledTimes(2);
+    });
+
+    it("reconnects with an explicit empty GTID checkpoint", async () => {
+      mocks.clientCtor.mockClear();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {});
+      mocks.pollImpl.mockReset();
+      mocks.pollImpl.mockRejectedValue(new Error("temporary drop"));
+      mocks.currentGtidImpl.mockReset();
+      mocks.currentGtidImpl.mockReturnValue("");
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        startBinlogFile: "binlog.000001",
+        startBinlogPosition: 4,
+        maxReconnectAttempts: 1,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("temporary drop");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+      expect(mocks.clientCtor.mock.calls[1][0]).toMatchObject({ startGtid: "" });
+      expect(mocks.clientCtor.mock.calls[1][0].startBinlogFile).toBeUndefined();
+      expect(mocks.clientCtor.mock.calls[1][0].startBinlogPosition).toBeUndefined();
     });
 
     it("close interrupts reconnect backoff", async () => {

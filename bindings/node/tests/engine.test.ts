@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
+import { MesErrorCode } from "../src/types.js";
 import {
   buildDeleteRowsBody,
   buildEvent,
@@ -20,6 +21,7 @@ const WRITE_ROWS_EVENT = 30;
 const UPDATE_ROWS_EVENT = 31;
 const DELETE_ROWS_EVENT = 32;
 const ROTATE_EVENT = 4;
+const MARIADB_ANNOTATE_ROWS_EVENT = 160;
 
 describe("CdcEngine", () => {
   let engine: CdcEngine;
@@ -60,9 +62,19 @@ describe("CdcEngine", () => {
     expect(event!.after).not.toBeNull();
     expect(event!.after!["0"]).toBe(42);
     expect(event!.timestamp).toBe(1000);
-    // Standalone mode (no metadata connection): name resolution is not
-    // attempted, so namesResolved is reported as true.
-    expect(event!.namesResolved).toBe(true);
+    // Standalone mode (no metadata connection): the TABLE_MAP has no names.
+    expect(event!.namesResolved).toBe(false);
+  });
+
+  it("exposes MariaDB ANNOTATE_ROWS SQL on row events", async () => {
+    engine = await CdcEngine.create();
+    const sql = "INSERT INTO users VALUES (42)";
+    const annotate = buildEvent(MARIADB_ANNOTATE_ROWS_EVENT, 1000, new TextEncoder().encode(sql));
+    const tableMap = buildEvent(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "testdb", "users"));
+    const write = buildEvent(WRITE_ROWS_EVENT, 1000, buildWriteRowsBody(1, 42));
+    engine.feed(concat(annotate, tableMap, write));
+
+    expect(engine.nextEvent()?.sourceSql).toBe(sql);
   });
 
   it("keeps prototype-like column names as own data properties", async () => {
@@ -169,6 +181,9 @@ describe("CdcEngine", () => {
     expect(engine.hasEvents()).toBe(true);
 
     engine.reset();
+    // reset deliberately retains events decoded before the reset boundary.
+    const event = engine.nextEvent();
+    expect(event?.after?.["0"]).toBe(42);
     expect(engine.hasEvents()).toBe(false);
   });
 
@@ -184,7 +199,17 @@ describe("CdcEngine", () => {
   it("should throw after destroy", async () => {
     engine = await CdcEngine.create();
     engine.destroy();
-    expect(() => engine.feed(new Uint8Array([1, 2, 3]))).toThrow("destroyed");
+    try {
+      engine.feed(new Uint8Array([1, 2, 3]));
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: MesErrorCode.InvalidArg,
+        name: "MesError",
+        message: "Engine has been destroyed",
+      });
+      return;
+    }
+    throw new Error("expected destroyed engine to reject feed");
   });
 
   it("should handle multiple events", async () => {
