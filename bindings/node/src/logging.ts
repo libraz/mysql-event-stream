@@ -51,6 +51,13 @@ export function setLogCallback(handler: LogHandler | null, level: LogLevel = Log
     throw new TypeError("setLogCallback expects a function or null");
   }
   addon.setLogCallback((lvl: number, message: string) => {
-    handler(lvl as LogLevel, message);
+    // Logging must never alter stream control flow. In particular, an
+    // application handler can throw because of a serializer or sink failure;
+    // keep that exception out of the native TSFN callback.
+    try {
+      handler(lvl as LogLevel, message);
+    } catch {
+      // Intentionally ignored: the log record has already reached its sink.
+    }
   }, level);
 }

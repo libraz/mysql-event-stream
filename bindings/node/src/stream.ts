@@ -5,11 +5,47 @@ import { BinlogClient } from "./client.js";
 import { CdcEngine } from "./engine.js";
 import type { ChangeEvent, StreamConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
+import { invalidArgument, validatePort } from "./validation.js";
 
 /** Error codes that indicate a permanent failure where reconnecting is futile. */
 const NON_RETRYABLE_CODES: ReadonlySet<number> = new Set([
   MesErrorCode.Auth,
+  MesErrorCode.InvalidArg,
   MesErrorCode.Validation,
+  MesErrorCode.Parse,
+  MesErrorCode.Checksum,
+  MesErrorCode.Decode,
+  MesErrorCode.DecodeColumn,
+  MesErrorCode.DecodeRow,
+  MesErrorCode.QueueFull,
+  MesErrorCode.GtidPurged,
+  MesErrorCode.GtidTaggedUnsupported,
+]);
+
+const STREAM_CONFIG_KEYS = new Set<keyof StreamConfig>([
+  "host",
+  "port",
+  "user",
+  "password",
+  "serverId",
+  "startGtid",
+  "startBinlogFile",
+  "startBinlogPosition",
+  "connectTimeoutS",
+  "readTimeoutS",
+  "sslMode",
+  "sslCa",
+  "sslCert",
+  "sslKey",
+  "allowPublicKeyRetrieval",
+  "maxQueueSize",
+  "maxQueueBytes",
+  "maxEventSize",
+  "includeDatabases",
+  "includeTables",
+  "excludeTables",
+  "maxReconnectAttempts",
+  "onMetadataError",
 ]);
 
 /** Concatenate two byte arrays into a new Uint8Array. */
@@ -31,15 +67,24 @@ function errorCode(err: unknown): number | undefined {
 
 /** High-level CDC stream that implements AsyncIterable for easy consumption. */
 export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
-  private config: StreamConfig;
+  private config!: StreamConfig;
   private client: BinlogClient | null = null;
   private engine: CdcEngine | null = null;
   private closed = false;
   private iterator: AsyncGenerator<ChangeEvent> | null = null;
   private cancelBackoff: (() => void) | null = null;
+  // Retains the last non-empty checkpoint after cleanup releases the native
+  // client. This keeps the checkpoint available to code immediately following
+  // a `for await` loop that exits with `break`.
+  private lastGtid = "";
 
   constructor(config: StreamConfig) {
-    this.config = config;
+    Object.defineProperty(this, "config", {
+      value: config,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
   }
 
   /** Override config properties before streaming starts. */
@@ -47,8 +92,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     if (this.iterator) {
       throw new Error("Cannot configure after streaming has started");
     }
-    if (overrides.port !== undefined && (overrides.port < 1 || overrides.port > 65535)) {
-      throw new Error(`port must be 1-65535, got ${overrides.port}`);
+    validatePort(overrides.port);
+    for (const key of Object.keys(overrides)) {
+      if (!STREAM_CONFIG_KEYS.has(key as keyof StreamConfig)) {
+        throw invalidArgument(`Unknown config key: ${key}`);
+      }
     }
     this.config = { ...this.config, ...overrides };
   }
@@ -89,7 +137,8 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
    * application processing succeeds; the stream does not provide exactly-once delivery.
    */
   get currentGtid(): string {
-    return this.client?.currentGtid ?? "";
+    this.cacheCurrentGtid();
+    return this.lastGtid;
   }
 
   private enableMetadataSafe(): void {
@@ -104,9 +153,17 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     }
   }
 
+  private applyFilters(): void {
+    this.engine!.setIncludeDatabases(this.config.includeDatabases ?? []);
+    this.engine!.setIncludeTables(this.config.includeTables ?? []);
+    this.engine!.setExcludeTables(this.config.excludeTables ?? []);
+  }
+
   private async *generate(): AsyncGenerator<ChangeEvent> {
     this.engine = new CdcEngine();
-    this.engine.setMaxEventSize(this.config.maxEventSize ?? 64 * 1024 * 1024);
+    this.engine.setMaxEventSize(this.config.maxEventSize ?? 32 * 1024 * 1024);
+    this.engine.setMaxQueueSize(this.config.maxQueueSize ?? 0);
+    this.applyFilters();
     this.enableMetadataSafe();
 
     let reconnectAttempts = 0;
@@ -128,28 +185,31 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           this.engine!.setChecksumEnabled(this.client.checksumEnabled);
 
           while (!this.closed) {
-            const result = await this.client.poll();
-            if (!result.data && !leftover) continue;
+            const results = await this.client.pollBatch();
+            for (const result of results) {
+              if (!result.data && !leftover) continue;
 
-            let chunk: Uint8Array;
-            if (leftover && result.data) {
-              chunk = concatBytes(leftover, result.data);
-            } else if (leftover) {
-              chunk = leftover;
-            } else {
-              chunk = result.data as Uint8Array;
-            }
+              let chunk: Uint8Array;
+              if (leftover && result.data) {
+                chunk = concatBytes(leftover, result.data);
+              } else if (leftover) {
+                chunk = leftover;
+              } else {
+                chunk = result.data as Uint8Array;
+              }
 
-            const consumed = this.engine!.feed(chunk);
-            leftover = consumed < chunk.length ? chunk.subarray(consumed) : null;
-            if (result.data) {
-              // A real protocol event proves the connection made progress.
-              // Merely accepting the connection/start command does not.
-              reconnectAttempts = 0;
-            }
+              const consumed = this.engine!.feed(chunk);
+              leftover = consumed < chunk.length ? chunk.subarray(consumed) : null;
 
-            for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
-              yield ev;
+              for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
+                // A decoded event is the only progress signal that can reset
+                // retry accounting. Framing metadata may be received before the
+                // same permanently undecodable event on every reconnect.
+                reconnectAttempts = 0;
+                this.cacheCurrentGtid();
+                yield ev;
+                this.cacheCurrentGtid();
+              }
             }
           }
         } catch (err) {
@@ -164,7 +224,8 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
             throw err;
           }
 
-          const gtid = this.client?.currentGtid ?? "";
+          this.cacheCurrentGtid();
+          const gtid = this.lastGtid;
           this.cleanupClient();
 
           reconnectAttempts++;
@@ -181,9 +242,13 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           if (this.closed) break;
 
           this.engine!.reset();
-          if (gtid) {
-            this.config = { ...this.config, startGtid: gtid };
-          }
+          this.config = {
+            ...this.config,
+            startGtid: gtid,
+            startBinlogFile: undefined,
+            startBinlogPosition: undefined,
+          };
+          this.applyFilters();
           // Re-enable metadata after engine reset. Keeps the Node binding
           // consistent with the Python binding, which re-runs
           // enable_metadata on every reconnect.
@@ -212,6 +277,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   }
 
   private cleanupClient(): void {
+    this.cacheCurrentGtid();
     if (this.client) {
       this.client.stop();
       this.client.disconnect();
@@ -225,6 +291,13 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     if (this.engine) {
       this.engine.destroy();
       this.engine = null;
+    }
+  }
+
+  private cacheCurrentGtid(): void {
+    const gtid = this.client?.currentGtid;
+    if (gtid) {
+      this.lastGtid = gtid;
     }
   }
 }

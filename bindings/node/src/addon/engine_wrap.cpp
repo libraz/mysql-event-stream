@@ -14,44 +14,12 @@
 static const char* const kEventTypeNames[] = {"INSERT", "UPDATE", "DELETE"};
 
 namespace {
-const char* MesErrorString(mes_error_t err) {
-  switch (err) {
-    case MES_OK:
-      return "success";
-    case MES_ERR_NULL_ARG:
-      return "null argument";
-    case MES_ERR_INVALID_ARG:
-      return "invalid argument";
-    case MES_ERR_INTERNAL:
-      return "internal error";
-    case MES_ERR_PARSE:
-      return "parse error";
-    case MES_ERR_CHECKSUM:
-      return "checksum mismatch";
-    case MES_ERR_DECODE:
-      return "decode error";
-    case MES_ERR_DECODE_COLUMN:
-      return "column decode error";
-    case MES_ERR_DECODE_ROW:
-      return "row decode error";
-    case MES_ERR_NO_EVENT:
-      return "no event available";
-    case MES_ERR_QUEUE_FULL:
-      return "queue full";
-    case MES_ERR_CONNECT:
-      return "connection error";
-    case MES_ERR_AUTH:
-      return "authentication error";
-    case MES_ERR_VALIDATION:
-      return "validation error";
-    case MES_ERR_STREAM:
-      return "stream error";
-    case MES_ERR_DISCONNECTED:
-      return "disconnected";
-    default:
-      return "unknown error";
-  }
+
+void ThrowDestroyed(Napi::Env env) {
+  mes_node::MakeMesError(env, "Engine has been destroyed", MES_ERR_INVALID_ARG)
+      .ThrowAsJavaScriptException();
 }
+
 }  // namespace
 
 Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
@@ -96,7 +64,7 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
 
@@ -139,7 +107,7 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
     // After a feed error the engine parse state is undefined; reset() is the
     // only valid next operation. Re-feeding without reset duplicates events.
     mes_node::MakeMesError(env,
-                           std::string("mes_feed failed: ") + MesErrorString(err) +
+                           std::string("mes_feed failed: ") + mes_error_string(err) +
                                " (call reset() before feeding again)",
                            err)
         .ThrowAsJavaScriptException();
@@ -153,7 +121,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
 
@@ -164,7 +132,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
     return env.Null();
   }
   if (err != MES_OK) {
-    mes_node::MakeMesError(env, std::string("mes_next_event failed: ") + MesErrorString(err), err)
+    mes_node::MakeMesError(env, std::string("mes_next_event failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -212,6 +180,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
     pos.Set("offset", Napi::Number::New(env, static_cast<double>(evt_offset)));
   }
   obj.Set("position", pos);
+  obj.Set("sourceSql", Napi::String::New(env, event->source_sql ? event->source_sql : ""));
 
   // namesResolved: false when column names could not be resolved for this
   // event's table, so all column keys fall back to numeric indices.
@@ -224,7 +193,7 @@ Napi::Value EngineWrap::HasEvents(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
 
@@ -235,7 +204,7 @@ Napi::Value EngineWrap::GetPosition(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
 
@@ -243,7 +212,8 @@ Napi::Value EngineWrap::GetPosition(const Napi::CallbackInfo& info) {
   uint64_t offset = 0;
   mes_error_t err = mes_get_position(engine_, &file, &offset);
   if (err != MES_OK) {
-    mes_node::MakeMesError(env, std::string("mes_get_position failed: ") + MesErrorString(err), err)
+    mes_node::MakeMesError(env, std::string("mes_get_position failed: ") + mes_error_string(err),
+                           err)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -262,13 +232,13 @@ void EngineWrap::Reset(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return;
   }
 
   mes_error_t err = mes_reset(engine_);
   if (err != MES_OK) {
-    mes_node::MakeMesError(env, std::string("mes_reset failed: ") + MesErrorString(err), err)
+    mes_node::MakeMesError(env, std::string("mes_reset failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -277,7 +247,7 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return;
   }
 
@@ -294,7 +264,7 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   mes_error_t err = mes_set_max_queue_size(engine_, static_cast<size_t>(max_size));
   if (err != MES_OK) {
     mes_node::MakeMesError(
-        env, std::string("mes_set_max_queue_size failed: ") + MesErrorString(err), err)
+        env, std::string("mes_set_max_queue_size failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -303,7 +273,7 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return;
   }
   if (info.Length() < 1 || !info[0].IsNumber()) {
@@ -319,7 +289,7 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
   mes_error_t err = mes_set_max_event_size(engine_, static_cast<uint32_t>(raw));
   if (err != MES_OK) {
     mes_node::MakeMesError(
-        env, std::string("mes_set_max_event_size failed: ") + MesErrorString(err), err)
+        env, std::string("mes_set_max_event_size failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -327,7 +297,7 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
 Napi::Value EngineWrap::GetMaxEventSize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
   uint32_t value = mes_get_max_event_size(engine_);
@@ -337,7 +307,7 @@ Napi::Value EngineWrap::GetMaxEventSize(const Napi::CallbackInfo& info) {
 void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return;
   }
   if (info.Length() < 1 || !info[0].IsBoolean()) {
@@ -347,7 +317,7 @@ void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
   mes_error_t err = mes_set_checksum_enabled(engine_, info[0].As<Napi::Boolean>().Value() ? 1 : 0);
   if (err != MES_OK) {
     mes_node::MakeMesError(
-        env, std::string("mes_set_checksum_enabled failed: ") + MesErrorString(err), err)
+        env, std::string("mes_set_checksum_enabled failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -373,7 +343,7 @@ void EngineWrap::SetStringFilter(const Napi::CallbackInfo& info,
                                  const char* method_name) {
   Napi::Env env = info.Env();
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return;
   }
   if (info.Length() < 1 || !info[0].IsArray()) {
@@ -386,7 +356,7 @@ void EngineWrap::SetStringFilter(const Napi::CallbackInfo& info,
   for (const auto& s : strings) ptrs.push_back(s.c_str());
   mes_error_t err = setter(engine_, ptrs.data(), ptrs.size());
   if (err != MES_OK) {
-    Napi::Error::New(env, std::string(method_name) + " failed: " + MesErrorString(err))
+    mes_node::MakeMesError(env, std::string(method_name) + " failed: " + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -415,7 +385,7 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
   if (!engine_) {
-    Napi::Error::New(env, "Engine has been destroyed").ThrowAsJavaScriptException();
+    ThrowDestroyed(env);
     return env.Undefined();
   }
 
@@ -434,7 +404,8 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
 
   mes_error_t rc = mes_engine_set_metadata_conn(engine_, &cfg);
   if (rc != MES_OK) {
-    Napi::Error::New(env, std::string("Failed to connect metadata: ") + MesErrorString(rc))
+    mes_node::MakeMesError(env, std::string("Failed to connect metadata: ") + mes_error_string(rc),
+                           rc)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -448,15 +419,7 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
   for (uint32_t i = 0; i < count; i++) {
     const mes_column_t& col = cols[i];
 
-    // Key: column name if available, otherwise string index.
-    // Build a Napi::String directly to avoid an intermediate std::string when
-    // the column name is present (common case when metadata is enabled).
-    Napi::String key;
-    if (col.col_name != nullptr && col.col_name[0] != '\0') {
-      key = Napi::String::New(env, col.col_name, std::strlen(col.col_name));
-    } else {
-      key = Napi::String::New(env, std::to_string(i));
-    }
+    Napi::String key = GetColumnKey(env, col, i);
 
     Napi::Value val;
     switch (col.type) {
@@ -524,4 +487,27 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
   }
 
   return record;
+}
+
+Napi::String EngineWrap::GetColumnKey(Napi::Env env, const mes_column_t& col, uint32_t index) {
+  if (col.col_name == nullptr || col.col_name[0] == '\0') {
+    return Napi::String::New(env, std::to_string(index));
+  }
+
+  const size_t name_size = std::strlen(col.col_name);
+  auto cached = column_name_cache_.find(col.col_name);
+  if (cached != column_name_cache_.end() && cached->second.bytes.size() == name_size &&
+      std::memcmp(cached->second.bytes.data(), col.col_name, name_size) == 0) {
+    return cached->second.holder.Value().Get("value").As<Napi::String>();
+  }
+
+  // TABLE_MAP storage can be cleared and later reuse the same address. Keep a
+  // byte copy and compare it above before returning a cached V8 string.
+  if (column_name_cache_.size() >= 8192) column_name_cache_.clear();
+  Napi::String key = Napi::String::New(env, col.col_name, name_size);
+  Napi::Object holder = Napi::Object::New(env);
+  holder.Set("value", key);
+  ColumnNameCacheEntry entry{std::string(col.col_name, name_size), Napi::Persistent(holder)};
+  column_name_cache_.insert_or_assign(col.col_name, std::move(entry));
+  return key;
 }

@@ -27,6 +27,8 @@ export const MesErrorCode = {
   Validation: 402,
   Stream: 403,
   Disconnected: 404,
+  GtidPurged: 405,
+  GtidTaggedUnsupported: 406,
 } as const;
 
 export type MesErrorCode = (typeof MesErrorCode)[keyof typeof MesErrorCode];
@@ -47,26 +49,38 @@ export const SslMode = {
 
 export type SslMode = (typeof SslMode)[keyof typeof SslMode];
 
+/** Database server flavor reported after connecting. */
+export const ServerFlavor = {
+  Mysql: 0,
+  MariaDb: 1,
+} as const;
+
+export type ServerFlavor = (typeof ServerFlavor)[keyof typeof ServerFlavor];
+
 /**
  * A column value as represented in JavaScript.
  *
  * The mapping from MySQL column types is:
  * - `null` — SQL NULL.
- * - `number` — integer, decimal, floating-point, temporal, ENUM, SET and BIT
- *   columns. ENUM arrives as its 1-based numeric index, SET as its numeric
- *   bitmask, and BIT as the integer value of its bits. Integers outside the
- *   safe-integer range are returned as `bigint` instead.
- * - `bigint` — integers that do not fit in a JS safe integer.
- * - `string` — textual columns (CHAR, VARCHAR, TEXT). See the limitation below.
- * - `Uint8Array` — binary columns: BLOB, BINARY/VARBINARY, GEOMETRY, and JSON.
+ * - `number` — TINYINT through INT, safe BIGINT/YEAR/TIMESTAMP values,
+ *   FLOAT/DOUBLE, ENUM, SET, and BIT. ENUM arrives as its 1-based numeric
+ *   index, SET as its numeric bitmask, and BIT as the integer value of its
+ *   bits. SET or BIT values above signed `int64_t` are exact decimal strings.
+ * - `bigint` — signed or unsigned BIGINT values within `int64_t` that do not
+ *   fit in a JS safe integer.
+ * - `string` — character columns (CHAR, VARCHAR, TEXT) plus DECIMAL and
+ *   temporal values, formatted by the core. BIGINT UNSIGNED and SET/BIT
+ *   values above `int64_t` are also exact decimal strings.
+ * - `Uint8Array` — binary columns (BINARY/VARBINARY/BLOB), GEOMETRY, and JSON.
  *   JSON columns arrive as raw bytes in MySQL's internal binary JSON format,
  *   not as a decoded string or object.
  *
  * String limitation: textual columns are decoded as UTF-8. Data stored in a
  * non-UTF-8 character set (e.g. latin1, sjis) is not transcoded; invalid byte
  * sequences are replaced with the Unicode replacement character (U+FFFD), so
- * such columns may be lossy. For lossless access to non-UTF-8 text, treat the
- * column as binary at the schema level.
+ * such columns may be lossy. The binary/text distinction relies on TABLE_MAP
+ * charset metadata; with `binlog_row_metadata=NO_LOG`, BLOB-family columns
+ * conservatively remain `Uint8Array`.
  */
 export type ColumnValue = null | number | bigint | string | Uint8Array;
 
@@ -99,11 +113,14 @@ export interface ChangeEvent {
     offset: number | bigint;
   };
   /**
-   * False when column names could not be resolved for this event's table
-   * (e.g. the metadata side-connection failed), in which case column keys in
-   * `before`/`after` fall back to numeric string indices ("0", "1", ...).
+   * False when any column name could not be resolved for this event's table
+   * (for example, no metadata connection is configured or it failed). In that
+   * case keys in `before`/`after` fall back to numeric string indices
+   * ("0", "1", ...).
    */
   namesResolved: boolean;
+  /** Original MariaDB SQL from ANNOTATE_ROWS, or an empty string when unavailable. */
+  sourceSql: string;
 }
 
 /** BinlogClient connection configuration. */
@@ -113,8 +130,12 @@ export interface ClientConfig {
   user?: string;
   password?: string;
   serverId?: number;
-  /** Empty/omitted snapshots the server's current executed set at stream start. */
+  /** Omitted snapshots the current server set; an empty string explicitly starts from an empty set. */
   startGtid?: string;
+  /** Binlog filename for an exact file/offset start. Requires startBinlogPosition. */
+  startBinlogFile?: string;
+  /** Binlog offset for an exact file/offset start (minimum 4). Requires startBinlogFile. */
+  startBinlogPosition?: number;
   connectTimeoutS?: number;
   readTimeoutS?: number;
   /** SSL connection mode. */
@@ -132,17 +153,24 @@ export interface ClientConfig {
   allowPublicKeyRetrieval?: boolean;
   /** Maximum internal event queue size (0 = default 10000). */
   maxQueueSize?: number;
-  /** Total queued payload byte budget (default 256 MiB; 0 restores default). */
+  /** Total queued payload byte budget (default 48 MiB; 0 restores default). */
   maxQueueBytes?: number;
   /**
    * Maximum binlog event size accepted by both the client and parser
-   * (default 64 MiB; 0 resolves to the 1 GiB hard cap).
+   * (default 32 MiB; 0 resolves to the 1 GiB hard cap). Configure a larger
+   * maxQueueBytes value when raising this limit.
    */
   maxEventSize?: number;
 }
 
 /** CdcStream configuration options (extends ClientConfig). */
 export interface StreamConfig extends ClientConfig {
+  /** Exact, case-sensitive database names to include. Empty or omitted means all databases. */
+  includeDatabases?: string[];
+  /** Case-sensitive table names to include (`database.table`, bare name, or trailing-* prefix). */
+  includeTables?: string[];
+  /** Case-sensitive table names to exclude (`database.table`, bare name, or trailing-* prefix). */
+  excludeTables?: string[];
   /** Maximum number of automatic reconnection attempts (default 10, 0 = disabled). */
   maxReconnectAttempts?: number;
   /**

@@ -7,5 +7,13 @@ const require = createRequire(import.meta.url);
 
 /** Load the native addon compiled into build/Release. */
 export function loadNativeAddon<T>(): T {
-  return require("../build/Release/mes-node.node") as T;
+  try {
+    return require("../build/Release/mes-node.node") as T;
+  } catch (error) {
+    const detail = error instanceof Error ? `: ${error.message}` : "";
+    throw new Error(
+      `Unable to load @libraz/mysql-event-stream native addon for ${process.platform}/${process.arch}${detail}`,
+      { cause: error },
+    );
+  }
 }

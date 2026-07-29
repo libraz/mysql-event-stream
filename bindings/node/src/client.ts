@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { loadNativeAddon } from "./native.js";
-import type { ClientConfig, PollResult } from "./types.js";
+import type { ClientConfig, PollResult, ServerFlavor } from "./types.js";
+import { MesErrorCode } from "./types.js";
+import { invalidArgument, validatePort } from "./validation.js";
 
 interface NativeAddon {
   BinlogClient?: new () => NativeClient;
@@ -13,6 +15,7 @@ interface NativeClient {
   connect(config: ClientConfig): void;
   start(): void;
   poll(): Promise<PollResult>;
+  pollBatch(maxEvents?: number): Promise<PollResult[]>;
   stop(): void;
   disconnect(): void;
   destroy(): void;
@@ -20,10 +23,22 @@ interface NativeClient {
   readonly isStreaming: boolean;
   readonly lastError: string;
   readonly currentGtid: string;
+  readonly flavor: ServerFlavor;
   readonly checksumEnabled: boolean;
+  readonly queuedBytes: number;
+  readonly maxQueueBytes: number;
+  readonly maxEventSize: number;
+  readonly crcErrors: number;
 }
 
 const addon = loadNativeAddon<NativeAddon>();
+
+function tagNativeValidationError(error: unknown): unknown {
+  if ((error instanceof TypeError || error instanceof RangeError) && !("code" in error)) {
+    Object.assign(error, { code: MesErrorCode.InvalidArg });
+  }
+  return error;
+}
 
 /** BinlogClient for connecting to MySQL and streaming binlog events. */
 export class BinlogClient {
@@ -33,8 +48,9 @@ export class BinlogClient {
     if (!addon.hasClient || !addon.BinlogClient) {
       throw new Error("BinlogClient native addon not loaded");
     }
-    if (config.port !== undefined && (config.port < 1 || config.port > 65535)) {
-      throw new Error(`port must be 1-65535, got ${config.port}`);
+    validatePort(config.port);
+    if (config.serverId !== undefined && config.serverId === 0) {
+      throw invalidArgument("serverId must be non-zero");
     }
     // If new addon.BinlogClient() throws, the exception propagates before
     // assignment completes — this.client stays null and the try block is
@@ -44,7 +60,7 @@ export class BinlogClient {
       this.client.connect(config);
     } catch (e) {
       this.client.destroy();
-      throw e;
+      throw tagNativeValidationError(e);
     }
   }
 
@@ -65,6 +81,15 @@ export class BinlogClient {
   poll(): Promise<PollResult> {
     this.ensureNotDestroyed();
     return this.client!.poll();
+  }
+
+  /** Block for one event, then return further events already in the native queue. */
+  pollBatch(maxEvents = 64): Promise<PollResult[]> {
+    this.ensureNotDestroyed();
+    if (!Number.isInteger(maxEvents) || maxEvents < 1 || maxEvents > 1024) {
+      throw invalidArgument("maxEvents must be an integer between 1 and 1024");
+    }
+    return this.client!.pollBatch(maxEvents);
   }
 
   /** Request stream stop. Thread-safe; unblocks a pending poll(). */
@@ -103,6 +128,11 @@ export class BinlogClient {
     return this.client?.lastError ?? "";
   }
 
+  /** Server flavor detected during connection. */
+  get flavor(): ServerFlavor {
+    return this.client?.flavor ?? 0;
+  }
+
   /**
    * Get the delivered, committed checkpoint candidate. This advances only
    * after the caller polls past a commit boundary; it is not a durable ack.
@@ -114,6 +144,26 @@ export class BinlogClient {
   /** Checksum mode negotiated for events returned by poll(). */
   get checksumEnabled(): boolean {
     return this.client?.checksumEnabled ?? false;
+  }
+
+  /** Current charged payload bytes waiting for the consumer. */
+  get queuedBytes(): number {
+    return this.client?.queuedBytes ?? 0;
+  }
+
+  /** Configured queue payload byte budget. */
+  get maxQueueBytes(): number {
+    return this.client?.maxQueueBytes ?? 0;
+  }
+
+  /** Configured maximum individual binlog event size. */
+  get maxEventSize(): number {
+    return this.client?.maxEventSize ?? 0;
+  }
+
+  /** Number of CRC32-invalid events detected by this client. */
+  get crcErrors(): number {
+    return this.client?.crcErrors ?? 0;
   }
 
   private ensureNotDestroyed(): void {

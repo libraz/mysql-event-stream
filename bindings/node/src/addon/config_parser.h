@@ -23,6 +23,7 @@ struct ConfigStrings {
   std::string user = "root";
   std::string password;
   std::string start_gtid;
+  std::string binlog_file;
   std::string ssl_ca;
   std::string ssl_cert;
   std::string ssl_key;
@@ -87,8 +88,12 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
     cfg.connect_timeout_s = kDefaultConnectTimeoutS;
   }
 
-  uint32_t ssl_mode = 0;
+  uint32_t ssl_mode = MES_SSL_PREFERRED;
   Napi::Value ssl_mode_v = config.Get("sslMode");
+  if (!ssl_mode_v.IsUndefined() && !ssl_mode_v.IsNumber()) {
+    Napi::TypeError::New(env, "sslMode must be a number from 0 to 4").ThrowAsJavaScriptException();
+    return false;
+  }
   if (ssl_mode_v.IsNumber()) {
     ssl_mode = ssl_mode_v.As<Napi::Number>().Uint32Value();
     if (ssl_mode > 4) {

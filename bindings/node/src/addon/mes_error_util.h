@@ -38,6 +38,10 @@ inline const char* MesErrorName(mes_error_t code) {
       return "MesStreamError";
     case MES_ERR_DISCONNECTED:
       return "MesDisconnectedError";
+    case MES_ERR_GTID_PURGED:
+      return "MesGtidPurgedError";
+    case MES_ERR_GTID_TAGGED_UNSUPPORTED:
+      return "MesGtidTaggedUnsupportedError";
     case MES_ERR_QUEUE_FULL:
       return "MesQueueFullError";
     default:

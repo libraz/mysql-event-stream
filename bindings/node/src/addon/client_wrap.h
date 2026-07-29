@@ -23,6 +23,7 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   void Connect(const Napi::CallbackInfo& info);
   void Start(const Napi::CallbackInfo& info);
   Napi::Value Poll(const Napi::CallbackInfo& info);
+  Napi::Value PollBatch(const Napi::CallbackInfo& info);
   void Stop(const Napi::CallbackInfo& info);
   void Disconnect(const Napi::CallbackInfo& info);
   void Destroy(const Napi::CallbackInfo& info);
@@ -30,10 +31,18 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   Napi::Value GetIsStreaming(const Napi::CallbackInfo& info);
   Napi::Value GetLastError(const Napi::CallbackInfo& info);
   Napi::Value GetCurrentGtid(const Napi::CallbackInfo& info);
+  Napi::Value GetFlavor(const Napi::CallbackInfo& info);
   Napi::Value GetChecksumEnabled(const Napi::CallbackInfo& info);
+  Napi::Value GetQueuedBytes(const Napi::CallbackInfo& info);
+  Napi::Value GetMaxQueueBytes(const Napi::CallbackInfo& info);
+  Napi::Value GetMaxEventSize(const Napi::CallbackInfo& info);
+  Napi::Value GetCrcErrors(const Napi::CallbackInfo& info);
 
   /** @brief Finalize deferred destroy if no workers remain in flight. */
   void MaybeFinalizeDeferredDestroy();
+
+  /** @brief Reject lifecycle changes while the native poll buffer is borrowed. */
+  bool RejectIfPollInFlight(Napi::Env env, const char* operation) const;
 
   mes_client_t* client_;
   std::atomic<int> pending_workers_{0};

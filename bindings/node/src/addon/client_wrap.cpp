@@ -3,6 +3,7 @@
 
 #include "client_wrap.h"
 
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -75,6 +76,87 @@ class PollWorker : public Napi::AsyncWorker {
   std::vector<uint8_t> data_;
 };
 
+/** @brief AsyncWorker for a blocking poll followed by a queued-event drain. */
+class PollBatchWorker : public Napi::AsyncWorker {
+ public:
+  PollBatchWorker(Napi::Env env, mes_client_t* client, ClientWrap* wrap,
+                  Napi::Promise::Deferred deferred, size_t max_events)
+      : Napi::AsyncWorker(env),
+        client_(client),
+        wrap_(wrap),
+        deferred_(deferred),
+        max_events_(max_events),
+        error_(MES_OK) {}
+
+  void Execute() override {
+    std::vector<mes_poll_result_t> raw(max_events_);
+    size_t count = 0;
+    error_ = mes_client_poll_batch(client_, raw.data(), raw.size(), &count);
+    if (error_ != MES_OK) return;
+
+    results_.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      if (raw[i].error != MES_OK) {
+        error_ = raw[i].error;
+        return;
+      }
+      BatchResult result;
+      result.is_heartbeat = raw[i].is_heartbeat != 0;
+      if (raw[i].data != nullptr && raw[i].size > 0) {
+        result.data.assign(raw[i].data, raw[i].data + raw[i].size);
+      }
+      results_.push_back(std::move(result));
+    }
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    if (error_ != MES_OK) {
+      const char* msg = mes_client_last_error(client_);
+      std::string err_msg = msg ? msg : "poll batch failed";
+      deferred_.Reject(
+          mes_node::MakeMesError(env, "mes_client_poll_batch failed: " + err_msg, error_).Value());
+    } else {
+      Napi::Array output = Napi::Array::New(env, results_.size());
+      for (size_t i = 0; i < results_.size(); ++i) {
+        Napi::Object result = Napi::Object::New(env);
+        if (!results_[i].data.empty()) {
+          auto* moved = new std::vector<uint8_t>(std::move(results_[i].data));
+          result.Set(
+              "data",
+              Napi::Buffer<uint8_t>::New(
+                  env, moved->data(), moved->size(),
+                  [](Napi::Env, uint8_t*, std::vector<uint8_t>* hint) { delete hint; }, moved));
+        } else {
+          result.Set("data", env.Null());
+        }
+        result.Set("isHeartbeat", Napi::Boolean::New(env, results_[i].is_heartbeat));
+        output.Set(i, result);
+      }
+      deferred_.Resolve(output);
+    }
+    wrap_->OnPollWorkerComplete();
+  }
+
+  void OnError(const Napi::Error& error) override {
+    deferred_.Reject(error.Value());
+    wrap_->OnPollWorkerComplete();
+  }
+
+ private:
+  struct BatchResult {
+    bool is_heartbeat = false;
+    std::vector<uint8_t> data;
+  };
+
+  mes_client_t* client_;
+  ClientWrap* wrap_;
+  Napi::Promise::Deferred deferred_;
+  size_t max_events_;
+  mes_error_t error_;
+  std::vector<BatchResult> results_;
+};
+
 Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func =
       DefineClass(env, "BinlogClient",
@@ -82,6 +164,7 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
                       InstanceMethod<&ClientWrap::Connect>("connect"),
                       InstanceMethod<&ClientWrap::Start>("start"),
                       InstanceMethod<&ClientWrap::Poll>("poll"),
+                      InstanceMethod<&ClientWrap::PollBatch>("pollBatch"),
                       InstanceMethod<&ClientWrap::Stop>("stop"),
                       InstanceMethod<&ClientWrap::Disconnect>("disconnect"),
                       InstanceMethod<&ClientWrap::Destroy>("destroy"),
@@ -89,7 +172,12 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
                       InstanceAccessor<&ClientWrap::GetIsStreaming>("isStreaming"),
                       InstanceAccessor<&ClientWrap::GetLastError>("lastError"),
                       InstanceAccessor<&ClientWrap::GetCurrentGtid>("currentGtid"),
+                      InstanceAccessor<&ClientWrap::GetFlavor>("flavor"),
                       InstanceAccessor<&ClientWrap::GetChecksumEnabled>("checksumEnabled"),
+                      InstanceAccessor<&ClientWrap::GetQueuedBytes>("queuedBytes"),
+                      InstanceAccessor<&ClientWrap::GetMaxQueueBytes>("maxQueueBytes"),
+                      InstanceAccessor<&ClientWrap::GetMaxEventSize>("maxEventSize"),
+                      InstanceAccessor<&ClientWrap::GetCrcErrors>("crcErrors"),
                   });
 
   exports.Set("BinlogClient", func);
@@ -110,8 +198,16 @@ ClientWrap::~ClientWrap() {
   }
 }
 
+bool ClientWrap::RejectIfPollInFlight(Napi::Env env, const char* operation) const {
+  if (pending_workers_.load(std::memory_order_acquire) == 0) return false;
+  Napi::Error::New(env, std::string("Cannot ") + operation + " while poll() is in progress")
+      .ThrowAsJavaScriptException();
+  return true;
+}
+
 void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (RejectIfPollInFlight(env, "connect")) return;
   if (!client_) {
     Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
     return;
@@ -136,6 +232,33 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (start_gtid_v.IsString()) {
     strings.start_gtid = start_gtid_v.As<Napi::String>().Utf8Value();
     c_config.start_gtid = strings.start_gtid.c_str();
+    c_config.start_position_mode = MES_START_AT_GTID;
+  }
+
+  Napi::Value binlog_file_v = config.Get("startBinlogFile");
+  Napi::Value binlog_position_v = config.Get("startBinlogPosition");
+  if (!binlog_file_v.IsUndefined() || !binlog_position_v.IsUndefined()) {
+    if (start_gtid_v.IsString()) {
+      Napi::TypeError::New(env, "startGtid and startBinlogFile cannot be combined")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    if (!binlog_file_v.IsString() || !binlog_position_v.IsNumber()) {
+      Napi::TypeError::New(
+          env, "startBinlogFile (string) and startBinlogPosition (number) are required together")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    strings.binlog_file = binlog_file_v.As<Napi::String>().Utf8Value();
+    const int64_t position = binlog_position_v.As<Napi::Number>().Int64Value();
+    if (strings.binlog_file.empty() || position < 4 || position > UINT32_MAX) {
+      Napi::RangeError::New(env, "startBinlogPosition must be between 4 and UINT32_MAX")
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    c_config.start_position_mode = MES_START_AT_POSITION;
+    c_config.binlog_file = strings.binlog_file.c_str();
+    c_config.binlog_position = static_cast<uint64_t>(position);
   }
 
   Napi::Value max_queue_size_v = config.Get("maxQueueSize");
@@ -150,7 +273,7 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     c_config.max_queue_size = static_cast<size_t>(max_queue_size);
   }
 
-  uint32_t max_event_size = 64u * 1024u * 1024u;
+  uint32_t max_event_size = 32u * 1024u * 1024u;
   Napi::Value max_event_size_v = config.Get("maxEventSize");
   if (max_event_size_v.IsNumber()) {
     int64_t raw = max_event_size_v.As<Napi::Number>().Int64Value();
@@ -167,7 +290,7 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     return;
   }
 
-  size_t max_queue_bytes = 256u * 1024u * 1024u;
+  size_t max_queue_bytes = MES_DEFAULT_QUEUE_BYTES;
   Napi::Value max_queue_bytes_v = config.Get("maxQueueBytes");
   if (max_queue_bytes_v.IsNumber()) {
     int64_t raw = max_queue_bytes_v.As<Napi::Number>().Int64Value();
@@ -200,6 +323,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
 
 void ClientWrap::Start(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+
+  if (RejectIfPollInFlight(env, "start")) return;
 
   if (!client_) {
     Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
@@ -243,6 +368,40 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   return deferred.Promise();
 }
 
+Napi::Value ClientWrap::PollBatch(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  auto deferred = Napi::Promise::Deferred::New(env);
+  if (!client_ || destroy_pending_.load(std::memory_order_acquire)) {
+    deferred.Reject(Napi::Error::New(env, "Client has been destroyed").Value());
+    return deferred.Promise();
+  }
+  if (pending_workers_.load(std::memory_order_acquire) > 0) {
+    deferred.Reject(Napi::Error::New(env, "A poll() is already in progress").Value());
+    return deferred.Promise();
+  }
+
+  size_t max_events = 64;
+  if (info.Length() > 0) {
+    if (!info[0].IsNumber()) {
+      deferred.Reject(Napi::TypeError::New(env, "maxEvents must be a number").Value());
+      return deferred.Promise();
+    }
+    const double value = info[0].As<Napi::Number>().DoubleValue();
+    if (!std::isfinite(value) || value < 1 || value > 1024 || std::floor(value) != value) {
+      deferred.Reject(
+          Napi::RangeError::New(env, "maxEvents must be an integer between 1 and 1024").Value());
+      return deferred.Promise();
+    }
+    max_events = static_cast<size_t>(value);
+  }
+
+  pending_workers_.fetch_add(1, std::memory_order_acq_rel);
+  Ref();
+  auto* worker = new PollBatchWorker(env, client_, this, deferred, max_events);
+  worker->Queue();
+  return deferred.Promise();
+}
+
 void ClientWrap::Stop(const Napi::CallbackInfo& info) {
   (void)info;
   if (client_) {
@@ -251,7 +410,7 @@ void ClientWrap::Stop(const Napi::CallbackInfo& info) {
 }
 
 void ClientWrap::Disconnect(const Napi::CallbackInfo& info) {
-  (void)info;
+  if (RejectIfPollInFlight(info.Env(), "disconnect")) return;
   if (client_) {
     mes_client_disconnect(client_);
   }
@@ -318,7 +477,29 @@ Napi::Value ClientWrap::GetCurrentGtid(const Napi::CallbackInfo& info) {
   return Napi::String::New(env, gtid ? gtid : "");
 }
 
+Napi::Value ClientWrap::GetFlavor(const Napi::CallbackInfo& info) {
+  const auto flavor = client_ == nullptr ? MES_SERVER_FLAVOR_MYSQL : mes_client_flavor(client_);
+  return Napi::Number::New(info.Env(), static_cast<int>(flavor));
+}
+
 Napi::Value ClientWrap::GetChecksumEnabled(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   return Napi::Boolean::New(env, client_ != nullptr && mes_client_checksum_enabled(client_) != 0);
+}
+
+Napi::Value ClientWrap::GetQueuedBytes(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(info.Env(), static_cast<double>(mes_client_queued_bytes(client_)));
+}
+
+Napi::Value ClientWrap::GetMaxQueueBytes(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(info.Env(),
+                           static_cast<double>(mes_client_get_max_queue_bytes(client_)));
+}
+
+Napi::Value ClientWrap::GetMaxEventSize(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(info.Env(), static_cast<double>(mes_client_get_max_event_size(client_)));
+}
+
+Napi::Value ClientWrap::GetCrcErrors(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(info.Env(), static_cast<double>(mes_client_crc_errors(client_)));
 }

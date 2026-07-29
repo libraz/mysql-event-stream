@@ -31,12 +31,23 @@ void CallJsLog(Napi::Env env, Napi::Function js_cb, void* /*context*/, LogMessag
   std::unique_ptr<LogMessage> owned(message);
   if (env == nullptr || js_cb.IsEmpty()) return;
 
+  auto call_and_clear_exception = [&env, &js_cb](int level, const std::string& text) {
+    js_cb.Call({Napi::Number::New(env, level), Napi::String::New(env, text)});
+    // N-API is built without C++ exceptions. A throwing JavaScript callback
+    // therefore leaves an exception pending on the environment; clear it so
+    // TSFN delivery cannot turn a logging failure into an uncaught process
+    // exception. The TypeScript facade also catches user handlers, but this
+    // guard keeps the native boundary safe on its own.
+    if (env.IsExceptionPending()) {
+      env.GetAndClearPendingException();
+    }
+  };
+
   if (owned->dropped_before > 0) {
-    js_cb.Call({Napi::Number::New(env, MES_LOG_WARN),
-                Napi::String::New(env, "event=node_log_queue_overflow dropped=" +
-                                           std::to_string(owned->dropped_before))});
+    call_and_clear_exception(MES_LOG_WARN, "event=node_log_queue_overflow dropped=" +
+                                               std::to_string(owned->dropped_before));
   }
-  js_cb.Call({Napi::Number::New(env, owned->level), Napi::String::New(env, owned->message)});
+  call_and_clear_exception(owned->level, owned->message);
 }
 
 using LogTsfn = Napi::TypedThreadSafeFunction<void, LogMessage, CallJsLog>;

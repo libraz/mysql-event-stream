@@ -3,6 +3,7 @@
 
 import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
+import { MesErrorCode } from "./types.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -32,6 +33,13 @@ interface NativeEngine {
 }
 
 const addon = loadNativeAddon<NativeAddon>();
+
+function destroyedError(): Error {
+  const error = new Error("Engine has been destroyed") as Error & { code: number };
+  error.name = "MesError";
+  error.code = MesErrorCode.InvalidArg;
+  return error;
+}
 
 /** Native N-API based CDC engine for parsing MySQL 8.4 binlog streams. */
 export class CdcEngine {
@@ -71,7 +79,7 @@ export class CdcEngine {
     return this.engine!.getPosition();
   }
 
-  /** Reset the engine, clearing all state. */
+  /** Reset parser state while retaining already decoded events for draining. */
   reset(): void {
     this.ensureNotDestroyed();
     this.engine!.reset();
@@ -118,14 +126,16 @@ export class CdcEngine {
   }
 
   /** Set table include filter. Only events from these tables are processed. Empty array = all.
-   *  Format: "database.table" or just "table" (matches any database). */
+   *  Format: "database.table" or just "table" (matches any database).
+   *  A trailing '*' performs a case-sensitive prefix match. */
   setIncludeTables(tables: string[]): void {
     this.ensureNotDestroyed();
     this.engine!.setIncludeTables(tables);
   }
 
   /** Set table exclude filter. Events from these tables are skipped.
-   *  Format: "database.table" or just "table" (matches any database). */
+   *  Format: "database.table" or just "table" (matches any database).
+   *  A trailing '*' performs a case-sensitive prefix match. */
   setExcludeTables(tables: string[]): void {
     this.ensureNotDestroyed();
     this.engine!.setExcludeTables(tables);
@@ -145,6 +155,6 @@ export class CdcEngine {
   }
 
   private ensureNotDestroyed(): void {
-    if (!this.engine) throw new Error("Engine has been destroyed");
+    if (!this.engine) throw destroyedError();
   }
 }

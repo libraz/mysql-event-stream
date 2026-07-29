@@ -9,8 +9,9 @@ export { CdcStream } from "./stream.js";
 export type {
   ChangeEvent,
   ClientConfig,
+  ColumnValue,
   EventType,
   PollResult,
   StreamConfig,
 } from "./types.js";
-export { MesErrorCode, SslMode } from "./types.js";
+export { MesErrorCode, ServerFlavor, SslMode } from "./types.js";

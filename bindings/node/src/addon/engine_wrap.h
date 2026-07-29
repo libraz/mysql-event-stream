@@ -6,6 +6,9 @@
 
 #include <napi.h>
 
+#include <string>
+#include <unordered_map>
+
 #include "mes.h"
 
 class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
@@ -34,7 +37,15 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
 
   Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count);
 
+  struct ColumnNameCacheEntry {
+    std::string bytes;
+    Napi::Reference<Napi::Object> holder;
+  };
+
+  Napi::String GetColumnKey(Napi::Env env, const mes_column_t& col, uint32_t index);
+
   mes_engine_t* engine_;
+  std::unordered_map<const char*, ColumnNameCacheEntry> column_name_cache_;
 
   Napi::Value EnableMetadata(const Napi::CallbackInfo& info);
 };
