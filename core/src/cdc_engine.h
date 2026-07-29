@@ -61,6 +61,7 @@ bool IsDdlQueryEvent(const uint8_t* body, size_t body_len);
 class CdcEngine {
  public:
   CdcEngine() = default;
+  ~CdcEngine();
 
   /**
    * @brief Feed raw binlog bytes into the engine.
@@ -90,7 +91,7 @@ class CdcEngine {
   size_t PendingEventCount() const;
 
   /**
-   * @brief Set maximum event queue size. 0 means unlimited.
+   * @brief Set maximum event queue size. 0 restores the bounded default.
    *
    * The limit is enforced per binlog event, not per row. A single multi-row
    * WRITE_ROWS/UPDATE_ROWS/DELETE_ROWS event is pushed atomically, so the
@@ -98,6 +99,9 @@ class CdcEngine {
    * items before backpressure is re-evaluated on the next Feed() iteration.
    */
   void SetMaxQueueSize(size_t max_size);
+
+  /** @brief Get the effective event queue limit. */
+  size_t MaxQueueSize() const;
 
   /** @brief Check if the engine is in an error state (e.g., parse/decode error). */
   bool IsError() const;
@@ -116,11 +120,13 @@ class CdcEngine {
   void SetIncludeDatabases(const std::vector<std::string>& databases);
 
   /** @brief Set table include filter. Only events from these tables are processed. Empty = all.
-   *  Format: "database.table" or just "table" (matches any database). */
+   *  Format: "database.table" or just "table" (matches any database).
+   *  A trailing '*' performs a case-sensitive prefix match. */
   void SetIncludeTables(const std::vector<std::string>& tables);
 
   /** @brief Set table exclude filter. Events from these tables are skipped.
-   *  Format: "database.table" or just "table" (matches any database). */
+   *  Format: "database.table" or just "table" (matches any database).
+   *  A trailing '*' performs a case-sensitive prefix match. */
   void SetExcludeTables(const std::vector<std::string>& tables);
 
   /** @brief Set metadata fetcher for column name resolution */
@@ -153,12 +159,23 @@ class CdcEngine {
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void LogRowDecodeFailure(const char* kind, const TableMetadata& meta);
+  bool HasIncludeFilters() const;
+  bool MatchesTableFilter(const std::unordered_set<std::string>& filters,
+                          const std::string& database, const std::string& table) const;
+  bool MatchesIncludeFilters(const std::string& database, const std::string& table) const;
+  void NoteTableMapForIncludeFilters(const TableMetadata& metadata);
+  void WarnIfIncludeFiltersMatchedNothing();
+  void ResetIncludeFilterMatchState();
 
   EventStreamParser stream_parser_;
   TableMapRegistry table_registry_;
   BinlogPosition position_;
+  std::string pending_source_sql_;
   std::queue<ChangeEvent> event_queue_;
-  size_t max_queue_size_ = 0;
+  // Raw-feed users, including CdcStream, must not accumulate an unbounded
+  // ChangeEvent queue when a producer temporarily outpaces the consumer.
+  // This matches the asynchronous client's event-count default.
+  size_t max_queue_size_ = MES_DEFAULT_QUEUE_SIZE;
 
   // Scratch buffers reused across ProcessRowEvent calls to avoid a
   // per-event heap allocation in the hot decode path. clear() preserves
@@ -180,6 +197,8 @@ class CdcEngine {
   std::unordered_set<std::string> include_tables_;
   std::unordered_set<std::string> exclude_tables_;
   std::unordered_set<uint64_t> blocked_table_ids_;
+  bool include_filter_saw_table_map_ = false;
+  bool include_filter_matched_ = false;
 
   // Non-owning pointer. Caller must ensure the MetadataFetcher outlives this CdcEngine.
   // Set via SetMetadataFetcher(). May be null if metadata resolution is not configured.

@@ -47,9 +47,11 @@ class MariaDBEventParser {
    * @param buffer Raw event data (including 19-byte header).
    * @param length Total event length.
    * @param[out] out GTID string in "domain-server-seq" format.
+   * @param[out] standalone Whether the GTID has FL_STANDALONE set. May be null.
    * @return MES_OK on success, MES_ERR_PARSE on error.
    */
-  static mes_error_t ExtractGtid(const uint8_t* buffer, size_t length, std::string* out);
+  static mes_error_t ExtractGtid(const uint8_t* buffer, size_t length, std::string* out,
+                                 bool* standalone = nullptr);
 
   /**
    * @brief Parse MARIADB_GTID_LIST_EVENT (type 163).

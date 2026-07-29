@@ -4,6 +4,7 @@
 #include "event_header.h"
 
 #include "binary_util.h"
+#include "crc32.h"
 
 namespace mes {
 
@@ -76,6 +77,8 @@ const char* BinlogEventTypeName(uint8_t type_code) {
       return "ANONYMOUS_GTID_LOG_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent):
       return "PREVIOUS_GTIDS_EVENT";
+    case static_cast<uint8_t>(BinlogEventType::kGtidTaggedLogEvent):
+      return "GTID_TAGGED_LOG_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
       return "MARIADB_ANNOTATE_ROWS_EVENT";
     case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
@@ -101,7 +104,10 @@ BinlogChecksumAlgorithm DetectFormatDescriptionChecksum(const uint8_t* data, siz
   }
   if (len >= kEventHeaderSize + kFdePrefix + 1 + kChecksumSize &&
       data[len - kChecksumSize - 1] == kBinlogChecksumAlgCrc32) {
-    return BinlogChecksumAlgorithm::kCrc32;
+    const size_t checksum_offset = len - kChecksumSize;
+    const uint32_t computed = ComputeCRC32(data, checksum_offset);
+    const uint32_t stored = binary::ReadU32Le(data + checksum_offset);
+    return computed == stored ? BinlogChecksumAlgorithm::kCrc32 : BinlogChecksumAlgorithm::kUnknown;
   }
   if (data[len - 1] == kBinlogChecksumAlgOff) {
     return BinlogChecksumAlgorithm::kOff;

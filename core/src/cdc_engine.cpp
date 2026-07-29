@@ -7,6 +7,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <string_view>
 
 #include "binary_util.h"
 #include "client/metadata_fetcher.h"
@@ -86,6 +87,8 @@ bool IsSqlIdentifierChar(char ch) {
 
 }  // namespace
 
+CdcEngine::~CdcEngine() { WarnIfIncludeFiltersMatchedNothing(); }
+
 // Extract the SQL statement from a QUERY_EVENT body and decide whether it is a
 // DDL statement that may alter table schema. QUERY_EVENT (v4) body layout:
 //   [0..4)  thread_id, [4..8) exec_time, [8] db_len, [9..11) error_code,
@@ -136,7 +139,11 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
 
   size_t total_consumed = 0;
 
-  while (total_consumed < len) {
+  // Processing an already-buffered event can set an engine error after the
+  // parser has accepted its bytes. EventStreamParser then remains in
+  // kEventReady, so another Feed() call would make no progress. Stop this
+  // call immediately instead of repeatedly processing the same event.
+  while (total_consumed < len && !IsError()) {
     // Stop feeding if queue is full (backpressure)
     if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
       break;
@@ -171,7 +178,11 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
   return total_consumed;
 }
 
-void CdcEngine::SetMaxQueueSize(size_t max_size) { max_queue_size_ = max_size; }
+void CdcEngine::SetMaxQueueSize(size_t max_size) {
+  max_queue_size_ = max_size == 0 ? MES_DEFAULT_QUEUE_SIZE : max_size;
+}
+
+size_t CdcEngine::MaxQueueSize() const { return max_queue_size_; }
 
 bool CdcEngine::NextEvent(ChangeEvent* event) {
   if (event_queue_.empty() || event == nullptr) {
@@ -187,14 +198,17 @@ bool CdcEngine::HasEvents() const { return !event_queue_.empty(); }
 const BinlogPosition& CdcEngine::CurrentPosition() const { return position_; }
 
 void CdcEngine::Reset() {
+  WarnIfIncludeFiltersMatchedNothing();
   stream_parser_.Reset();
   table_registry_.Clear();
   position_ = BinlogPosition{};
+  pending_source_sql_.clear();
   blocked_table_ids_.clear();
+  ResetIncludeFilterMatchState();
   last_error_ = MES_OK;
-  // Clear the queue
-  std::queue<ChangeEvent> empty;
-  event_queue_.swap(empty);
+  // Keep already decoded events. A parse error can follow valid row events
+  // in the same input buffer; discarding those events makes acknowledged data
+  // unrecoverable. Callers may drain the queue after Reset() before resuming.
   // Note: metadata_fetcher_ is intentionally NOT cleared. Reset()
   // is used on reconnect paths; the metadata connection is long-lived and
   // reusing it avoids a SHOW COLUMNS round-trip storm right after a
@@ -220,11 +234,13 @@ mes_error_t CdcEngine::ErrorCode() const {
 
 void CdcEngine::SetIncludeDatabases(const std::vector<std::string>& databases) {
   include_databases_ = std::unordered_set<std::string>(databases.begin(), databases.end());
+  ResetIncludeFilterMatchState();
   RebuildBlockedTableIds();
 }
 
 void CdcEngine::SetIncludeTables(const std::vector<std::string>& tables) {
   include_tables_ = std::unordered_set<std::string>(tables.begin(), tables.end());
+  ResetIncludeFilterMatchState();
   RebuildBlockedTableIds();
 }
 
@@ -234,32 +250,68 @@ void CdcEngine::SetExcludeTables(const std::vector<std::string>& tables) {
 }
 
 bool CdcEngine::IsTableAllowed(const std::string& database, const std::string& table) const {
-  // Check database filter
+  if (!MatchesIncludeFilters(database, table)) return false;
+
+  // Check exclude filter
+  if (MatchesTableFilter(exclude_tables_, database, table)) {
+    return false;
+  }
+  return true;
+}
+
+bool CdcEngine::HasIncludeFilters() const {
+  return !include_databases_.empty() || !include_tables_.empty();
+}
+
+bool CdcEngine::MatchesTableFilter(const std::unordered_set<std::string>& filters,
+                                   const std::string& database, const std::string& table) const {
+  if (filters.empty()) return false;
+  const std::string qualified = database + "." + table;
+  for (const std::string& filter : filters) {
+    if (filter == qualified || filter == table) return true;
+    if (filter.empty() || filter.back() != '*') continue;
+    const std::string_view prefix(filter.data(), filter.size() - 1);
+    if (qualified.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0 ||
+        table.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CdcEngine::MatchesIncludeFilters(const std::string& database, const std::string& table) const {
   if (!include_databases_.empty() &&
       include_databases_.find(database) == include_databases_.end()) {
     return false;
   }
+  return include_tables_.empty() || MatchesTableFilter(include_tables_, database, table);
+}
 
-  std::string qualified = database + "." + table;
+void CdcEngine::NoteTableMapForIncludeFilters(const TableMetadata& metadata) {
+  if (!HasIncludeFilters()) return;
+  include_filter_saw_table_map_ = true;
+  include_filter_matched_ =
+      include_filter_matched_ || MatchesIncludeFilters(metadata.database_name, metadata.table_name);
+}
 
-  // Check exclude filter
-  if (exclude_tables_.find(qualified) != exclude_tables_.end() ||
-      exclude_tables_.find(table) != exclude_tables_.end()) {
-    return false;
-  }
+void CdcEngine::WarnIfIncludeFiltersMatchedNothing() {
+  if (!HasIncludeFilters() || !include_filter_saw_table_map_ || include_filter_matched_) return;
+  StructuredLog()
+      .Event("include_filter_matched_nothing")
+      .Field("include_database_count", static_cast<uint64_t>(include_databases_.size()))
+      .Field("include_table_count", static_cast<uint64_t>(include_tables_.size()))
+      .Warn();
+}
 
-  // Check include filter
-  if (!include_tables_.empty()) {
-    return include_tables_.find(qualified) != include_tables_.end() ||
-           include_tables_.find(table) != include_tables_.end();
-  }
-
-  return true;
+void CdcEngine::ResetIncludeFilterMatchState() {
+  include_filter_saw_table_map_ = false;
+  include_filter_matched_ = false;
 }
 
 void CdcEngine::RebuildBlockedTableIds() {
   blocked_table_ids_.clear();
   table_registry_.ForEach([this](uint64_t table_id, const TableMetadata& metadata) {
+    NoteTableMapForIncludeFilters(metadata);
     if (!IsTableAllowed(metadata.database_name, metadata.table_name)) {
       blocked_table_ids_.insert(table_id);
     }
@@ -294,7 +346,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         break;
       }
       uint64_t table_id = binary::ReadU48Le(body);
-      if (!table_registry_.ProcessTableMapEvent(body, body_len)) {
+      uint64_t evicted_table_id = UINT64_MAX;
+      bool unchanged = false;
+      if (!table_registry_.ProcessTableMapEvent(body, body_len, &evicted_table_id, &unchanged)) {
         last_error_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("table_map_parse_failed")
@@ -303,8 +357,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             .Error();
         break;
       }
+      if (evicted_table_id != UINT64_MAX) blocked_table_ids_.erase(evicted_table_id);
+      if (unchanged) break;
       auto* meta = table_registry_.MutableLookup(table_id);
       if (meta) {
+        NoteTableMapForIncludeFilters(*meta);
         if (!IsTableAllowed(meta->database_name, meta->table_name)) {
           blocked_table_ids_.insert(table_id);
           break;
@@ -318,10 +375,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
           // FetchColumnInfo returns an empty vector on any failure (connection
-          // loss, lost SELECT privilege, column-count mismatch). Record that
-          // names could not be resolved so downstream events can surface the
-          // gap instead of silently shipping empty column names.
-          meta->names_resolved = infos.size() == meta->columns.size();
+          // loss, lost SELECT privilege, column-count mismatch).
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
             meta->columns[i].name = infos[i].name;
             // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
@@ -333,6 +387,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             }
           }
         }
+        // A TABLE_MAP may carry names itself, or the metadata side-connection
+        // may have supplied them above. The flag must describe the resulting
+        // metadata, not whether a lookup was attempted.
+        meta->names_resolved = std::none_of(meta->columns.begin(), meta->columns.end(),
+                                            [](const ColumnMetadata& c) { return c.name.empty(); });
       }
       break;
     }
@@ -347,6 +406,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
 
     case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
+      pending_source_sql_.clear();
       // A DDL statement (ALTER/RENAME/DROP/CREATE/TRUNCATE) may change a
       // table's columns while preserving the column count, which the metadata
       // cache's count guard cannot detect. Invalidate the whole metadata cache
@@ -361,7 +421,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kRotateEvent): {
       RotateEventData rot;
       if (ParseRotateEvent(body, body_len, &rot)) {
-        position_.binlog_file = std::move(rot.new_log_file);
+        // Empty filenames appear in artificial ROTATE events. They carry an
+        // updated offset but must not erase the last usable resume filename.
+        if (!rot.new_log_file.empty()) {
+          position_.binlog_file = std::move(rot.new_log_file);
+        }
         position_.offset = rot.position;
         // A new binlog file reassigns table_ids and re-sends TABLE_MAP events
         // before any row events, so the old registry is stale. Clear it (and
@@ -378,20 +442,63 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
     }
 
-    // MariaDB-specific events: skip (CDC uses standard row events)
     case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
+      if (body == nullptr || body_len == 0) {
+        last_error_ = MES_ERR_PARSE;
+        StructuredLog().Event("mariadb_annotate_rows_parse_failed").Error();
+      } else {
+        pending_source_sql_.assign(reinterpret_cast<const char*>(body), body_len);
+      }
+      break;
+
+    // MariaDB-specific events without a row-level representation.
     case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBStartEncryptionEvent):
+    case static_cast<uint8_t>(BinlogEventType::kHeartbeatLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kIgnorableLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kRowsQueryLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent):
+    case static_cast<uint8_t>(BinlogEventType::kXidEvent):
+      pending_source_sql_.clear();
+      break;
+
+    case static_cast<uint8_t>(BinlogEventType::kGtidLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kGtidTaggedLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kAnonymousGtidLogEvent):
+    case static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent):
+    case static_cast<uint8_t>(BinlogEventType::kTransactionContextEvent):
+    case static_cast<uint8_t>(BinlogEventType::kViewChangeEvent):
+    case static_cast<uint8_t>(BinlogEventType::kHeartbeatLogEventV2):
+      break;
+
+    // PARTIAL_JSON and MariaDB log_bin_compress need decoders that preserve
+    // full row values. Refuse them rather than silently advancing a CDC
+    // checkpoint past changes we cannot represent.
+    case static_cast<uint8_t>(BinlogEventType::kPartialUpdateRowsEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBQueryCompressedEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEventV1):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBUpdateRowsCompressedEventV1):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBDeleteRowsCompressedEventV1):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBUpdateRowsCompressedEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBDeleteRowsCompressedEvent):
+      last_error_ = MES_ERR_PARSE;
+      StructuredLog()
+          .Event("unsupported_binlog_event")
+          .Field("type_code", static_cast<uint64_t>(header.type_code))
+          .Error();
       break;
 
     default:
-      // TODO: FORMAT_DESCRIPTION_EVENT is currently treated as a
-      // no-op. Post-header sizes are assumed fixed for MySQL 5.6+/MariaDB
-      // 10.0+ (which covers MySQL 8.4 and MariaDB 10.x, the target versions).
-      // If supporting other versions, parse the post-header size array here
-      // to dynamically determine event offsets.
+      // Do not silently skip a newly introduced event type: doing so advances
+      // the caller's checkpoint while dropping an unknown change.
+      last_error_ = MES_ERR_PARSE;
+      StructuredLog()
+          .Event("unknown_binlog_event")
+          .Field("type_code", static_cast<uint64_t>(header.type_code))
+          .Error();
       break;
   }
 
@@ -416,8 +523,8 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   // Extract table_id from the first 6 bytes of the body
   uint64_t table_id = binary::ReadU48Le(body);
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
-  const TableMetadata* meta = table_registry_.Lookup(table_id);
-  if (meta == nullptr) {
+  const auto meta = table_registry_.SharedLookup(table_id);
+  if (!meta) {
     last_error_ = MES_ERR_DECODE_ROW;
     StructuredLog()
         .Event("rows_event_no_table_map")
@@ -446,8 +553,10 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.table = meta->table_name;
         event.after = std::move(row);
         AttachColumnNames(event.after, *meta);
+        event.table_metadata = meta;
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }
@@ -466,8 +575,10 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.after = std::move(pair.after);
         AttachColumnNames(event.before, *meta);
         AttachColumnNames(event.after, *meta);
+        event.table_metadata = meta;
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }
@@ -485,8 +596,10 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.table = meta->table_name;
         event.before = std::move(row);
         AttachColumnNames(event.before, *meta);
+        event.table_metadata = meta;
         event.timestamp = header.timestamp;
         event.position = position_;
+        event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         event_queue_.push(std::move(event));
       }

@@ -26,6 +26,9 @@ enum class BinlogEventType : uint8_t {
   kFormatDescriptionEvent = 15,
   kXidEvent = 16,
   kTableMapEvent = 19,
+  kHeartbeatLogEvent = 27,
+  kIgnorableLogEvent = 28,
+  kRowsQueryLogEvent = 29,
   kWriteRowsEventV1 = 23,
   kUpdateRowsEventV1 = 24,
   kDeleteRowsEventV1 = 25,
@@ -35,6 +38,11 @@ enum class BinlogEventType : uint8_t {
   kGtidLogEvent = 33,
   kAnonymousGtidLogEvent = 34,
   kPreviousGtidsEvent = 35,
+  kTransactionContextEvent = 36,
+  kViewChangeEvent = 37,
+  kPartialUpdateRowsEvent = 39,
+  kHeartbeatLogEventV2 = 41,
+  kGtidTaggedLogEvent = 42,
 
   // MariaDB-specific event types (160+)
   kMariaDBAnnotateRowsEvent = 160,
@@ -42,6 +50,13 @@ enum class BinlogEventType : uint8_t {
   kMariaDBGtidEvent = 162,
   kMariaDBGtidListEvent = 163,
   kMariaDBStartEncryptionEvent = 164,
+  kMariaDBQueryCompressedEvent = 165,
+  kMariaDBWriteRowsCompressedEventV1 = 166,
+  kMariaDBUpdateRowsCompressedEventV1 = 167,
+  kMariaDBDeleteRowsCompressedEventV1 = 168,
+  kMariaDBWriteRowsCompressedEvent = 169,
+  kMariaDBUpdateRowsCompressedEvent = 170,
+  kMariaDBDeleteRowsCompressedEvent = 171,
 };
 
 /// MySQL binlog v4 event header (19 bytes).

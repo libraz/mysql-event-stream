@@ -21,8 +21,8 @@ static constexpr size_t kGtidListEntrySize = 16;
 /// Mask for extracting entry count from GTID_LIST count_and_flags field (lower 28 bits)
 static constexpr uint32_t kGtidListCountMask = 0x0FFFFFFFu;
 
-mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer, size_t length,
-                                            std::string* out) {
+mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer, size_t length, std::string* out,
+                                            bool* standalone) {
   if (buffer == nullptr || out == nullptr) {
     return MES_ERR_NULL_ARG;
   }
@@ -43,6 +43,12 @@ mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer, size_t length
 
   // domain_id: 4 bytes at offset 8 (little-endian uint32)
   uint32_t domain_id = binary::ReadU32Le(post_header + 8);
+
+  // MariaDB's FL_STANDALONE means this GTID group has no terminating COMMIT
+  // or XID event, so consumers must close the checkpoint at this event.
+  if (standalone != nullptr) {
+    *standalone = (post_header[12] & 0x01u) != 0;
+  }
 
   // Construct "domain-server-seq" format
   MariaDBGtid gtid;
