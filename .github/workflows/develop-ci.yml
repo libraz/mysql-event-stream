@@ -175,3 +175,10 @@ jobs:
           cmake --build build --parallel
       - name: Run tests
         run: cd build && ctest --output-on-failure --parallel $(nproc) -E "E2E"
+      - name: Run reader-thread E2E under ${{ matrix.sanitizer.name }}
+        run: |
+          MYSQL_VERSION=8.4 docker compose -f e2e/docker/docker-compose.yml up -d --wait
+          ctest --test-dir build --output-on-failure -R 'E2EProtocol.StopInterruptsPoll|E2EBuffer.GracefulShutdownNoLeak'
+      - name: Stop reader-thread E2E services
+        if: always()
+        run: docker compose -f e2e/docker/docker-compose.yml down -v
