@@ -30,6 +30,8 @@
 
 namespace mes {
 
+class BinlogClientTestAccess;
+
 /**
  * @brief Configuration for BinlogClient
  */
@@ -39,7 +41,11 @@ struct BinlogClientConfig {
   std::string user;
   std::string password;
   uint32_t server_id = 1;
-  std::string start_gtid;  // Empty = start from current position
+  std::string start_gtid;
+  bool start_at_current = true;
+  bool start_at_file_position = false;
+  std::string binlog_file;
+  uint64_t binlog_position = 4;
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
   mes_ssl_mode_t ssl_mode = MES_SSL_DISABLED;
@@ -116,6 +122,14 @@ class BinlogClient {
   PollResult Poll();
 
   /**
+   * @brief Block for one event, then drain up to @p max_events already queued events.
+   *
+   * Result data pointers remain valid until the next Poll() or PollBatch()
+   * call. A terminal error is returned as the final batch element.
+   */
+  size_t PollBatch(size_t max_events, std::vector<PollResult>* results);
+
+  /**
    * @brief Synchronously stop from any thread and unblock a pending Poll().
    * @note Acquires locks and joins the reader; not async-signal-safe.
    */
@@ -129,6 +143,9 @@ class BinlogClient {
 
   /** @brief Check whether Poll() can still drain events or a terminal error. */
   bool IsStreaming() const;
+
+  /** @brief Get the server flavor detected during Connect(). */
+  ServerFlavor GetServerFlavor() const;
 
   /** @brief Get last error message */
   const char* GetLastError() const;
@@ -166,6 +183,8 @@ class BinlogClient {
   size_t QueuedBytes() const;
 
  private:
+  friend class BinlogClientTestAccess;
+
   protocol::MysqlConnection conn_;
   protocol::BinlogStream binlog_stream_;
   ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
@@ -201,15 +220,19 @@ class BinlogClient {
   // component is usable on its own; only the kChecksumSize constant is shared.
   std::atomic<bool> checksum_enabled_{true};
   std::atomic<bool> stop_requested_{false};
-  uint32_t max_event_size_ = 64u * 1024u * 1024u;
+  // Keep the default below the 48 MiB queue budget so a valid maximum-sized
+  // event can always enter the queue. Larger events remain an explicit opt-in
+  // together with a larger max_queue_bytes setting.
+  uint32_t max_event_size_ = 32u * 1024u * 1024u;
   size_t max_queue_bytes_ = kDefaultEventQueueBytes;
 
   // Reader thread infrastructure
   std::unique_ptr<EventQueue> event_queue_;
   std::thread reader_thread_;
-  QueuedEvent current_event_;            // Holds data for current Poll() result
-  TransactionGtidTracker gtid_tracker_;  // Reader-thread received/commit state
-  std::mutex stop_mutex_;                // Serializes Stop() calls
+  QueuedEvent current_event_;              // Holds data for current Poll() result
+  std::vector<QueuedEvent> batch_events_;  // Holds data for current PollBatch() results
+  TransactionGtidTracker gtid_tracker_;    // Reader-thread received/commit state
+  std::mutex stop_mutex_;                  // Serializes Stop() calls
 
   // Reusable scratch buffer for FetchEvent() packet reads. Lives on the
   // reader thread: after a successful non-heartbeat read, the buffer is

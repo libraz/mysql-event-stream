@@ -16,7 +16,7 @@
 
 namespace mes {
 
-constexpr size_t kDefaultEventQueueBytes = 256u * 1024u * 1024u;
+constexpr size_t kDefaultEventQueueBytes = MES_DEFAULT_QUEUE_BYTES;
 
 // Note: this queue intentionally uses std::queue + mutex + condition
 // variables rather than a lock-free SPSC ring buffer. Rationale:
@@ -34,15 +34,17 @@ constexpr size_t kDefaultEventQueueBytes = 256u * 1024u * 1024u;
 
 /** @brief An event buffered in the EventQueue. */
 struct QueuedEvent {
-  std::vector<uint8_t> data;    ///< Owned binlog packet bytes (empty for heartbeat/error)
-  size_t data_offset = 0;       ///< Offset of the event payload within `data`
-                                ///< (used to skip the MySQL OK byte without
-                                ///< copying). Consumers read from
-                                ///< `data.data() + data_offset` with size
-                                ///< `data.size() - data_offset`.
-  mes_error_t error = MES_OK;   ///< MES_OK for real events; error code for poison pill
-  bool is_heartbeat = false;    ///< true for silent heartbeats from the server
-  std::string checkpoint_gtid;  ///< Committed GTID promoted after consumer finishes this event
+  std::vector<uint8_t> data;       ///< Owned binlog packet bytes (empty for heartbeat/error)
+  size_t data_offset = 0;          ///< Offset of the event payload within `data`
+                                   ///< (used to skip the MySQL OK byte without
+                                   ///< copying). Consumers read from
+                                   ///< `data.data() + data_offset` with size
+                                   ///< `data.size() - data_offset`.
+  mes_error_t error = MES_OK;      ///< MES_OK for real events; error code for poison pill
+  uint16_t server_error_code = 0;  ///< MySQL ERR packet code for an error sentinel
+  std::string error_message;       ///< Detailed error text for an error sentinel
+  bool is_heartbeat = false;       ///< true for silent heartbeats from the server
+  std::string checkpoint_gtid;     ///< Committed GTID promoted after consumer finishes this event
 };
 
 /**
@@ -78,6 +80,9 @@ class EventQueue {
    */
   bool Pop(QueuedEvent* event);
 
+  /** Pop an already queued event without blocking. Returns false when empty. */
+  bool TryPop(QueuedEvent* event);
+
   /** @brief Close the queue, unblocking all waiters. Idempotent. */
   void Close();
 
@@ -87,7 +92,7 @@ class EventQueue {
   /** @brief Current number of events in the queue (approximate under concurrency). */
   size_t Size() const;
 
-  /** @brief Current charged payload bytes in the queue. */
+  /** @brief Current payload bytes in the queue (vector/string size, not capacity). */
   size_t QueuedBytes() const;
 
   /** @brief Configured queue byte budget. */

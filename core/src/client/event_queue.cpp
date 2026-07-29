@@ -43,6 +43,17 @@ bool EventQueue::Pop(QueuedEvent* event) {
   return true;
 }
 
+bool EventQueue::TryPop(QueuedEvent* event) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (queue_.empty()) return false;
+  const size_t event_bytes = EventMemoryBytes(queue_.front());
+  *event = std::move(queue_.front());
+  queue_.pop();
+  queued_bytes_ -= event_bytes;
+  not_full_cv_.notify_one();
+  return true;
+}
+
 void EventQueue::Close() {
   std::lock_guard<std::mutex> lock(mu_);
   closed_ = true;
@@ -76,13 +87,14 @@ bool EventQueue::IsClosed() const {
 }
 
 size_t EventQueue::EventMemoryBytes(const QueuedEvent& event) {
-  const size_t data_bytes = event.data.capacity();
-  const size_t checkpoint_bytes =
-      event.checkpoint_gtid.empty() ? 0 : event.checkpoint_gtid.capacity();
-  if (data_bytes > std::numeric_limits<size_t>::max() - checkpoint_bytes) {
+  const size_t data_bytes = event.data.size();
+  const size_t checkpoint_bytes = event.checkpoint_gtid.empty() ? 0 : event.checkpoint_gtid.size();
+  const size_t message_bytes = event.error_message.empty() ? 0 : event.error_message.size();
+  if (data_bytes > std::numeric_limits<size_t>::max() - checkpoint_bytes ||
+      data_bytes + checkpoint_bytes > std::numeric_limits<size_t>::max() - message_bytes) {
     return std::numeric_limits<size_t>::max();
   }
-  return data_bytes + checkpoint_bytes;
+  return data_bytes + checkpoint_bytes + message_bytes;
 }
 
 }  // namespace mes
