@@ -1282,8 +1282,12 @@ TEST(E2EProtocol, StopInterruptsPoll) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 30;  // long timeout
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  // caching_sha2_password full auth needs certificate-verified TLS, so this
+  // test must not depend on another test having warmed the server's password
+  // cache for this account.
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
+  std::string ca_path = DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
