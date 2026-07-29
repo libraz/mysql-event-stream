@@ -4,13 +4,12 @@
 #ifndef MES_CLIENT_TRANSACTION_GTID_TRACKER_H_
 #define MES_CLIENT_TRANSACTION_GTID_TRACKER_H_
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
-#include <vector>
 
+#include "client/gtid_set.h"
 #include "mariadb_gtid.h"
 #include "server_flavor.h"
 
@@ -42,25 +41,19 @@ class TransactionGtidTracker {
   const std::string& received_gtid() const { return received_gtid_; }
 
  private:
-  struct Interval {
-    uint64_t start = 0;
-    uint64_t end = 0;  // Exclusive.
-  };
-
-  using Sid = std::array<uint8_t, 16>;
-  using MySQLSet = std::map<Sid, std::vector<Interval>>;
+  using Sid = GtidSet::Sid;
+  using MySQLSet = GtidSet;
   using MariaDBSet = std::map<uint32_t, MariaDBGtid>;
 
   struct PendingGtid {
     bool present = false;
     ServerFlavor flavor = ServerFlavor::kMySQL;
     Sid sid{};
+    std::string tag;
     uint64_t sequence_no = 0;
     MariaDBGtid mariadb;
   };
 
-  static bool DecodeMySQLSet(const uint8_t* data, size_t size, MySQLSet* out);
-  static void MergeInterval(std::vector<Interval>* intervals, Interval interval);
   static void MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid& gtid);
   static std::string FormatMySQLSet(const MySQLSet& set);
   static std::string FormatMariaDBSet(const MariaDBSet& set);
@@ -73,6 +66,7 @@ class TransactionGtidTracker {
   MariaDBSet mariadb_set_;
   std::string received_gtid_;
   PendingGtid pending_gtid_;
+  bool transaction_open_ = false;
 };
 
 }  // namespace mes

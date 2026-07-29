@@ -6,6 +6,8 @@ option(MES_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MES_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MES_ENABLE_COVERAGE "Enable code coverage" OFF)
 option(MES_ENABLE_FUZZ "Build libFuzzer harnesses (requires Clang)" OFF)
+option(MES_BUILD_FUZZ_SMOKE "Build deterministic fuzz corpus smoke runner" OFF)
+option(MES_BUILD_BENCHMARKS "Build manual performance measurement harnesses" OFF)
 
 # OpenSSL (required for protocol layer)
 # Static linking for self-contained wheel/binary distribution
@@ -67,6 +69,7 @@ add_library(mes-objects OBJECT
   src/cdc_engine.cpp
   src/capi.cpp
   src/logger.cpp
+  src/client/gtid_set.cpp
   src/client/gtid_encoder.cpp
   ${PROTOCOL_SOURCES}
   ${CLIENT_SOURCES}
@@ -197,6 +200,28 @@ if(MES_ENABLE_FUZZ)
   target_link_libraries(fuzz_feed PRIVATE mes-core)
   target_compile_options(fuzz_feed PRIVATE -fsanitize=fuzzer)
   target_link_options(fuzz_feed PRIVATE -fsanitize=fuzzer)
+  add_executable(fuzz_protocol_parsers tests/fuzz/fuzz_protocol_parsers.cpp)
+  target_link_libraries(fuzz_protocol_parsers PRIVATE mes-core)
+  target_compile_options(fuzz_protocol_parsers PRIVATE -fsanitize=fuzzer)
+  target_link_options(fuzz_protocol_parsers PRIVATE -fsanitize=fuzzer)
+endif()
+
+if(MES_BUILD_FUZZ_SMOKE)
+  add_executable(fuzz_seed_smoke tests/fuzz/fuzz_feed.cpp)
+  target_link_libraries(fuzz_seed_smoke PRIVATE mes-core)
+  target_compile_definitions(fuzz_seed_smoke PRIVATE MES_FUZZ_STANDALONE)
+  target_compile_options(fuzz_seed_smoke PRIVATE -fno-exceptions -fno-rtti)
+  add_executable(fuzz_protocol_smoke tests/fuzz/fuzz_protocol_parsers.cpp)
+  target_link_libraries(fuzz_protocol_smoke PRIVATE mes-core)
+  target_compile_definitions(fuzz_protocol_smoke PRIVATE MES_FUZZ_STANDALONE)
+  target_compile_options(fuzz_protocol_smoke PRIVATE -fno-exceptions -fno-rtti)
+endif()
+
+if(MES_BUILD_BENCHMARKS)
+  add_executable(mes_benchmark_feed benchmarks/benchmark_feed.cpp)
+  target_include_directories(mes_benchmark_feed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(mes_benchmark_feed PRIVATE mes-core)
+  target_compile_options(mes_benchmark_feed PRIVATE -fno-exceptions -fno-rtti)
 endif()
 
 # Tests are disabled for wheel/native artifact builds with BUILD_TESTING=OFF.

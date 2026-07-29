@@ -9,8 +9,6 @@
 #ifndef MES_CLIENT_GTID_ENCODER_H_
 #define MES_CLIENT_GTID_ENCODER_H_
 
-#include <array>
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,9 +20,11 @@ namespace mes {
  * @brief Encodes MySQL GTID sets into binary format for binlog replication
  *
  * Binary format:
- *   8 bytes: number of SIDs (UUIDs)
+ *   8 bytes: number of TSIDs (UUIDs), with MySQL's tagged-format nibble
+ *            when any TSID has a tag
  *   For each SID:
  *     16 bytes: UUID
+ *     tagged format only: variable-length tag size and tag bytes
  *     8 bytes: number of intervals
  *     For each interval:
  *       8 bytes: start transaction number
@@ -34,7 +34,7 @@ class GtidEncoder {
  public:
   /**
    * @brief Encode a GTID set string into binary format
-   * @param gtid_set String like "uuid:1-3,5-7" or "uuid1:1-3,uuid2:5-7"
+   * @param gtid_set String like "uuid:1-3,5-7" or "uuid:tag:1-3"
    * @param out Output: binary encoded GTID set
    * @return MES_OK on success, error code otherwise
    */
@@ -53,22 +53,8 @@ class GtidEncoder {
   static std::string ConvertSingleGtidToRange(const std::string& gtid);
 
  private:
-  struct Interval {
-    int64_t start;
-    int64_t end;  // exclusive
-  };
-
-  struct Sid {
-    std::array<uint8_t, 16> uuid{};
-    std::vector<Interval> intervals;
-  };
-
   /// Normalize a single comma-free SID ("uuid:N" -> "uuid:1-N").
   static std::string NormalizeSingleSid(const std::string& gtid);
-  static mes_error_t ParseUuid(const char* str, uint8_t* out);
-  static mes_error_t ParseInterval(const char* str, Interval* out);
-  static void StoreInt64Le(std::vector<uint8_t>& buf, uint64_t val);
-  static void MergeIntervals(std::vector<Interval>& intervals);
 };
 
 }  // namespace mes

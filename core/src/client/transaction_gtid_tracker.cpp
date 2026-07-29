@@ -3,14 +3,12 @@
 
 #include "client/transaction_gtid_tracker.h"
 
-#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <limits>
 #include <utility>
 
 #include "binary_util.h"
-#include "client/gtid_encoder.h"
 #include "event_header.h"
 #include "mariadb_event_parser.h"
 
@@ -18,6 +16,48 @@ namespace mes {
 namespace {
 
 constexpr size_t kMySQLGtidBodySize = 25;
+
+bool ReadVarUInt(const uint8_t* data, size_t size, size_t* offset, uint64_t* value) {
+  if (data == nullptr || offset == nullptr || value == nullptr || *offset >= size) return false;
+  const uint8_t first = data[*offset];
+  size_t bytes = 1;
+  while (bytes <= 8 && (first & (uint8_t{1} << (bytes - 1))) != 0) ++bytes;
+  if (bytes > size - *offset) return false;
+
+  uint64_t decoded = first >> bytes;
+  if (bytes > 1) {
+    uint64_t trailing = 0;
+    for (size_t i = 1; i < bytes; ++i) trailing |= uint64_t{data[*offset + i]} << (8 * (i - 1));
+    decoded |= trailing << (bytes == 9 ? 0 : 8 - bytes);
+  }
+  *offset += bytes;
+  *value = decoded;
+  return true;
+}
+
+bool ReadVarInt(const uint8_t* data, size_t size, size_t* offset, int64_t* value) {
+  uint64_t encoded = 0;
+  if (!ReadVarUInt(data, size, offset, &encoded) || encoded > uint64_t{INT64_MAX} * 2 + 1) {
+    return false;
+  }
+  *value = static_cast<int64_t>((encoded >> 1) ^ (0 - (encoded & 1)));
+  return true;
+}
+
+bool ReadTaggedFieldId(const uint8_t* data, size_t size, size_t* offset, uint64_t expected) {
+  uint64_t actual = 0;
+  return ReadVarUInt(data, size, offset, &actual) && actual == expected;
+}
+
+std::string FormatMySQLGtid(const std::array<uint8_t, 16>& sid, const std::string& tag,
+                            uint64_t gno) {
+  char uuid[37];
+  std::snprintf(uuid, sizeof(uuid),
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", sid[0],
+                sid[1], sid[2], sid[3], sid[4], sid[5], sid[6], sid[7], sid[8], sid[9], sid[10],
+                sid[11], sid[12], sid[13], sid[14], sid[15]);
+  return std::string(uuid) + (tag.empty() ? ":" : ":" + tag + ":") + std::to_string(gno);
+}
 
 bool ExtractMySQLGtid(const uint8_t* data, size_t size, std::array<uint8_t, 16>* sid, uint64_t* gno,
                       std::string* formatted) {
@@ -34,17 +74,64 @@ bool ExtractMySQLGtid(const uint8_t* data, size_t size, std::array<uint8_t, 16>*
     return false;
   }
 
-  char uuid[37];
-  std::snprintf(
-      uuid, sizeof(uuid), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-      (*sid)[0], (*sid)[1], (*sid)[2], (*sid)[3], (*sid)[4], (*sid)[5], (*sid)[6], (*sid)[7],
-      (*sid)[8], (*sid)[9], (*sid)[10], (*sid)[11], (*sid)[12], (*sid)[13], (*sid)[14], (*sid)[15]);
-  *formatted = std::string(uuid) + ":" + std::to_string(*gno);
+  *formatted = FormatMySQLGtid(*sid, "", *gno);
   return true;
 }
 
-bool ExtractQueryKeyword(const uint8_t* data, size_t size, bool has_checksum,
-                         std::string* keyword) {
+bool ExtractTaggedMySQLGtid(const uint8_t* data, size_t size, bool has_checksum,
+                            std::array<uint8_t, 16>* sid, std::string* tag, uint64_t* gno,
+                            std::string* formatted) {
+  EventHeader header;
+  if (!ParseEventHeader(data, size, &header) || header.event_length > size) return false;
+  const size_t checksum_size = has_checksum ? kChecksumSize : 0;
+  if (header.event_length < kEventHeaderSize + checksum_size) return false;
+  const uint8_t* body = data + kEventHeaderSize;
+  const size_t body_size = header.event_length - kEventHeaderSize - checksum_size;
+  size_t offset = 0;
+  uint64_t encoded_size = 0;
+  uint64_t last_non_ignorable_field = 0;
+  if (!ReadVarUInt(body, body_size, &offset, &encoded_size) || encoded_size != body_size ||
+      !ReadVarUInt(body, body_size, &offset, &last_non_ignorable_field) ||
+      last_non_ignorable_field < 4 || !ReadTaggedFieldId(body, body_size, &offset, 0)) {
+    return false;
+  }
+  uint64_t flags = 0;
+  if (!ReadVarUInt(body, body_size, &offset, &flags) || flags > UINT8_MAX ||
+      !ReadTaggedFieldId(body, body_size, &offset, 1)) {
+    return false;
+  }
+  for (uint8_t& byte : *sid) {
+    uint64_t value = 0;
+    if (!ReadVarUInt(body, body_size, &offset, &value) || value > UINT8_MAX) return false;
+    byte = static_cast<uint8_t>(value);
+  }
+  int64_t signed_gno = 0;
+  if (!ReadTaggedFieldId(body, body_size, &offset, 2) ||
+      !ReadVarInt(body, body_size, &offset, &signed_gno) || signed_gno <= 0) {
+    return false;
+  }
+  uint64_t tag_size = 0;
+  if (!ReadTaggedFieldId(body, body_size, &offset, 3) ||
+      !ReadVarUInt(body, body_size, &offset, &tag_size) || tag_size == 0 || tag_size > 32 ||
+      tag_size > body_size - offset) {
+    return false;
+  }
+  tag->assign(reinterpret_cast<const char*>(body + offset), static_cast<size_t>(tag_size));
+  for (size_t i = 0; i < tag->size(); ++i) {
+    const char ch = (*tag)[i];
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' ||
+          ((ch >= '0' && ch <= '9') && i > 0))) {
+      return false;
+    }
+    (*tag)[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  *gno = static_cast<uint64_t>(signed_gno);
+  *formatted = FormatMySQLGtid(*sid, *tag, *gno);
+  return true;
+}
+
+bool ExtractQueryKeywords(const uint8_t* data, size_t size, bool has_checksum, std::string* first,
+                          std::string* second) {
   EventHeader header;
   if (!ParseEventHeader(data, size, &header) || header.event_length > size) return false;
   size_t tail_size = has_checksum ? kChecksumSize : 0;
@@ -84,32 +171,42 @@ bool ExtractQueryKeyword(const uint8_t* data, size_t size, bool has_checksum,
     break;
   }
 
-  size_t end = pos;
-  while (end < statement_len && std::isalpha(static_cast<unsigned char>(statement[end])) != 0) {
-    ++end;
-  }
-  if (end == pos) return false;
-  keyword->assign(statement + pos, statement + end);
-  std::transform(keyword->begin(), keyword->end(), keyword->begin(),
-                 [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+  auto read_keyword = [&](std::string* keyword) {
+    while (pos < statement_len && std::isspace(static_cast<unsigned char>(statement[pos])) != 0) {
+      ++pos;
+    }
+    size_t end = pos;
+    while (end < statement_len && std::isalpha(static_cast<unsigned char>(statement[end])) != 0) {
+      ++end;
+    }
+    if (end == pos) return false;
+    keyword->assign(statement + pos, statement + end);
+    std::transform(keyword->begin(), keyword->end(), keyword->begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    pos = end;
+    return true;
+  };
+
+  if (!read_keyword(first)) return false;
+  second->clear();
+  (void)read_keyword(second);
   return true;
 }
 
-bool IsQueryCommitBoundary(const uint8_t* data, size_t size, bool has_checksum) {
-  std::string keyword;
-  if (!ExtractQueryKeyword(data, size, has_checksum, &keyword)) return false;
-  return keyword == "COMMIT" || keyword == "ROLLBACK" || keyword == "ALTER" ||
-         keyword == "RENAME" || keyword == "DROP" || keyword == "CREATE" || keyword == "TRUNCATE";
+bool IsDdlKeyword(const std::string& keyword) {
+  return keyword == "ALTER" || keyword == "RENAME" || keyword == "DROP" || keyword == "CREATE" ||
+         keyword == "TRUNCATE";
 }
 
 }  // namespace
 
 void TransactionGtidTracker::Reset() {
   flavor_ = ServerFlavor::kMySQL;
-  mysql_set_.clear();
+  mysql_set_.Clear();
   mariadb_set_.clear();
   received_gtid_.clear();
   pending_gtid_ = {};
+  transaction_open_ = false;
 }
 
 bool TransactionGtidTracker::Reset(const std::string& initial_gtid_set, ServerFlavor flavor) {
@@ -123,65 +220,7 @@ bool TransactionGtidTracker::Reset(const std::string& initial_gtid_set, ServerFl
     return true;
   }
 
-  std::vector<uint8_t> encoded;
-  if (GtidEncoder::Encode(initial_gtid_set.c_str(), &encoded) != MES_OK) return false;
-  return DecodeMySQLSet(encoded.data(), encoded.size(), &mysql_set_);
-}
-
-bool TransactionGtidTracker::DecodeMySQLSet(const uint8_t* data, size_t size, MySQLSet* out) {
-  if (data == nullptr || out == nullptr || size < sizeof(uint64_t)) return false;
-
-  size_t offset = 0;
-  const uint64_t sid_count = binary::ReadU64Le(data);
-  offset += sizeof(uint64_t);
-  // Every SID needs a UUID, an interval count, and at least one interval.
-  constexpr size_t kMinSidSize = 16 + sizeof(uint64_t) + 2 * sizeof(uint64_t);
-  if (sid_count > (size - offset) / kMinSidSize) return false;
-
-  MySQLSet decoded;
-  for (uint64_t sid_index = 0; sid_index < sid_count; ++sid_index) {
-    if (size - offset < 16 + sizeof(uint64_t)) return false;
-    Sid sid{};
-    std::copy_n(data + offset, sid.size(), sid.begin());
-    offset += sid.size();
-
-    const uint64_t interval_count = binary::ReadU64Le(data + offset);
-    offset += sizeof(uint64_t);
-    constexpr size_t kIntervalSize = 2 * sizeof(uint64_t);
-    if (interval_count == 0 || interval_count > (size - offset) / kIntervalSize) {
-      return false;
-    }
-
-    auto& intervals = decoded[sid];
-    for (uint64_t interval_index = 0; interval_index < interval_count; ++interval_index) {
-      const uint64_t start = binary::ReadU64Le(data + offset);
-      const uint64_t end = binary::ReadU64Le(data + offset + sizeof(uint64_t));
-      offset += kIntervalSize;
-      if (start == 0 || end <= start) return false;
-      MergeInterval(&intervals, {start, end});
-    }
-  }
-
-  if (offset != size) return false;
-  *out = std::move(decoded);
-  return true;
-}
-
-void TransactionGtidTracker::MergeInterval(std::vector<Interval>* intervals, Interval interval) {
-  intervals->push_back(interval);
-  std::sort(intervals->begin(), intervals->end(), [](const Interval& lhs, const Interval& rhs) {
-    return lhs.start < rhs.start || (lhs.start == rhs.start && lhs.end < rhs.end);
-  });
-
-  size_t write = 0;
-  for (const auto& candidate : *intervals) {
-    if (write == 0 || candidate.start > (*intervals)[write - 1].end) {
-      (*intervals)[write++] = candidate;
-    } else if (candidate.end > (*intervals)[write - 1].end) {
-      (*intervals)[write - 1].end = candidate.end;
-    }
-  }
-  intervals->resize(write);
+  return GtidSet::Parse(initial_gtid_set, &mysql_set_) == MES_OK;
 }
 
 void TransactionGtidTracker::MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid& gtid) {
@@ -191,28 +230,7 @@ void TransactionGtidTracker::MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid
   }
 }
 
-std::string TransactionGtidTracker::FormatMySQLSet(const MySQLSet& set) {
-  std::string result;
-  for (const auto& [sid, intervals] : set) {
-    if (intervals.empty()) continue;
-    char uuid[37];
-    std::snprintf(uuid, sizeof(uuid),
-                  "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", sid[0],
-                  sid[1], sid[2], sid[3], sid[4], sid[5], sid[6], sid[7], sid[8], sid[9], sid[10],
-                  sid[11], sid[12], sid[13], sid[14], sid[15]);
-    if (!result.empty()) result += ',';
-    result += uuid;
-    for (const auto& interval : intervals) {
-      result += ':';
-      result += std::to_string(interval.start);
-      if (interval.end - interval.start != 1) {
-        result += '-';
-        result += std::to_string(interval.end - 1);
-      }
-    }
-  }
-  return result;
-}
+std::string TransactionGtidTracker::FormatMySQLSet(const MySQLSet& set) { return set.ToString(); }
 
 std::string TransactionGtidTracker::FormatMariaDBSet(const MariaDBSet& set) {
   std::vector<MariaDBGtid> gtids;
@@ -236,8 +254,11 @@ std::string TransactionGtidTracker::CommitPending() {
   if (flavor_ == ServerFlavor::kMariaDB) {
     MergeMariaDBGtid(&mariadb_set_, pending_gtid_.mariadb);
   } else {
-    MergeInterval(&mysql_set_[pending_gtid_.sid],
-                  {pending_gtid_.sequence_no, pending_gtid_.sequence_no + 1});
+    if (!mysql_set_.Add(pending_gtid_.sid, pending_gtid_.tag,
+                        {pending_gtid_.sequence_no, pending_gtid_.sequence_no + 1})) {
+      pending_gtid_ = {};
+      return {};
+    }
   }
   pending_gtid_ = {};
   return FormatCurrentSet();
@@ -256,11 +277,9 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   if (event_type == static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent)) {
     const size_t payload_size = content_size - kEventHeaderSize;
     MySQLSet baseline;
-    if (!DecodeMySQLSet(data + kEventHeaderSize, payload_size, &baseline)) return {};
+    if (!GtidSet::DecodeBinary(data + kEventHeaderSize, payload_size, &baseline)) return {};
     MySQLSet merged = mysql_set_;
-    for (const auto& [sid, intervals] : baseline) {
-      for (const auto& interval : intervals) MergeInterval(&merged[sid], interval);
-    }
+    if (!merged.Merge(baseline)) return {};
     mysql_set_ = std::move(merged);
     flavor_ = ServerFlavor::kMySQL;
     return FormatCurrentSet();
@@ -286,35 +305,81 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
     // Seeing the next GTID proves the preceding transaction group ended even
     // if it used a standalone event type we do not classify explicitly.
     std::string committed = CommitPending();
+    transaction_open_ = false;
     flavor_ = ServerFlavor::kMySQL;
     received_gtid_ = std::move(gtid);
-    pending_gtid_ = {true, ServerFlavor::kMySQL, sid, gno, {}};
+    pending_gtid_ = {true, ServerFlavor::kMySQL, sid, "", gno, {}};
+    return committed;
+  }
+
+  if (event_type == static_cast<uint8_t>(BinlogEventType::kGtidTaggedLogEvent)) {
+    Sid sid{};
+    std::string tag;
+    uint64_t gno = 0;
+    std::string gtid;
+    if (!ExtractTaggedMySQLGtid(data, size, has_checksum, &sid, &tag, &gno, &gtid)) return {};
+    std::string committed = CommitPending();
+    transaction_open_ = false;
+    flavor_ = ServerFlavor::kMySQL;
+    received_gtid_ = std::move(gtid);
+    pending_gtid_ = {true, ServerFlavor::kMySQL, sid, std::move(tag), gno, {}};
     return committed;
   }
 
   if (event_type == static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent)) {
     std::string gtid_string;
-    if (MariaDBEventParser::ExtractGtid(data, content_size, &gtid_string) != MES_OK) return {};
+    bool standalone = false;
+    if (MariaDBEventParser::ExtractGtid(data, content_size, &gtid_string, &standalone) != MES_OK) {
+      return {};
+    }
     MariaDBGtid gtid;
     if (MariaDBGtid::Parse(gtid_string, &gtid) != MES_OK) return {};
     std::string committed = CommitPending();
+    transaction_open_ = false;
     flavor_ = ServerFlavor::kMariaDB;
     received_gtid_ = std::move(gtid_string);
-    pending_gtid_ = {true, ServerFlavor::kMariaDB, {}, 0, gtid};
+    pending_gtid_ = {true, ServerFlavor::kMariaDB, {}, "", 0, gtid};
+    if (standalone) {
+      std::string standalone_checkpoint = CommitPending();
+      // This complete set also contains a preceding pending group, if this
+      // event was the proof that it completed.
+      return standalone_checkpoint;
+    }
     return committed;
   }
 
   if (event_type == static_cast<uint8_t>(BinlogEventType::kAnonymousGtidLogEvent)) {
     std::string committed = CommitPending();
+    transaction_open_ = false;
     received_gtid_.clear();
     pending_gtid_ = {};
     return committed;
   }
 
-  const bool commit_boundary = event_type == static_cast<uint8_t>(BinlogEventType::kXidEvent) ||
-                               (event_type == static_cast<uint8_t>(BinlogEventType::kQueryEvent) &&
-                                IsQueryCommitBoundary(data, size, has_checksum));
-  return commit_boundary ? CommitPending() : std::string{};
+  if (event_type == static_cast<uint8_t>(BinlogEventType::kXidEvent)) {
+    transaction_open_ = false;
+    return CommitPending();
+  }
+
+  if (event_type != static_cast<uint8_t>(BinlogEventType::kQueryEvent)) return {};
+
+  std::string first;
+  std::string second;
+  if (!ExtractQueryKeywords(data, size, has_checksum, &first, &second)) return {};
+  if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
+    transaction_open_ = true;
+    return {};
+  }
+  if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
+    transaction_open_ = false;
+    return CommitPending();
+  }
+  // DDL normally has an implicit transaction boundary, but never promote a
+  // pending checkpoint merely because a DDL word appears inside an explicitly
+  // open transaction group. In particular, ROLLBACK TO SAVEPOINT is not a
+  // transaction rollback and must leave its GTID pending until COMMIT/XID.
+  if (!transaction_open_ && IsDdlKeyword(first)) return CommitPending();
+  return {};
 }
 
 }  // namespace mes
