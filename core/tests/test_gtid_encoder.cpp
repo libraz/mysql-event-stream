@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "client/gtid_encoder.h"
+#include "client/gtid_set.h"
 
 namespace {
 
@@ -223,26 +224,82 @@ TEST(GtidEncoderTest, ErrorOverflowRangeEnd) {
             MES_ERR_INVALID_ARG);
 }
 
-// --- Error: tagged GTID (MySQL 8.4 uuid:tag:N) is rejected explicitly ---
+// --- Tagged GTIDs use the MySQL 8.4 tagged GTID-set wire format ---
 
-TEST(GtidEncoderTest, ErrorTaggedGtidRejected) {
+TEST(GtidEncoderTest, TaggedGtidUsesTaggedFormatAndCanonicalizesTag) {
   std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:mytag:1-5", &out),
-            MES_ERR_INVALID_ARG);
+  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:MyTag:1-5", &out), MES_OK);
+  ASSERT_EQ(out.size(), 54u);
+  EXPECT_EQ(ReadInt64Le(out, 0), (uint64_t{1} << 56) | (uint64_t{1} << 8) | 1);
+  EXPECT_EQ(out[24], 10u);
+  EXPECT_EQ(std::string(out.begin() + 25, out.begin() + 30), "mytag");
+  EXPECT_EQ(ReadInt64Le(out, 30), 1u);
+  EXPECT_EQ(ReadInt64Le(out, 38), 1u);
+  EXPECT_EQ(ReadInt64Le(out, 46), 6u);
 }
 
-TEST(GtidEncoderTest, ErrorTaggedGtidSingleTransaction) {
+TEST(GtidEncoderTest, TaggedGtidSetEncodesUntaggedTsidWithEmptyTag) {
   std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:tag:7", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-TEST(GtidEncoderTest, ErrorTaggedGtidAmongMultiUuid) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3,"
-                                "00000000-0000-0000-0000-000000000002:analytics:1-9",
+  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-2,"
+                                "00000000-0000-0000-0000-000000000002:tag:7",
                                 &out),
+            MES_OK);
+  EXPECT_EQ(ReadInt64Le(out, 0), (uint64_t{1} << 56) | (uint64_t{2} << 8) | 1);
+  EXPECT_EQ(out[24], 0u);
+  EXPECT_EQ(ReadInt64Le(out, 25), 1u);
+  EXPECT_EQ(ReadInt64Le(out, 33), 1u);
+  EXPECT_EQ(ReadInt64Le(out, 41), 3u);
+}
+
+TEST(GtidEncoderTest, TaggedGtidSupportsUnderscoreAndDigits) {
+  std::vector<uint8_t> out;
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:_tag_2:7", &out), MES_OK);
+}
+
+TEST(GtidEncoderTest, TaggedGtidRejectsInvalidTag) {
+  std::vector<uint8_t> out;
+  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:bad-tag:1-9", &out),
             MES_ERR_INVALID_ARG);
+}
+
+TEST(GtidSetTest, TaggedBinaryAndTextRoundTripPreserveEveryTsid) {
+  mes::GtidSet original;
+  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:Analytics:1-3,"
+                                "00000000-0000-0000-0000-000000000002:7-9",
+                                &original),
+            MES_OK);
+  std::vector<uint8_t> encoded;
+  ASSERT_EQ(original.EncodeBinary(&encoded), MES_OK);
+
+  mes::GtidSet decoded;
+  ASSERT_TRUE(mes::GtidSet::DecodeBinary(encoded.data(), encoded.size(), &decoded));
+  EXPECT_EQ(decoded.ToString(),
+            "00000000-0000-0000-0000-000000000001:analytics:1-3,"
+            "00000000-0000-0000-0000-000000000002:7-9");
+
+  mes::GtidSet reparsed;
+  ASSERT_EQ(mes::GtidSet::Parse(decoded.ToString(), &reparsed), MES_OK);
+  EXPECT_EQ(reparsed.ToString(), decoded.ToString());
+}
+
+TEST(GtidSetTest, SubsetRequiresEveryTsidAndIntervalToBeCovered) {
+  mes::GtidSet subset;
+  mes::GtidSet superset;
+  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:2-4,"
+                                "00000000-0000-0000-0000-000000000002:tag:7-9",
+                                &subset),
+            MES_OK);
+  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:1-6,"
+                                "00000000-0000-0000-0000-000000000002:tag:1-10",
+                                &superset),
+            MES_OK);
+  EXPECT_TRUE(subset.IsSubsetOf(superset));
+  EXPECT_FALSE(superset.IsSubsetOf(subset));
+
+  mes::GtidSet wrong_tag;
+  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000002:other:7-9", &wrong_tag),
+            MES_OK);
+  EXPECT_FALSE(subset.IsSubsetOf(wrong_tag));
 }
 
 // --- Error: null output pointer ---

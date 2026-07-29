@@ -4,7 +4,9 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <vector>
 
+#include "crc32.h"
 #include "event_header.h"
 
 namespace mes {
@@ -128,6 +130,24 @@ TEST(EventHeaderTest, EventBodySizeNoChecksumMinimal) {
   EventHeader header;
   header.event_length = 19;  // header only, no checksum
   EXPECT_EQ(EventBodySize(header, false), 0u);
+}
+
+TEST(EventHeaderTest, RejectsCrc32FormatDescriptionWithInvalidTrailer) {
+  // FDE's fixed post-header prefix is 57 bytes; the algorithm byte follows
+  // it, then a CRC32 trailer. A matching byte at the old heuristic offset is
+  // not sufficient evidence that the stream uses checksums.
+  std::vector<uint8_t> event(kEventHeaderSize + 58 + kChecksumSize, 0);
+  BuildHeader(event.data(), 0, static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent), 1,
+              event.size(), 0, 0);
+  event[kEventHeaderSize + 57] = kBinlogChecksumAlgCrc32;
+  const uint32_t crc = ComputeCRC32(event.data(), event.size() - kChecksumSize);
+  std::memcpy(event.data() + event.size() - kChecksumSize, &crc, sizeof(crc));
+  EXPECT_EQ(DetectFormatDescriptionChecksum(event.data(), event.size()),
+            BinlogChecksumAlgorithm::kCrc32);
+
+  event[20] ^= 0x80;
+  EXPECT_EQ(DetectFormatDescriptionChecksum(event.data(), event.size()),
+            BinlogChecksumAlgorithm::kUnknown);
 }
 
 TEST(EventHeaderTest, IsRowEventWriteV1) {

@@ -27,6 +27,11 @@ TEST(CApi, SizeofEventMatchesStruct) { EXPECT_EQ(mes_sizeof_event(), sizeof(mes_
 
 TEST(CApi, SizeofColumnMatchesStruct) { EXPECT_EQ(mes_sizeof_column(), sizeof(mes_column_t)); }
 
+TEST(CApi, VersionAndAbiAreExposed) {
+  EXPECT_STREQ(mes_version(), "1.5.0");
+  EXPECT_EQ(mes_abi_version(), MES_ABI_VERSION);
+}
+
 // ---- Engine lifecycle ----
 
 TEST(CApi, CreateAndDestroy) {
@@ -37,6 +42,25 @@ TEST(CApi, CreateAndDestroy) {
 
 TEST(CApi, DestroyNull) {
   mes_destroy(nullptr);  // Should not crash
+}
+
+TEST(CApi, MetadataConnectionRejectsInvalidSslModeBeforeConnecting) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  mes_client_config_t config{};
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(99);
+  EXPECT_EQ(mes_engine_set_metadata_conn(engine, &config), MES_ERR_INVALID_ARG);
+  mes_destroy(engine);
+}
+
+TEST(CApi, ClientRejectsZeroServerIdBeforeConnecting) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.server_id = 0;
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), "server_id must be non-zero");
+  mes_client_destroy(client);
 }
 
 // ---- Null argument handling ----
@@ -262,7 +286,11 @@ TEST(CApi, Reset) {
   EXPECT_EQ(mes_has_events(engine), 1);
 
   EXPECT_EQ(mes_reset(engine), MES_OK);
-  EXPECT_EQ(mes_has_events(engine), 0);
+  EXPECT_EQ(mes_has_events(engine), 1);
+  const mes_event_t* preserved = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &preserved), MES_OK);
+  ASSERT_NE(preserved, nullptr);
+  EXPECT_EQ(preserved->type, MES_EVENT_INSERT);
 
   mes_destroy(engine);
 }
@@ -529,6 +557,59 @@ TEST(CApi, FeedReturnsChecksumErrorOnCorruptedEvent) {
   mes_destroy(engine);
 }
 
+TEST(CApi, FeedProcessingErrorsReturnWithoutReprocessingParsedEvent) {
+  // Each invalid event is followed by a normal event in the same buffer.  The
+  // C API must return the processing error rather than repeatedly processing
+  // the already-parsed invalid event and spinning forever.
+  const auto normal_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1001, 200, {});
+
+  struct Case {
+    const char* name;
+    std::vector<uint8_t> invalid_event;
+    mes_error_t expected;
+  };
+
+  const auto short_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+                                          1000, 100, std::vector<uint8_t>(5, 0));
+  const auto malformed_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+                                              1000, 100, std::vector<uint8_t>(6, 0));
+  const auto malformed_rotate =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1000, 100, {});
+  const auto short_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                    100, std::vector<uint8_t>(5, 0));
+  const auto row_without_table_map = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 100, BuildWriteRowsBody(1, 42));
+  auto truncated_row_body = BuildWriteRowsBody(1, 42);
+  truncated_row_body.pop_back();
+  const auto truncated_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+                                        1000, 100, truncated_row_body);
+
+  const std::vector<Case> cases = {
+      {"short table map", short_table_map, MES_ERR_PARSE},
+      {"malformed table map", malformed_table_map, MES_ERR_PARSE},
+      {"malformed rotate", malformed_rotate, MES_ERR_PARSE},
+      {"short row event", short_row, MES_ERR_DECODE_ROW},
+      {"row without table map", row_without_table_map, MES_ERR_DECODE_ROW},
+      {"truncated row", truncated_row, MES_ERR_DECODE_ROW},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    auto* engine = mes_create();
+    ASSERT_NE(engine, nullptr);
+
+    std::vector<uint8_t> stream = test_case.invalid_event;
+    stream.insert(stream.end(), normal_event.begin(), normal_event.end());
+    size_t consumed = 123;
+    EXPECT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), test_case.expected);
+    EXPECT_EQ(consumed, 0u);
+    EXPECT_EQ(mes_has_events(engine), 0);
+
+    mes_destroy(engine);
+  }
+}
+
 TEST(CApi, ChecksumOverrideSupportsNoChecksumStream) {
   EXPECT_EQ(mes_set_checksum_enabled(nullptr, 0), MES_ERR_NULL_ARG);
   auto* engine = mes_create();
@@ -695,10 +776,10 @@ TEST(CApi, SetMaxQueueSizeNullEngine) {
   EXPECT_EQ(mes_set_max_queue_size(nullptr, 10), MES_ERR_NULL_ARG);
 }
 
-TEST(CApi, SetMaxQueueSizeZeroUnlimited) {
+TEST(CApi, SetMaxQueueSizeZeroRestoresBoundedDefault) {
   auto* engine = mes_create();
 
-  // Setting max_queue_size to 0 means unlimited
+  // Setting max_queue_size to 0 restores the bounded default.
   EXPECT_EQ(mes_set_max_queue_size(engine, 0), MES_OK);
 
   // Build TABLE_MAP + 2 WRITE_ROWS events
@@ -718,7 +799,7 @@ TEST(CApi, SetMaxQueueSizeZeroUnlimited) {
 
   size_t consumed = 0;
   ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
-  // With unlimited queue, all data should be consumed
+  // The default is much larger than this fixture, so all data is consumed.
   EXPECT_EQ(consumed, stream.size());
 
   // Both events should be available
@@ -763,8 +844,8 @@ TEST(CApi, MaxEventSizeClampsToAbsoluteMax) {
 
 TEST(CApi, MaxEventSizeZeroMeansNoLimit) {
   auto* engine = mes_create();
-  // 0 means "no limit": resolves to the 1 GiB hard cap, consistent with
-  // max_queue_size == 0 semantics elsewhere, rather than rejecting all events.
+  // 0 means "no limit": resolves to the 1 GiB hard cap rather than
+  // rejecting all events.
   EXPECT_EQ(mes_set_max_event_size(engine, 0), MES_OK);
   EXPECT_EQ(mes_get_max_event_size(engine), 1024u * 1024u * 1024u);
   mes_destroy(engine);
@@ -775,7 +856,7 @@ TEST(CApi, ClientMaxEventSizeDefaultAndRoundTrip) {
   ASSERT_NE(client, nullptr);
   EXPECT_EQ(mes_client_is_connected(client), 0);
   EXPECT_EQ(mes_client_is_streaming(client), 0);
-  EXPECT_EQ(mes_client_get_max_event_size(client), 64u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_get_max_event_size(client), 32u * 1024u * 1024u);
   EXPECT_EQ(mes_client_set_max_event_size(client, 128u * 1024u * 1024u), MES_OK);
   EXPECT_EQ(mes_client_get_max_event_size(client), 128u * 1024u * 1024u);
   EXPECT_EQ(mes_client_set_max_event_size(client, 0), MES_OK);
@@ -790,15 +871,23 @@ TEST(CApi, ClientMaxEventSizeNull) {
   EXPECT_EQ(mes_client_is_streaming(nullptr), 0);
 }
 
+TEST(CApi, ClientFlavorDefaultsToMysqlBeforeConnection) {
+  EXPECT_EQ(mes_client_flavor(nullptr), MES_SERVER_FLAVOR_MYSQL);
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  EXPECT_EQ(mes_client_flavor(client), MES_SERVER_FLAVOR_MYSQL);
+  mes_client_destroy(client);
+}
+
 TEST(CApi, ClientMaxQueueBytesDefaultAndRoundTrip) {
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
-  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 256u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 48u * 1024u * 1024u);
   EXPECT_EQ(mes_client_queued_bytes(client), 0u);
   EXPECT_EQ(mes_client_set_max_queue_bytes(client, 512u * 1024u * 1024u), MES_OK);
   EXPECT_EQ(mes_client_get_max_queue_bytes(client), 512u * 1024u * 1024u);
   EXPECT_EQ(mes_client_set_max_queue_bytes(client, 0), MES_OK);
-  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 256u * 1024u * 1024u);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), 48u * 1024u * 1024u);
   mes_client_destroy(client);
 }
 
@@ -806,6 +895,47 @@ TEST(CApi, ClientMaxQueueBytesNull) {
   EXPECT_EQ(mes_client_set_max_queue_bytes(nullptr, 1024), MES_ERR_NULL_ARG);
   EXPECT_EQ(mes_client_get_max_queue_bytes(nullptr), 0u);
   EXPECT_EQ(mes_client_queued_bytes(nullptr), 0u);
+  EXPECT_EQ(mes_client_crc_errors(nullptr), 0u);
+}
+
+TEST(CApi, ClientPollBatchValidatesArguments) {
+  mes_poll_result_t results[2]{};
+  size_t count = 0;
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  EXPECT_EQ(mes_client_poll_batch(nullptr, results, 2, &count), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_client_poll_batch(client, nullptr, 2, &count), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_client_poll_batch(client, results, 2, nullptr), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_client_poll_batch(client, results, 0, &count), MES_ERR_INVALID_ARG);
+  mes_client_destroy(client);
+}
+
+TEST(CApi, ClientRejectsInvalidStartPositionConfigurationBeforeConnecting) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+
+  config = {};
+  config.start_position_mode = MES_START_AT_POSITION;
+  config.binlog_file = "binlog.000001";
+  config.binlog_position = 3;
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+
+  config.binlog_file = nullptr;
+  config.binlog_position = 4;
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  mes_client_destroy(client);
+}
+
+TEST(CApi, ErrorStringCoversKnownAndUnknownCodes) {
+  EXPECT_STREQ(mes_error_string(MES_OK), "success");
+  EXPECT_STREQ(mes_error_string(MES_ERR_AUTH), "authentication error");
+  EXPECT_STREQ(mes_error_string(MES_ERR_GTID_PURGED), "requested GTID position has been purged");
+  EXPECT_STREQ(mes_error_string(MES_ERR_GTID_TAGGED_UNSUPPORTED), "legacy tagged GTID error");
+  EXPECT_STREQ(mes_error_string(static_cast<mes_error_t>(999)), "unknown error");
 }
 
 }  // namespace

@@ -27,16 +27,10 @@ TEST(AuthNativePasswordTest, KnownPasswordProduces20Bytes) {
   auto err = AuthNativePassword("root", kZeroSalt, 20, &response);
   EXPECT_EQ(err, MES_OK);
   EXPECT_EQ(response.size(), 20u);
-
-  // Verify at least one byte is non-zero
-  bool all_zero = true;
-  for (uint8_t b : response) {
-    if (b != 0) {
-      all_zero = false;
-      break;
-    }
-  }
-  EXPECT_FALSE(all_zero);
+  const std::vector<uint8_t> expected = {0xbc, 0xcb, 0x5c, 0xac, 0x49, 0xb1, 0x43,
+                                         0x08, 0x78, 0xe1, 0xfe, 0x07, 0xdf, 0xf9,
+                                         0x23, 0xde, 0x69, 0xb4, 0x77, 0xaf};
+  EXPECT_EQ(response, expected);
 }
 
 TEST(AuthNativePasswordTest, Determinism) {
@@ -60,15 +54,12 @@ TEST(AuthCachingSha2PasswordTest, KnownPasswordProduces32Bytes) {
   auto err = AuthCachingSha2Password("root", kZeroSalt, 20, &response);
   EXPECT_EQ(err, MES_OK);
   EXPECT_EQ(response.size(), 32u);
-
-  bool all_zero = true;
-  for (uint8_t b : response) {
-    if (b != 0) {
-      all_zero = false;
-      break;
-    }
-  }
-  EXPECT_FALSE(all_zero);
+  const std::vector<uint8_t> expected = {
+      0xff, 0xba, 0xf7, 0x7a, 0xba, 0xca, 0xb5, 0x85, 0x9b, 0x43, 0x37,
+      0x5f, 0x82, 0x9a, 0x96, 0x6e, 0xe7, 0x20, 0xd2, 0xdb, 0xb5, 0x2d,
+      0x10, 0x6e, 0xa3, 0xde, 0x76, 0x1e, 0x5b, 0x7e, 0x5c, 0x8e,
+  };
+  EXPECT_EQ(response, expected);
 }
 
 TEST(AuthCachingSha2PasswordTest, Determinism) {

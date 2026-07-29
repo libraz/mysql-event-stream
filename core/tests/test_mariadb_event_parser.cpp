@@ -112,8 +112,10 @@ TEST_F(MariaDBEventParserGtidTest, ZeroValues) {
 TEST_F(MariaDBEventParserGtidTest, WithFlags) {
   auto event = BuildGtidEvent(1, 2, 100, 0x01);
   std::string out;
-  ASSERT_EQ(MES_OK, MariaDBEventParser::ExtractGtid(event.data(), event.size(), &out));
+  bool standalone = false;
+  ASSERT_EQ(MES_OK, MariaDBEventParser::ExtractGtid(event.data(), event.size(), &out, &standalone));
   EXPECT_EQ(out, "1-2-100");
+  EXPECT_TRUE(standalone);
 }
 
 TEST_F(MariaDBEventParserGtidTest, NullBuffer) {

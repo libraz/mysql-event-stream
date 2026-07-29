@@ -275,6 +275,30 @@ TEST(TableMapTest, ParseMariaDbCompressedMetadata) {
   EXPECT_EQ(metadata.columns[1].metadata, 273u);
 }
 
+TEST(TableMapTest, ParseMariaDbCompressedColumnCharsetMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(104);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("compressed_charset");
+  builder.WriteColumnCount(2);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarcharCompressed),
+                            static_cast<uint8_t>(ColumnType::kBlobCompressed)});
+  builder.WriteMetadataBlock({0x90, 0x01, 0x02});
+  builder.WriteNullBitmap({0x03});
+  // COLUMN_CHARSET supplies one packed collation id for each compressed
+  // character column, in TABLE_MAP order.
+  builder.WriteRawBytes({0x03, 0x02, 0x2D, 0x3F});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 2u);
+  EXPECT_TRUE(metadata.columns[0].charset_known);
+  EXPECT_EQ(metadata.columns[0].charset_id, 45u);
+  EXPECT_TRUE(metadata.columns[1].charset_known);
+  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
+}
+
 // --- Optional metadata (SIGNEDNESS / COLUMN_NAME) ---
 
 TEST(TableMapTest, ParseSignednessOptionalMetadata) {
@@ -309,6 +333,49 @@ TEST(TableMapTest, ParseSignednessOptionalMetadata) {
   EXPECT_FALSE(metadata.columns[2].is_unsigned);  // TINYINT signed
 }
 
+TEST(TableMapTest, ParseSignednessAccountsForYearAndLegacyDecimal) {
+  TableMapBuilder builder;
+  builder.WriteTableId(71);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  // YEAR and legacy DECIMAL both consume a SIGNEDNESS bit in MySQL's
+  // TABLE_MAP metadata. The BIGINT bit is the third bit here, not the second.
+  builder.WriteColumnCount(4);
+  builder.WriteColumnTypes(
+      {static_cast<uint8_t>(ColumnType::kLong), static_cast<uint8_t>(ColumnType::kYear),
+       static_cast<uint8_t>(ColumnType::kLongLong), static_cast<uint8_t>(ColumnType::kDecimal)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x0F});
+  builder.WriteRawBytes({0x01, 0x01, 0x30});  // BIGINT and DECIMAL unsigned.
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 4u);
+  EXPECT_TRUE(metadata.signedness_from_binlog);
+  EXPECT_FALSE(metadata.columns[0].is_unsigned);
+  EXPECT_FALSE(metadata.columns[1].is_unsigned);
+  EXPECT_TRUE(metadata.columns[2].is_unsigned);
+  EXPECT_TRUE(metadata.columns[3].is_unsigned);
+}
+
+TEST(TableMapTest, RejectsTruncatedSignednessBitmap) {
+  TableMapBuilder builder;
+  builder.WriteTableId(72);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x01});
+  builder.WriteRawBytes({0x01, 0x00});
+
+  TableMetadata metadata;
+  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+}
+
 TEST(TableMapTest, ParseColumnNameOptionalMetadata) {
   TableMapBuilder builder;
   builder.WriteTableId(8);
@@ -334,6 +401,99 @@ TEST(TableMapTest, ParseColumnNameOptionalMetadata) {
   ASSERT_EQ(metadata.columns.size(), 2u);
   EXPECT_EQ(metadata.columns[0].name, "id");
   EXPECT_EQ(metadata.columns[1].name, "amount");
+}
+
+TEST(TableMapTest, ParseDefaultCharsetOptionalMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(81);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(2);
+  builder.WriteColumnTypes(
+      {static_cast<uint8_t>(ColumnType::kVarchar), static_cast<uint8_t>(ColumnType::kBlob)});
+  builder.WriteMetadataBlock({0xFF, 0x00, 0x01});
+  builder.WriteNullBitmap({0x03});
+  // DEFAULT_CHARSET: default collation 45 (utf8mb4), then character-column
+  // index 1 (BLOB) overridden to collation 63 (binary).
+  builder.WriteRawBytes({0x02, 0x03, 0x2D, 0x01, 0x3F});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 2u);
+  EXPECT_TRUE(metadata.columns[0].charset_known);
+  EXPECT_EQ(metadata.columns[0].charset_id, 45u);
+  EXPECT_TRUE(metadata.columns[1].charset_known);
+  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
+}
+
+TEST(TableMapTest, ParseColumnCharsetOptionalMetadata) {
+  TableMapBuilder builder;
+  builder.WriteTableId(82);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(2);
+  builder.WriteColumnTypes(
+      {static_cast<uint8_t>(ColumnType::kVarchar), static_cast<uint8_t>(ColumnType::kBlob)});
+  builder.WriteMetadataBlock({0xFF, 0x00, 0x01});
+  builder.WriteNullBitmap({0x03});
+  // COLUMN_CHARSET: one collation per character column in TABLE_MAP order.
+  builder.WriteRawBytes({0x03, 0x02, 0x3F, 0x2D});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  EXPECT_EQ(metadata.columns[0].charset_id, 63u);
+  EXPECT_EQ(metadata.columns[1].charset_id, 45u);
+}
+
+TEST(TableMapTest, SkipsEveryUnhandledOptionalMetadataField) {
+  TableMapBuilder builder;
+  builder.WriteTableId(83);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
+  builder.WriteMetadataBlock({0xFF, 0x00});
+  builder.WriteNullBitmap({0x01});
+
+  // Optional metadata field types 5-12 are currently not exposed by the
+  // public event model, but each TLV must be skipped exactly so a following
+  // recognized field remains aligned.
+  for (uint8_t type = 5; type <= 12; ++type) {
+    builder.WriteRawBytes({type, 0x01, type});
+  }
+  // COLUMN_NAME after every skipped field confirms the parser did not lose
+  // synchronization in the common default switch branch.
+  builder.WriteRawBytes({0x04, 0x03, 0x02, 'i', 'd'});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 1u);
+  EXPECT_EQ(metadata.columns[0].name, "id");
+}
+
+TEST(TableMapRegistryTest, ReusesUnchangedRawTableMapBody) {
+  TableMapBuilder builder;
+  builder.WriteTableId(84);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(1);
+  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x01});
+
+  TableMapRegistry registry;
+  bool unchanged = true;
+  ASSERT_TRUE(
+      registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), nullptr, &unchanged));
+  EXPECT_FALSE(unchanged);
+  ASSERT_TRUE(
+      registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), nullptr, &unchanged));
+  EXPECT_TRUE(unchanged);
+  ASSERT_NE(registry.Lookup(84), nullptr);
 }
 
 TEST(TableMapTest, OptionalMetadataAbsentIsSafe) {
@@ -505,6 +665,47 @@ TEST(TableMapRegistryTest, MultipleTables) {
   EXPECT_EQ(registry.Lookup(10)->table_name, "table_a");
   ASSERT_NE(registry.Lookup(20), nullptr);
   EXPECT_EQ(registry.Lookup(20)->table_name, "table_b");
+}
+
+TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
+  TableMapRegistry registry;
+  const auto add_table = [&registry](uint64_t id) {
+    TableMapBuilder builder;
+    builder.WriteTableId(id);
+    builder.WriteFlags(0);
+    builder.WriteDatabaseName("db");
+    builder.WriteTableName("t");
+    builder.WriteColumnCount(1);
+    builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+    builder.WriteMetadataBlock({});
+    builder.WriteNullBitmap({0x01});
+    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size());
+  };
+
+  for (uint64_t id = 1; id <= TableMapRegistry::kMaxEntries; ++id) {
+    ASSERT_TRUE(add_table(id));
+  }
+  ASSERT_NE(registry.MutableLookup(1), nullptr);  // Refresh the oldest entry.
+
+  uint64_t evicted = UINT64_MAX;
+  ASSERT_TRUE(add_table(TableMapRegistry::kMaxEntries + 1));
+  // The optional eviction out-param is used by CdcEngine to bound its filter cache.
+  TableMapBuilder replacement;
+  replacement.WriteTableId(TableMapRegistry::kMaxEntries + 2);
+  replacement.WriteFlags(0);
+  replacement.WriteDatabaseName("db");
+  replacement.WriteTableName("t");
+  replacement.WriteColumnCount(1);
+  replacement.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+  replacement.WriteMetadataBlock({});
+  replacement.WriteNullBitmap({0x01});
+  ASSERT_TRUE(
+      registry.ProcessTableMapEvent(replacement.Data().data(), replacement.Size(), &evicted));
+
+  EXPECT_EQ(evicted, 3u);
+  EXPECT_NE(registry.Lookup(1), nullptr);
+  EXPECT_EQ(registry.Lookup(2), nullptr);
+  EXPECT_EQ(registry.Size(), TableMapRegistry::kMaxEntries);
 }
 
 TEST(TableMapRegistryTest, ReplaceExistingTable) {

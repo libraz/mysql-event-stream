@@ -294,7 +294,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
-  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.123000");
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.123");
 }
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac6) {
@@ -394,7 +394,7 @@ TEST(DecodeColumnValueTest, Time2NegativeFracSmall) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.string_val, "-00:00:00.990000");
+  EXPECT_EQ(result.string_val, "-00:00:00.99");
 }
 
 TEST(DecodeColumnValueTest, Time2NegativeFracOneCentisecond) {
@@ -405,7 +405,7 @@ TEST(DecodeColumnValueTest, Time2NegativeFracOneCentisecond) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.string_val, "-00:00:00.010000");
+  EXPECT_EQ(result.string_val, "-00:00:00.01");
 }
 
 TEST(DecodeColumnValueTest, Time2NegativeFracBorrow) {
@@ -416,7 +416,7 @@ TEST(DecodeColumnValueTest, Time2NegativeFracBorrow) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.string_val, "-00:00:01.010000");
+  EXPECT_EQ(result.string_val, "-00:00:01.01");
 }
 
 TEST(DecodeColumnValueTest, Time2NegativeWholeSecondNoFrac) {
@@ -427,7 +427,7 @@ TEST(DecodeColumnValueTest, Time2NegativeWholeSecondNoFrac) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(result.string_val, "-00:00:01.000000");
+  EXPECT_EQ(result.string_val, "-00:00:01.00");
 }
 
 TEST(DecodeColumnValueTest, Time2NegativeAllFractionalPrecisions) {
@@ -437,9 +437,9 @@ TEST(DecodeColumnValueTest, Time2NegativeAllFractionalPrecisions) {
     const char* expected;
   };
   const Case cases[] = {
-      {1, 100000, "-05:15:30.100000"}, {2, 120000, "-05:15:30.120000"},
-      {3, 123000, "-05:15:30.123000"}, {4, 123400, "-05:15:30.123400"},
-      {5, 123450, "-05:15:30.123450"}, {6, 123456, "-05:15:30.123456"},
+      {1, 100000, "-05:15:30.1"},     {2, 120000, "-05:15:30.12"},
+      {3, 123000, "-05:15:30.123"},   {4, 123400, "-05:15:30.1234"},
+      {5, 123450, "-05:15:30.12345"}, {6, 123456, "-05:15:30.123456"},
   };
 
   const int64_t hms = (int64_t{5} << 12) | (15 << 6) | 30;
@@ -482,7 +482,7 @@ TEST(DecodeColumnValueTest, Time2WithFrac3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
-  EXPECT_EQ(result.string_val, "10:30:45.500000");
+  EXPECT_EQ(result.string_val, "10:30:45.500");
 }
 
 TEST(DecodeColumnValueTest, VarcharShort) {
@@ -597,6 +597,18 @@ TEST(DecodeColumnValueTest, BitMultipleBytes) {
   EXPECT_EQ(result.int_val, 0x0102);
 }
 
+TEST(DecodeColumnValueTest, Bit64AboveSignedRangeUsesDecimalString) {
+  // BIT(64): eight full bytes. Its high bit must not be reinterpreted as a
+  // negative int64_t value by the C ABI or a language binding.
+  uint8_t data[] = {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint16_t meta = (8 << 8) | 0;
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kBit, meta, false, data, sizeof(data), &consumed);
+  EXPECT_EQ(consumed, sizeof(data));
+  EXPECT_EQ(result.type, ColumnType::kBit);
+  EXPECT_EQ(result.string_val, "9223372036854775808");
+}
+
 TEST(DecodeColumnValueTest, StringEnum1Byte) {
   // ENUM encoded in STRING: real_type = 0xF7, size = 1
   // meta = (0xF7 << 8) | 1
@@ -634,6 +646,18 @@ TEST(DecodeColumnValueTest, StringSet) {
   EXPECT_EQ(result.int_val, 5);
 }
 
+TEST(DecodeColumnValueTest, StringSet64AboveSignedRangeUsesDecimalString) {
+  // SET encoded in STRING: real_type = 0xF8, size = 8. A 64-member SET can
+  // set bit 63, which is outside the signed int64_t range.
+  uint8_t data[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+  uint16_t meta = (0xF8 << 8) | 8;
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kString, meta, false, data, sizeof(data), &consumed);
+  EXPECT_EQ(consumed, sizeof(data));
+  EXPECT_EQ(result.type, ColumnType::kSet);
+  EXPECT_EQ(result.string_val, "9223372036854775808");
+}
+
 TEST(DecodeColumnValueTest, StringChar) {
   // CHAR(10) with type_byte=0xFE: meta = (0xFE << 8) | 10 = 0xFE0A
   // max_len = (((0xFE0A >> 4) & 0x300) ^ 0x300) + (0xFE0A & 0xFF)
@@ -646,6 +670,21 @@ TEST(DecodeColumnValueTest, StringChar) {
   auto result = DecodeColumnValue(ColumnType::kString, meta, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.string_val, "hello");
+}
+
+TEST(DecodeColumnValueTest, CharsetMetadataSelectsTextOrBytes) {
+  const uint8_t varchar_data[] = {2, 0xFF, 0xFE};
+  size_t consumed = 0;
+  auto binary_varchar = DecodeColumnValue(ColumnType::kVarchar, 100, false, varchar_data,
+                                          sizeof(varchar_data), &consumed, true, true);
+  EXPECT_TRUE(binary_varchar.is_binary);
+  EXPECT_EQ(binary_varchar.string_val, std::string("\xFF\xFE", 2));
+
+  const uint8_t blob_data[] = {2, 'o', 'k'};
+  auto text_blob = DecodeColumnValue(ColumnType::kBlob, 1, false, blob_data, sizeof(blob_data),
+                                     &consumed, true, false);
+  EXPECT_FALSE(text_blob.is_binary);
+  EXPECT_EQ(text_blob.string_val, "ok");
 }
 
 // --- DecodeWriteRows test ---
@@ -689,6 +728,7 @@ TEST(DecodeWriteRowsTest, SingleRowIntVarchar) {
   ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
   ASSERT_EQ(rows.size(), 1u);
   ASSERT_EQ(rows[0].columns.size(), 2u);
+  EXPECT_EQ(rows[0].columns.get_allocator().resource(), RowColumnMemoryResource());
   EXPECT_EQ(rows[0].columns[0].int_val, 42);
   EXPECT_EQ(rows[0].columns[1].string_val, "Alice");
 }
@@ -754,6 +794,36 @@ TEST(DecodeUpdateRowsTest, SinglePair) {
   EXPECT_EQ(pairs[0].after.columns[0].int_val, 200);
 }
 
+TEST(DecodeUpdateRowsTest, RejectsAsymmetricPartialAfterImage) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(2);
+  for (auto& column : metadata.columns) {
+    column.type = ColumnType::kLong;
+    column.metadata = 0;
+  }
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);
+  w.WriteU8(2);     // column_count
+  w.WriteU8(0x03);  // before image has both columns
+  w.WriteU8(0x01);  // after image carries only the first column
+  w.WriteU8(0x00);  // before null bitmap
+  w.WriteU32Le(10);
+  w.WriteU32Le(20);
+  w.WriteU8(0x00);  // after null bitmap for its one present column
+  w.WriteU32Le(30);
+
+  std::vector<UpdatePair> pairs;
+  // The C ABI intentionally has no "absent" value. Reject a non-symmetric
+  // MINIMAL after image instead of exposing its missing second column as SQL
+  // NULL and letting a downstream update erase it.
+  EXPECT_FALSE(DecodeUpdateRows(w.Data(), w.Size(), metadata, true, &pairs));
+  EXPECT_TRUE(pairs.empty());
+}
+
 TEST(DecodeDeleteRowsTest, SingleRow) {
   TableMetadata metadata;
   metadata.table_id = 10;
@@ -815,16 +885,11 @@ TEST(DecodeWriteRowsTest, PartialColumnPresent) {
   w.WriteString("hi");
 
   std::vector<RowData> rows;
-  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
-  ASSERT_EQ(rows.size(), 1u);
-  // Should have 3 columns: 2 present + 1 absent (null)
-  ASSERT_EQ(rows[0].columns.size(), 3u);
-  EXPECT_FALSE(rows[0].columns[0].is_null);
-  EXPECT_EQ(rows[0].columns[0].int_val, 42);
-  EXPECT_FALSE(rows[0].columns[1].is_null);
-  EXPECT_EQ(rows[0].columns[1].string_val, "hi");
-  // Column 2 is absent from the bitmap, should be null
-  EXPECT_TRUE(rows[0].columns[2].is_null);
+  // A partial row image cannot be represented safely at the C ABI: an
+  // absent column used to be exposed as SQL NULL. Reject it rather than
+  // allowing a downstream upsert to silently clear column 2.
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+  EXPECT_TRUE(rows.empty());
 }
 
 TEST(DecodeWriteRowsTest, NullColumn) {
@@ -945,7 +1010,7 @@ TEST(DecodeColumnValueTest, Timestamp) {
   size_t consumed = 0;
   auto val = DecodeColumnValue(ColumnType::kTimestamp, 0, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 4u);
-  EXPECT_EQ(val.int_val, static_cast<int64_t>(kTimestamp20240315_103045));
+  EXPECT_EQ(val.string_val, std::to_string(kTimestamp20240315_103045));
 }
 
 // --- Time test ---
@@ -1309,7 +1374,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.500000");
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.5");
 }
 
 TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
@@ -1321,7 +1386,7 @@ TEST(DecodeColumnValueTest, Datetime2WithFrac2) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.120000");
+  EXPECT_EQ(result.string_val, "2024-03-15 10:30:45.12");
 }
 
 // --- Timestamp2 with fsp=1 and fsp=4 ---
@@ -1333,7 +1398,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTimestamp2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 5u);
-  EXPECT_EQ(result.string_val, "1710502245.500000");
+  EXPECT_EQ(result.string_val, "1710502245.5");
 }
 
 TEST(DecodeColumnValueTest, Timestamp2WithFrac4) {
@@ -1343,7 +1408,7 @@ TEST(DecodeColumnValueTest, Timestamp2WithFrac4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kTimestamp2, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.string_val, "1710502245.123400");
+  EXPECT_EQ(result.string_val, "1710502245.1234");
 }
 
 // --- DecodeWriteRows V1 test ---
@@ -1842,7 +1907,7 @@ TEST(FracToMicrosecondsTest, Meta1) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 1, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.500000");
+  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.5");
 }
 
 TEST(FracToMicrosecondsTest, Meta2) {
@@ -1852,7 +1917,7 @@ TEST(FracToMicrosecondsTest, Meta2) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 2, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
-  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.990000");
+  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.99");
 }
 
 TEST(FracToMicrosecondsTest, Meta3) {
@@ -1863,7 +1928,7 @@ TEST(FracToMicrosecondsTest, Meta3) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 3, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
-  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.123000");
+  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.123");
 }
 
 TEST(FracToMicrosecondsTest, Meta4) {
@@ -1874,7 +1939,7 @@ TEST(FracToMicrosecondsTest, Meta4) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 7u);
-  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.567800");
+  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.5678");
 }
 
 TEST(FracToMicrosecondsTest, Meta5) {
@@ -1885,7 +1950,7 @@ TEST(FracToMicrosecondsTest, Meta5) {
   size_t consumed = 0;
   auto result = DecodeColumnValue(ColumnType::kDatetime2, 5, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 8u);
-  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.123450");
+  EXPECT_EQ(result.string_val, "2024-06-01 00:00:00.12345");
 }
 
 TEST(FracToMicrosecondsTest, Meta6) {

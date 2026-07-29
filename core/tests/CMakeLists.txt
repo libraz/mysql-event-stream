@@ -12,7 +12,10 @@ function(mes_add_gtest target source)
   add_executable(${target} ${source})
   target_link_libraries(${target} PRIVATE mes-core GTest::gtest_main ${ARGN})
   target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
-  gtest_discover_tests(${target} DISCOVERY_TIMEOUT 30)
+  # A Feed regression must fail promptly if a parsed event sets an engine
+  # error.  Without this per-test timeout the original no-progress loop would
+  # leave the CTest job running indefinitely.
+  gtest_discover_tests(${target} DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 10)
 endfunction()
 
 # test_types
@@ -50,6 +53,9 @@ mes_add_gtest(test_mysql_packet test_mysql_packet.cpp)
 
 # test_mysql_auth
 mes_add_gtest(test_mysql_auth test_mysql_auth.cpp)
+
+# test_mysql_connection
+mes_add_gtest(test_mysql_connection test_mysql_connection.cpp)
 
 # test_mysql_query
 mes_add_gtest(test_mysql_query test_mysql_query.cpp)

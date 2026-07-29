@@ -190,11 +190,15 @@ TEST(EventQueueTest, ErrorSentinel) {
 
   mes::QueuedEvent ev;
   ev.error = MES_ERR_STREAM;
+  ev.server_error_code = 1236;
+  ev.error_message = "MySQL server error 1236: requested GTID has been purged";
   ASSERT_TRUE(q.Push(std::move(ev)));
 
   mes::QueuedEvent out;
   ASSERT_TRUE(q.Pop(&out));
   EXPECT_EQ(out.error, MES_ERR_STREAM);
+  EXPECT_EQ(out.server_error_code, 1236u);
+  EXPECT_EQ(out.error_message, "MySQL server error 1236: requested GTID has been purged");
   EXPECT_TRUE(out.data.empty());
 }
 
@@ -362,6 +366,17 @@ TEST(EventQueueTest, OversizedSingleEventIsRejectedWithoutBlocking) {
   EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kEventTooLarge);
   EXPECT_EQ(q.Size(), 0u);
   EXPECT_EQ(q.QueuedBytes(), 0u);
+}
+
+TEST(EventQueueTest, ChargesPayloadSizeRatherThanVectorCapacity) {
+  mes::EventQueue q(100, 4);
+  mes::QueuedEvent event;
+  event.data.reserve(1024);
+  event.data = {1, 2, 3, 4};
+  ASSERT_GT(event.data.capacity(), event.data.size());
+
+  EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
+  EXPECT_EQ(q.QueuedBytes(), 4u);
 }
 
 TEST(EventQueueTest, ClearResetsByteChargeAndUnblocksProducer) {
