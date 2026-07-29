@@ -84,6 +84,8 @@ __pycache__/
 *.egg-info/
 .venv/
 .python-version
+# The binding's toolchain pin is part of the rye-managed environment.
+!bindings/python/.python-version
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/

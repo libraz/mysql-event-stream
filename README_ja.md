@@ -309,18 +309,13 @@ yarn test
 
 ### Python バインディング
 
-Python 3.11+ が必要です。
+Python 3.11+ が必要です。バインディングは [Rye](https://rye.astral.sh/) で管理しており、
+開発環境の依存関係は `requirements.lock` / `requirements-dev.lock` が正になります。
 
 ```bash
 cd bindings/python
-
-# Rye の場合
 rye sync
 rye run pytest
-
-# pip の場合
-pip install -e ".[dev]"
-pytest
 ```
 
 ## プロジェクト構成

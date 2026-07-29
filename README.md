@@ -360,18 +360,14 @@ yarn test
 
 ### Python Binding
 
-Requires Python 3.11+.
+Requires Python 3.11+. The binding is managed with [Rye](https://rye.astral.sh/);
+`requirements.lock` / `requirements-dev.lock` are the source of truth for the
+development environment.
 
 ```bash
 cd bindings/python
-
-# With Rye
 rye sync
 rye run pytest
-
-# With pip
-pip install -e ".[dev]"
-pytest
 ```
 
 ## Project Structure

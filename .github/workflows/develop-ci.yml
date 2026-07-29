@@ -146,12 +146,16 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel
+      - name: Install rye
+        run: |
+          curl -sSf https://rye.astral.sh/get | RYE_INSTALL_OPTION="--yes" bash
+          echo "$HOME/.rye/shims" >> "$GITHUB_PATH"
       - name: Install Python package
         working-directory: bindings/python
-        run: pip install -e ".[dev]"
+        run: rye sync --no-lock
       - name: Run tests
         working-directory: bindings/python
-        run: pytest tests/ -v
+        run: rye run pytest tests/ -v
 
   sanitizers:
     name: Sanitizers

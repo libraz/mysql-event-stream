@@ -29,7 +29,7 @@ else
     LIB_PATH="$BUILD_DIR/core/libmes.so"
 fi
 
-# Prefer the project venv's pytest, fall back to whatever is on PATH.
+# Prefer the rye-managed venv's pytest, fall back to whatever is on PATH.
 if [[ -x "$PYTHON_DIR/.venv/bin/pytest" ]]; then
     PYTEST="$PYTHON_DIR/.venv/bin/pytest"
 else
@@ -122,7 +122,7 @@ if [[ "$RUN_PYTHON" == true ]]; then
         RUN_PYTHON=false
     elif [[ ! -x "$PYTEST" ]] && ! command -v "$PYTEST" >/dev/null 2>&1; then
         echo "WARNING: pytest not found ($PYTEST). Skipping Python E2E tests."
-        echo "Set up with: cd bindings/python && pip install -e '.[dev]'"
+        echo "Set up with: cd bindings/python && rye sync"
         RUN_PYTHON=false
     fi
 fi

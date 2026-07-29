@@ -65,7 +65,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel
 cd bindings/node && yarn install && yarn build
 
 # Python package + dev deps (creates the .venv the runner prefers)
-cd bindings/python && pip install -e ".[dev]"
+cd bindings/python && rye sync
 ```
 
 The Python suite loads `build/core/libmes.{dylib,so}` via `MES_LIB_PATH` and
