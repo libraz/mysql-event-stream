@@ -4,6 +4,7 @@
 #include "table_map.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "binary_util.h"
 

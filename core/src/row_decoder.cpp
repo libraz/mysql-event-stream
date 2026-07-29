@@ -5,6 +5,7 @@
 
 #include <zlib.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <limits>

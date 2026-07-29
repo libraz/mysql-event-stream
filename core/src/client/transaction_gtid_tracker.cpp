@@ -3,6 +3,7 @@
 
 #include "client/transaction_gtid_tracker.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <limits>
