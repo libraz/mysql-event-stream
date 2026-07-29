@@ -55,6 +55,7 @@ while (event := engine.next_event()) is not None:
 import asyncio
 from mysql_event_stream import CdcStream
 
+
 async def main():
     async for event in CdcStream(
         host="127.0.0.1",
@@ -65,6 +66,7 @@ async def main():
         print(f"{event.type.name} {event.database}.{event.table}")
         print(f"  before: {event.before}")
         print(f"  after:  {event.after}")
+
 
 asyncio.run(main())
 ```
