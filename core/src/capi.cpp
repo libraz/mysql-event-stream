@@ -148,7 +148,7 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
 
 extern "C" {
 
-MES_API const char* mes_version(void) { return "1.5.0"; }
+MES_API const char* mes_version(void) { return "1.6.0"; }
 
 MES_API uint32_t mes_abi_version(void) { return MES_ABI_VERSION; }
 

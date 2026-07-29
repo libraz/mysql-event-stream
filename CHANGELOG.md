@@ -10,6 +10,138 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-29
+
+A correctness and throughput release. The C ABI grows to version 2: no symbols
+are removed, but `mes_client_config_t` and `mes_event_t` gain trailing fields,
+so consumers must recompile against the new header. Several defaults and
+failure behaviors changed — see Changed before upgrading.
+
+### Added
+
+- **`mes_version()` / `mes_abi_version()` / `MES_ABI_VERSION`** (C ABI) — both
+  bindings verify the ABI version when they load the shared library and refuse
+  a mismatched build instead of misreading structs
+- **`mes_error_string()`** (C ABI) — stable text for every error code, replacing
+  the message tables previously maintained inside each binding
+- **`mes_client_poll_batch()`** (C ABI) — block for one result, then drain what
+  is already queued in a single call. Exposed as Node `pollBatch()` and Python
+  `poll_batch()`, and used by both stream implementations
+- **Explicit start positions** — `mes_start_position_mode_t` plus `binlog_file` /
+  `binlog_position` in `mes_client_config_t` separate "snapshot the current GTID
+  set", "resume from this GTID set" (including an empty one), and "resume from
+  this file and offset". Exposed as Node `startBinlogFile` / `startBinlogPosition`
+  and Python `start_binlog_file` / `start_binlog_position`
+- **`MES_ERR_GTID_PURGED` (405)** — the client compares the requested GTID set
+  against `@@GLOBAL.gtid_purged` before dumping and maps server error 1236, so a
+  purged checkpoint reports a diagnosable error instead of a dropped connection
+- **`mes_event_t::source_sql`** — original statement text from MariaDB
+  `ANNOTATE_ROWS` events. Exposed as Node `sourceSql` and Python `source_sql`
+- **`mes_client_flavor()` / `mes_client_crc_errors()`** (C ABI) — detected server
+  flavor and the count of CRC32-invalid events. Exposed as Node `flavor` /
+  `crcErrors` and Python `flavor` / `crc_errors`
+- **Tagged GTID support** — a shared `GtidSet` parses, merges, and encodes
+  MySQL 8.4 tagged GTIDs (`uuid:tag:1-5`), including `GTID_TAGGED_LOG_EVENT` in
+  the transaction tracker; tagged sets were previously rejected
+- **Charset-aware column typing** — TABLE_MAP charset metadata decides text
+  versus binary, so a non-binary BLOB-family column decodes as a string and a
+  binary `VARCHAR`/`CHAR` decodes as bytes
+- **Stream-level filtering in both bindings** — `includeDatabases` /
+  `includeTables` / `excludeTables` (Node) and their Python equivalents are
+  applied at start and re-applied after a reconnect; filter entries accept a
+  trailing `*` as a prefix wildcard
+- **`MesErrorCode` and `ServerFlavor`** enums in both bindings; every raised
+  error carries the numeric code
+- Python `on_metadata_error` callback, replacing silently suppressed metadata
+  failures
+- `make benchmark` feed/decode harness and a protocol-parser fuzz target with a
+  seeded corpus
+
+### Changed
+
+- **ABI version 2 — recompile required.** `mes_client_config_t` gains
+  `start_position_mode`, `binlog_file`, and `binlog_position`; `mes_event_t`
+  gains `source_sql`. Existing field offsets are unchanged and no symbol was
+  removed, but a caller compiled against the 1.5 header must be rebuilt
+- **Unknown and unsupported binlog events now fail.** `PARTIAL_UPDATE_ROWS`,
+  the MariaDB compressed event types, and any unrecognized type return
+  `MES_ERR_PARSE` instead of being skipped, so a checkpoint can no longer
+  advance past a change the consumer never saw
+- **Partial row images are rejected.** A row event whose columns-present bitmap
+  has cleared bits fails rather than reporting absent columns as NULL; sources
+  must run `binlog_row_image=FULL`
+- **Queue defaults lowered** — the client byte budget defaults to 48 MiB (was
+  256 MiB) and the maximum event size to 32 MiB (was 64 MiB); charged bytes now
+  use payload size instead of allocator capacity
+- **`mes_set_max_queue_size(0)` restores the bounded default** (10000 events);
+  the engine no longer defaults to an unbounded queue
+- **`mes_reset()` keeps already-decoded events** so events that preceded a parse
+  error can still be drained; it clears parser, table-map, position, and error
+  state as before
+- `names_resolved` now reports whether every column name is non-empty, counting
+  names carried by TABLE_MAP, instead of whether the metadata side-connection
+  returned a matching column count
+- `caching_sha2_password` full authentication sends the cleartext password only
+  when TLS verified the server certificate
+- Both bindings default `sslMode` / `ssl_mode` to preferred instead of disabled,
+  and reject `server_id` 0 at construction
+- Python `start_gtid=None` snapshots the current position while `""` requests an
+  explicit empty set; the engine raises `ParseError` for unrepresentable events
+  instead of warning and returning nothing
+- Both stream implementations treat parse, checksum, decode, queue-full, and
+  GTID errors as permanent and stop reconnecting; the retry budget resets only
+  after an event is decoded
+- MariaDB: a failed `@mariadb_slave_capability` negotiation is now fatal,
+  `log_bin_compress=ON` is rejected during validation, and "start at current"
+  prefers `@@GLOBAL.gtid_binlog_pos`
+- The Python package is classified as Beta
+
+### Fixed
+
+- Reader-thread and socket lifecycle races: the descriptor is atomic and its
+  shutdown/close is serialized, a finished reader is joined before replacement,
+  and `stop()` interrupts an in-flight handshake
+- The TLS handshake no longer blocks past the read timeout, verify modes without
+  an explicit CA load the system trust store, and a final TLS record arriving
+  together with a hangup is no longer discarded
+- Result-set reading: a first field of 16 MiB or more is no longer mistaken for
+  the end-of-rows marker, server errors are classified as validation errors, and
+  a connection left mid-result-set is poisoned instead of reused
+- `FORMAT_DESCRIPTION` checksum detection verifies the CRC32 trailer instead of
+  trusting the algorithm byte
+- SIGNEDNESS metadata accounting (TYPED_ARRAY, DECIMAL, YEAR) and rejection of a
+  truncated bitmap; fractional seconds are emitted at the column's declared
+  precision; `SET` and `BIT` values above `INT64_MAX` are returned as exact
+  decimal strings
+- The TABLE_MAP registry evicts least-recently-used entries instead of clearing
+  itself, and a byte-identical repeated TABLE_MAP skips re-parsing
+- A parse error raised after an event was accepted no longer makes `mes_feed()`
+  reprocess the same event indefinitely, and an artificial ROTATE no longer
+  clears the resume filename
+- Metadata resolution caches failures and throttles reconnects, so a missing
+  SELECT privilege no longer causes a query storm
+- Transaction boundaries: `ROLLBACK TO SAVEPOINT` and DDL keywords inside an
+  open transaction no longer promote a checkpoint, and MariaDB standalone GTID
+  groups are committed immediately
+- Node: a throwing log handler can no longer surface as an uncaught exception,
+  `connect()` / `start()` / `disconnect()` are rejected while a poll is in
+  flight, and the column-name cache verifies the underlying bytes before reuse
+- Python: unconsumed `feed()` bytes are retained instead of dropped, and close,
+  stop, and property reads are serialized against the poll lock
+- The E2E matrix runner reads ctest's exit status through the pipe and fails
+  when every test was skipped
+
+### Documentation
+
+- Error-code table with retry guidance, and pointers to `MesErrorCode` /
+  `mes_error_string()` instead of message-text matching
+- `feed()` examples corrected to a consume loop that retains unconsumed bytes
+- TLS mode guidance, supported authentication plugins, and the public-key
+  retrieval opt-in
+- Filter semantics (case sensitivity, prefix wildcards, matched-nothing warning)
+  and the server binlog settings required for column-name resolution
+- Client lifecycle expectations for bindings, and corrected npm install wording
+
 ## [1.5.0] - 2026-07-15
 
 A client-side flow-control and packaging release. New C ABI surface is additive
@@ -290,7 +422,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/libraz/mysql-event-stream/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mysql-event-stream/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/libraz/mysql-event-stream/compare/v1.3.1...v1.3.2

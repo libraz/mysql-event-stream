@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of mysql-event-s
 
 ## Available Versions
 
-- [v1.5.0](v1.5.0.md) - Latest release (2026-07-15) - Client flow control: byte-budgeted backpressure, client-side event-size clamp, streaming/checksum introspection, delivery-acknowledged GTID; prebuilt Node packages and Python wheels
+- [v1.6.0](v1.6.0.md) - Latest release (2026-07-29) - Batched polling, explicit start positions, purged-GTID detection, tagged GTIDs, charset-aware column typing; unrepresentable events and partial row images now fail instead of being skipped (ABI version 2)
+- [v1.5.0](v1.5.0.md) - 2026-07-15 - Client flow control: byte-budgeted backpressure, client-side event-size clamp, streaming/checksum introspection, delivery-acknowledged GTID; prebuilt Node packages and Python wheels
 - [v1.4.0](v1.4.0.md) - 2026-06-26 - Audit remediation: TABLE_MAP metadata parsing (UNSIGNED), checksum unification (binlog_checksum=NONE), Python shutdown crash-safety, cross-surface API completeness (log callback, typed errors)
 - [v1.3.2](v1.3.2.md) - 2026-05-17 - OpenSSL EVP auth migration, row-decoder column-count validation, CdcEngine error propagation, thread-safety docs
 - v1.3.1 - 2026-04-15 - Fix npm publish formatting check blocked on v1.3.0 (no runtime changes)
