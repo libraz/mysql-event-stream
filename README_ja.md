@@ -107,7 +107,8 @@ mes_destroy(engine);
   "before": null,
   "after": { "id": 8, "name": "Widget", "value": 42 },
   "timestamp": 1773584163,
-  "position": { "file": "mysql-bin.000003", "offset": 3265 }
+  "position": { "file": "mysql-bin.000003", "offset": 3265 },
+  "namesResolved": true
 }
 
 -- UPDATE items SET value = 100 WHERE name = 'Widget'
@@ -118,7 +119,8 @@ mes_destroy(engine);
   "before": { "id": 8, "name": "Widget", "value": 42 },
   "after": { "id": 8, "name": "Widget", "value": 100 },
   "timestamp": 1773584164,
-  "position": { "file": "mysql-bin.000003", "offset": 3611 }
+  "position": { "file": "mysql-bin.000003", "offset": 3611 },
+  "namesResolved": true
 }
 
 -- DELETE FROM items WHERE name = 'Widget'
@@ -139,11 +141,11 @@ mes_destroy(engine);
 - **ストリーミング処理** - バイト列の到着に合わせて逐次的にイベントを処理
 - **多言語対応** - C/C++、Node.js (N-API)、Python (ctypes) バインディング
 - **MySQL 8.4+** - LTS および Innovation リリースに対応
-- **MariaDB 10.11+** - MariaDB 向け binlog プロトコル、GTID (`domain-server-seq` 形式)、ANNOTATE_ROWS、slave capability ネゴシエーションに対応
+- **MariaDB 10.11+** - MariaDB 向け binlog プロトコル、GTID (`domain-server-seq` 形式)、ANNOTATE_ROWS SQL（`sourceSql` / `source_sql`）、slave capability ネゴシエーションに対応
 - **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient (MySQL / MariaDB 両形式)
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
 - **VECTOR 型** - MySQL 9.0+ の VECTOR カラムをネイティブサポート（生バイト列としてデコード）
-- **カラム名解決** - メタデータクエリによる自動カラム名解決
+- **カラム名解決** - `binlog_row_metadata=FULL` または `SELECT` 権限を持つメタデータ接続による自動カラム名解決
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 - **SSL/TLS** - MySQL 接続の SSL/TLS 暗号化に対応
 - **自動再接続** - 接続断時にバックオフ付きで自動再接続
@@ -162,7 +164,7 @@ const stream = new CdcStream({
   host: "mysql.example.com",
   user: "replicator",
   password: "secret",
-  sslMode: 2,  // 0=無効, 1=優先, 2=必須, 3=CA検証, 4=サーバー検証
+  sslMode: 4,  // 0=無効, 1=優先, 2=必須, 3=CA検証, 4=サーバー検証
   sslCa: "/path/to/ca.pem",
 });
 ```
@@ -173,26 +175,48 @@ stream = CdcStream(
     host="mysql.example.com",
     user="replicator",
     password="secret",
-    ssl_mode=2,
+    ssl_mode=4,
     ssl_ca="/path/to/ca.pem",
 )
 ```
+
+`preferred` と `required` は暗号化しますが、サーバー証明書を検証しません。本番の認証情報には、CA バンドルまたは OS の信頼ストアとともに `verify_ca` か `verify_identity` を使ってください。
+
+### 認証プラグイン
+
+native client が対応する MySQL 認証プラグインは `caching_sha2_password` と
+`mysql_native_password` です。これ以外をサーバーが要求した場合は、暗黙に
+フォールバックせず認証エラーになります。TLS なしで
+`caching_sha2_password` を使う際の RSA 公開鍵取得は
+`allowPublicKeyRetrieval` / `allow_public_key_retrieval` による明示的な opt-in
+です。可能な限り検証付き TLS を使ってください。
 
 ### テーブルフィルタリング
 
 ```typescript
 // Node.js - 特定のテーブルのイベントのみ処理
-const engine = new CdcEngine();
-engine.setIncludeDatabases(["mydb"]);
-engine.setExcludeTables(["mydb.audit_log"]);
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  includeDatabases: ["mydb"],
+  excludeTables: ["mydb.audit_log"],
+});
 ```
 
 ```python
 # Python
-engine = CdcEngine()
-engine.set_include_databases(["mydb"])
-engine.set_exclude_tables(["mydb.audit_log"])
+stream = CdcStream(
+    host="mysql.example.com",
+    include_databases=["mydb"],
+    exclude_tables=["mydb.audit_log"],
+)
 ```
+
+フィルタは大文字小文字を区別します。`database.table` またはテーブル名だけの完全一致に加え、
+末尾の `*` を prefix ワイルドカードとして使えます（例: `mydb.audit_*`）。それ以外の位置の
+`*` はリテラルです。include フィルタを設定し、TABLE_MAP を受信したにもかかわらず一件も
+一致しなければ、reset または stream close 時に log callback へ
+`include_filter_matched_nothing` WARN が一度だけ配送されます。MySQL の識別子の大文字小文字規則は
+サーバープラットフォームで異なるため、送信元サーバーが出力する名前を使ってください。
 
 ### 流量制御
 
@@ -327,12 +351,34 @@ mysql-event-stream/
 - バージョン: 8.4+ (LTS および Innovation リリース)
 - GTID モード有効 (BinlogClient 使用時)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- スキーマ由来のカラム名には `binlog_row_metadata=FULL` を設定するか、同じ認証情報に `SELECT` も付与します。メタデータクエリは別接続で実行されます。
+- メタデータ接続は binlog の過去時点ではなくサーバーの**現在の**スキーマを読みます。古い checkpoint から再生する場合、カラム名を信頼できるのは `binlog_row_metadata=FULL` を設定し、元の TABLE_MAP metadata を保持しているときだけです。
 
 **MariaDB:**
 - バージョン: 10.11+ (10.11 / 11.4 で動作検証済み)
 - GTID レプリケーション有効 (`gtid_strict_mode`、行フォーマットの `log_bin`)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- スキーマ由来のカラム名には `binlog_row_metadata=FULL` を設定するか、同じ認証情報に `SELECT` も付与します。メタデータクエリは別接続で実行されます。
+- メタデータ接続は binlog の過去時点ではなくサーバーの**現在の**スキーマを読みます。古い checkpoint から再生する場合、カラム名を信頼できるのは `binlog_row_metadata=FULL` を設定し、元の TABLE_MAP metadata を保持しているときだけです。
 - クライアントはサーバーフレーバーを自動検出し、MariaDB binlog プロトコル（GTID イベント type 162、ANNOTATE_ROWS、`@mariadb_slave_capability`）に切り替えます
+
+### MySQL binlog 設定
+
+接続 validator は次の MySQL 設定を必須とします。`my.cnf`（または include
+される設定ファイル）へコピーし、変更後に MySQL を再起動してください。
+
+```ini
+[mysqld]
+log_bin=ON
+gtid_mode=ON
+binlog_format=ROW
+binlog_row_image=FULL
+binlog_transaction_compression=OFF
+binlog_row_value_options=""
+```
+
+`binlog_row_value_options` に `PARTIAL_JSON` を含めることはできません。MariaDB
+では同等の行形式を検査し、`log_bin_compress=ON` を拒否します。
 
 ## ライセンス
 

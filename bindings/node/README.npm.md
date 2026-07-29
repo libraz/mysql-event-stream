@@ -12,20 +12,18 @@ Lightweight CDC (Change Data Capture) engine for Node.js supporting MySQL 8.4+ a
 npm install @libraz/mysql-event-stream
 ```
 
-The package installs a matching prebuilt N-API addon through an optional
-platform dependency. Build tools and native development headers are not needed.
+The npm package does not use optional platform dependencies or an install-time
+prebuild downloader. Its archive contains the addon produced at publish time;
+use it only when that addon matches your Node runtime and platform. For a
+portable deployment, build from this repository with Node.js 22+, CMake,
+OpenSSL, ZLIB, and a C++17 compiler:
 
-Published prebuilds support:
-
-- Linux x64 and arm64 with glibc 2.28 or newer
-- macOS 15.0 or newer on x64 and arm64 (development use)
-
-Optional dependencies must remain enabled. Alpine/musl, Windows, and other
-targets are not currently published.
-
-OpenSSL 3.5 and ZLIB are statically linked into every prebuild. Linux prebuilds
-also statically link the GNU C++ and GCC runtimes and are built in a glibc 2.28
-container; macOS prebuilds depend only on Apple system libraries at runtime.
+```bash
+git clone https://github.com/libraz/mysql-event-stream.git
+cd mysql-event-stream/bindings/node
+yarn install
+yarn build
+```
 
 ## Usage
 
@@ -56,7 +54,12 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 // Only needed when a checksum=NONE byte stream starts after its FDE:
 // engine.setChecksumEnabled(false);
-engine.feed(binlogChunk);
+let offset = 0;
+while (offset < binlogChunk.length) {
+  const consumed = engine.feed(binlogChunk.subarray(offset));
+  if (consumed === 0) break; // retain the remainder and drain backpressure
+  offset += consumed;
+}
 
 while (engine.hasEvents()) {
   const event = engine.nextEvent();
@@ -100,6 +103,12 @@ engine.setIncludeDatabases(["mydb"]);
 engine.setExcludeTables(["mydb.audit_log"]);
 ```
 
+Table filters are case-sensitive. Use an exact `database.table` or bare table
+name, or a trailing-`*` prefix such as `mydb.audit_*`. A `*` elsewhere is
+literal. If include filters see TABLE_MAP events but match none, the configured
+log callback receives one `include_filter_matched_nothing` WARN when the engine
+is reset or destroyed.
+
 ## Thread Safety
 
 `CdcEngine` instances are single-owner objects. Do not call `feed()`,
@@ -110,6 +119,12 @@ externally.
 `BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
 connection lifecycle calls are single-owner operations; `stop()` is the intended
 any-thread cancellation path and may be used to unblock a pending poll/iterator.
+
+Each active stream has one blocking native poll worker. `pollBatch()` drains up
+to 64 already queued events after the first result, but an idle stream still uses
+a libuv thread-pool slot. Node defaults to four slots; for more than four idle
+streams, set `UV_THREADPOOL_SIZE` before Node starts, for example
+`UV_THREADPOOL_SIZE=16 node app.mjs`.
 
 ## Event Format
 
@@ -133,7 +148,7 @@ any-thread cancellation path and may be used to unblock a pending poll/iterator.
 - **MySQL 8.4+ and MariaDB 10.11+** -- Auto-detects server flavor and negotiates the appropriate binlog protocol
 - **GTID support** -- BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** -- Full before/after column values for INSERT, UPDATE, DELETE
-- **Column names** -- Automatic column name resolution via metadata queries
+- **Column names** -- Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **SSL/TLS** -- Secure MySQL connections with certificate verification
 - **Backpressure** -- Internal reader thread with bounded event queue (default 10,000)
 - **Auto-reconnection** -- Linear backoff on connection loss (default 10 attempts)
@@ -146,11 +161,32 @@ any-thread cancellation path and may be used to unblock a pending poll/iterator.
 - Binary log format: ROW (`binlog_format=ROW`)
 - GTID mode enabled (for BinlogClient)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
 
 **MariaDB:**
 - Version: 10.11+ (tested against 10.11 and 11.4)
 - GTID replication enabled (`log_bin` in ROW format)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
+
+### MySQL binlog configuration
+
+The connection validator requires the following MySQL settings. Copy this into
+your `my.cnf` (or its included configuration file) and restart MySQL after
+changing it:
+
+```ini
+[mysqld]
+log_bin=ON
+gtid_mode=ON
+binlog_format=ROW
+binlog_row_image=FULL
+binlog_transaction_compression=OFF
+binlog_row_value_options=""
+```
+
+`binlog_row_value_options` must not contain `PARTIAL_JSON`. MariaDB is checked
+for the equivalent required row format and rejects `log_bin_compress=ON`.
 
 ## Also available
 

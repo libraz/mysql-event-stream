@@ -35,8 +35,13 @@ engine = CdcEngine()
 # Only needed when a checksum=NONE byte stream starts after its FDE:
 # engine.set_checksum_enabled(False)
 
-# Feed raw binlog bytes
-engine.feed(binlog_chunk)
+# Feed raw binlog bytes; retain the unconsumed suffix on backpressure.
+offset = 0
+while offset < len(binlog_chunk):
+    consumed = engine.feed(binlog_chunk[offset:])
+    if consumed == 0:
+        break
+    offset += consumed
 
 while (event := engine.next_event()) is not None:
     print(event.type, event.database, event.table)
@@ -64,6 +69,43 @@ async def main():
 asyncio.run(main())
 ```
 
+### Low-level client
+
+`BinlogClient` exposes explicit `connect()`, `start()`, `poll()`, `stop()`,
+`disconnect()`, and `close()` calls for applications that own their own event
+loop. `ClientConfig` and `SslMode` describe its connection settings; `PollResult`
+contains packet data or a heartbeat. `CdcStream` is the higher-level async
+iterator and is the usual choice.
+
+```python
+from mysql_event_stream import BinlogClient, SslMode
+
+with BinlogClient(user="replicator", password="secret", ssl_mode=SslMode.REQUIRED) as client:
+    client.connect()
+    client.start()
+    result = client.poll()
+```
+
+### Errors and logging
+
+`ParseError`, `DecodeError`, and `ChecksumError` identify malformed binlog
+input. Native failures also carry a stable `MesErrorCode`. Install a
+process-wide structured log handler with `set_log_callback`; it can run on the
+native reader thread, so keep it non-blocking and do not call client lifecycle
+methods from the handler.
+
+```python
+from mysql_event_stream import LogLevel, set_log_callback
+
+set_log_callback(lambda level, message: print(level.name, message), LogLevel.WARN)
+```
+
+### Loading a specific native library
+
+Set `MES_LIB_PATH=/absolute/path/to/libmes.so` (or `.dylib`) before import, or
+pass `lib_path=` to `CdcEngine`, `BinlogClient`, or `set_log_callback()` to
+select the libmes instance to use.
+
 ## Event Format
 
 Each `ChangeEvent` contains the event type, database/table name, binlog position, and row data as a plain dict keyed by column name:
@@ -77,8 +119,25 @@ ChangeEvent(
     after={"id": 1, "name": "Alice", "score": 100},
     timestamp=1773584164,
     position=BinlogPosition(file="mysql-bin.000003", offset=3611),
+    names_resolved=True,
 )
 ```
+
+## Lifecycle
+
+`BinlogClient()` only allocates the native handle; call `connect()` explicitly,
+then `start()` before polling. Prefer `with BinlogClient(...) as client:` so
+`close()` runs on every exit path. `close()` is idempotent: it stops a pending
+poll, waits for native access to finish, then disconnects and destroys the
+handle. Calls to `poll()` are serialized by the binding.
+
+## Table filtering
+
+`CdcStream(include_tables=["mydb.audit_*"])` and the lower-level engine
+filters accept exact, case-sensitive `database.table` or bare table names. A
+trailing `*` is a prefix wildcard; other `*` characters are literal. If include
+filters see TABLE_MAP events but none matches, the configured native log
+callback receives one `include_filter_matched_nothing` WARN on reset or close.
 
 ## Thread Safety
 
@@ -94,15 +153,15 @@ other lifecycle methods concurrently.
 
 ## Features
 
-- **Native performance** — C++ core with ctypes FFI, >100k events/sec
+- **Native performance** — C++ core with ctypes FFI
 - **Zero native dependencies** — No libmysqlclient required; only OpenSSL
 - **Streaming** — Process events incrementally as bytes arrive
 - **MySQL 8.4+** — Supports LTS and Innovation releases
-- **MariaDB 10.11+** — Auto-detects flavor and handles MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS, slave capability negotiation)
+- **MariaDB 10.11+** — Auto-detects flavor and handles MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS SQL in `ChangeEvent.source_sql`, slave capability negotiation)
 - **GTID support** — Native BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** — Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** — Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
-- **Column names** — Automatic column name resolution via metadata queries
+- **Column names** — Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **SSL/TLS** — Full SSL/TLS support for secure MySQL connections
 - **Backpressure** — Internal reader thread with bounded event queue (default 10,000)
 - **Auto-reconnection** — Automatic reconnection with linear backoff on connection loss
@@ -113,11 +172,32 @@ other lifecycle methods concurrently.
 - Version: 8.4+
 - GTID mode enabled (for BinlogClient)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
 
 **MariaDB:**
 - Version: 10.11+ (tested against 10.11 and 11.4)
 - GTID replication enabled (`log_bin` in ROW format)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
+
+### MySQL binlog configuration
+
+The connection validator requires the following MySQL settings. Copy this into
+your `my.cnf` (or its included configuration file) and restart MySQL after
+changing it:
+
+```ini
+[mysqld]
+log_bin=ON
+gtid_mode=ON
+binlog_format=ROW
+binlog_row_image=FULL
+binlog_transaction_compression=OFF
+binlog_row_value_options=""
+```
+
+`binlog_row_value_options` must not contain `PARTIAL_JSON`. MariaDB is checked
+for the equivalent required row format and rejects `log_bin_compress=ON`.
 
 ## License
 

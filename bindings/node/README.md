@@ -69,6 +69,15 @@ src/
 
 The native addon statically links the C++ core (protocol layer, CDC engine, BinlogClient) and OpenSSL. The TypeScript layer provides typed wrappers and the `CdcStream` async iterator.
 
+## Lifecycle
+
+`new BinlogClient(config)` connects and validates configuration immediately;
+connection errors are thrown by the constructor. Call `start()` before polling,
+then call `destroy()` when finished. `destroy()` is idempotent. Only one
+`poll()` may be in flight; use `stop()` to cancel it before changing connection
+lifecycle state. `CdcStream` owns this sequence and `await stream.close()` is
+the corresponding idempotent cleanup operation.
+
 ## Thread Safety
 
 `CdcEngine` instances are single-owner objects. Do not call `feed()`,
@@ -79,6 +88,31 @@ externally.
 `BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
 connection lifecycle calls are single-owner operations; `stop()` is the intended
 any-thread cancellation path and may be used to unblock a pending poll/iterator.
+
+Each active stream has one blocking native poll worker. `pollBatch()` amortizes
+that handoff by draining up to 64 queued events after the first result, but the
+worker still occupies a libuv thread-pool slot while idle. Node defaults to four
+slots; for more than four concurrently idle streams, set `UV_THREADPOOL_SIZE`
+before starting Node (for example, `UV_THREADPOOL_SIZE=16 node app.mjs`).
+
+## MySQL binlog configuration
+
+The connection validator requires the following MySQL settings. Copy this into
+your `my.cnf` (or its included configuration file) and restart MySQL after
+changing it:
+
+```ini
+[mysqld]
+log_bin=ON
+gtid_mode=ON
+binlog_format=ROW
+binlog_row_image=FULL
+binlog_transaction_compression=OFF
+binlog_row_value_options=""
+```
+
+`binlog_row_value_options` must not contain `PARTIAL_JSON`. MariaDB is checked
+for the equivalent required row format and rejects `log_bin_compress=ON`.
 
 ## Publishing
 
@@ -98,5 +132,7 @@ The `prepack` script swaps `README.md` with `README.npm.md` so npm shows user-fa
 | `CdcEngine` | Low-level binlog byte parser |
 | `BinlogClient` | MySQL binlog replication client |
 | `CdcStream` | High-level async iterator (recommended) |
-| `ChangeEvent` | Event type definition |
-| `ClientConfig` | Connection config type |
+| `LogLevel`, `setLogCallback` | Structured logging API |
+| `MesErrorCode` | Stable native error-code enum |
+| `ServerFlavor`, `SslMode` | Server and TLS enums |
+| `ChangeEvent`, `ClientConfig`, `ColumnValue`, `EventType`, `PollResult`, `StreamConfig` | Public TypeScript types |

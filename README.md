@@ -45,7 +45,12 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 
 // Feed raw binlog bytes from your replication stream
-engine.feed(binlogChunk);
+let offset = 0;
+while (offset < binlogChunk.length) {
+  const consumed = engine.feed(binlogChunk.subarray(offset));
+  if (consumed === 0) break; // retain the remainder and drain backpressure
+  offset += consumed;
+}
 
 while (engine.hasEvents()) {
   const event = engine.nextEvent();
@@ -65,8 +70,13 @@ from mysql_event_stream import CdcEngine
 
 engine = CdcEngine()
 
-# Feed raw binlog bytes
-engine.feed(binlog_chunk)
+# Feed raw binlog bytes. Retain binlog_chunk[consumed:] on backpressure.
+offset = 0
+while offset < len(binlog_chunk):
+    consumed = engine.feed(binlog_chunk[offset:])
+    if consumed == 0:
+        break
+    offset += consumed
 
 while engine.has_events():
     event = engine.next_event()
@@ -83,8 +93,11 @@ engine.close()
 #include "mes.h"
 
 mes_engine_t* engine = mes_create();
-size_t consumed;
-mes_feed(engine, data, len, &consumed);
+size_t consumed = 0;
+if (mes_feed(engine, data, len, &consumed) != MES_OK) {
+    /* call mes_reset(), then drain already decoded events */
+}
+/* retain data + consumed through data + len and re-feed it later */
 
 const mes_event_t* event;
 while (mes_next_event(engine, &event) == MES_OK) {
@@ -107,7 +120,8 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
   "before": null,
   "after": { "id": 8, "name": "Widget", "value": 42 },
   "timestamp": 1773584163,
-  "position": { "file": "mysql-bin.000003", "offset": 3265 }
+  "position": { "file": "mysql-bin.000003", "offset": 3265 },
+  "namesResolved": true
 }
 
 -- UPDATE items SET value = 100 WHERE name = 'Widget'
@@ -118,7 +132,8 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
   "before": { "id": 8, "name": "Widget", "value": 42 },
   "after": { "id": 8, "name": "Widget", "value": 100 },
   "timestamp": 1773584164,
-  "position": { "file": "mysql-bin.000003", "offset": 3611 }
+  "position": { "file": "mysql-bin.000003", "offset": 3611 },
+  "namesResolved": true
 }
 
 -- DELETE FROM items WHERE name = 'Widget'
@@ -140,11 +155,11 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Streaming** - Process events incrementally as bytes arrive
 - **Multi-language** - C/C++, Node.js (N-API), and Python (ctypes) bindings
 - **MySQL 8.4+** - Supports LTS and Innovation releases
-- **MariaDB 10.11+** - MariaDB-flavor binlog protocol, GTID (`domain-server-seq`), ANNOTATE_ROWS, and slave capability negotiation
+- **MariaDB 10.11+** - MariaDB-flavor binlog protocol, GTID (`domain-server-seq`), ANNOTATE_ROWS SQL (`sourceSql` / `source_sql`), and slave capability negotiation
 - **GTID support** - Native BinlogClient with GTID-based replication (both MySQL and MariaDB formats)
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** - Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
-- **Column Names** - Automatic column name resolution via metadata queries
+- **Column Names** - Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 - **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
 - **Auto-reconnection** - Automatic reconnection with linear backoff on connection loss
@@ -163,7 +178,7 @@ const stream = new CdcStream({
   host: "mysql.example.com",
   user: "replicator",
   password: "secret",
-  sslMode: 2,  // 0=disabled, 1=preferred, 2=required, 3=verify_ca, 4=verify_identity
+  sslMode: 4,  // 0=disabled, 1=preferred, 2=required, 3=verify_ca, 4=verify_identity
   sslCa: "/path/to/ca.pem",
 });
 ```
@@ -174,26 +189,51 @@ stream = CdcStream(
     host="mysql.example.com",
     user="replicator",
     password="secret",
-    ssl_mode=2,
+    ssl_mode=4,
     ssl_ca="/path/to/ca.pem",
 )
 ```
+
+`preferred` and `required` encrypt the connection but do not authenticate the
+server certificate. Use `verify_ca` or `verify_identity` with a CA bundle (or
+the OS trust store) for production credentials.
+
+### Authentication plugins
+
+The native client supports MySQL's `caching_sha2_password` and
+`mysql_native_password` plugins. A server-requested plugin outside this list
+fails with an authentication error rather than silently falling back. For
+`caching_sha2_password` without TLS, `allowPublicKeyRetrieval` /
+`allow_public_key_retrieval` explicitly opts into RSA public-key retrieval;
+prefer verified TLS.
 
 ### Table Filtering
 
 ```typescript
 // Node.js - only process events from specific tables
-const engine = new CdcEngine();
-engine.setIncludeDatabases(["mydb"]);
-engine.setExcludeTables(["mydb.audit_log"]);
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  includeDatabases: ["mydb"],
+  excludeTables: ["mydb.audit_log"],
+});
 ```
 
 ```python
 # Python
-engine = CdcEngine()
-engine.set_include_databases(["mydb"])
-engine.set_exclude_tables(["mydb.audit_log"])
+stream = CdcStream(
+    host="mysql.example.com",
+    include_databases=["mydb"],
+    exclude_tables=["mydb.audit_log"],
+)
 ```
+
+Filters are case-sensitive. Use an exact `database.table` or bare table name;
+a trailing `*` is also supported as a prefix wildcard (for example,
+`mydb.audit_*` or `orders_*`). A `*` anywhere else is literal. MySQL identifier
+case rules can differ by server platform, so use names emitted by the source
+server. If configured include filters see TABLE_MAP events but match none, the
+log callback receives one `include_filter_matched_nothing` WARN at reset or
+stream close.
 
 ### Backpressure Control
 
@@ -242,7 +282,39 @@ const stream = new CdcStream({
 });
 ```
 
+## Error codes
+
+Native errors expose a stable numeric `mes_error_t` code. Node errors carry it
+as `error.code` with `MesErrorCode`; Python exceptions carry `.code` with the
+same values and export `MesErrorCode`. Use the code, not message text, for
+retry decisions.
+
+| Codes | Meaning | Retry guidance |
+| --- | --- | --- |
+| 1–2 | Invalid API argument | Fix configuration; do not retry |
+| 100–101 | Parse or checksum failure | Reset/reconnect only after diagnosing the input |
+| 200–202 | Row decode failure | Do not retry unchanged input |
+| 301 | Queue byte/event budget exceeded | Increase the configured limit; do not retry unchanged input |
+| 400–401 | Connection or authentication failure | Retry only transient connection failures; fix credentials for 401 |
+| 402 | Server configuration validation failure | Fix the server configuration; do not retry |
+| 403–404 | Stream transport ended | Reconnect from the persisted checkpoint |
+| 405 | Requested GTID was purged | Choose a new recovery/snapshot point; do not retry |
+
+The C ABI `mes_error_string()` returns the canonical short description for a
+numeric code.
+
 ## Installation
+
+### Package installs
+
+```bash
+npm install @libraz/mysql-event-stream
+pip install mysql-event-stream
+```
+
+The Python package publishes platform wheels. The npm package does not select
+an addon through optional platform dependencies; build the Node binding from
+source below when its bundled addon is not compatible with your runtime.
 
 ### Prerequisites
 
@@ -330,12 +402,35 @@ This project extracts the binlog parsing and replication components from [mygram
 - Version: 8.4+ (LTS and Innovation releases)
 - GTID mode enabled (for BinlogClient)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
+- The metadata connection reads the server's current schema, not historical schema at a binlog position. For replay from an old checkpoint, trust column names only with `binlog_row_metadata=FULL` and preserve the original TABLE_MAP metadata.
 
 **MariaDB:**
 - Version: 10.11+ (tested against 10.11 and 11.4)
-- GTID replication enabled (`gtid_strict_mode`, `log_bin` with row format)
+- GTID replication enabled (`log_bin` with row format)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
+- For schema-derived column names, set `binlog_row_metadata=FULL` or also grant `SELECT`. Metadata queries use a separate connection with the same credentials.
+- The metadata connection reads the server's current schema, not historical schema at a binlog position. For replay from an old checkpoint, trust column names only with `binlog_row_metadata=FULL` and preserve the original TABLE_MAP metadata.
 - The client auto-detects the server flavor and switches to the MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS, `@mariadb_slave_capability`)
+
+### MySQL binlog configuration
+
+The connection validator requires the following MySQL settings. Copy this into
+your `my.cnf` (or its included configuration file) and restart MySQL after
+changing it:
+
+```ini
+[mysqld]
+log_bin=ON
+gtid_mode=ON
+binlog_format=ROW
+binlog_row_image=FULL
+binlog_transaction_compression=OFF
+binlog_row_value_options=""
+```
+
+`binlog_row_value_options` must not contain `PARTIAL_JSON`. MariaDB is checked
+for the equivalent required row format and rejects `log_bin_compress=ON`.
 
 ## License
 
