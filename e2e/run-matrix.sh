@@ -185,14 +185,18 @@ for target in "${TARGETS[@]}"; do
             if [[ "$RUN_CPP" == true ]]; then
                 echo "  [C++] Running E2E tests..."
                 cd "$BUILD_DIR"
-                DB_FLAVOR="$DB_FLAVOR" ctest -R "E2E" \
+                cpp_output="$(mktemp)"
+                if ! DB_FLAVOR="$DB_FLAVOR" ctest -R "E2E" \
                     --output-on-failure \
                     --timeout 60 \
                     "${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"}" \
-                    2>&1
-                if [[ $? -ne 0 ]]; then
+                    2>&1 | tee "$cpp_output"; then
+                    target_pass=false
+                elif ! grep -Eq '^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed' "$cpp_output"; then
+                    echo "  [C++] FAIL: all E2E tests were skipped; no test result was recorded"
                     target_pass=false
                 fi
+                rm -f "$cpp_output"
                 cd "$SCRIPT_DIR"
             fi
 

@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -441,12 +442,13 @@ TEST(E2EEngine, BackpressureMaxQueueSize) {
 // -- Reconnect --
 
 TEST(E2EEngine, ReconnectAfterDisconnect) {
-  // First connection: connect, start stream, stop, disconnect
-  std::string gtid1 = GetCurrentGtid();
-  ASSERT_FALSE(gtid1.empty());
+  ASSERT_EQ(ExecuteDML("DELETE FROM mes_test.items WHERE name LIKE 'reconn_%'"), MES_OK);
 
-  mes_client_t* client = mes_client_create();
-  ASSERT_NE(client, nullptr);
+  const std::string start_gtid = GetCurrentGtid();
+  ASSERT_FALSE(start_gtid.empty());
+
+  mes_client_t* client1 = mes_client_create();
+  ASSERT_NE(client1, nullptr);
 
   mes_client_config_t config{};
   config.host = kHost;
@@ -454,7 +456,7 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
   config.user = kReplUser;
   config.password = kReplPass;
   config.server_id = 607;
-  config.start_gtid = gtid1.c_str();
+  config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
   config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
@@ -463,67 +465,115 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
-  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
-  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_connect(client1, &config), MES_OK) << mes_client_last_error(client1);
+  ASSERT_EQ(mes_client_start(client1), MES_OK) << mes_client_last_error(client1);
 
-  // Poll once to confirm stream is working
-  auto result = mes_client_poll(client);
-  (void)result;
-
-  mes_client_stop(client);
-  mes_client_disconnect(client);
-  EXPECT_EQ(mes_client_is_connected(client), 0);
-
-  mes_client_destroy(client);
-
-  // Second connection: reconnect with a new client and verify streaming works
-  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('reconn_test', 77)"),
+  const std::vector<std::string> before_names = {"reconn_before_1", "reconn_before_2",
+                                                 "reconn_before_3"};
+  for (size_t i = 0; i < before_names.size(); ++i) {
+    ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('" + before_names[i] +
+                         "', " + std::to_string(i + 1) + ")"),
+              MES_OK);
+  }
+  // Seeing this row means the preceding three transactions have been acknowledged by Poll().
+  ASSERT_EQ(ExecuteDML(
+                "INSERT INTO mes_test.items (name, value) VALUES ('reconn_checkpoint_barrier', 4)"),
             MES_OK);
 
-  std::string gtid2 = GetCurrentGtid();
+  mes_engine_t* engine1 = mes_create();
+  ASSERT_NE(engine1, nullptr);
+  std::map<std::string, size_t> first_delivery_count;
+  bool saw_barrier = false;
+  for (int polls = 0; polls < 200 && !saw_barrier; ++polls) {
+    const mes_poll_result_t result = mes_client_poll(client1);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client1);
+    if (result.is_heartbeat || result.data == nullptr) continue;
 
-  // Insert after getting gtid2 so we can capture it
-  // Actually, insert before getting gtid, then stream from gtid1
-  // Let's use a fresh GTID and insert after
-  std::string gtid_before = GetCurrentGtid();
-  ASSERT_FALSE(gtid_before.empty());
+    size_t consumed = 0;
+    ASSERT_EQ(mes_feed(engine1, result.data, result.size, &consumed), MES_OK);
+    const mes_event_t* event = nullptr;
+    while (mes_next_event(engine1, &event) == MES_OK) {
+      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+        continue;
+      }
+      const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+      ++first_delivery_count[name];
+      saw_barrier = name == "reconn_checkpoint_barrier";
+    }
+  }
+  ASSERT_TRUE(saw_barrier) << "client1 did not reach the checkpoint barrier";
+  for (const auto& name : before_names) {
+    EXPECT_EQ(first_delivery_count[name], 1u)
+        << "client1 did not deliver " << name << " exactly once";
+  }
 
-  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
-                       "('reconn_test2', 88)"),
-            MES_OK);
+  const char* current_gtid = mes_client_current_gtid(client1);
+  ASSERT_NE(current_gtid, nullptr);
+  const std::string checkpoint = current_gtid;
+  ASSERT_FALSE(checkpoint.empty());
+  EXPECT_NE(checkpoint, start_gtid);
+
+  mes_client_stop(client1);
+  mes_client_disconnect(client1);
+  EXPECT_EQ(mes_client_is_connected(client1), 0);
+  mes_client_destroy(client1);
+  mes_destroy(engine1);
+
+  const std::vector<std::string> after_names = {"reconn_after_1", "reconn_after_2"};
+  for (size_t i = 0; i < after_names.size(); ++i) {
+    ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('" + after_names[i] +
+                         "', " + std::to_string(i + 11) + ")"),
+              MES_OK);
+  }
+  // Drive client2 beyond both rows, so a replay of either cannot be hidden behind an unpolled
+  // event.
+  ASSERT_EQ(
+      ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('reconn_after_barrier', 13)"),
+      MES_OK);
 
   mes_client_t* client2 = mes_client_create();
   ASSERT_NE(client2, nullptr);
 
   config.server_id = 608;
-  config.start_gtid = gtid_before.c_str();
+  config.start_gtid = checkpoint.c_str();
   ASSERT_EQ(mes_client_connect(client2, &config), MES_OK) << mes_client_last_error(client2);
   ASSERT_EQ(mes_client_start(client2), MES_OK) << mes_client_last_error(client2);
 
   mes_engine_t* engine = mes_create();
   ASSERT_NE(engine, nullptr);
 
-  bool found = false;
-  int polls = 0;
-  while (!found && polls < 100) {
-    auto poll_result = mes_client_poll(client2);
-    polls++;
-    if (poll_result.error != MES_OK) break;
+  std::map<std::string, size_t> second_delivery_count;
+  bool replayed_before = false;
+  bool saw_after_barrier = false;
+  for (int polls = 0; polls < 200 && !saw_after_barrier; ++polls) {
+    const mes_poll_result_t poll_result = mes_client_poll(client2);
+    ASSERT_EQ(poll_result.error, MES_OK) << mes_client_last_error(client2);
     if (poll_result.is_heartbeat || poll_result.data == nullptr) continue;
 
     size_t consumed = 0;
-    mes_feed(engine, poll_result.data, poll_result.size, &consumed);
+    ASSERT_EQ(mes_feed(engine, poll_result.data, poll_result.size, &consumed), MES_OK);
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
-        found = true;
-        break;
+      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+        continue;
       }
+      const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+      ++second_delivery_count[name];
+      for (const auto& before_name : before_names)
+        replayed_before = replayed_before || name == before_name;
+      saw_after_barrier = name == "reconn_after_barrier";
     }
   }
 
-  EXPECT_TRUE(found) << "Second stream did not capture INSERT event";
+  ASSERT_TRUE(saw_after_barrier) << "client2 did not capture the post-resume barrier";
+  EXPECT_FALSE(replayed_before) << "client2 replayed a transaction acknowledged by client1";
+  for (const auto& name : after_names) {
+    EXPECT_EQ(second_delivery_count[name], 1u)
+        << "client2 did not deliver " << name << " exactly once";
+  }
 
   mes_client_stop(client2);
   mes_client_disconnect(client2);

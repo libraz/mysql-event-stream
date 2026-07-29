@@ -52,6 +52,9 @@ constexpr uint32_t kDmlVectorUpdate = 521;
 constexpr uint32_t kDmlVectorDelete = 522;
 constexpr uint32_t kDmlClientEventSizeLimit = 523;
 constexpr uint32_t kDmlClientQueueByteBudget = 524;
+constexpr uint32_t kDmlYearSignedness = 525;
+constexpr uint32_t kDmlCharsetMetadata = 526;
+constexpr uint32_t kDmlExtendedTypes = 527;
 }  // namespace server_ids
 
 // Connection defaults
@@ -75,10 +78,8 @@ inline mes::ServerFlavor GetDbFlavor() {
 inline bool IsMariaDB() { return GetDbFlavor() == mes::ServerFlavor::kMariaDB; }
 
 // MariaDB uses mysql_native_password (no TLS required for auth).
-// MySQL 8.4+ uses caching_sha2_password (TLS needed for full auth).
-inline uint32_t DefaultSslMode() {
-  return IsMariaDB() ? MES_SSL_DISABLED : 2;  // 2 = MES_SSL_REQUIRED
-}
+// MySQL 8.4+ uses caching_sha2_password (certificate-verified TLS is needed for full auth).
+inline uint32_t DefaultSslMode() { return IsMariaDB() ? MES_SSL_DISABLED : MES_SSL_VERIFY_CA; }
 
 // SSL cert paths (relative to project root)
 // Use absolute paths derived at compile time or pass from environment
@@ -97,11 +98,12 @@ inline std::string WrongCa() { return CertDir() + "/wrong-ca.pem"; }
 
 inline std::string DefaultCa() { return IsMariaDB() ? "" : CaCert(); }
 
-inline bool IsE2eServerAvailable() {
+inline bool IsE2eServerAvailable(std::string* error = nullptr) {
   mes::protocol::MysqlConnection conn;
   auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
                          DefaultCa(), "", "");
   if (rc != MES_OK) {
+    if (error) *error = conn.GetLastError();
     return false;
   }
   conn.Disconnect();
@@ -125,6 +127,7 @@ struct CapturedEvent {
   std::vector<CapturedColumn> before;
   std::vector<CapturedColumn> after;
   uint32_t timestamp = 0;
+  bool names_resolved = false;
 };
 
 inline CapturedColumn CopyColumn(const mes_column_t& c) {
@@ -145,6 +148,7 @@ inline CapturedEvent CopyEvent(const mes_event_t* e) {
   ce.database = e->database ? e->database : "";
   ce.table = e->table ? e->table : "";
   ce.timestamp = e->timestamp;
+  ce.names_resolved = e->names_resolved != 0;
   for (uint32_t i = 0; i < e->before_count; i++) {
     ce.before.push_back(CopyColumn(e->before_columns[i]));
   }
@@ -188,7 +192,8 @@ using EventPredicate = std::function<bool(const std::vector<CapturedEvent>&)>;
 inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, uint32_t server_id,
                                                 const EventPredicate& done_pred,
                                                 int max_polls = 100,
-                                                mes_engine_t* external_engine = nullptr) {
+                                                mes_engine_t* external_engine = nullptr,
+                                                mes_error_t* feed_error = nullptr) {
   std::vector<CapturedEvent> events;
 
   mes_client_t* client = mes_client_create();
@@ -233,7 +238,14 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
     if (result.is_heartbeat || result.data == nullptr) continue;
 
     size_t consumed = 0;
-    mes_feed(engine, result.data, result.size, &consumed);
+    // A decode failure cannot be recovered by waiting for more packets. Stop
+    // immediately so an E2E assertion reports the triggering event rather
+    // than spending the remaining poll budget on heartbeats.
+    const mes_error_t rc = mes_feed(engine, result.data, result.size, &consumed);
+    if (rc != MES_OK) {
+      if (feed_error) *feed_error = rc;
+      break;
+    }
 
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
@@ -255,7 +267,8 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
 inline std::vector<CapturedEvent> CaptureTableEvents(const std::string& start_gtid,
                                                      uint32_t server_id,
                                                      const std::string& table_name, size_t count,
-                                                     mes_engine_t* engine = nullptr) {
+                                                     mes_engine_t* engine = nullptr,
+                                                     mes_error_t* feed_error = nullptr) {
   return CaptureEvents(
       start_gtid, server_id,
       [&](const std::vector<CapturedEvent>& evts) {
@@ -265,7 +278,7 @@ inline std::vector<CapturedEvent> CaptureTableEvents(const std::string& start_gt
         }
         return n >= count;
       },
-      200, engine);
+      200, engine, feed_error);
 }
 
 // Get MySQL/MariaDB major version from server

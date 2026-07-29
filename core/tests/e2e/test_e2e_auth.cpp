@@ -39,8 +39,8 @@ TEST(E2EAuth, CachingSha2OverTls) {
     GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout, 2,
-                         CaCert(), "", "");
+  auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout,
+                         MES_SSL_VERIFY_CA, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -53,8 +53,8 @@ TEST(E2EAuth, CachingSha2FastAuth) {
   // First connection: full auth over TLS to populate server's auth cache
   {
     mes::protocol::MysqlConnection conn;
-    auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout, 2,
-                           CaCert(), "", "");
+    auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout,
+                           MES_SSL_VERIFY_CA, CaCert(), "", "");
     ASSERT_EQ(rc, MES_OK) << "First connect failed: " << conn.GetLastError();
     EXPECT_TRUE(conn.IsConnected());
     conn.Disconnect();
@@ -63,8 +63,8 @@ TEST(E2EAuth, CachingSha2FastAuth) {
   // Second connection: should use fast auth path (server cache is warm)
   {
     mes::protocol::MysqlConnection conn;
-    auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout, 2,
-                           CaCert(), "", "");
+    auto rc = conn.Connect(kHost, kPort, "sha2_user", "sha2_test_pwd", kTimeout, kTimeout,
+                           MES_SSL_VERIFY_CA, CaCert(), "", "");
     ASSERT_EQ(rc, MES_OK) << "Second connect failed: " << conn.GetLastError();
     EXPECT_TRUE(conn.IsConnected());
     conn.Disconnect();
@@ -114,8 +114,8 @@ TEST(E2EAuth, CachingSha2DefaultPlugin) {
   // All users use caching_sha2_password (default in 8.4+, only option in 9.x).
   // repl_user uses caching_sha2_password, so no auth switch is needed.
   mes::protocol::MysqlConnection conn;
-  auto rc =
-      conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, 2, CaCert(), "", "");
+  auto rc = conn.Connect(kHost, kPort, kReplUser, kReplPass, kTimeout, kTimeout, MES_SSL_VERIFY_CA,
+                         CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
 
@@ -173,8 +173,8 @@ TEST(E2EAuth, SpecialCharsInPassword) {
   }
   // Connect over TLS since caching_sha2_password may need full auth
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, "special_user", "p@ss'w\\ord\"!", kTimeout, kTimeout, 2,
-                         CaCert(), "", "");
+  auto rc = conn.Connect(kHost, kPort, "special_user", "p@ss'w\\ord\"!", kTimeout, kTimeout,
+                         MES_SSL_VERIFY_CA, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -195,8 +195,8 @@ TEST(E2EAuth, WrongPasswordSha2) {
     GTEST_SKIP() << "sha2_user is only provisioned in the MySQL container";
   }
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, "sha2_user", "wrong_password", kTimeout, kTimeout, 2,
-                         CaCert(), "", "");
+  auto rc = conn.Connect(kHost, kPort, "sha2_user", "wrong_password", kTimeout, kTimeout,
+                         MES_SSL_VERIFY_CA, CaCert(), "", "");
   EXPECT_EQ(rc, MES_ERR_AUTH);
   EXPECT_FALSE(conn.IsConnected());
   EXPECT_FALSE(conn.GetLastError().empty());
@@ -210,8 +210,8 @@ TEST(E2EAuth, NoReplPrivilegesConnect) {
   }
   // Connection itself should succeed (SELECT privilege is enough for auth)
   mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, "no_repl_user", "no_repl_pass", kTimeout, kTimeout, 2,
-                         CaCert(), "", "");
+  auto rc = conn.Connect(kHost, kPort, "no_repl_user", "no_repl_pass", kTimeout, kTimeout,
+                         MES_SSL_VERIFY_CA, CaCert(), "", "");
   ASSERT_EQ(rc, MES_OK) << conn.GetLastError();
   EXPECT_TRUE(conn.IsConnected());
   conn.Disconnect();
@@ -240,7 +240,7 @@ TEST(E2EAuth, NoReplPrivilegesStreamFails) {
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = kTimeout;
   std::string ca_cert = CaCert();
-  config.ssl_mode = MES_SSL_REQUIRED;
+  config.ssl_mode = MES_SSL_VERIFY_CA;
   config.ssl_ca = ca_cert.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

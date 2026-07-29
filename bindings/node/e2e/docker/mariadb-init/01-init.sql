@@ -44,3 +44,17 @@ CREATE TABLE IF NOT EXISTS large_data (
     big_text LONGTEXT,
     big_blob LONGBLOB
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS charset_values (
+    id INT NOT NULL PRIMARY KEY,
+    binary_value BINARY(16) NOT NULL,
+    text_value LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS type_mapping_values (
+    id INT NOT NULL PRIMARY KEY,
+    enum_value ENUM('first', 'second') NOT NULL,
+    set_value SET('a', 'b', 'c') NOT NULL,
+    bit_value BIT(8) NOT NULL,
+    unsigned_value BIGINT UNSIGNED NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

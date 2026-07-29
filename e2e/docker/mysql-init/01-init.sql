@@ -62,3 +62,44 @@ CREATE TABLE IF NOT EXISTS large_data (
     big_text LONGTEXT,
     big_blob LONGBLOB
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Exercises TABLE_MAP SIGNEDNESS bit accounting: YEAR must consume a bit
+-- before the signed and unsigned BIGINT columns.
+CREATE TABLE IF NOT EXISTS signedness_values (
+    y YEAR NOT NULL,
+    signed_value BIGINT NOT NULL,
+    unsigned_value BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (y)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS charset_values (
+    id INT NOT NULL PRIMARY KEY,
+    binary_value BINARY(16) NOT NULL,
+    text_value LONGTEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS type_mapping_values (
+    id INT NOT NULL PRIMARY KEY,
+    enum_value ENUM('first', 'second') NOT NULL,
+    set_value SET('a', 'b', 'c') NOT NULL,
+    bit_value BIT(8) NOT NULL,
+    unsigned_value BIGINT UNSIGNED NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Real-server coverage for type families whose TABLE_MAP metadata is easy to
+-- decode incorrectly: signedness, temporal fractional precision, wide CHAR,
+-- binary strings, and GEOMETRY.
+CREATE TABLE IF NOT EXISTS extended_type_values (
+    id INT NOT NULL PRIMARY KEY,
+    tiny_unsigned TINYINT UNSIGNED NOT NULL,
+    small_unsigned SMALLINT UNSIGNED NOT NULL,
+    medium_unsigned MEDIUMINT UNSIGNED NOT NULL,
+    int_unsigned INT UNSIGNED NOT NULL,
+    year_value YEAR NOT NULL,
+    date_value DATE NOT NULL,
+    time_value TIME(6) NOT NULL,
+    float_value FLOAT NOT NULL,
+    wide_char CHAR(255) NOT NULL,
+    binary_value VARBINARY(16) NOT NULL,
+    geometry_value GEOMETRY NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

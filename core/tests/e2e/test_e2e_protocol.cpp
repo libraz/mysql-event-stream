@@ -29,6 +29,7 @@
 #include <unistd.h>
 #endif
 
+#include "client/binlog_client.h"
 #include "client/gtid_encoder.h"
 #include "client/metadata_fetcher.h"
 #include "event_header.h"
@@ -47,6 +48,21 @@ std::vector<uint8_t> EncodeGtidSet(const std::string& gtid_set) {
   EXPECT_EQ(mes::GtidEncoder::Encode(gtid_set.c_str(), &encoded), MES_OK);
   return encoded;
 }
+
+}  // namespace
+
+namespace mes {
+
+class BinlogClientTestAccess {
+ public:
+  static void InstallFinishedReader(BinlogClient* client) {
+    client->reader_thread_ = std::thread([] {});
+  }
+};
+
+}  // namespace mes
+
+namespace {
 
 #ifndef _WIN32
 
@@ -418,6 +434,90 @@ TEST(E2EProtocol, ConnectionValidatorViaCApi) {
   mes_client_destroy(client);
 }
 
+TEST(E2EProtocol, PollBatchDrainsQueuedWireEvents) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 115;
+  const std::string start_gtid = e2e::GetCurrentGtid();
+  config.start_gtid = start_gtid.c_str();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = kTimeout;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  const std::string ca_path = e2e::DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  const std::string suffix =
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.items WHERE name LIKE 'poll_batch_" + suffix +
+                             "%'");
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
+                            "('poll_batch_" +
+                            suffix +
+                            "_1', 1), "
+                            "('poll_batch_" +
+                            suffix +
+                            "_2', 2), "
+                            "('poll_batch_" +
+                            suffix + "_3', 3)"),
+            MES_OK);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  mes_poll_result_t batch[32]{};
+  size_t count = 0;
+  ASSERT_EQ(mes_client_poll_batch(client, batch, 32, &count), MES_OK);
+  ASSERT_GE(count, 2u);
+  for (size_t i = 0; i < count; ++i) {
+    ASSERT_EQ(batch[i].error, MES_OK) << mes_client_last_error(client);
+  }
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
+}
+
+TEST(E2EProtocol, MariaDbLogBinCompressIsRejected) {
+  if (!e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MariaDB-specific server variable";
+  }
+
+  mes::protocol::MysqlConnection admin;
+  ASSERT_EQ(admin.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, 0, "", "", ""),
+            MES_OK);
+  mes::protocol::QueryResult result;
+  std::string error;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(admin.Socket(), "SET GLOBAL log_bin_compress = ON", &result,
+                                        &error),
+            MES_OK)
+      << error;
+  e2e::ScopedCleanup reset_compression("SET GLOBAL log_bin_compress = OFF");
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 98;
+  config.start_gtid = "";
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = kTimeout;
+  config.ssl_mode = MES_SSL_DISABLED;
+
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_VALIDATION);
+  EXPECT_NE(std::string(mes_client_last_error(client)).find("log_bin_compress"), std::string::npos);
+  mes_client_destroy(client);
+  admin.Disconnect();
+}
+
 TEST(E2EProtocol, ShortReadTimeoutStaysAliveAcrossHeartbeatPeriods) {
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
@@ -457,6 +557,33 @@ TEST(E2EProtocol, ShortReadTimeoutStaysAliveAcrossHeartbeatPeriods) {
   mes_client_stop(client);
   mes_client_disconnect(client);
   mes_client_destroy(client);
+}
+
+TEST(E2EProtocol, StartStreamReapsFinishedReaderBeforeReplacement) {
+  mes::BinlogClient client;
+  mes::BinlogClientConfig config;
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 114;
+  config.start_gtid = e2e::GetCurrentGtid();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = kTimeout;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(e2e::DefaultSslMode());
+  config.ssl_ca = e2e::DefaultCa();
+
+  ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+  mes::BinlogClientTestAccess::InstallFinishedReader(&client);
+
+  // The injected worker models a reader that has already returned after
+  // placing a terminal error in the queue. Assigning the replacement over it
+  // used to call std::terminate; StartStream must join it first.
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  EXPECT_TRUE(client.IsStreaming());
+
+  client.Stop();
+  client.Disconnect();
 }
 
 // -- BinlogStream via C ABI --
@@ -633,6 +760,66 @@ TEST(E2EProtocol, EmptyStartGtidSnapshotsCurrentPosition) {
   mes_client_disconnect(client);
   mes_client_destroy(client);
   mes_destroy(engine);
+  data_conn.Disconnect();
+}
+
+TEST(E2EProtocol, PurgedGtidReportsServerDiagnostic) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "MySQL COM_BINLOG_DUMP_GTID-specific contract";
+  }
+
+  mes::protocol::MysqlConnection data_conn;
+  ASSERT_EQ(data_conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout,
+                              MES_SSL_VERIFY_CA, CaCert(), "", ""),
+            MES_OK);
+  const std::string before_gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(before_gtid.empty());
+
+  mes::protocol::QueryResult qr;
+  std::string err;
+  const std::string suffix =
+      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  ASSERT_EQ(mes::protocol::ExecuteQuery(
+                data_conn.Socket(),
+                "INSERT INTO mes_test.items (name, value) VALUES ('purged_gtid_" + suffix + "', 1)",
+                &qr, &err),
+            MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "FLUSH BINARY LOGS", &qr, &err), MES_OK)
+      << err;
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(), "SHOW BINARY LOGS", &qr, &err), MES_OK)
+      << err;
+  ASSERT_FALSE(qr.rows.empty());
+  ASSERT_FALSE(qr.rows.back().values.empty());
+  const std::string current_binlog = qr.rows.back().values[0];
+  ASSERT_EQ(mes::protocol::ExecuteQuery(data_conn.Socket(),
+                                        "PURGE BINARY LOGS TO '" + current_binlog + "'", &qr, &err),
+            MES_OK)
+      << err;
+
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+  mes_client_config_t config{};
+  config.host = kHost;
+  config.port = kPort;
+  config.user = kReplUser;
+  config.password = kReplPass;
+  config.server_id = 113;
+  config.start_gtid = before_gtid.c_str();
+  config.connect_timeout_s = kTimeout;
+  config.read_timeout_s = kTimeout;
+  const std::string ca_cert = CaCert();
+  config.ssl_mode = MES_SSL_VERIFY_CA;
+  config.ssl_ca = ca_cert.c_str();
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  EXPECT_EQ(mes_client_start(client), MES_ERR_GTID_PURGED);
+  const std::string diagnostic = mes_client_last_error(client);
+  EXPECT_NE(diagnostic.find("purged"), std::string::npos) << diagnostic;
+
+  mes_client_stop(client);
+  mes_client_disconnect(client);
+  mes_client_destroy(client);
   data_conn.Disconnect();
 }
 

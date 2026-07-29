@@ -5,7 +5,10 @@ function(mes_add_e2e_gtest target source)
   target_link_libraries(${target} PRIVATE mes-core GTest::gtest)
   target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
   target_compile_definitions(${target} PRIVATE MES_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
-  gtest_discover_tests(${target} DISCOVERY_TIMEOUT 30)
+  # Every discovered test shares one Docker server and mutates the same
+  # schemas/binlog. Let unit tests run in parallel, but serialize this group
+  # so one test cannot observe another test's transient DML or cleanup.
+  gtest_discover_tests(${target} DISCOVERY_TIMEOUT 30 PROPERTIES RUN_SERIAL TRUE)
 endfunction()
 
 mes_add_e2e_gtest(test_e2e_protocol test_e2e_protocol.cpp)

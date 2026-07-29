@@ -34,10 +34,12 @@ using e2e::CaptureTableEvents;
 using e2e::ExecuteDML;
 using e2e::FilterByTable;
 using e2e::GetCurrentGtid;
+using e2e::ScopedCleanup;
 
 TEST(E2EBinlogDDL, CreateTableDuringStream) {
   // Ensure no leftover table from a previous failed run
   ExecuteDML("DROP TABLE IF EXISTS mes_test.dyn_create_test");
+  ScopedCleanup cleanup("DROP TABLE IF EXISTS mes_test.dyn_create_test");
 
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Failed to fetch current GTID";
@@ -55,12 +57,11 @@ TEST(E2EBinlogDDL, CreateTableDuringStream) {
   ASSERT_GE(filtered.size(), 1u) << "Expected at least 1 INSERT for dyn_create_test";
   EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
   EXPECT_EQ(filtered[0].after.size(), 2u);
-
-  // Cleanup
-  ExecuteDML("DROP TABLE IF EXISTS mes_test.dyn_create_test");
 }
 
 TEST(E2EBinlogDDL, AlterTableAddColumn) {
+  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN extra");
+  ScopedCleanup cleanup("ALTER TABLE mes_test.ddl_test DROP COLUMN extra");
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Failed to fetch current GTID";
 
@@ -73,13 +74,12 @@ TEST(E2EBinlogDDL, AlterTableAddColumn) {
   ASSERT_GE(filtered.size(), 1u) << "Expected at least 1 INSERT for ddl_test";
   EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
   EXPECT_EQ(filtered[0].after.size(), 3u) << "Expected 3 columns: id, val, extra";
-
-  // Cleanup
-  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN extra");
 }
 
 TEST(E2EBinlogDDL, AlterTableDropColumn) {
   // First add a temporary column
+  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN temp_col");
+  ScopedCleanup cleanup("ALTER TABLE mes_test.ddl_test DROP COLUMN temp_col");
   ASSERT_EQ(ExecuteDML("ALTER TABLE mes_test.ddl_test ADD COLUMN temp_col INT DEFAULT 0"), MES_OK);
 
   std::string gtid = GetCurrentGtid();
@@ -97,6 +97,7 @@ TEST(E2EBinlogDDL, AlterTableDropColumn) {
 }
 
 TEST(E2EBinlogDDL, AlterTableModifyType) {
+  ScopedCleanup cleanup("ALTER TABLE mes_test.ddl_test MODIFY val VARCHAR(100)");
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Failed to fetch current GTID";
 
@@ -114,14 +115,12 @@ TEST(E2EBinlogDDL, AlterTableModifyType) {
   ASSERT_GE(filtered[0].after.size(), 2u);
   EXPECT_TRUE(filtered[0].after[1].type == MES_COL_STRING ||
               filtered[0].after[1].type == MES_COL_BYTES);
-
-  // Cleanup: revert to VARCHAR(100)
-  ExecuteDML("ALTER TABLE mes_test.ddl_test MODIFY val VARCHAR(100)");
 }
 
 TEST(E2EBinlogDDL, DropTableDuringStream) {
   // Ensure no leftover table from a previous failed run
   ExecuteDML("DROP TABLE IF EXISTS mes_test.drop_me");
+  ScopedCleanup cleanup("DROP TABLE IF EXISTS mes_test.drop_me");
 
   ASSERT_EQ(ExecuteDML("CREATE TABLE mes_test.drop_me ("
                        "id INT NOT NULL PRIMARY KEY, v INT)"),
@@ -153,6 +152,8 @@ TEST(E2EBinlogDDL, DropTableDuringStream) {
 }
 
 TEST(E2EBinlogDDL, RenameTableDuringStream) {
+  ExecuteDML("DROP TABLE IF EXISTS mes_test.ddl_test_renamed");
+  ScopedCleanup cleanup("RENAME TABLE mes_test.ddl_test_renamed TO mes_test.ddl_test");
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Failed to fetch current GTID";
 
@@ -165,9 +166,6 @@ TEST(E2EBinlogDDL, RenameTableDuringStream) {
   ASSERT_GE(filtered.size(), 1u) << "Expected at least 1 INSERT for ddl_test_renamed";
   EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
   EXPECT_EQ(filtered[0].table, "ddl_test_renamed");
-
-  // Cleanup: rename back
-  ExecuteDML("RENAME TABLE mes_test.ddl_test_renamed TO mes_test.ddl_test");
 }
 
 TEST(E2EBinlogDDL, TruncateTable) {
@@ -188,6 +186,10 @@ TEST(E2EBinlogDDL, TruncateTable) {
 }
 
 TEST(E2EBinlogDDL, DmlAfterMultipleSchemaChanges) {
+  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN c1");
+  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN c2");
+  ScopedCleanup cleanup_c1("ALTER TABLE mes_test.ddl_test DROP COLUMN c1");
+  ScopedCleanup cleanup_c2("ALTER TABLE mes_test.ddl_test DROP COLUMN c2");
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Failed to fetch current GTID";
 
@@ -221,14 +223,13 @@ TEST(E2EBinlogDDL, DmlAfterMultipleSchemaChanges) {
   // 3rd INSERT: id, val, c2 (3 columns)
   EXPECT_EQ(filtered[2].type, MES_EVENT_INSERT);
   EXPECT_EQ(filtered[2].after.size(), 3u) << "3rd INSERT should have 3 columns (id, val, c2)";
-
-  // Cleanup: drop c2
-  ExecuteDML("ALTER TABLE mes_test.ddl_test DROP COLUMN c2");
 }
 
 TEST(E2EBinlogDDL, LeadingCommentsBeforeAlterAndRename) {
   ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_test");
   ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_renamed");
+  ScopedCleanup cleanup_original("DROP TABLE IF EXISTS mes_test.comment_ddl_test");
+  ScopedCleanup cleanup_renamed("DROP TABLE IF EXISTS mes_test.comment_ddl_renamed");
   ASSERT_EQ(ExecuteDML("CREATE TABLE mes_test.comment_ddl_test (id INT PRIMARY KEY, c1 INT)"),
             MES_OK);
 
@@ -251,8 +252,6 @@ TEST(E2EBinlogDDL, LeadingCommentsBeforeAlterAndRename) {
   EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
   EXPECT_EQ(filtered[0].after.size(), 2u);
   EXPECT_EQ(filtered[0].after[1].int_val, 44);
-
-  ExecuteDML("DROP TABLE IF EXISTS mes_test.comment_ddl_renamed");
 }
 
 }  // namespace

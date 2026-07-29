@@ -10,8 +10,10 @@ namespace {
 class E2eEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
-    if (!e2e::IsE2eServerAvailable()) {
-      GTEST_SKIP() << "E2E database is not available at " << e2e::kHost << ":" << e2e::kPort;
+    std::string error;
+    if (!e2e::IsE2eServerAvailable(&error)) {
+      FAIL() << "E2E database is not available at " << e2e::kHost << ":" << e2e::kPort << ": "
+             << error;
     }
   }
 };

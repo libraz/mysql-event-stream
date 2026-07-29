@@ -110,8 +110,8 @@ describe("Column type handling", () => {
     expect(ev.after!.value).toBeDefined();
   });
 
-  it("DOUBLE column values are decoded correctly", async () => {
-    await mysql.insert("users", { name: "DoubleUser", score: 3.14159 });
+  it("DOUBLE, DECIMAL, and temporal columns use their documented types", async () => {
+    await mysql.insert("users", { name: "DoubleUser", balance: "1234.56", score: 3.14159 });
 
     const events = await collector.waitForEvents({
       table: "users",
@@ -124,10 +124,56 @@ describe("Column type handling", () => {
     const ev = events[0]!;
     expect(ev.after).not.toBeNull();
     expect(typeof ev.after!.score).toBe("number");
+    expect(typeof ev.after!.balance).toBe("string");
+    expect(typeof ev.after!.created_at).toBe("string");
+    expect(typeof ev.after!.updated_at).toBe("string");
 
     // Column key assertions (users table)
     expect(ev.after!.id).toBeDefined();
     expect(ev.after!.name).toBeDefined();
     expect(ev.after!.score).toBeDefined();
+  });
+
+  it("distinguishes BINARY bytes from LONGTEXT", async () => {
+    const binaryValue = Buffer.from([...Array(16).keys()]);
+    await mysql.execute("DELETE FROM charset_values");
+    await mysql.execute(
+      "INSERT INTO charset_values (id, binary_value, text_value) VALUES (?, ?, ?)",
+      [1, binaryValue, "charset metadata text"],
+    );
+
+    const events = await collector.waitForEvents({
+      table: "charset_values",
+      type: "INSERT",
+      count: 1,
+      timeout: 10_000,
+    });
+    const values = Object.values(events[0]!.after!);
+    const bytes = values.find((value) => value instanceof Uint8Array);
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(bytes as Uint8Array)).toEqual(binaryValue);
+    expect(values).toContain("charset metadata text");
+  });
+
+  it("maps ENUM, SET, BIT, and overflowing unsigned BIGINT precisely", async () => {
+    await mysql.execute("DELETE FROM type_mapping_values");
+    await mysql.execute(
+      "INSERT INTO type_mapping_values " +
+        "(id, enum_value, set_value, bit_value, unsigned_value) " +
+        "VALUES (1, 'second', 'a,c', b'10101010', 18446744073709551615)",
+    );
+
+    const events = await collector.waitForEvents({
+      table: "type_mapping_values",
+      type: "INSERT",
+      count: 1,
+      timeout: 10_000,
+    });
+    expect(events[0]!.after).toMatchObject({
+      enum_value: 2,
+      set_value: 5,
+      bit_value: 170,
+      unsigned_value: "18446744073709551615",
+    });
   });
 });

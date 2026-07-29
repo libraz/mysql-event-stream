@@ -212,7 +212,7 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
   // Insert a row to generate a binlog event
   ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('ssl_e2e', 77)"), MES_OK);
 
-  // Set up binlog client with SSL mode 2 and caching_sha2_password user
+  // Set up binlog client with certificate-verified TLS and a caching_sha2_password user.
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
 
@@ -227,7 +227,7 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
   config.start_gtid = gtid_before.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = MES_SSL_REQUIRED;
+  config.ssl_mode = MES_SSL_VERIFY_CA;
   config.ssl_ca = ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;

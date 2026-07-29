@@ -67,24 +67,73 @@ TEST(E2EBinlogDML, InsertAllColumnTypes) {
 
   // 0: id (BIGINT)
   EXPECT_EQ(ev.after[0].type, MES_COL_INT);
+  EXPECT_EQ(ev.after[0].int_val, 1000);
   // 1: name (VARCHAR)
   EXPECT_EQ(ev.after[1].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[1].str_data, "Alice");
   // 2: email (VARCHAR)
   EXPECT_EQ(ev.after[2].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[2].str_data, "alice@test.com");
   // 3: age (INT)
   EXPECT_EQ(ev.after[3].type, MES_COL_INT);
+  EXPECT_EQ(ev.after[3].int_val, 30);
   // 4: balance (DECIMAL)
   EXPECT_EQ(ev.after[4].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[4].str_data, "1234.56");
   // 5: score (DOUBLE)
   EXPECT_EQ(ev.after[5].type, MES_COL_DOUBLE);
+  EXPECT_DOUBLE_EQ(ev.after[5].double_val, 3.14);
   // 6: is_active (TINYINT)
   EXPECT_EQ(ev.after[6].type, MES_COL_INT);
-  // 7: bio (TEXT — decoded as BYTES in binlog, TEXT uses BLOB column type)
-  EXPECT_TRUE(ev.after[7].type == MES_COL_STRING || ev.after[7].type == MES_COL_BYTES);
+  EXPECT_EQ(ev.after[6].int_val, 1);
+  // 7: bio (TEXT)
+  EXPECT_EQ(ev.after[7].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[7].str_data, "Hello world");
   // 9: created_at (DATETIME(3))
   EXPECT_EQ(ev.after[9].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[9].str_data, "2024-01-15 10:30:00.123");
   // 10: updated_at (TIMESTAMP(6))
   EXPECT_EQ(ev.after[10].type, MES_COL_STRING);
+  EXPECT_EQ(ev.after[10].str_data, "1705314600.123456");
+}
+
+TEST(E2EBinlogDML, ExtendedServerColumnTypes) {
+  e2e::ExecuteDML("DELETE FROM mes_test.extended_type_values WHERE id = 1");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.extended_type_values WHERE id = 1");
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(
+      e2e::ExecuteDML(
+          "INSERT INTO mes_test.extended_type_values "
+          "(id, tiny_unsigned, small_unsigned, medium_unsigned, int_unsigned, year_value, "
+          " date_value, time_value, float_value, wide_char, binary_value, geometry_value) VALUES "
+          "(1, 255, 65535, 16777215, 4294967295, 2025, '2024-01-15', "
+          " '12:34:56.123456', 1.25, 'wide char value', X'00FF10', "
+          " ST_GeomFromText('POINT(1 2)'))"),
+      MES_OK);
+
+  const auto events =
+      e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlExtendedTypes, "extended_type_values", 1);
+  const auto filtered = e2e::FilterByTable(events, "extended_type_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  const auto& after = filtered[0].after;
+  ASSERT_EQ(after.size(), 12u);
+  EXPECT_EQ(after[0].int_val, 1);
+  EXPECT_EQ(after[1].int_val, 255);
+  EXPECT_EQ(after[2].int_val, 65535);
+  EXPECT_EQ(after[3].int_val, 16777215);
+  EXPECT_EQ(after[4].int_val, 4294967295LL);
+  EXPECT_EQ(after[5].int_val, 2025);
+  EXPECT_EQ(after[6].str_data, "2024-01-15");
+  EXPECT_EQ(after[7].str_data, "12:34:56.123456");
+  EXPECT_EQ(after[8].type, MES_COL_DOUBLE);
+  EXPECT_FLOAT_EQ(static_cast<float>(after[8].double_val), 1.25F);
+  EXPECT_EQ(after[9].str_data, "wide char value");
+  EXPECT_EQ(after[10].type, MES_COL_BYTES);
+  EXPECT_EQ(after[10].str_data, std::string("\0\xFF\x10", 3));
+  EXPECT_EQ(after[11].type, MES_COL_BYTES);
+  EXPECT_FALSE(after[11].str_data.empty());
 }
 
 // ---- InsertWithNulls ----
@@ -392,14 +441,16 @@ TEST(E2EBinlogDML, LargeTextValue) {
 // ---- LargeBlobValue ----
 
 TEST(E2EBinlogDML, LargeBlobValue) {
-  e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id = 2");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.large_data WHERE id = 2");
+  constexpr size_t kPayloadBytes = 16 * 1024 * 1024 + 1;
 
   auto gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
   auto rc = e2e::ExecuteDML(
       "INSERT INTO mes_test.large_data (id, big_blob) VALUES "
-      "(2, UNHEX(REPEAT('41', 100000)))");
+      "(2, UNHEX(REPEAT('41', " +
+      std::to_string(kPayloadBytes) + ")))");
   ASSERT_EQ(rc, MES_OK);
 
   auto events = e2e::CaptureTableEvents(gtid, 510, "large_data", 1);
@@ -412,10 +463,9 @@ TEST(E2EBinlogDML, LargeBlobValue) {
   // Index 2: big_blob
   ASSERT_GT(ev.after.size(), 2u);
   EXPECT_EQ(ev.after[2].type, MES_COL_BYTES);
-  EXPECT_GE(ev.after[2].str_data.size(), 100000u);
-
-  // Cleanup
-  e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id = 2");
+  ASSERT_EQ(ev.after[2].str_data.size(), kPayloadBytes);
+  EXPECT_EQ(ev.after[2].str_data.front(), 'A');
+  EXPECT_EQ(ev.after[2].str_data.back(), 'A');
 }
 
 TEST(E2EBinlogDML, ClientEventSizeLimitRejectsLargeBlobPacket) {
@@ -741,6 +791,59 @@ TEST(E2EBinlogDML, BooleanValues) {
   e2e::ExecuteDML("DELETE FROM mes_test.users WHERE id IN (1017, 1018)");
 }
 
+TEST(E2EBinlogDML, YearConsumesSignednessBitBeforeBigInts) {
+  e2e::ExecuteDML("DELETE FROM mes_test.signedness_values WHERE y = 2026");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.signedness_values WHERE y = 2026");
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.signedness_values "
+                            "(y, signed_value, unsigned_value) VALUES "
+                            "(2026, -1, 18446744073709551615)"),
+            MES_OK);
+
+  const auto events =
+      e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlYearSignedness, "signedness_values", 1);
+  const auto filtered = e2e::FilterByTable(events, "signedness_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_EQ(filtered[0].after.size(), 3u);
+
+  EXPECT_EQ(filtered[0].after[0].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[0].int_val, 2026);
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[1].int_val, -1);
+  // Values beyond INT64_MAX are intentionally exposed as their exact decimal
+  // string rather than an overflowing signed integer.
+  EXPECT_EQ(filtered[0].after[2].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[2].str_data, "18446744073709551615");
+}
+
+TEST(E2EBinlogDML, CharsetMetadataPreservesBinaryAndTextTypes) {
+  e2e::ExecuteDML("DELETE FROM mes_test.charset_values WHERE id = 1");
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.charset_values WHERE id = 1");
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(
+      e2e::ExecuteDML("INSERT INTO mes_test.charset_values (id, binary_value, text_value) VALUES "
+                      "(1, UNHEX('000102030405060708090A0B0C0D0E0F'), 'charset metadata text')"),
+      MES_OK);
+
+  const auto events =
+      e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlCharsetMetadata, "charset_values", 1);
+  const auto filtered = e2e::FilterByTable(events, "charset_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_EQ(filtered[0].after.size(), 3u);
+  EXPECT_FALSE(filtered[0].names_resolved);
+  EXPECT_EQ(filtered[0].after[0].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[1].str_data, std::string("\x00\x01\x02\x03\x04\x05\x06\x07"
+                                                       "\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F",
+                                                       16));
+  EXPECT_EQ(filtered[0].after[2].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[2].str_data, "charset metadata text");
+}
+
 TEST(E2EBinlogDML, MariaCompressedColumns) {
   if (!e2e::IsMariaDB()) {
     GTEST_SKIP() << "MariaDB COMPRESSED columns are flavor-specific";
@@ -759,8 +862,10 @@ TEST(E2EBinlogDML, MariaCompressedColumns) {
                             "(1, 'short', REPEAT('x', 4096), REPEAT('b', 4096))"),
             MES_OK);
 
+  mes_error_t feed_error = MES_OK;
   const auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlMariaCompressedColumns,
-                                              "compressed_values", 1);
+                                              "compressed_values", 1, nullptr, &feed_error);
+  ASSERT_EQ(feed_error, MES_OK);
   const auto filtered = e2e::FilterByTable(events, "compressed_values");
   ASSERT_EQ(filtered.size(), 1u);
   ASSERT_EQ(filtered[0].after.size(), 4u);
