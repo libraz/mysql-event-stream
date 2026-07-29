@@ -1,7 +1,7 @@
 # mysql-event-stream Makefile
 # Convenience wrapper for CMake + Node.js + Python build systems
 
-.PHONY: help build test test-tsan clean rebuild install uninstall format format-check \
+.PHONY: help build test test-tsan benchmark clean rebuild install uninstall format format-check \
         node-build node-test node-check node-fix \
         py-test py-lint py-format py-typecheck \
         e2e e2e-cpp build-wheel configure lint
@@ -23,6 +23,7 @@ help:
 	@echo "  make build          - Build C++ core (default)"
 	@echo "  make test           - Run C++ unit tests"
 	@echo "  make test-tsan      - Run non-E2E C++ tests under ThreadSanitizer"
+	@echo "  make benchmark      - Measure synthetic feed/decode throughput, latency and RSS"
 	@echo "  make clean          - Clean build directory"
 	@echo "  make rebuild        - Clean and rebuild"
 	@echo "  make install        - Install library"
@@ -68,6 +69,11 @@ test-tsan:
 	cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DMES_ENABLE_TSAN=ON $(CMAKE_OPTIONS)
 	cmake --build build-tsan --parallel
 	ctest --test-dir build-tsan --output-on-failure --parallel -E "E2E"
+
+benchmark:
+	cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON $(CMAKE_OPTIONS)
+	cmake --build build-bench --target mes_benchmark_feed --parallel
+	build-bench/core/mes_benchmark_feed
 
 clean:
 	rm -rf $(BUILD_DIR)

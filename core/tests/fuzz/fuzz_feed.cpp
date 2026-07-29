@@ -8,8 +8,47 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#ifdef MES_FUZZ_STANDALONE
+#include <fstream>
+#include <iterator>
+#endif
+#include <vector>
 
 #include "mes.h"
+
+namespace {
+
+// Corpus files are text so they remain reviewable in git. A MES_HEX prefix
+// denotes an exact binlog byte sequence encoded as hexadecimal; normal
+// libFuzzer-generated inputs still flow through untouched.
+std::vector<uint8_t> DecodeHexCorpus(const uint8_t* data, size_t size) {
+  constexpr char kPrefix[] = "MES_HEX\n";
+  if (size < sizeof(kPrefix) - 1 || std::memcmp(data, kPrefix, sizeof(kPrefix) - 1) != 0) {
+    return {};
+  }
+
+  std::vector<uint8_t> decoded;
+  int high_nibble = -1;
+  for (size_t i = sizeof(kPrefix) - 1; i < size; ++i) {
+    const uint8_t ch = data[i];
+    if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') continue;
+    const int value = ch >= '0' && ch <= '9'   ? ch - '0'
+                      : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10
+                      : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10
+                                               : -1;
+    if (value < 0) return {};
+    if (high_nibble < 0) {
+      high_nibble = value;
+    } else {
+      decoded.push_back(static_cast<uint8_t>((high_nibble << 4) | value));
+      high_nibble = -1;
+    }
+  }
+  return high_nibble < 0 ? decoded : std::vector<uint8_t>{};
+}
+
+}  // namespace
 
 /**
  * @brief libFuzzer entry point.
@@ -19,6 +58,12 @@
  * exercised. All drained events are read out to drive the decoder.
  */
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  const std::vector<uint8_t> decoded = DecodeHexCorpus(data, size);
+  if (!decoded.empty()) {
+    data = decoded.data();
+    size = decoded.size();
+  }
+
   mes_engine_t* engine = mes_create();
   if (engine == nullptr) {
     return 0;
@@ -46,3 +91,14 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   mes_destroy(engine);
   return 0;
 }
+
+#ifdef MES_FUZZ_STANDALONE
+int main(int argc, char** argv) {
+  if (argc != 2) return 2;
+  std::ifstream input(argv[1], std::ios::binary);
+  if (!input) return 3;
+  const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+                                   std::istreambuf_iterator<char>());
+  return LLVMFuzzerTestOneInput(bytes.data(), bytes.size());
+}
+#endif
