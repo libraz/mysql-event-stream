@@ -42,9 +42,15 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
   // Set col_name before the is_null early return. The mes.h contract states
   // col_name is never NULL ("" if unknown), so it must be set for all columns
   // including NULL-valued ones.
-  c.col_name = col.name.c_str();
+  c.col_name = col.name.empty() ? "" : col.name.data();
   if (col.is_null) {
     c.type = MES_COL_NULL;
+    return c;
+  }
+  if (col.is_binary) {
+    c.type = MES_COL_BYTES;
+    c.str_data = reinterpret_cast<const char*>(col.bytes_data());
+    c.str_len = static_cast<uint32_t>(std::min(col.bytes_size(), static_cast<size_t>(UINT32_MAX)));
     return c;
   }
   switch (col.type) {
@@ -79,11 +85,6 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       break;
     case mes::ColumnType::kJson:
     case mes::ColumnType::kTypedArray:
-    case mes::ColumnType::kBlob:
-    case mes::ColumnType::kBlobCompressed:
-    case mes::ColumnType::kTinyBlob:
-    case mes::ColumnType::kMediumBlob:
-    case mes::ColumnType::kLongBlob:
     case mes::ColumnType::kGeometry:
     case mes::ColumnType::kVector:
       // BLOB/JSON/GEOMETRY payloads live in string_val alongside text
@@ -147,6 +148,52 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
 
 extern "C" {
 
+MES_API const char* mes_version(void) { return "1.5.0"; }
+
+MES_API uint32_t mes_abi_version(void) { return MES_ABI_VERSION; }
+
+MES_API const char* mes_error_string(mes_error_t error) {
+  switch (error) {
+    case MES_OK:
+      return "success";
+    case MES_ERR_NULL_ARG:
+      return "null argument";
+    case MES_ERR_INVALID_ARG:
+      return "invalid argument";
+    case MES_ERR_INTERNAL:
+      return "internal error";
+    case MES_ERR_PARSE:
+      return "parse error";
+    case MES_ERR_CHECKSUM:
+      return "checksum mismatch";
+    case MES_ERR_DECODE:
+      return "decode error";
+    case MES_ERR_DECODE_COLUMN:
+      return "column decode error";
+    case MES_ERR_DECODE_ROW:
+      return "row decode error";
+    case MES_ERR_NO_EVENT:
+      return "no event available";
+    case MES_ERR_QUEUE_FULL:
+      return "queue full";
+    case MES_ERR_CONNECT:
+      return "connection error";
+    case MES_ERR_AUTH:
+      return "authentication error";
+    case MES_ERR_VALIDATION:
+      return "validation error";
+    case MES_ERR_STREAM:
+      return "stream error";
+    case MES_ERR_DISCONNECTED:
+      return "disconnected";
+    case MES_ERR_GTID_PURGED:
+      return "requested GTID position has been purged";
+    case MES_ERR_GTID_TAGGED_UNSUPPORTED:
+      return "legacy tagged GTID error";
+  }
+  return "unknown error";
+}
+
 /* ---- Engine lifecycle ---- */
 
 MES_API mes_engine_t* mes_create(void) { return new (std::nothrow) mes_engine_t(); }
@@ -209,6 +256,7 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
   ce.binlog_file = engine->current_event.position.binlog_file.c_str();
   ce.binlog_offset = engine->current_event.position.offset;
   ce.names_resolved = engine->current_event.names_resolved ? 1 : 0;
+  ce.source_sql = engine->current_event.source_sql.c_str();
 
   *event = &engine->c_event;
   return MES_OK;
@@ -315,6 +363,9 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
                                                  const mes_client_config_t* config) {
   if (engine == nullptr || config == nullptr) {
     return MES_ERR_NULL_ARG;
+  }
+  if (config->ssl_mode < MES_SSL_DISABLED || config->ssl_mode > MES_SSL_VERIFY_IDENTITY) {
+    return MES_ERR_INVALID_ARG;
   }
   auto fetcher = std::make_unique<mes::MetadataFetcher>();
   std::string host = config->host != nullptr ? config->host : "127.0.0.1";
