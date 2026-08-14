@@ -17,7 +17,7 @@ Native N-API binding for the mysql-event-stream CDC engine (MySQL 8.4+ and Maria
 ### Prerequisites
 
 - Node.js 22+
-- Yarn 4.9.1
+- Yarn 4.18.0 (pinned by `packageManager` in `package.json`)
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
 - OpenSSL development libraries

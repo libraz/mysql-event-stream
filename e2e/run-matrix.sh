@@ -38,9 +38,9 @@ fi
 
 cd "$SCRIPT_DIR"
 
-# Ensure Volta shims are on PATH (project pins Node via volta.node in package.json)
-if [[ -d "$HOME/.volta/bin" ]]; then
-    export PATH="$HOME/.volta/bin:$PATH"
+# Ensure mise shims are on PATH (the Node binding pins its Node via mise.toml)
+if [[ -d "$HOME/.local/share/mise/shims" ]]; then
+    export PATH="$HOME/.local/share/mise/shims:$PATH"
 fi
 
 # Parse options
