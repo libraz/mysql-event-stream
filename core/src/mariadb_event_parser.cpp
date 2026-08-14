@@ -44,8 +44,10 @@ mes_error_t MariaDBEventParser::ExtractGtid(const uint8_t* buffer, size_t length
   // domain_id: 4 bytes at offset 8 (little-endian uint32)
   uint32_t domain_id = binary::ReadU32Le(post_header + 8);
 
-  // MariaDB's FL_STANDALONE means this GTID group has no terminating COMMIT
-  // or XID event, so consumers must close the checkpoint at this event.
+  // MariaDB's FL_STANDALONE marks a GTID group that commits without a
+  // terminating COMMIT or XID event. The group's payload still arrives after
+  // this event, so consumers must keep the checkpoint closed until they have
+  // observed the group's own terminating event.
   if (standalone != nullptr) {
     *standalone = (post_header[12] & 0x01u) != 0;
   }
@@ -106,6 +108,26 @@ mes_error_t MariaDBEventParser::ParseGtidList(const uint8_t* buffer, size_t leng
   return MES_OK;
 }
 
+mes_error_t MariaDBEventParser::ExtractAnnotateRowsBody(const uint8_t* body, size_t body_len,
+                                                        std::string* out) {
+  if (body == nullptr || out == nullptr) {
+    return MES_ERR_NULL_ARG;
+  }
+
+  // Need at least 1 byte of text
+  if (body_len == 0) {
+    return MES_ERR_PARSE;
+  }
+
+  // Note: ANNOTATE_ROWS payload is the original SQL text in the
+  // server's character set (typically UTF-8 on modern MariaDB). Storing
+  // it as a std::string preserves the raw bytes verbatim; downstream
+  // consumers must handle potential non-UTF-8 bytes if the server
+  // character_set_client differs.
+  out->assign(reinterpret_cast<const char*>(body), body_len);
+  return MES_OK;
+}
+
 mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer, size_t length,
                                                     bool has_checksum, std::string* out) {
   if (buffer == nullptr || out == nullptr) {
@@ -119,19 +141,8 @@ mes_error_t MariaDBEventParser::ExtractAnnotateRows(const uint8_t* buffer, size_
     return MES_ERR_PARSE;
   }
 
-  size_t text_length = length - kEventHeaderSize - tail_size;
-
-  if (text_length == 0) {
-    return MES_ERR_PARSE;
-  }
-
-  // Note: ANNOTATE_ROWS payload is the original SQL text in the
-  // server's character set (typically UTF-8 on modern MariaDB). Storing
-  // it as a std::string preserves the raw bytes verbatim; downstream
-  // consumers must handle potential non-UTF-8 bytes if the server
-  // character_set_client differs.
-  *out = std::string(reinterpret_cast<const char*>(buffer + kEventHeaderSize), text_length);
-  return MES_OK;
+  return ExtractAnnotateRowsBody(buffer + kEventHeaderSize, length - kEventHeaderSize - tail_size,
+                                 out);
 }
 
 }  // namespace mes

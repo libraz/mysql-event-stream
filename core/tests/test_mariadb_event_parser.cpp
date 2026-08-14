@@ -341,6 +341,30 @@ TEST_F(MariaDBEventParserAnnotateTest, NoChecksumEmptyText) {
             MariaDBEventParser::ExtractAnnotateRows(header.data(), header.size(), false, &out));
 }
 
+TEST_F(MariaDBEventParserAnnotateTest, BodyEntryPointMatchesTheFullEventEntryPoint) {
+  // CdcEngine reaches the parser through the body entry point because the
+  // stream parser has already stripped the header and the checksum.
+  const std::string sql = "INSERT INTO t1 VALUES (1, 'hello')";
+  auto event = BuildAnnotateRowsEvent(sql);
+
+  std::string from_event;
+  ASSERT_EQ(MES_OK,
+            MariaDBEventParser::ExtractAnnotateRows(event.data(), event.size(), true, &from_event));
+
+  std::string from_body;
+  ASSERT_EQ(MES_OK, MariaDBEventParser::ExtractAnnotateRowsBody(event.data() + kEventHeaderSize,
+                                                                sql.size(), &from_body));
+  EXPECT_EQ(from_body, from_event);
+}
+
+TEST_F(MariaDBEventParserAnnotateTest, BodyEntryPointRejectsEmptyAndNullInput) {
+  const uint8_t body[] = {'x'};
+  std::string out;
+  EXPECT_NE(MES_OK, MariaDBEventParser::ExtractAnnotateRowsBody(body, 0, &out));
+  EXPECT_NE(MES_OK, MariaDBEventParser::ExtractAnnotateRowsBody(nullptr, 1, &out));
+  EXPECT_NE(MES_OK, MariaDBEventParser::ExtractAnnotateRowsBody(body, 1, nullptr));
+}
+
 // ===========================================================================
 // Integration: GTID round-trip (event -> extract -> parse -> verify)
 // ===========================================================================

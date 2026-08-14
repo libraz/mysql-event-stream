@@ -7,11 +7,15 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include "binary_util.h"
 #include "client/metadata_fetcher.h"
 #include "logger.h"
+#include "mariadb_event_parser.h"
 #include "rotate_event.h"
 
 namespace mes {
@@ -202,7 +206,7 @@ void CdcEngine::Reset() {
   stream_parser_.Reset();
   table_registry_.Clear();
   position_ = BinlogPosition{};
-  pending_source_sql_.clear();
+  pending_source_sql_.reset();
   blocked_table_ids_.clear();
   ResetIncludeFilterMatchState();
   last_error_ = MES_OK;
@@ -266,13 +270,24 @@ bool CdcEngine::HasIncludeFilters() const {
 bool CdcEngine::MatchesTableFilter(const std::unordered_set<std::string>& filters,
                                    const std::string& database, const std::string& table) const {
   if (filters.empty()) return false;
-  const std::string qualified = database + "." + table;
+  // Built on demand so a filter set of bare table names never pays for the
+  // concatenation.
+  std::string qualified;
+  bool qualified_built = false;
   for (const std::string& filter : filters) {
-    if (filter == qualified || filter == table) return true;
+    // An entry containing '.' names one "database.table"; an entry without one
+    // names a bare table in any database. Comparing a bare entry against the
+    // qualified name would let its prefix match the database name instead.
+    const bool filter_is_qualified = filter.find('.') != std::string::npos;
+    if (filter_is_qualified && !qualified_built) {
+      qualified = database + "." + table;
+      qualified_built = true;
+    }
+    const std::string& subject = filter_is_qualified ? qualified : table;
+    if (filter == subject) return true;
     if (filter.empty() || filter.back() != '*') continue;
     const std::string_view prefix(filter.data(), filter.size() - 1);
-    if (qualified.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0 ||
-        table.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0) {
+    if (subject.compare(0, prefix.size(), prefix.data(), prefix.size()) == 0) {
       return true;
     }
   }
@@ -338,6 +353,31 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     position_.offset = header.next_position;
   }
 
+  // Every type code a supported server can put on the wire is classified by
+  // the switch below, so the default case is reached only by codes no
+  // supported server emits. Sources: MySQL 8.4/9.x Log_event_type in
+  // mysql/binlog/event/binlog_event.h, MariaDB Log_event_type in
+  // sql/log_event.h.
+  //
+  //   decoded: 2 QUERY, 4 ROTATE, 19 TABLE_MAP, 23-25/30-32 ROWS,
+  //     160 MARIADB_ANNOTATE_ROWS
+  //   skipped, no row change this engine represents: 3 STOP, 5 INTVAR,
+  //     9 APPEND_BLOCK, 11 DELETE_FILE, 13 RAND, 14 USER_VAR,
+  //     15 FORMAT_DESCRIPTION, 16 XID, 17 BEGIN_LOAD_QUERY,
+  //     18 EXECUTE_LOAD_QUERY, 27/41 HEARTBEAT, 28 IGNORABLE, 29 ROWS_QUERY,
+  //     33/34/42 GTID, 35 PREVIOUS_GTIDS, 36 TRANSACTION_CONTEXT,
+  //     37 VIEW_CHANGE, 38 XA_PREPARE, 161 MARIADB_BINLOG_CHECKPOINT,
+  //     162 MARIADB_GTID, 163 MARIADB_GTID_LIST, 164 MARIADB_START_ENCRYPTION
+  //   refused loudly, carries a change this engine cannot represent:
+  //     26 INCIDENT, 39 PARTIAL_UPDATE_ROWS, 40 TRANSACTION_PAYLOAD,
+  //     165-171 MariaDB compressed, 172 MARIADB_PARTIAL_ROW_DATA
+  //   default: 0 UNKNOWN, 1 START_V3, 6 LOAD, 7 SLAVE, 8 CREATE_FILE,
+  //     10 EXEC_LOAD, 12 NEW_LOAD, 20-22 PRE_GA_ROWS — obsolete formats
+  //     neither server still writes — plus any code added after this table
+  //
+  // The LOAD DATA family (9/11/17/18) is only written under a non-row binlog
+  // format, where the DML itself already arrives as a QUERY_EVENT this engine
+  // skips. Refusing it would stall the stream rather than surface a change.
   switch (header.type_code) {
     case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
       if (body == nullptr || body_len < 6) {
@@ -406,7 +446,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
 
     case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
-      pending_source_sql_.clear();
+      pending_source_sql_.reset();
       // A DDL statement (ALTER/RENAME/DROP/CREATE/TRUNCATE) may change a
       // table's columns while preserving the column count, which the metadata
       // cache's count guard cannot detect. Invalidate the whole metadata cache
@@ -442,16 +482,22 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
     }
 
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent):
-      if (body == nullptr || body_len == 0) {
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent): {
+      // One allocation per ANNOTATE_ROWS event, shared by every row it
+      // annotates, instead of one copy of the statement per row.
+      auto sql = std::make_shared<std::string>();
+      if (MariaDBEventParser::ExtractAnnotateRowsBody(body, body_len, sql.get()) != MES_OK) {
         last_error_ = MES_ERR_PARSE;
         StructuredLog().Event("mariadb_annotate_rows_parse_failed").Error();
-      } else {
-        pending_source_sql_.assign(reinterpret_cast<const char*>(body), body_len);
+        break;
       }
+      pending_source_sql_ = std::move(sql);
       break;
+    }
 
-    // MariaDB-specific events without a row-level representation.
+    // Standard control events and MariaDB-specific events without a row-level
+    // representation. They carry no change this engine can surface, so the
+    // stream position advances past them.
     case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent):
@@ -461,7 +507,16 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kRowsQueryLogEvent):
     case static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent):
     case static_cast<uint8_t>(BinlogEventType::kXidEvent):
-      pending_source_sql_.clear();
+    case static_cast<uint8_t>(BinlogEventType::kStopEvent):
+    case static_cast<uint8_t>(BinlogEventType::kIntvarEvent):
+    case static_cast<uint8_t>(BinlogEventType::kRandEvent):
+    case static_cast<uint8_t>(BinlogEventType::kUserVarEvent):
+    case static_cast<uint8_t>(BinlogEventType::kAppendBlockEvent):
+    case static_cast<uint8_t>(BinlogEventType::kDeleteFileEvent):
+    case static_cast<uint8_t>(BinlogEventType::kBeginLoadQueryEvent):
+    case static_cast<uint8_t>(BinlogEventType::kExecuteLoadQueryEvent):
+    case static_cast<uint8_t>(BinlogEventType::kXaPrepareLogEvent):
+      pending_source_sql_.reset();
       break;
 
     case static_cast<uint8_t>(BinlogEventType::kGtidLogEvent):
@@ -473,9 +528,13 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kHeartbeatLogEventV2):
       break;
 
-    // PARTIAL_JSON and MariaDB log_bin_compress need decoders that preserve
-    // full row values. Refuse them rather than silently advancing a CDC
-    // checkpoint past changes we cannot represent.
+    // PARTIAL_JSON, transaction payload compression and MariaDB
+    // log_bin_compress need decoders that preserve full row values; INCIDENT
+    // reports that the server itself lost events. Refuse them rather than
+    // silently advancing a CDC checkpoint past changes we cannot represent.
+    case static_cast<uint8_t>(BinlogEventType::kIncidentEvent):
+    case static_cast<uint8_t>(BinlogEventType::kTransactionPayloadEvent):
+    case static_cast<uint8_t>(BinlogEventType::kMariaDBPartialRowDataEvent):
     case static_cast<uint8_t>(BinlogEventType::kPartialUpdateRowsEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBQueryCompressedEvent):
     case static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEventV1):

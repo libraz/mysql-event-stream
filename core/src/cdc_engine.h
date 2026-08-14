@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <queue>
 #include <string>
 #include <unordered_set>
@@ -170,7 +171,10 @@ class CdcEngine {
   EventStreamParser stream_parser_;
   TableMapRegistry table_registry_;
   BinlogPosition position_;
-  std::string pending_source_sql_;
+  // Shared with every ChangeEvent decoded from the ROWS event this annotates,
+  // so an ANNOTATE_ROWS statement is stored once per event rather than once
+  // per row. Null when no annotation is in effect.
+  std::shared_ptr<const std::string> pending_source_sql_;
   std::queue<ChangeEvent> event_queue_;
   // Raw-feed users, including CdcStream, must not accumulate an unbounded
   // ChangeEvent queue when a producer temporarily outpaces the consumer.

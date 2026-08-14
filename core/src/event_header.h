@@ -22,10 +22,19 @@ namespace mes {
 enum class BinlogEventType : uint8_t {
   kUnknown = 0,
   kQueryEvent = 2,
+  kStopEvent = 3,
   kRotateEvent = 4,
+  kIntvarEvent = 5,
+  kAppendBlockEvent = 9,
+  kDeleteFileEvent = 11,
+  kRandEvent = 13,
+  kUserVarEvent = 14,
   kFormatDescriptionEvent = 15,
   kXidEvent = 16,
+  kBeginLoadQueryEvent = 17,
+  kExecuteLoadQueryEvent = 18,
   kTableMapEvent = 19,
+  kIncidentEvent = 26,
   kHeartbeatLogEvent = 27,
   kIgnorableLogEvent = 28,
   kRowsQueryLogEvent = 29,
@@ -40,7 +49,9 @@ enum class BinlogEventType : uint8_t {
   kPreviousGtidsEvent = 35,
   kTransactionContextEvent = 36,
   kViewChangeEvent = 37,
+  kXaPrepareLogEvent = 38,
   kPartialUpdateRowsEvent = 39,
+  kTransactionPayloadEvent = 40,
   kHeartbeatLogEventV2 = 41,
   kGtidTaggedLogEvent = 42,
 
@@ -57,6 +68,7 @@ enum class BinlogEventType : uint8_t {
   kMariaDBWriteRowsCompressedEvent = 169,
   kMariaDBUpdateRowsCompressedEvent = 170,
   kMariaDBDeleteRowsCompressedEvent = 171,
+  kMariaDBPartialRowDataEvent = 172,
 };
 
 /// MySQL binlog v4 event header (19 bytes).

@@ -3,19 +3,29 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
+#include <string>
 #include <vector>
 
 #include "event_header.h"
 #include "mes.h"
 #include "test_helpers.h"
 
+namespace mes {
+// Defined in capi.cpp. Not part of the public C ABI: it is the only way to put
+// an engine into the "metadata enabled" shape without a live MySQL server.
+void CapiInstallUnconnectedMetadataFetcher(mes_engine_t* engine);
+}  // namespace mes
+
 namespace {
 
 using mes::BinlogEventType;
 using mes::test::BuildDeleteRowsBody;
 using mes::test::BuildEvent;
+using mes::test::BuildQueryEventBody;
 using mes::test::BuildRotateBody;
 using mes::test::BuildTableMapBody;
 using mes::test::BuildUpdateRowsBody;
@@ -42,6 +52,23 @@ TEST(CApi, CreateAndDestroy) {
 
 TEST(CApi, DestroyNull) {
   mes_destroy(nullptr);  // Should not crash
+}
+
+TEST(CApi, DestroyWithMetadataFetcherKeepsFetcherAliveForTheEngine) {
+  mes_engine_t* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  mes::CapiInstallUnconnectedMetadataFetcher(engine);
+
+  // A DDL QUERY_EVENT makes the engine dereference the fetcher it does not own.
+  auto ddl = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 100,
+                        BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT"));
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, ddl.data(), ddl.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, ddl.size());
+
+  // The fetcher outlives the CdcEngine that points at it; under ASan/LSan this
+  // also asserts it is released exactly once.
+  mes_destroy(engine);
 }
 
 TEST(CApi, MetadataConnectionRejectsInvalidSslModeBeforeConnecting) {
@@ -173,6 +200,49 @@ TEST(CApi, InsertEvent) {
 
   // No more events
   EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+  mes_destroy(engine);
+}
+
+// mes_event_t.source_sql is a NUL-terminated pointer valid until the next
+// mes_feed/mes_next_event/mes_reset, whether or not the row was annotated.
+TEST(CApi, SourceSqlIsNulTerminatedForAnnotatedAndPlainEvents) {
+  auto* engine = mes_create();
+
+  const std::string sql = "INSERT INTO users VALUES (42)";
+  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
+                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                             BuildTableMapBody(1, "testdb", "users"));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+                             BuildWriteRowsBody(1, 42));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), annotate.begin(), annotate.end());
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+
+  const mes_event_t* event;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event->source_sql, nullptr);
+  EXPECT_STREQ(event->source_sql, sql.c_str());
+
+  // A XID ends the annotated statement, so the next row carries an empty
+  // (but still dereferenceable) source_sql.
+  auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 250, {});
+  auto next_wr = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 300,
+                            BuildWriteRowsBody(1, 43));
+  std::vector<uint8_t> tail;
+  tail.insert(tail.end(), xid.begin(), xid.end());
+  tail.insert(tail.end(), next_wr.begin(), next_wr.end());
+  ASSERT_EQ(mes_feed(engine, tail.data(), tail.size(), &consumed), MES_OK);
+
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event->source_sql, nullptr);
+  EXPECT_STREQ(event->source_sql, "");
+
   mes_destroy(engine);
 }
 
@@ -930,11 +1000,143 @@ TEST(CApi, ClientRejectsInvalidStartPositionConfigurationBeforeConnecting) {
   mes_client_destroy(client);
 }
 
-TEST(CApi, ErrorStringCoversKnownAndUnknownCodes) {
-  EXPECT_STREQ(mes_error_string(MES_OK), "success");
-  EXPECT_STREQ(mes_error_string(MES_ERR_AUTH), "authentication error");
-  EXPECT_STREQ(mes_error_string(MES_ERR_GTID_PURGED), "requested GTID position has been purged");
-  EXPECT_STREQ(mes_error_string(MES_ERR_GTID_TAGGED_UNSUPPORTED), "legacy tagged GTID error");
+// ---- Filter setters ----
+
+// Feed a TABLE_MAP + WRITE_ROWS pair for one table and report whether the
+// engine surfaced the resulting INSERT. Each call needs its own table_id so
+// the registry entry of a previous call is not reused.
+bool FeedInsertFor(mes_engine_t* engine, uint64_t table_id, const char* database,
+                   const char* table) {
+  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                             BuildTableMapBody(table_id, database, table));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                             BuildWriteRowsBody(table_id, 1));
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  size_t consumed = 0;
+  EXPECT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+  const mes_event_t* event = nullptr;
+  return mes_next_event(engine, &event) == MES_OK;
+}
+
+TEST(CApi, SetIncludeDatabasesRejectsNullElementAndKeepsFilter) {
+  auto* engine = mes_create();
+  const char* keep[] = {"keepdb"};
+  ASSERT_EQ(mes_set_include_databases(engine, keep, 1), MES_OK);
+
+  const char* all_null[] = {nullptr};
+  EXPECT_EQ(mes_set_include_databases(engine, all_null, 1), MES_ERR_NULL_ARG);
+  const char* partial[] = {"otherdb", nullptr};
+  EXPECT_EQ(mes_set_include_databases(engine, partial, 2), MES_ERR_NULL_ARG);
+
+  // Neither rejected call may have cleared or widened the installed filter.
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "otherdb", "t"));
+  EXPECT_TRUE(FeedInsertFor(engine, 2, "keepdb", "t"));
+  mes_destroy(engine);
+}
+
+TEST(CApi, SetIncludeTablesRejectsNullElementAndKeepsFilter) {
+  auto* engine = mes_create();
+  const char* keep[] = {"keepdb.keep"};
+  ASSERT_EQ(mes_set_include_tables(engine, keep, 1), MES_OK);
+
+  const char* all_null[] = {nullptr};
+  EXPECT_EQ(mes_set_include_tables(engine, all_null, 1), MES_ERR_NULL_ARG);
+  const char* partial[] = {"keepdb.other", nullptr};
+  EXPECT_EQ(mes_set_include_tables(engine, partial, 2), MES_ERR_NULL_ARG);
+
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "keepdb", "other"));
+  EXPECT_TRUE(FeedInsertFor(engine, 2, "keepdb", "keep"));
+  mes_destroy(engine);
+}
+
+TEST(CApi, SetExcludeTablesRejectsNullElementAndKeepsFilter) {
+  auto* engine = mes_create();
+  const char* drop[] = {"skipdb.skip"};
+  ASSERT_EQ(mes_set_exclude_tables(engine, drop, 1), MES_OK);
+
+  const char* all_null[] = {nullptr};
+  EXPECT_EQ(mes_set_exclude_tables(engine, all_null, 1), MES_ERR_NULL_ARG);
+  const char* partial[] = {"skipdb.other", nullptr};
+  EXPECT_EQ(mes_set_exclude_tables(engine, partial, 2), MES_ERR_NULL_ARG);
+
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "skipdb", "skip"));
+  EXPECT_TRUE(FeedInsertFor(engine, 2, "skipdb", "other"));
+  mes_destroy(engine);
+}
+
+TEST(CApi, FilterSettersAcceptEmptyArrays) {
+  auto* engine = mes_create();
+  EXPECT_EQ(mes_set_include_databases(engine, nullptr, 0), MES_OK);
+  EXPECT_EQ(mes_set_include_tables(engine, nullptr, 0), MES_OK);
+  EXPECT_EQ(mes_set_exclude_tables(engine, nullptr, 0), MES_OK);
+  EXPECT_TRUE(FeedInsertFor(engine, 1, "anydb", "t"));
+  mes_destroy(engine);
+}
+
+TEST(CApi, FilterSettersRejectNullArrayWithNonZeroCount) {
+  auto* engine = mes_create();
+  EXPECT_EQ(mes_set_include_databases(engine, nullptr, 1), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_set_include_tables(engine, nullptr, 1), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_set_exclude_tables(engine, nullptr, 1), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_set_include_databases(nullptr, nullptr, 0), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_set_include_tables(nullptr, nullptr, 0), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_set_exclude_tables(nullptr, nullptr, 0), MES_ERR_NULL_ARG);
+  mes_destroy(engine);
+}
+
+TEST(CApi, ErrorStringCoversEveryEnumerator) {
+  // Every mes_error_t declared in mes.h, in declaration order. A new enumerator
+  // without a case in mes_error_string() silently degrades to "unknown error",
+  // which callers cannot distinguish from a corrupt code.
+  struct ErrorStringCase {
+    mes_error_t code;
+    const char* text;
+  };
+  static constexpr ErrorStringCase kCases[] = {
+      {MES_OK, "success"},
+      {MES_ERR_NULL_ARG, "null argument"},
+      {MES_ERR_INVALID_ARG, "invalid argument"},
+      {MES_ERR_INTERNAL, "internal error"},
+      {MES_ERR_PARSE, "parse error"},
+      {MES_ERR_CHECKSUM, "checksum mismatch"},
+      {MES_ERR_DECODE, "decode error"},
+      {MES_ERR_DECODE_COLUMN, "column decode error"},
+      {MES_ERR_DECODE_ROW, "row decode error"},
+      {MES_ERR_NO_EVENT, "no event available"},
+      {MES_ERR_QUEUE_FULL, "queue full"},
+      {MES_ERR_CONNECT, "connection error"},
+      {MES_ERR_AUTH, "authentication error"},
+      {MES_ERR_VALIDATION, "validation error"},
+      {MES_ERR_STREAM, "stream error"},
+      {MES_ERR_DISCONNECTED, "disconnected"},
+      {MES_ERR_GTID_PURGED, "requested GTID position has been purged"},
+      {MES_ERR_GTID_TAGGED_UNSUPPORTED, "legacy tagged GTID error"},
+  };
+  ASSERT_EQ(std::size(kCases), 18u);
+
+  for (const auto& c : kCases) {
+    const char* text = mes_error_string(c.code);
+    ASSERT_NE(text, nullptr) << "code " << static_cast<int>(c.code);
+    EXPECT_STREQ(text, c.text) << "code " << static_cast<int>(c.code);
+    EXPECT_STRNE(text, "unknown error") << "code " << static_cast<int>(c.code);
+    // The returned pointer is static storage, so it stays valid and stable
+    // across calls; bindings copy it lazily.
+    EXPECT_EQ(text, mes_error_string(c.code)) << "code " << static_cast<int>(c.code);
+  }
+
+  // Distinctness: no two enumerators share a message, so an error string
+  // identifies its code.
+  for (size_t i = 0; i < std::size(kCases); ++i) {
+    for (size_t j = i + 1; j < std::size(kCases); ++j) {
+      EXPECT_STRNE(kCases[i].text, kCases[j].text) << "codes " << static_cast<int>(kCases[i].code)
+                                                   << " and " << static_cast<int>(kCases[j].code);
+    }
+  }
+
   EXPECT_STREQ(mes_error_string(static_cast<mes_error_t>(999)), "unknown error");
 }
 

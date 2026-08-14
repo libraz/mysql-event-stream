@@ -249,8 +249,24 @@ struct ChangeEvent {
   RowData after;   ///< Populated for INSERT and UPDATE
   uint32_t timestamp = 0;
   BinlogPosition position;
-  /// Original MariaDB SQL from the preceding ANNOTATE_ROWS event, if present.
-  std::string source_sql;
+  /// Original MariaDB SQL from the preceding ANNOTATE_ROWS event; null when the
+  /// event carried none. Held by shared pointer because one ANNOTATE_ROWS
+  /// annotates every row of the ROWS event that follows it: giving each row its
+  /// own copy charges the statement length per row, which for an 8 KB statement
+  /// dominates the queued event. All ChangeEvents from one ROWS event therefore
+  /// share a single copy. Use SourceSql() to read it.
+  std::shared_ptr<const std::string> source_sql;
+
+  /**
+   * @brief The annotating statement, or an empty string when there was none.
+   *
+   * The returned reference is valid for as long as this ChangeEvent (or any
+   * other event sharing the same statement) is alive.
+   */
+  const std::string& SourceSql() const {
+    static const std::string kNoSourceSql;
+    return source_sql ? *source_sql : kNoSourceSql;
+  }
   /// False when column names could not be resolved for this row's table, so
   /// column names in @ref before / @ref after are empty. See
   /// TableMetadata::names_resolved.

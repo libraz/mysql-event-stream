@@ -130,15 +130,35 @@ typedef enum {
  * binlog_row_metadata=NO_LOG), BLOB-family values remain MES_COL_BYTES as a
  * conservative fallback. JSON and geometry values are always MES_COL_BYTES.
  *
- * The C ABI mapping is:
- * - MES_COL_INT: TINYINT through BIGINT within int64_t, MEDIUMINT, YEAR,
- *   BIT, ENUM, and SET. BIGINT UNSIGNED above INT64_MAX is MES_COL_STRING
- *   containing its exact decimal value.
- * - MES_COL_DOUBLE: FLOAT and DOUBLE.
- * - MES_COL_STRING: non-binary character and BLOB-family columns, DECIMAL,
- *   DATE/TIME/DATETIME, legacy TIMESTAMP, and fractional temporal values.
- * - MES_COL_BYTES: binary character and BLOB-family columns, JSON, GEOMETRY,
- *   VECTOR, and typed-array payloads.
+ * Two column families sit off that path. ENUM and SET travel on the wire as
+ * MYSQL_TYPE_STRING but are excluded from the DEFAULT_CHARSET and
+ * COLUMN_CHARSET index space, because the server carries their collations in
+ * the separate ENUM_AND_SET_* metadata fields; they are surfaced as
+ * MES_COL_INT (the 1-based ordinal for ENUM, the member bitmask for SET) and
+ * never as text. VECTOR does occupy a slot in that index space, always with
+ * the binary collation, and is always surfaced as MES_COL_BYTES.
+ *
+ * Canonical column-type table. Every language binding restates it in its own
+ * public documentation, and a binding test compares the two tables so the
+ * surfaces cannot drift apart:
+ *
+ *   MES_COL_INT    => TINYINT SMALLINT MEDIUMINT INT BIGINT YEAR BIT ENUM SET
+ *   MES_COL_DOUBLE => FLOAT DOUBLE
+ *   MES_COL_STRING => CHAR VARCHAR TEXT DECIMAL DATE TIME DATETIME TIMESTAMP
+ *   MES_COL_BYTES  => BINARY VARBINARY BLOB JSON GEOMETRY VECTOR
+ *
+ * The table lists each column type once, under the type it produces by
+ * default. Three refinements apply within a row:
+ * - A character or BLOB-family column follows its charset, so a TEXT column
+ *   declared with a binary collation is MES_COL_BYTES and a BLOB column with a
+ *   text collation is MES_COL_STRING.
+ * - A BIGINT UNSIGNED, SET, or BIT value above INT64_MAX is MES_COL_STRING
+ *   holding its exact decimal value, because int_val cannot represent it.
+ * - Every TIMESTAMP variant is MES_COL_STRING holding decimal Unix epoch
+ *   seconds, carrying as many fractional digits as the column's declared
+ *   precision.
+ * Typed-array payloads extracted from JSON are MES_COL_BYTES like the JSON
+ * itself.
  */
 typedef enum {
   MES_COL_NULL = 0,
@@ -151,9 +171,11 @@ typedef enum {
 /* ---- Column value ---- */
 /**
  * @note str_len is intentionally 32-bit to keep the struct compact and
- *       to simplify the ctypes/N-API bindings. MySQL LONGBLOB/LONGTEXT
- *       payloads larger than 4 GiB are therefore truncated at the C ABI
- *       boundary; row_decoder asserts on payloads that exceed UINT32_MAX.
+ *       to simplify the ctypes/N-API bindings. A payload longer than
+ *       UINT32_MAX is clamped to UINT32_MAX at this boundary and reported
+ *       through the log callback as a `column_data_truncated` WARN event;
+ *       nothing asserts or aborts. The 1 GiB ceiling on a single event
+ *       (see mes_set_max_event_size) keeps the clamp unreachable in practice.
  *       This field will be widened to uint64_t in the next major release.
  */
 typedef struct {
@@ -228,8 +250,18 @@ MES_API void mes_destroy(mes_engine_t* engine);
  * must be drained before feeding resumes from a known binlog position.
  * Re-feeding the same or subsequent bytes without a reset is unsupported and
  * may duplicate events or make no progress.
- * Do not retry mes_feed() on error. An unsupported or unknown binlog event is
- * an MES_ERR_PARSE failure; it is never silently skipped or checkpointed.
+ * Do not retry mes_feed() on error.
+ *
+ * Not every binlog event produces a change event. A standard control event
+ * that has no row-level representation (STOP, ROTATE, XID, INTVAR, RAND,
+ * USER_VAR, EXECUTE_LOAD_QUERY, XA_PREPARE, heartbeat, format description, the
+ * GTID family, and the MariaDB equivalents) advances the stream position
+ * silently. An event that would hide a change the engine cannot represent
+ * fails with MES_ERR_PARSE instead of being skipped or checkpointed: INCIDENT,
+ * transaction payload compression, partial JSON and partial row updates, and
+ * the MariaDB compressed query/row events. So does any type code that no
+ * supported server emits, so a newly introduced event type is loud rather
+ * than lossy.
  *
  * @param engine  Engine handle.
  * @param data    Pointer to binlog byte stream.
@@ -415,7 +447,9 @@ MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char**
  *
  * Each entry is "database.table" or just "table" (matches any database).
  * Matching is byte-exact and case-sensitive. A trailing '*' is a prefix
- * wildcard (for example, "mydb.audit_*"); '*' elsewhere is literal.
+ * wildcard (for example, "mydb.audit_*"); '*' elsewhere is literal. An entry
+ * without a '.' is compared against the bare table name only, so its prefix
+ * never matches a database name.
  * When include database/table filters see TABLE_MAP events but match none
  * before reset or destruction, the configured WARN callback receives an
  * `include_filter_matched_nothing` event.
@@ -432,7 +466,9 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
  *
  * Each entry is "database.table" or just "table" (matches any database).
  * Matching is byte-exact and case-sensitive. A trailing '*' is a prefix
- * wildcard; '*' elsewhere is literal.
+ * wildcard; '*' elsewhere is literal. An entry without a '.' is compared
+ * against the bare table name only, so its prefix never matches a database
+ * name.
  *
  * @param engine Engine handle.
  * @param tables Array of table name strings.
@@ -488,8 +524,14 @@ typedef struct {
   uint16_t port;
   const char* user;
   const char* password;
-  uint32_t server_id;     /**< Non-zero replica server ID required for binlog streaming. */
-  const char* start_gtid; /**< Used exactly when start_position_mode is MES_START_AT_GTID. */
+  uint32_t server_id; /**< Non-zero replica server ID required for binlog streaming. */
+  /** Used exactly when start_position_mode is MES_START_AT_GTID.
+   *  A MySQL entry naming a bare transaction number is widened for backward
+   *  compatibility before it goes on the wire: "uuid:N" is sent as "uuid:1-N",
+   *  and the tagged form "uuid:tag:N" as "uuid:tag:1-N". An entry that already
+   *  states an interval, such as "uuid:5-9", is sent as written, and "uuid:0"
+   *  contributes nothing to the set. MariaDB GTIDs are sent verbatim. */
+  const char* start_gtid;
   uint32_t connect_timeout_s;
   uint32_t read_timeout_s;
   /* SSL/TLS options */
@@ -499,8 +541,14 @@ typedef struct {
   const char* ssl_key;     /**< Path to client private key file (NULL to skip) */
   /* Buffering */
   size_t max_queue_size; /**< @brief 0 = use MES_DEFAULT_QUEUE_SIZE */
-  /** Allow fetching an unauthenticated RSA key for plaintext caching_sha2 auth.
-   *  Disabled by default. Prefer verified TLS; opt-in remains MITM-sensitive. */
+  /** Allow fetching an unauthenticated RSA key so caching_sha2_password can
+   *  complete full authentication (a cold server-side password cache: fresh
+   *  user, server restart, FLUSH PRIVILEGES). Required whenever ssl_mode is
+   *  below MES_SSL_VERIFY_CA, including with TLS active, because preferred and
+   *  required encrypt without authenticating the server certificate and the
+   *  cleartext shortcut stays gated on certificate verification. Disabled by
+   *  default; raising ssl_mode to verify_ca or verify_identity is the safer
+   *  remedy, since the fetched key is itself unauthenticated. */
   int allow_public_key_retrieval;
   /** Defaults to MES_START_AT_CURRENT for zero-initialized configs. */
   mes_start_position_mode_t start_position_mode;
@@ -572,6 +620,13 @@ MES_API mes_error_t mes_client_connect(mes_client_t* client, const mes_client_co
  *  transport may no longer be usable, in which case it returns the setup
  *  error and the caller must reconnect before starting again. Calling this
  *  while mes_client_is_streaming() is nonzero is a no-op that returns MES_OK.
+ *
+ *  Startup spans several blocking round trips and does not hold the lifecycle
+ *  lock across them, so mes_client_stop() interrupts it; the interrupted call
+ *  then returns MES_ERR_DISCONNECTED. Stop shuts the transport down for good,
+ *  so every later start returns MES_ERR_DISCONNECTED until mes_client_connect()
+ *  establishes a new one. Two concurrent starts are refused with
+ *  MES_ERR_STREAM rather than serialized.
  *  @return MES_OK or a configuration/connection/stream error, including
  *          MES_ERR_GTID_PURGED when the requested GTID is behind the source's
  *          purged set.
@@ -595,6 +650,14 @@ MES_API mes_poll_result_t mes_client_poll(mes_client_t* client);
  * A terminal result is included as the final element. Every `data` pointer is
  * valid only until the next poll or batch call on the client.
  *
+ * The return value reports whether the batch call itself was well formed, not
+ * whether the stream is healthy: a terminal condition arrives in the `error`
+ * field of the final element while this function still returns MES_OK. Results
+ * written before that element are real payloads. Deliver them to the consumer
+ * and report the terminal error only afterwards: the GTID checkpoint advances
+ * on the next poll or batch call as if the whole batch had been consumed, so
+ * discarding those results loses events permanently.
+ *
  * @return MES_OK, MES_ERR_NULL_ARG, or MES_ERR_INVALID_ARG (capacity is zero).
  * @threadsafety Same single-owner rule as mes_client_poll().
  */
@@ -602,11 +665,16 @@ MES_API mes_error_t mes_client_poll_batch(mes_client_t* client, mes_poll_result_
                                           size_t capacity, size_t* result_count);
 
 /** @brief Synchronously stop a streaming client.
+ *
+ *  Stops the reader, closes the event queue and discards whatever it still
+ *  holds, and shuts the socket down. The transport is not reusable afterwards:
+ *  mes_client_connect() must establish a new one before streaming can resume.
  *  @threadsafety May be called from a thread other than the poll/owner thread
- *                to unblock mes_client_poll(). The call acquires locks, shuts
- *                down the socket, and joins the reader thread, so it may block
- *                until that thread exits. It is NOT async-signal-safe and
- *                must not be called from a signal handler.
+ *                to unblock mes_client_poll() or an in-progress
+ *                mes_client_start(). The call acquires locks, shuts down the
+ *                socket, and joins the reader thread, so it may block until
+ *                that thread exits. It is NOT async-signal-safe and must not
+ *                be called from a signal handler.
  */
 MES_API void mes_client_stop(mes_client_t* client);
 
@@ -675,13 +743,15 @@ MES_API int mes_client_checksum_enabled(mes_client_t* client);
 /**
  * @brief Set the maximum binlog event size accepted by the client reader.
  *
- * Keep this value aligned with mes_set_max_event_size() on the engine that
- * consumes mes_client_poll() results. The reader accounts for MySQL's one-byte
- * OK packet prefix separately, so an event exactly at the configured ceiling
- * is accepted. Values use the same normalization as the engine: 0 resolves to
- * the 1 GiB hard cap and other out-of-range values are clamped.
+ * The default is 32 MiB. Keep this value aligned with
+ * mes_set_max_event_size() on the engine that consumes mes_client_poll()
+ * results, whose own default is 64 MiB. The reader accounts for MySQL's
+ * one-byte OK packet prefix separately, so an event exactly at the configured
+ * ceiling is accepted. Values use the same normalization as the engine: 0
+ * resolves to the 1 GiB hard cap and other out-of-range values are clamped.
  *
  * Call before mes_client_start().
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p client is NULL.
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* client, uint32_t max_event_size);
@@ -693,9 +763,10 @@ MES_API uint32_t mes_client_get_max_event_size(mes_client_t* client);
  * @brief Set the total payload byte budget for the client event queue.
  *
  * The producer blocks when either max_queue_size events or this many charged
- * bytes are queued. Charged bytes use the packet and non-empty checkpoint
- * payload sizes, not allocator capacity. 0 restores MES_DEFAULT_QUEUE_BYTES.
- * The budget must be greater than the normalized max event size when
+ * bytes are queued. Only the buffered wire payload is charged, not allocator
+ * capacity and not the reader's checkpoint bookkeeping. 0 restores
+ * MES_DEFAULT_QUEUE_BYTES. The budget must admit at least one event at the
+ * normalized max event size (that size plus the one-byte packet prefix) when
  * mes_client_start() is called, otherwise start returns MES_ERR_INVALID_ARG.
  *
  * Call before mes_client_start().

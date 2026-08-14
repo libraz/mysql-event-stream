@@ -10,11 +10,11 @@
  * between internal C++ types and their C ABI equivalents.
  */
 
-#include <algorithm>
-#include <climits>
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <string>
+#include <type_traits>
 #include <vector>
 
 #include "cdc_engine.h"
@@ -23,7 +23,25 @@
 #include "mes.h"
 #include "types.h"
 
-struct mes_engine {
+namespace mes {
+
+/**
+ * @brief Sole owner of the engine's metadata fetcher.
+ *
+ * CdcEngine holds a non-owning MetadataFetcher* and may dereference it at any
+ * point at which that pointer is non-null, including from its own destructor.
+ * The fetcher must therefore outlive the CdcEngine. Expressing the ownership
+ * as a base class rather than a member makes that structural: a base subobject
+ * is constructed before, and destroyed after, every member of the derived
+ * class, whatever order the members happen to be declared in.
+ */
+struct MetadataFetcherOwner {
+  std::unique_ptr<MetadataFetcher> metadata_fetcher;
+};
+
+}  // namespace mes
+
+struct mes_engine : mes::MetadataFetcherOwner {
   mes::CdcEngine engine;
 
   // Buffers for the current event's C representation, valid until the
@@ -32,9 +50,28 @@ struct mes_engine {
   mes_event_t c_event;
   std::vector<mes_column_t> before_cols;
   std::vector<mes_column_t> after_cols;
-
-  std::unique_ptr<mes::MetadataFetcher> metadata_fetcher;
 };
+
+static_assert(std::is_base_of<mes::MetadataFetcherOwner, mes_engine>::value,
+              "metadata_fetcher must stay in a base class of mes_engine so it is destroyed "
+              "after CdcEngine, which points at it");
+
+// Narrow a payload length to mes_column_t::str_len.
+//
+// mes.h documents a single reporting path for this boundary: the length is
+// clamped to UINT32_MAX and a `column_data_truncated` WARN event is emitted.
+// Every narrowing in ConvertColumn goes through here so no column type can
+// truncate silently.
+static uint32_t ClampPayloadLength(size_t size) {
+  if (size > UINT32_MAX) {
+    mes::StructuredLog()
+        .Event("column_data_truncated")
+        .Field("size", static_cast<uint64_t>(size))
+        .Warn();
+    return UINT32_MAX;
+  }
+  return static_cast<uint32_t>(size);
+}
 
 // Convert a single internal ColumnValue to its C ABI representation.
 static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
@@ -50,7 +87,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
   if (col.is_binary) {
     c.type = MES_COL_BYTES;
     c.str_data = reinterpret_cast<const char*>(col.bytes_data());
-    c.str_len = static_cast<uint32_t>(std::min(col.bytes_size(), static_cast<size_t>(UINT32_MAX)));
+    c.str_len = ClampPayloadLength(col.bytes_size());
     return c;
   }
   switch (col.type) {
@@ -71,8 +108,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       if (!col.string_val.empty()) {
         c.type = MES_COL_STRING;
         c.str_data = col.string_val.c_str();
-        c.str_len =
-            static_cast<uint32_t>(std::min(col.string_val.size(), static_cast<size_t>(UINT32_MAX)));
+        c.str_len = ClampPayloadLength(col.string_val.size());
       } else {
         c.type = MES_COL_INT;
         c.int_val = col.int_val;
@@ -92,14 +128,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       // are thin wrappers that return the same pointer/length.
       c.type = MES_COL_BYTES;
       c.str_data = reinterpret_cast<const char*>(col.bytes_data());
-      if (col.bytes_size() > UINT32_MAX) {
-        mes::StructuredLog()
-            .Event("column_data_truncated")
-            .Field("size", static_cast<uint64_t>(col.bytes_size()))
-            .Warn();
-      }
-      c.str_len =
-          static_cast<uint32_t>(std::min(col.bytes_size(), static_cast<size_t>(UINT32_MAX)));
+      c.str_len = ClampPayloadLength(col.bytes_size());
       break;
     default:
       // All remaining types use string representation:
@@ -107,14 +136,7 @@ static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
       // kDatetime2, kTimestamp2, kTime2, kNewDecimal
       c.type = MES_COL_STRING;
       c.str_data = col.string_val.c_str();
-      if (col.string_val.size() > UINT32_MAX) {
-        mes::StructuredLog()
-            .Event("column_data_truncated")
-            .Field("size", static_cast<uint64_t>(col.string_val.size()))
-            .Warn();
-      }
-      c.str_len =
-          static_cast<uint32_t>(std::min(col.string_val.size(), static_cast<size_t>(UINT32_MAX)));
+      c.str_len = ClampPayloadLength(col.string_val.size());
       break;
   }
   return c;
@@ -143,6 +165,44 @@ static mes_event_type_t ConvertEventType(mes::EventType t) {
       .Error();
   return MES_EVENT_INSERT;
 }
+
+// Copy a C string array into a filter list. Rejects a NULL element instead of
+// skipping it: a partially collected list would silently narrow (or, for an
+// all-NULL array, silently clear) the filter the caller asked for. Nothing is
+// installed until the whole array validates, so a rejected call leaves the
+// engine's current filter untouched.
+static mes_error_t CollectFilterEntries(const char** values, size_t count,
+                                        std::vector<std::string>* out) {
+  if (values == nullptr && count > 0) {
+    return MES_ERR_NULL_ARG;
+  }
+  out->reserve(count);
+  for (size_t i = 0; i < count; i++) {
+    if (values[i] == nullptr) {
+      return MES_ERR_NULL_ARG;
+    }
+    out->emplace_back(values[i]);
+  }
+  return MES_OK;
+}
+
+namespace mes {
+
+/**
+ * @brief Install a metadata fetcher that has never been connected.
+ *
+ * mes_engine_set_metadata_conn() only publishes a fetcher after a successful
+ * server handshake, so this is the only way to bring an engine into the
+ * "metadata enabled" shape without a live server. Declared by the C ABI tests,
+ * never by mes.h.
+ */
+void CapiInstallUnconnectedMetadataFetcher(mes_engine_t* engine) {
+  engine->engine.SetMetadataFetcher(nullptr);
+  engine->metadata_fetcher = std::make_unique<MetadataFetcher>();
+  engine->engine.SetMetadataFetcher(engine->metadata_fetcher.get());
+}
+
+}  // namespace mes
 
 /* ---- Exported C ABI functions ---- */
 
@@ -212,11 +272,13 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
   }
   *consumed = engine->engine.Feed(data, len);
   if (engine->engine.IsError()) {
-    // Intentionally reset consumed to 0: the engine's internal state is now
-    // corrupt and must be reset via mes_reset(). By reporting 0 consumed,
-    // the caller keeps their full input buffer intact. After mes_reset()
-    // clears all internal state (including any buffered bytes), the caller
-    // can re-feed from the start or seek to a known-good stream position.
+    // Intentionally reset consumed to 0: the parse state is undefined once an
+    // event fails, so no prefix of this buffer can be reported as safely
+    // consumed. Per the mes_feed() contract in mes.h the only valid next
+    // operation is mes_reset(), after which the events decoded before the
+    // failure must be drained via mes_next_event() and the stream resumed from
+    // a known binlog position. Re-feeding these bytes, or the ones that follow
+    // them, without a reset is unsupported.
     *consumed = 0;
     return engine->engine.ErrorCode();
   }
@@ -256,7 +318,7 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
   ce.binlog_file = engine->current_event.position.binlog_file.c_str();
   ce.binlog_offset = engine->current_event.position.offset;
   ce.names_resolved = engine->current_event.names_resolved ? 1 : 0;
-  ce.source_sql = engine->current_event.source_sql.c_str();
+  ce.source_sql = engine->current_event.SourceSql().c_str();
 
   *event = &engine->c_event;
   return MES_OK;
@@ -321,11 +383,9 @@ MES_API size_t mes_sizeof_column(void) { return sizeof(mes_column_t); }
 MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char** databases,
                                               size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
-  if (databases == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> dbs;
-  for (size_t i = 0; i < count; i++) {
-    if (databases[i]) dbs.emplace_back(databases[i]);
-  }
+  mes_error_t rc = CollectFilterEntries(databases, count, &dbs);
+  if (rc != MES_OK) return rc;
   engine->engine.SetIncludeDatabases(dbs);
   return MES_OK;
 }
@@ -333,11 +393,9 @@ MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char**
 MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** tables,
                                            size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
-  if (tables == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
-  for (size_t i = 0; i < count; i++) {
-    if (tables[i]) tbs.emplace_back(tables[i]);
-  }
+  mes_error_t rc = CollectFilterEntries(tables, count, &tbs);
+  if (rc != MES_OK) return rc;
   engine->engine.SetIncludeTables(tbs);
   return MES_OK;
 }
@@ -345,11 +403,9 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
 MES_API mes_error_t mes_set_exclude_tables(mes_engine_t* engine, const char** tables,
                                            size_t count) {
   if (engine == nullptr) return MES_ERR_NULL_ARG;
-  if (tables == nullptr && count > 0) return MES_ERR_NULL_ARG;
   std::vector<std::string> tbs;
-  for (size_t i = 0; i < count; i++) {
-    if (tables[i]) tbs.emplace_back(tables[i]);
-  }
+  mes_error_t rc = CollectFilterEntries(tables, count, &tbs);
+  if (rc != MES_OK) return rc;
   engine->engine.SetExcludeTables(tbs);
   return MES_OK;
 }

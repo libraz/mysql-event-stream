@@ -39,6 +39,27 @@ void CaptureIncludeFilterWarning(mes_log_level_t level, const char* message, voi
   g_include_filter_warning_message = text;
 }
 
+std::string g_last_error_log;
+
+void CaptureErrorLog(mes_log_level_t level, const char* message, void*) {
+  if (level != MES_LOG_ERROR || message == nullptr) return;
+  g_last_error_log = message;
+}
+
+// Routes error-level logs into g_last_error_log for the duration of a scope,
+// so a test can tell apart error paths that share the same error code.
+class ScopedErrorLogCapture {
+ public:
+  ScopedErrorLogCapture() {
+    g_last_error_log.clear();
+    LogConfig::SetCallback(CaptureErrorLog, MES_LOG_ERROR, nullptr);
+  }
+  ~ScopedErrorLogCapture() { LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr); }
+
+  ScopedErrorLogCapture(const ScopedErrorLogCapture&) = delete;
+  ScopedErrorLogCapture& operator=(const ScopedErrorLogCapture&) = delete;
+};
+
 std::vector<uint8_t> DecodeHexFixture(const char* hex) {
   std::vector<uint8_t> bytes;
   int high_nibble = -1;
@@ -166,7 +187,7 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
 
   ChangeEvent event;
   ASSERT_TRUE(engine.NextEvent(&event));
-  EXPECT_EQ(event.source_sql, sql);
+  EXPECT_EQ(event.SourceSql(), sql);
 
   auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 175, {});
   auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
@@ -174,7 +195,58 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
   ASSERT_EQ(engine.Feed(xid.data(), xid.size()), xid.size());
   ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
   ASSERT_TRUE(engine.NextEvent(&event));
-  EXPECT_TRUE(event.source_sql.empty());
+  EXPECT_TRUE(event.SourceSql().empty());
+}
+
+// One ANNOTATE_ROWS annotates every row of the ROWS event that follows it.
+// Copying the statement into each row would charge its length once per row,
+// which for a large statement dominates a queued event; the rows must share a
+// single copy instead.
+TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsSharedAcrossTheRowsOfOneEvent) {
+  CdcEngine engine;
+  const std::string sql(4096, 'x');
+  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
+                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  // Two INT rows in one WRITE_ROWS event: the single-row body plus a second
+  // (null bitmap, value) pair in the same layout.
+  std::vector<uint8_t> two_rows = BuildWriteRowsBody(42, 1);
+  const std::vector<uint8_t> second_row = {0x00, 0x02, 0x00, 0x00, 0x00};
+  two_rows.insert(two_rows.end(), second_row.begin(), second_row.end());
+  auto write =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150, two_rows);
+  ASSERT_EQ(engine.Feed(annotate.data(), annotate.size()), annotate.size());
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+
+  ChangeEvent first;
+  ChangeEvent second;
+  ASSERT_TRUE(engine.NextEvent(&first));
+  ASSERT_TRUE(engine.NextEvent(&second));
+  ASSERT_EQ(first.after.columns.size(), 1u);
+  ASSERT_EQ(second.after.columns.size(), 1u);
+  EXPECT_EQ(first.after.columns[0].int_val, 1);
+  EXPECT_EQ(second.after.columns[0].int_val, 2);
+  EXPECT_EQ(first.SourceSql(), sql);
+  EXPECT_EQ(second.SourceSql(), sql);
+  EXPECT_EQ(first.source_sql.get(), second.source_sql.get());
+}
+
+// An event with no annotation must not hold an allocation for the empty case.
+TEST(CdcEngineMariaDBTest, EventsWithoutAnnotateRowsHoldNoStatement) {
+  CdcEngine engine;
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 7));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.source_sql, nullptr);
+  EXPECT_TRUE(event.SourceSql().empty());
 }
 
 TEST(CdcEngineChecksumTest, CorruptedCrcReturnsChecksumErrorWithoutAdvancingPosition) {
@@ -534,16 +606,113 @@ TEST(CdcEngineTest, DecodeFailureDoesNotAdvancePosition) {
   EXPECT_EQ(engine.CurrentPosition().offset, 100u);
 }
 
-TEST(CdcEngineTest, UnknownEventSkipped) {
+TEST(CdcEngineTest, UnknownEventTypeIsParseErrorWithoutAdvancingCheckpoint) {
   CdcEngine engine;
 
-  // Event type 99 is unknown
+  // Event type 99 is emitted by no supported server. Skipping it would advance
+  // the caller's checkpoint past a change the engine could not decode.
   std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04};
   auto event = BuildEvent(99, 1000, 100, body);
 
-  size_t consumed = engine.Feed(event.data(), event.size());
-  EXPECT_EQ(consumed, event.size());
+  ScopedErrorLogCapture capture;
+  engine.Feed(event.data(), event.size());
   EXPECT_FALSE(engine.HasEvents());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_PARSE);
+  EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+  EXPECT_NE(g_last_error_log.find("event=unknown_binlog_event"), std::string::npos);
+}
+
+TEST(CdcEngineTest, StopEventDoesNotInterruptSurroundingEvents) {
+  CdcEngine engine;
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "users"));
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                BuildWriteRowsBody(1, 4242));
+  // Every clean mysqld/mariadbd shutdown writes a STOP_EVENT, and the stream
+  // resumes with the ROTATE that opens the next binlog file.
+  const auto stop = BuildEvent(static_cast<uint8_t>(BinlogEventType::kStopEvent), 1002, 300, {});
+  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1003, 400,
+                                 BuildRotateBody(4, "mysql-bin.000002"));
+
+  std::vector<uint8_t> stream;
+  for (const std::vector<uint8_t>* event : {&table_map, &write, &stop, &rotate}) {
+    stream.insert(stream.end(), event->begin(), event->end());
+  }
+
+  EXPECT_EQ(engine.Feed(stream.data(), stream.size()), stream.size());
+  EXPECT_FALSE(engine.IsError());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.type, EventType::kInsert);
+  EXPECT_EQ(event.table, "users");
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 4242);
+  EXPECT_FALSE(engine.HasEvents());
+
+  // The ROTATE after the STOP was applied, so a reconnect resumes in the new
+  // file instead of re-reading the STOP forever.
+  EXPECT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000002");
+  EXPECT_EQ(engine.CurrentPosition().offset, 4u);
+}
+
+TEST(CdcEngineTest, StopEventAdvancesPositionWithoutError) {
+  CdcEngine engine;
+  const auto stop = BuildEvent(static_cast<uint8_t>(BinlogEventType::kStopEvent), 1000, 512, {});
+
+  EXPECT_EQ(engine.Feed(stop.data(), stop.size()), stop.size());
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_EQ(engine.CurrentPosition().offset, 512u);
+}
+
+TEST(CdcEngineTest, StandardControlEventsAdvancePositionWithoutError) {
+  const uint8_t control_types[] = {
+      static_cast<uint8_t>(BinlogEventType::kIntvarEvent),
+      static_cast<uint8_t>(BinlogEventType::kRandEvent),
+      static_cast<uint8_t>(BinlogEventType::kUserVarEvent),
+      static_cast<uint8_t>(BinlogEventType::kAppendBlockEvent),
+      static_cast<uint8_t>(BinlogEventType::kDeleteFileEvent),
+      static_cast<uint8_t>(BinlogEventType::kBeginLoadQueryEvent),
+      static_cast<uint8_t>(BinlogEventType::kExecuteLoadQueryEvent),
+      static_cast<uint8_t>(BinlogEventType::kXaPrepareLogEvent),
+  };
+
+  for (uint8_t type_code : control_types) {
+    SCOPED_TRACE(static_cast<int>(type_code));
+    CdcEngine engine;
+    const auto event = BuildEvent(type_code, 1000, 640, {0x01, 0x02, 0x03, 0x04});
+
+    EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
+    EXPECT_FALSE(engine.IsError());
+    EXPECT_FALSE(engine.HasEvents());
+    EXPECT_EQ(engine.CurrentPosition().offset, 640u);
+  }
+}
+
+TEST(CdcEngineTest, UnsupportedEventTypesFailDistinctlyFromUnknownOnes) {
+  // INCIDENT reports that the server lost events; TRANSACTION_PAYLOAD carries
+  // a compressed transaction. Both are documented types this engine cannot
+  // represent, so they must fail as unsupported rather than as unknown.
+  const uint8_t unsupported_types[] = {
+      static_cast<uint8_t>(BinlogEventType::kIncidentEvent),
+      static_cast<uint8_t>(BinlogEventType::kTransactionPayloadEvent),
+  };
+
+  for (uint8_t type_code : unsupported_types) {
+    SCOPED_TRACE(static_cast<int>(type_code));
+    CdcEngine engine;
+    const auto event = BuildEvent(type_code, 1000, 700, {0x01, 0x02, 0x03, 0x04});
+
+    ScopedErrorLogCapture capture;
+    engine.Feed(event.data(), event.size());
+    EXPECT_TRUE(engine.IsError());
+    EXPECT_EQ(engine.ErrorCode(), MES_ERR_PARSE);
+    EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+    EXPECT_NE(g_last_error_log.find("event=unsupported_binlog_event"), std::string::npos);
+  }
 }
 
 TEST(CdcEngineTest, MultipleEvents) {
@@ -968,6 +1137,53 @@ TEST(CdcEngineTest, TableFilterTrailingWildcardMatchesQualifiedAndBareNames) {
   ASSERT_TRUE(engine.NextEvent(&event));
   EXPECT_EQ(event.table, "users_archive");
   EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, UnqualifiedExcludeWildcardIgnoresTheDatabaseName) {
+  CdcEngine engine;
+  // "log*" names bare tables, so it must not exclude logs.events on the
+  // strength of the database name alone.
+  engine.SetExcludeTables({"log*"});
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "logs", "events"));
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                BuildWriteRowsBody(1, 7));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.database, "logs");
+  EXPECT_EQ(event.table, "events");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, UnqualifiedIncludeWildcardIgnoresTheDatabaseName) {
+  CdcEngine engine;
+  // "user*" admits tables whose bare name starts with "user", not every table
+  // that happens to live in the users_db database.
+  engine.SetIncludeTables({"user*"});
+
+  const auto sessions_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                       100, BuildTableMapBody(1, "users_db", "sessions"));
+  const auto profiles_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
+                                       200, BuildTableMapBody(2, "users_db", "user_profiles"));
+  ASSERT_EQ(engine.Feed(sessions_map.data(), sessions_map.size()), sessions_map.size());
+  ASSERT_EQ(engine.Feed(profiles_map.data(), profiles_map.size()), profiles_map.size());
+
+  const auto sessions_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                       300, BuildWriteRowsBody(1, 10));
+  const auto profiles_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
+                                       400, BuildWriteRowsBody(2, 20));
+  ASSERT_EQ(engine.Feed(sessions_row.data(), sessions_row.size()), sessions_row.size());
+  ASSERT_EQ(engine.Feed(profiles_row.data(), profiles_row.size()), profiles_row.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "user_profiles");
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
 }
 
 TEST(CdcEngineTest, WarnsOnceWhenIncludeFiltersMatchNoTableMaps) {

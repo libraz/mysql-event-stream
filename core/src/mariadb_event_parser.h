@@ -85,6 +85,20 @@ class MariaDBEventParser {
    */
   static mes_error_t ExtractAnnotateRows(const uint8_t* buffer, size_t length, bool has_checksum,
                                          std::string* out);
+
+  /**
+   * @brief Extract SQL text from an ANNOTATE_ROWS body.
+   *
+   * Canonical interpretation of the event body, for callers that already hold
+   * the payload with the header and any trailing CRC32 stripped off.
+   *
+   * @param body Event body (no 19-byte header, no trailing checksum).
+   * @param body_len Body length in bytes.
+   * @param[out] out SQL text string.
+   * @return MES_OK on success, MES_ERR_PARSE on an empty body.
+   */
+  static mes_error_t ExtractAnnotateRowsBody(const uint8_t* body, size_t body_len,
+                                             std::string* out);
 };
 
 }  // namespace mes
