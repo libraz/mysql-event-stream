@@ -65,6 +65,16 @@ export class MysqlClient {
     return result.affectedRows;
   }
 
+  /**
+   * Run a statement over the text protocol.
+   *
+   * Unlike execute(), this sends the literal SQL instead of preparing it, so
+   * MariaDB's ANNOTATE_ROWS records exactly the text passed here.
+   */
+  async queryText(sql: string): Promise<void> {
+    await this.pool.query(sql);
+  }
+
   /** Truncate a table. */
   async truncate(table: string): Promise<void> {
     await this.pool.execute(`TRUNCATE TABLE ${table}`);
@@ -86,6 +96,12 @@ export class MysqlClient {
         : "SELECT @@GLOBAL.gtid_executed AS gtid";
     const [rows] = await this.pool.query(query);
     return (rows as any)[0].gtid;
+  }
+
+  /** Server version string, e.g. "9.1.0" or "11.4.2-MariaDB". */
+  async serverVersion(): Promise<string> {
+    const [rows] = await this.pool.query<mysql.RowDataPacket[]>("SELECT VERSION() AS version");
+    return String(rows[0]?.version ?? "");
   }
 
   /** Check if MySQL is reachable. */
