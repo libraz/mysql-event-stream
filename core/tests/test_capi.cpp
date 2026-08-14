@@ -38,7 +38,7 @@ TEST(CApi, SizeofEventMatchesStruct) { EXPECT_EQ(mes_sizeof_event(), sizeof(mes_
 TEST(CApi, SizeofColumnMatchesStruct) { EXPECT_EQ(mes_sizeof_column(), sizeof(mes_column_t)); }
 
 TEST(CApi, VersionAndAbiAreExposed) {
-  EXPECT_STREQ(mes_version(), "1.6.0");
+  EXPECT_STREQ(mes_version(), "1.6.1");
   EXPECT_EQ(mes_abi_version(), MES_ABI_VERSION);
 }
 

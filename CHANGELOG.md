@@ -10,6 +10,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-08-15
+
+A correctness and hardening release. The C ABI is unchanged — no symbol, field,
+or enum value was added, removed, or moved, so a 1.6.0 build links without
+recompiling. Several failures that used to be silent are now loud, and both
+bindings validate their options the same way, so a configuration that was
+previously accepted out of range is now rejected at construction.
+
+### Added
+
+- **Shared binding contract** — `core/contracts/bindings.json` fixes error
+  retryability, the reconnect backoff schedule, the checkpoint-resume rule, and
+  the shared option defaults and ranges in one place. Both bindings mirror it as
+  typed constants and verify them against the JSON, so a value changed on one
+  side without the other fails that binding's suite
+- **Benchmark suite** — synthetic workload, loopback socket-read, and
+  allocation-tracking harnesses with a recorded baseline, driven by
+  `make benchmark`, `make benchmark-socket`, and `make benchmark-python`
+- **Security policy** — `SECURITY.md` documents private disclosure, supported
+  versions, and what is in and out of scope for the binlog protocol surface
+
+### Fixed
+
+- **MariaDB `source_sql` was always empty.** The dump request now sets the
+  ANNOTATE_ROWS flag, which the slave capability alone does not imply, so the
+  statement text actually arrives. It is decoded once and shared by every row of
+  the following row event instead of copied per row
+- **MariaDB standalone GTID groups checkpointed too early.** A group with no
+  COMMIT or XID was checkpointed at its GTID event, before its own row payload
+  was delivered; it now waits for the group's terminating event. A GTID that
+  cannot merge into the tracked set is logged as
+  `gtid_checkpoint_merge_failed` and kept pending instead of being dropped
+- **An empty reconnect checkpoint was forwarded as a resume position.** Both
+  bindings sent `startGtid` / `start_gtid` of `""` when a connection dropped
+  before the first commit, which the server reads as "send every retained
+  binlog"; the configured start mode is now kept verbatim until a real
+  checkpoint exists
+- **ENUM, SET, and VECTOR were counted wrongly in the charset index space.**
+  ENUM and SET travel as `MYSQL_TYPE_STRING` but carry their collations in
+  separate metadata, so they no longer consume a `DEFAULT_CHARSET` slot, while
+  VECTOR does. A table mixing them could otherwise assign a later column the
+  wrong collation and surface it as bytes instead of text
+- **`mes_client_stop()` could not interrupt `mes_client_start()`.** Startup no
+  longer holds the lifecycle lock across its blocking round trips; an
+  interrupted start returns `MES_ERR_DISCONNECTED`, and two concurrent starts
+  are refused with `MES_ERR_STREAM` rather than serialized
+- **A bare table filter entry could match on the database name.** An entry
+  without a `.` is now compared against the bare table name only, so
+  `log*` no longer matches database `logs`
+- **A NULL element in a filter array silently cleared the filter.**
+  `mes_set_include_databases()`, `mes_set_include_tables()`, and
+  `mes_set_exclude_tables()` now reject the whole call with `MES_ERR_NULL_ARG`
+  and leave the installed filter untouched
+- **Artificial ROTATE detection could reframe the event being parsed.** Checksum
+  presence is only ever turned on by that path, never re-derived mid-event
+- **A dual-stack hostname could block for twice the connect timeout.** One
+  deadline is now computed once and shared across every resolved address
+- **An unsupported auth plugin with an empty password produced an empty auth
+  response** instead of being rejected; the plugin name is validated first
+- **Column names were not charged against the result-set byte budget**, which
+  could be exceeded before any row value was read. Column-definition size and
+  repeated empty row packets are now bounded as well
+- **The metadata fetcher could be destroyed before the engine that used it**;
+  ownership now guarantees the fetcher outlives it
+- **An oversized column payload asserted at the C ABI boundary.** It is clamped
+  to `UINT32_MAX` and reported as a `column_data_truncated` warning instead
+- Every event type a supported server emits is now explicitly decoded, skipped
+  as a control event, or refused with `MES_ERR_PARSE`, so a newly introduced
+  event type is loud rather than lossy
+- Row decoding charges a per-event budget and cross-checks the wire column count
+  against TABLE_MAP before any bitmap arithmetic, so a compressed or malformed
+  row event cannot drive heap growth far past the event size
+- A tagged MySQL GTID naming a bare transaction number (`uuid:tag:5`) is widened
+  to `uuid:tag:1-5` like the untagged form, instead of being sent as written
+- Both bindings validate every option at construction the same way `configure()`
+  does, and range-check batch size and log level against the shared contract
+- Every error raised across the native boundary carries a numeric error code, so
+  a permanent lifecycle violation is never retried as a transient failure
+
+### Changed
+
+- **Events that precede a terminal error are now delivered.** A batch poll
+  reports the events it collected and latches the terminal error for the next
+  call; the native checkpoint advances as if the batch was consumed, so
+  discarding it lost events permanently
+- **Transport and framing failures during a query report `MES_ERR_STREAM`**
+  instead of `MES_ERR_PARSE`. Callers matching on the specific code need to
+  expect the new one
+- The client queue byte budget charges only the buffered wire payload;
+  checkpoint text and error messages are no longer counted against it, and
+  admission is checked against the minimum budget one maximum-size event needs
+- Credential bytes are wiped from protocol packet buffers on clear and
+  destruction, and the staging copy of the password is wiped after connect
+- Python column marshalling copies payloads through a single window over the C
+  buffer instead of one `ctypes.string_at` call per column
+- The Node binding pins its toolchain with mise instead of volta and moves to
+  Yarn 4.18
+
+### Documentation
+
+- The column-type mapping is stated once as a canonical table in `mes.h` and
+  restated in each binding, with a test comparing the tables so the surfaces
+  cannot drift. TIMESTAMP is documented as a decimal Unix-epoch string, which is
+  what the engine has always produced
+- The `feed()` quickstarts drain the queue on each iteration, which is required
+  because `feed()` stops early when the queue fills mid-chunk
+- The `caching_sha2_password` guidance explains why `preferred` and `required`
+  do not satisfy full authentication and names both remedies
+- `README_ja.md` gains the error-code and package-install sections that were
+  English-only, and drops an incorrect `gtid_strict_mode` requirement
+
 ## [1.6.0] - 2026-07-29
 
 A correctness and throughput release. The C ABI grows to version 2: no symbols
@@ -427,7 +538,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/libraz/mysql-event-stream/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/libraz/mysql-event-stream/compare/v1.3.2...v1.4.0
