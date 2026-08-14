@@ -1,0 +1,274 @@
+{
+  "contractVersion": 1,
+  "description": "Behaviour every language binding must implement identically: which native error codes are worth retrying, the reconnect backoff schedule, how a reconnect checkpoint replaces the configured start position, what happens when the optional metadata connection fails, and the shared option defaults with their accepted ranges. Each binding keeps a mirror of this table (Node: src/contract.ts, Python: _contract.py) and a contract test that compares the mirror against this file, so changing a constant on one surface alone fails that surface's test suite.",
+  "nonRetryableErrorCodes": [
+    { "name": "MES_ERR_NULL_ARG", "code": 1 },
+    { "name": "MES_ERR_INVALID_ARG", "code": 2 },
+    { "name": "MES_ERR_PARSE", "code": 100 },
+    { "name": "MES_ERR_CHECKSUM", "code": 101 },
+    { "name": "MES_ERR_DECODE", "code": 200 },
+    { "name": "MES_ERR_DECODE_COLUMN", "code": 201 },
+    { "name": "MES_ERR_DECODE_ROW", "code": 202 },
+    { "name": "MES_ERR_QUEUE_FULL", "code": 301 },
+    { "name": "MES_ERR_AUTH", "code": 401 },
+    { "name": "MES_ERR_VALIDATION", "code": 402 },
+    { "name": "MES_ERR_GTID_PURGED", "code": 405 },
+    { "name": "MES_ERR_GTID_TAGGED_UNSUPPORTED", "code": 406 }
+  ],
+  "retryableErrorCodes": [
+    { "name": "MES_ERR_INTERNAL", "code": 99 },
+    { "name": "MES_ERR_NO_EVENT", "code": 300 },
+    { "name": "MES_ERR_CONNECT", "code": 400 },
+    { "name": "MES_ERR_STREAM", "code": 403 },
+    { "name": "MES_ERR_DISCONNECTED", "code": 404 }
+  ],
+  "reconnect": {
+    "delayFormula": "min(baseDelayMs * attempt, maxDelayMs) * (jitterMin + jitter * (jitterMax - jitterMin))",
+    "baseDelayMs": 1000,
+    "maxDelayMs": 10000,
+    "jitterMin": 0.5,
+    "jitterMax": 1.0,
+    "schedule": [
+      { "attempt": 1, "undelayedMs": 1000 },
+      { "attempt": 2, "undelayedMs": 2000 },
+      { "attempt": 3, "undelayedMs": 3000 },
+      { "attempt": 9, "undelayedMs": 9000 },
+      { "attempt": 10, "undelayedMs": 10000 },
+      { "attempt": 11, "undelayedMs": 10000 },
+      { "attempt": 50, "undelayedMs": 10000 }
+    ]
+  },
+  "checkpointResume": {
+    "rule": "A non-empty checkpoint becomes the successor connection's start GTID and clears any file/offset anchor. An empty checkpoint means none was ever published, so the configured start mode is kept verbatim: forwarding an empty GTID set would ask the server for every binlog it still retains.",
+    "clearedValue": "Each binding reports a cleared or unset start-position field as null in the normalized form used by the contract tests.",
+    "cases": [
+      {
+        "name": "empty checkpoint keeps a file/offset anchor",
+        "checkpoint": "",
+        "config": {
+          "startGtid": null,
+          "startBinlogFile": "binlog.000001",
+          "startBinlogPosition": 4
+        },
+        "expect": {
+          "startGtid": null,
+          "startBinlogFile": "binlog.000001",
+          "startBinlogPosition": 4
+        }
+      },
+      {
+        "name": "empty checkpoint keeps the current-position start mode",
+        "checkpoint": "",
+        "config": { "startGtid": null, "startBinlogFile": null, "startBinlogPosition": null },
+        "expect": { "startGtid": null, "startBinlogFile": null, "startBinlogPosition": null }
+      },
+      {
+        "name": "empty checkpoint keeps an explicitly configured start GTID",
+        "checkpoint": "",
+        "config": {
+          "startGtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
+          "startBinlogFile": null,
+          "startBinlogPosition": null
+        },
+        "expect": {
+          "startGtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
+          "startBinlogFile": null,
+          "startBinlogPosition": null
+        }
+      },
+      {
+        "name": "published checkpoint replaces a file/offset anchor",
+        "checkpoint": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5",
+        "config": {
+          "startGtid": null,
+          "startBinlogFile": "binlog.000001",
+          "startBinlogPosition": 4
+        },
+        "expect": {
+          "startGtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5",
+          "startBinlogFile": null,
+          "startBinlogPosition": null
+        }
+      },
+      {
+        "name": "published checkpoint replaces an explicitly configured start GTID",
+        "checkpoint": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5",
+        "config": {
+          "startGtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
+          "startBinlogFile": null,
+          "startBinlogPosition": null
+        },
+        "expect": {
+          "startGtid": "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5",
+          "startBinlogFile": null,
+          "startBinlogPosition": null
+        }
+      }
+    ]
+  },
+  "checkpointRetention": {
+    "rule": "The stream's checkpoint accessor keeps returning the last non-empty checkpoint after the native client is released, so the documented pattern of persisting it after leaving the iteration scope works on every surface.",
+    "maxNativeReadsPerPollBatch": 1,
+    "readRule": "The native checkpoint advances as events leave the client queue, so one read covers a whole poll batch. Reading it per decoded row event is a defect: the cost then scales with row count instead of batch count."
+  },
+  "metadataError": {
+    "defaultBehaviour": "silent",
+    "rule": "When the optional column-name metadata connection cannot be enabled and no metadata-error handler is configured, the binding stays silent: no warning, no stderr write. The library never writes diagnostics on its own; embedders opt in through the handler or through the native log callback."
+  },
+  "iteration": {
+    "releaseContract": "aclose",
+    "rule": "Leaving an iteration early does not release native resources on its own. Every binding exposes an async close on the stream (Node: Symbol.asyncDispose / close(), Python: aclose() / close()) and documents the scoped form (`await using` / `async with`) as the supported usage."
+  },
+  "pollBatch": {
+    "defaultMaxEvents": 64,
+    "minMaxEvents": 1,
+    "maxMaxEvents": 1024
+  },
+  "logLevel": {
+    "min": 0,
+    "max": 3,
+    "default": 1,
+    "rule": "Installing a log handler with a level outside the documented mes_log_level_t range is an error, never a silently disabled callback."
+  },
+  "optionsRule": "Every entry states the accepted range each binding must enforce for the option. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only.",
+  "options": [
+    {
+      "canonical": "host",
+      "node": "host",
+      "python": "host",
+      "type": "string",
+      "default": "127.0.0.1"
+    },
+    {
+      "canonical": "port",
+      "node": "port",
+      "python": "port",
+      "type": "integer",
+      "default": 3306,
+      "min": 1,
+      "max": 65535
+    },
+    {
+      "canonical": "user",
+      "node": "user",
+      "python": "user",
+      "type": "string",
+      "default": "root"
+    },
+    {
+      "canonical": "password",
+      "node": "password",
+      "python": "password",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "canonical": "serverId",
+      "node": "serverId",
+      "python": "server_id",
+      "type": "integer",
+      "default": 1,
+      "min": 1,
+      "max": 4294967295
+    },
+    {
+      "canonical": "connectTimeoutS",
+      "node": "connectTimeoutS",
+      "python": "connect_timeout_s",
+      "type": "integer",
+      "default": 10,
+      "min": 0,
+      "max": 4294967295
+    },
+    {
+      "canonical": "readTimeoutS",
+      "node": "readTimeoutS",
+      "python": "read_timeout_s",
+      "type": "integer",
+      "default": 30,
+      "min": 0,
+      "max": 4294967295
+    },
+    {
+      "canonical": "sslMode",
+      "node": "sslMode",
+      "python": "ssl_mode",
+      "type": "integer",
+      "default": 1,
+      "min": 0,
+      "max": 4
+    },
+    {
+      "canonical": "sslCa",
+      "node": "sslCa",
+      "python": "ssl_ca",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "canonical": "sslCert",
+      "node": "sslCert",
+      "python": "ssl_cert",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "canonical": "sslKey",
+      "node": "sslKey",
+      "python": "ssl_key",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "canonical": "allowPublicKeyRetrieval",
+      "node": "allowPublicKeyRetrieval",
+      "python": "allow_public_key_retrieval",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "canonical": "maxQueueSize",
+      "node": "maxQueueSize",
+      "python": "max_queue_size",
+      "type": "integer",
+      "default": 0,
+      "min": 0,
+      "max": null
+    },
+    {
+      "canonical": "maxQueueBytes",
+      "node": "maxQueueBytes",
+      "python": "max_queue_bytes",
+      "type": "integer",
+      "default": 50331648,
+      "min": 0,
+      "max": null
+    },
+    {
+      "canonical": "maxEventSize",
+      "node": "maxEventSize",
+      "python": "max_event_size",
+      "type": "integer",
+      "default": 33554432,
+      "min": 0,
+      "max": 4294967295
+    },
+    {
+      "canonical": "maxReconnectAttempts",
+      "node": "maxReconnectAttempts",
+      "python": "max_reconnect_attempts",
+      "type": "integer",
+      "default": 10,
+      "min": 0,
+      "max": null
+    },
+    {
+      "canonical": "startBinlogPosition",
+      "node": "startBinlogPosition",
+      "python": "start_binlog_position",
+      "type": "integer",
+      "min": 0,
+      "max": 4294967295
+    }
+  ]
+}
