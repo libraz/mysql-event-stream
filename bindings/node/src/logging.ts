@@ -1,7 +1,9 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { LOG_LEVEL_RANGE } from "./contract.js";
 import { loadNativeAddon } from "./native.js";
+import { invalidArgument } from "./validation.js";
 
 interface LogAddon {
   setLogCallback(callback: ((level: number, message: string) => void) | null, level: number): void;
@@ -26,6 +28,18 @@ export type LogLevel = (typeof LogLevel)[keyof typeof LogLevel];
 export type LogHandler = (level: LogLevel, message: string) => void;
 
 /**
+ * Reject a severity the C ABI does not define. A level outside 0-3 reaches the
+ * core as an unknown threshold and suppresses every record, which looks
+ * identical to a handler that was never installed.
+ */
+function validateLogLevel(level: number): void {
+  const { min, max } = LOG_LEVEL_RANGE;
+  if (!Number.isInteger(level) || level < min || level > max) {
+    throw invalidArgument(`log level must be an integer between ${min} and ${max}, got ${level}`);
+  }
+}
+
+/**
  * Install (or remove) a process-wide handler for the native core's structured
  * log messages (decode warnings, truncation notices, auth traces, etc.).
  *
@@ -40,9 +54,12 @@ export type LogHandler = (level: LogLevel, message: string) => void;
  * @param handler Called as `handler(level, message)` for each record, or `null`
  *   to remove the current handler.
  * @param level Maximum verbosity to deliver (default {@link LogLevel.Warn}).
- *   Messages more verbose than this are suppressed. Ignored when removing.
+ *   Messages more verbose than this are suppressed. Unused when removing, but
+ *   still range-checked so a typo can never disable delivery silently.
+ * @throws RangeError If `level` is not one of the four {@link LogLevel} values.
  */
 export function setLogCallback(handler: LogHandler | null, level: LogLevel = LogLevel.Warn): void {
+  validateLogLevel(level);
   if (handler === null) {
     addon.setLogCallback(null, level);
     return;

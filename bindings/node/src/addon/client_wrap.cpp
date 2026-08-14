@@ -12,6 +12,23 @@
 #include "config_parser.h"
 #include "mes_error_util.h"
 
+namespace {
+
+/**
+ * @brief Describe a failed C ABI call, never returning an empty string.
+ *
+ * mes_client_last_error() is empty for conditions the core never annotates,
+ * and a rejection whose message ends in ": " is undiagnosable. Fall back to
+ * the canonical description of the code itself.
+ */
+std::string DescribeClientError(mes_client_t* client, mes_error_t error) {
+  const char* msg = client != nullptr ? mes_client_last_error(client) : nullptr;
+  if (msg != nullptr && *msg != '\0') return msg;
+  return mes_error_string(error);
+}
+
+}  // namespace
+
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
 class PollWorker : public Napi::AsyncWorker {
  public:
@@ -38,10 +55,10 @@ class PollWorker : public Napi::AsyncWorker {
     Napi::Env env = Env();
 
     if (error_ != MES_OK) {
-      const char* msg = mes_client_last_error(client_);
-      std::string err_msg = msg ? msg : "poll failed";
       deferred_.Reject(
-          mes_node::MakeMesError(env, "mes_client_poll failed: " + err_msg, error_).Value());
+          mes_node::MakeMesError(
+              env, "mes_client_poll failed: " + DescribeClientError(client_, error_), error_)
+              .Value());
     } else {
       Napi::Object result = Napi::Object::New(env);
 
@@ -97,8 +114,11 @@ class PollBatchWorker : public Napi::AsyncWorker {
     results_.reserve(count);
     for (size_t i = 0; i < count; ++i) {
       if (raw[i].error != MES_OK) {
+        // A terminal condition is the final element of a batch whose earlier
+        // elements are genuine events. Keep those, and let OnOK() decide
+        // whether the error is reported now or on the next call.
         error_ = raw[i].error;
-        return;
+        break;
       }
       BatchResult result;
       result.is_heartbeat = raw[i].is_heartbeat != 0;
@@ -111,11 +131,19 @@ class PollBatchWorker : public Napi::AsyncWorker {
 
   void OnOK() override {
     Napi::Env env = Env();
+    if (error_ != MES_OK && !results_.empty()) {
+      // Deliver what the batch already produced, then surface the terminal
+      // error from the next poll/pollBatch call. Dropping these results would
+      // lose events for good: the core advances the GTID checkpoint on the
+      // next call as if the whole batch had been consumed.
+      wrap_->LatchTerminalError(error_, DescribeClientError(client_, error_));
+      error_ = MES_OK;
+    }
     if (error_ != MES_OK) {
-      const char* msg = mes_client_last_error(client_);
-      std::string err_msg = msg ? msg : "poll batch failed";
       deferred_.Reject(
-          mes_node::MakeMesError(env, "mes_client_poll_batch failed: " + err_msg, error_).Value());
+          mes_node::MakeMesError(
+              env, "mes_client_poll_batch failed: " + DescribeClientError(client_, error_), error_)
+              .Value());
     } else {
       Napi::Array output = Napi::Array::New(env, results_.size());
       for (size_t i = 0; i < results_.size(); ++i) {
@@ -187,7 +215,11 @@ Napi::Object ClientWrap::Init(Napi::Env env, Napi::Object exports) {
 ClientWrap::ClientWrap(const Napi::CallbackInfo& info)
     : Napi::ObjectWrap<ClientWrap>(info), client_(mes_client_create()) {
   if (!client_) {
-    Napi::Error::New(info.Env(), "Failed to create mes client").ThrowAsJavaScriptException();
+    // Every throw and rejection on this surface carries a numeric code: the
+    // stream retry policy classifies a code-less error as retryable and would
+    // spend its whole reconnect budget on a permanent failure.
+    mes_node::MakeMesError(info.Env(), "Failed to create mes client", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
   }
 }
 
@@ -200,8 +232,24 @@ ClientWrap::~ClientWrap() {
 
 bool ClientWrap::RejectIfPollInFlight(Napi::Env env, const char* operation) const {
   if (pending_workers_.load(std::memory_order_acquire) == 0) return false;
-  Napi::Error::New(env, std::string("Cannot ") + operation + " while poll() is in progress")
+  mes_node::MakeMesError(env, std::string("Cannot ") + operation + " while poll() is in progress",
+                         MES_ERR_INVALID_ARG)
       .ThrowAsJavaScriptException();
+  return true;
+}
+
+void ClientWrap::LatchTerminalError(mes_error_t error, const std::string& message) {
+  if (error == MES_OK) return;
+  latched_error_ = error;
+  latched_error_message_ = message;
+}
+
+bool ClientWrap::TakeLatchedError(mes_error_t* error, std::string* message) {
+  if (latched_error_ == MES_OK) return false;
+  *error = latched_error_;
+  *message = std::move(latched_error_message_);
+  latched_error_ = MES_OK;
+  latched_error_message_.clear();
   return true;
 }
 
@@ -209,13 +257,19 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (RejectIfPollInFlight(env, "connect")) return;
   if (!client_) {
-    Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Client has been destroyed", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
   if (info.Length() < 1 || !info[0].IsObject()) {
     Napi::TypeError::New(env, "Expected config object").ThrowAsJavaScriptException();
     return;
   }
+
+  // A new session cannot inherit the terminal error of the previous one.
+  mes_error_t stale_error = MES_OK;
+  std::string stale_message;
+  TakeLatchedError(&stale_error, &stale_message);
 
   Napi::Object config = info[0].As<Napi::Object>();
 
@@ -228,6 +282,11 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   // Client-specific fields not in the shared parser.
   // Single Get() per key: undefined returns env.Undefined(), which fails
   // IsString()/IsNumber() checks — same semantics as the prior Has()+Get().
+  // An empty startGtid is a deliberate request for the empty GTID set (see
+  // mes.h MES_START_AT_GTID and the ClientConfig.startGtid doc), which the
+  // server answers with every binlog it still retains. It is therefore never a
+  // usable reconnect checkpoint: CdcStream.resumeConfig() keeps the configured
+  // start mode instead of forwarding an empty checkpoint here.
   Napi::Value start_gtid_v = config.Get("startGtid");
   if (start_gtid_v.IsString()) {
     strings.start_gtid = start_gtid_v.As<Napi::String>().Utf8Value();
@@ -314,9 +373,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     // core/src/protocol/mysql_connection.cpp) do not include credentials.
     // Only descriptive strings (optionally with host:port, auth plugin name,
     // or ssl_mode) are forwarded. Safe to surface directly.
-    const char* msg = mes_client_last_error(client_);
-    std::string err_msg = msg ? msg : "connection failed";
-    mes_node::MakeMesError(env, "mes_client_connect failed: " + err_msg, err)
+    mes_node::MakeMesError(env, "mes_client_connect failed: " + DescribeClientError(client_, err),
+                           err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -327,15 +385,15 @@ void ClientWrap::Start(const Napi::CallbackInfo& info) {
   if (RejectIfPollInFlight(env, "start")) return;
 
   if (!client_) {
-    Napi::Error::New(env, "Client has been destroyed").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Client has been destroyed", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
 
   mes_error_t err = mes_client_start(client_);
   if (err != MES_OK) {
-    const char* msg = mes_client_last_error(client_);
-    std::string err_msg = msg ? msg : "start failed";
-    mes_node::MakeMesError(env, "mes_client_start failed: " + err_msg, err)
+    mes_node::MakeMesError(env, "mes_client_start failed: " + DescribeClientError(client_, err),
+                           err)
         .ThrowAsJavaScriptException();
   }
 }
@@ -345,7 +403,8 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
 
   if (!client_ || destroy_pending_.load(std::memory_order_acquire)) {
     auto deferred = Napi::Promise::Deferred::New(env);
-    deferred.Reject(Napi::Error::New(env, "Client has been destroyed").Value());
+    deferred.Reject(
+        mes_node::MakeMesError(env, "Client has been destroyed", MES_ERR_INVALID_ARG).Value());
     return deferred.Promise();
   }
 
@@ -354,7 +413,18 @@ Napi::Value ClientWrap::Poll(const Napi::CallbackInfo& info) {
   // next call to mes_client_poll() on the same client.
   if (pending_workers_.load(std::memory_order_acquire) > 0) {
     auto deferred = Napi::Promise::Deferred::New(env);
-    deferred.Reject(Napi::Error::New(env, "A poll() is already in progress").Value());
+    deferred.Reject(
+        mes_node::MakeMesError(env, "A poll() is already in progress", MES_ERR_INVALID_ARG)
+            .Value());
+    return deferred.Promise();
+  }
+
+  mes_error_t latched = MES_OK;
+  std::string latched_message;
+  if (TakeLatchedError(&latched, &latched_message)) {
+    auto deferred = Napi::Promise::Deferred::New(env);
+    deferred.Reject(
+        mes_node::MakeMesError(env, "mes_client_poll failed: " + latched_message, latched).Value());
     return deferred.Promise();
   }
 
@@ -372,27 +442,41 @@ Napi::Value ClientWrap::PollBatch(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   auto deferred = Napi::Promise::Deferred::New(env);
   if (!client_ || destroy_pending_.load(std::memory_order_acquire)) {
-    deferred.Reject(Napi::Error::New(env, "Client has been destroyed").Value());
+    deferred.Reject(
+        mes_node::MakeMesError(env, "Client has been destroyed", MES_ERR_INVALID_ARG).Value());
     return deferred.Promise();
   }
   if (pending_workers_.load(std::memory_order_acquire) > 0) {
-    deferred.Reject(Napi::Error::New(env, "A poll() is already in progress").Value());
+    deferred.Reject(
+        mes_node::MakeMesError(env, "A poll() is already in progress", MES_ERR_INVALID_ARG)
+            .Value());
     return deferred.Promise();
   }
 
   size_t max_events = 64;
   if (info.Length() > 0) {
     if (!info[0].IsNumber()) {
-      deferred.Reject(Napi::TypeError::New(env, "maxEvents must be a number").Value());
+      deferred.Reject(
+          mes_node::MakeMesError(env, "maxEvents must be a number", MES_ERR_INVALID_ARG).Value());
       return deferred.Promise();
     }
     const double value = info[0].As<Napi::Number>().DoubleValue();
     if (!std::isfinite(value) || value < 1 || value > 1024 || std::floor(value) != value) {
-      deferred.Reject(
-          Napi::RangeError::New(env, "maxEvents must be an integer between 1 and 1024").Value());
+      deferred.Reject(mes_node::MakeMesError(env, "maxEvents must be an integer between 1 and 1024",
+                                             MES_ERR_INVALID_ARG)
+                          .Value());
       return deferred.Promise();
     }
     max_events = static_cast<size_t>(value);
+  }
+
+  mes_error_t latched = MES_OK;
+  std::string latched_message;
+  if (TakeLatchedError(&latched, &latched_message)) {
+    deferred.Reject(
+        mes_node::MakeMesError(env, "mes_client_poll_batch failed: " + latched_message, latched)
+            .Value());
+    return deferred.Promise();
   }
 
   pending_workers_.fetch_add(1, std::memory_order_acq_rel);

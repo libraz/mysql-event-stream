@@ -7,6 +7,7 @@
 #include <napi.h>
 
 #include <atomic>
+#include <string>
 
 #include "mes.h"
 
@@ -18,6 +19,16 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
 
   /** @brief Called by PollWorker on the main thread when work completes. */
   void OnPollWorkerComplete();
+
+  /**
+   * @brief Hold a terminal poll error until the next poll/pollBatch call.
+   *
+   * mes_client_poll_batch() reports a terminal condition as the final element
+   * of a batch whose earlier elements are real events. Those events are
+   * delivered to the caller, so the error has to wait rather than replace
+   * them; the C ABI checkpoint advances as if the batch was consumed.
+   */
+  void LatchTerminalError(mes_error_t error, const std::string& message);
 
  private:
   void Connect(const Napi::CallbackInfo& info);
@@ -44,7 +55,12 @@ class ClientWrap : public Napi::ObjectWrap<ClientWrap> {
   /** @brief Reject lifecycle changes while the native poll buffer is borrowed. */
   bool RejectIfPollInFlight(Napi::Env env, const char* operation) const;
 
+  /** @brief Take the pending terminal error, if any, clearing it. */
+  bool TakeLatchedError(mes_error_t* error, std::string* message);
+
   mes_client_t* client_;
+  mes_error_t latched_error_ = MES_OK;
+  std::string latched_error_message_;
   std::atomic<int> pending_workers_{0};
   // N-API callbacks are serialized on the JS thread, but keep as atomic to
   // defensively document the shared-state contract with PollWorker completion.

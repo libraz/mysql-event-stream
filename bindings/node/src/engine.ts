@@ -54,7 +54,17 @@ export class CdcEngine {
     return new CdcEngine();
   }
 
-  /** Feed raw binlog bytes into the engine. Returns number of bytes consumed. */
+  /**
+   * Feed raw binlog bytes into the engine. Returns the number of bytes
+   * consumed; on a partial consume, feed the remainder next (never the whole
+   * buffer again) or already-queued events are delivered twice.
+   *
+   * After this throws, the engine's parse state is undefined and the only
+   * valid next operation is {@link reset}. Events decoded before the failing
+   * one stay queued and can be drained with {@link nextEvent} after the reset.
+   * Feeding again without a reset is unsupported: it may duplicate events or
+   * make no progress.
+   */
   feed(data: Uint8Array): number {
     this.ensureNotDestroyed();
     if (data.length === 0) return 0;
@@ -85,7 +95,15 @@ export class CdcEngine {
     this.engine!.reset();
   }
 
-  /** Set maximum event queue size for backpressure control. 0 = unlimited. */
+  /**
+   * Set the maximum event queue size for backpressure control. When the queue
+   * is full, {@link feed} stops consuming bytes early; drain with
+   * {@link nextEvent} and feed the remainder.
+   *
+   * `0` restores the bounded default of 10,000 events. There is no unlimited
+   * setting: an unbounded queue would let a producer that outruns the consumer
+   * grow it without limit.
+   */
   setMaxQueueSize(maxSize: number): void {
     this.ensureNotDestroyed();
     this.engine!.setMaxQueueSize(maxSize);

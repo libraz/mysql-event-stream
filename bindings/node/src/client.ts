@@ -1,10 +1,11 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { POLL_BATCH } from "./contract.js";
 import { loadNativeAddon } from "./native.js";
 import type { ClientConfig, PollResult, ServerFlavor } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { invalidArgument, validatePort } from "./validation.js";
+import { invalidArgument, validatePollBatchSize, validatePort } from "./validation.js";
 
 interface NativeAddon {
   BinlogClient?: new () => NativeClient;
@@ -33,6 +34,13 @@ interface NativeClient {
 
 const addon = loadNativeAddon<NativeAddon>();
 
+function destroyedError(): Error {
+  const error = new Error("Client has been destroyed") as Error & { code: number };
+  error.name = "MesError";
+  error.code = MesErrorCode.InvalidArg;
+  return error;
+}
+
 function tagNativeValidationError(error: unknown): unknown {
   if ((error instanceof TypeError || error instanceof RangeError) && !("code" in error)) {
     Object.assign(error, { code: MesErrorCode.InvalidArg });
@@ -46,7 +54,7 @@ export class BinlogClient {
 
   constructor(config: ClientConfig) {
     if (!addon.hasClient || !addon.BinlogClient) {
-      throw new Error("BinlogClient native addon not loaded");
+      throw invalidArgument("BinlogClient native addon not loaded");
     }
     validatePort(config.port);
     if (config.serverId !== undefined && config.serverId === 0) {
@@ -84,11 +92,9 @@ export class BinlogClient {
   }
 
   /** Block for one event, then return further events already in the native queue. */
-  pollBatch(maxEvents = 64): Promise<PollResult[]> {
+  pollBatch(maxEvents: number = POLL_BATCH.defaultMaxEvents): Promise<PollResult[]> {
     this.ensureNotDestroyed();
-    if (!Number.isInteger(maxEvents) || maxEvents < 1 || maxEvents > 1024) {
-      throw invalidArgument("maxEvents must be an integer between 1 and 1024");
-    }
+    validatePollBatchSize(maxEvents);
     return this.client!.pollBatch(maxEvents);
   }
 
@@ -167,6 +173,6 @@ export class BinlogClient {
   }
 
   private ensureNotDestroyed(): void {
-    if (!this.client) throw new Error("Client has been destroyed");
+    if (!this.client) throw destroyedError();
   }
 }

@@ -74,13 +74,87 @@ describe("BinlogClient", () => {
     }
   });
 
+  it("defers the native destroy until an in-flight poll completes", async () => {
+    // The worker holds the raw mes_client_t* on the libuv thread pool, so
+    // destroy() must not release it while pending_workers_ > 0. maxQueueBytes
+    // reads through the handle: it is positive while the handle lives and
+    // zero once it has been released.
+    const native = loadNativeAddon<{ BinlogClient: new () => NativeClientForTest }>();
+    const client = new native.BinlogClient();
+    expect(client.maxQueueBytes).toBeGreaterThan(0);
+
+    const pendingPoll = client.poll();
+    expect(() => client.destroy()).not.toThrow();
+    expect(client.maxQueueBytes).toBeGreaterThan(0);
+
+    await expect(pendingPoll).rejects.toBeDefined();
+
+    // The last worker completing on the main thread runs the deferred destroy.
+    expect(client.maxQueueBytes).toBe(0);
+    expect(client.isConnected).toBe(false);
+
+    // Exactly once: a second destroy() is a no-op, not a double free.
+    expect(() => client.destroy()).not.toThrow();
+    expect(client.maxQueueBytes).toBe(0);
+  });
+
   it("validates native pollBatch capacity", async () => {
     const native = loadNativeAddon<{ BinlogClient: new () => NativeClientForTest }>();
     const client = new native.BinlogClient();
     try {
       await expect(client.pollBatch(0)).rejects.toThrow("maxEvents must be an integer");
+      await expect(client.pollBatch(0)).rejects.toMatchObject({ code: MesErrorCode.InvalidArg });
     } finally {
       client.destroy();
+    }
+  });
+
+  // The stream layer treats a rejection it cannot classify as retryable, so a
+  // lifecycle violation without a code burns the whole reconnect budget, and
+  // an empty native message leaves the operator with no diagnosis at all.
+  it("rejects a poll on a client that never started, with a code and a reason", async () => {
+    const native = loadNativeAddon<{ BinlogClient: new () => NativeClientForTest }>();
+    const client = new native.BinlogClient();
+    try {
+      // Sequentially: a second in-flight poll would be rejected as a
+      // concurrent poll instead of reaching the disconnected path.
+      for (const start of [() => client.poll(), () => client.pollBatch(4)]) {
+        const error = (await start().then(
+          () => undefined,
+          (e: unknown) => e,
+        )) as (Error & { code?: number }) | undefined;
+        expect(error?.code).toBe(MesErrorCode.Disconnected);
+        expect(error?.message).toMatch(/failed: \S/);
+      }
+    } finally {
+      client.destroy();
+    }
+  });
+
+  it("rejects poll and pollBatch on a destroyed native client with a code", async () => {
+    const native = loadNativeAddon<{ BinlogClient: new () => NativeClientForTest }>();
+    const client = new native.BinlogClient();
+    client.destroy();
+    await expect(client.poll()).rejects.toMatchObject({
+      code: MesErrorCode.InvalidArg,
+      message: "Client has been destroyed",
+    });
+    await expect(client.pollBatch(4)).rejects.toMatchObject({ code: MesErrorCode.InvalidArg });
+  });
+
+  it("throws a coded error from every method of a destroyed client", () => {
+    const client = Object.create(BinlogClient.prototype) as BinlogClient;
+    for (const call of [
+      () => client.start(),
+      () => client.poll(),
+      () => client.pollBatch(),
+    ] as const) {
+      expect(call).toThrow("Client has been destroyed");
+      try {
+        call();
+      } catch (error) {
+        expect(error).toMatchObject({ code: MesErrorCode.InvalidArg, name: "MesError" });
+      }
     }
   });
 

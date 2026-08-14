@@ -2,25 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { BinlogClient } from "./client.js";
+import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";
 import type { ChangeEvent, StreamConfig } from "./types.js";
-import { MesErrorCode } from "./types.js";
-import { invalidArgument, validatePort } from "./validation.js";
-
-/** Error codes that indicate a permanent failure where reconnecting is futile. */
-const NON_RETRYABLE_CODES: ReadonlySet<number> = new Set([
-  MesErrorCode.Auth,
-  MesErrorCode.InvalidArg,
-  MesErrorCode.Validation,
-  MesErrorCode.Parse,
-  MesErrorCode.Checksum,
-  MesErrorCode.Decode,
-  MesErrorCode.DecodeColumn,
-  MesErrorCode.DecodeRow,
-  MesErrorCode.QueueFull,
-  MesErrorCode.GtidPurged,
-  MesErrorCode.GtidTaggedUnsupported,
-]);
+import { invalidArgument, validateStreamOptions, withStreamDefaults } from "./validation.js";
 
 const STREAM_CONFIG_KEYS = new Set<keyof StreamConfig>([
   "host",
@@ -65,7 +50,23 @@ function errorCode(err: unknown): number | undefined {
   return undefined;
 }
 
-/** High-level CDC stream that implements AsyncIterable for easy consumption. */
+/**
+ * High-level CDC stream that implements AsyncIterable for easy consumption.
+ *
+ * Leaving the iteration early does not release the native client on its own,
+ * so scope the stream and let the disposal run:
+ *
+ * ```ts
+ * await using stream = new CdcStream({ host: "127.0.0.1", user: "root" });
+ * for await (const event of stream) {
+ *   console.log(event);
+ *   break;
+ * }
+ * // stream.currentGtid still holds the last checkpoint here.
+ * ```
+ *
+ * Without `await using`, call {@link close} explicitly.
+ */
 export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   private config!: StreamConfig;
   private client: BinlogClient | null = null;
@@ -79,8 +80,9 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   private lastGtid = "";
 
   constructor(config: StreamConfig) {
+    validateStreamOptions(config);
     Object.defineProperty(this, "config", {
-      value: config,
+      value: withStreamDefaults(config),
       writable: true,
       configurable: true,
       enumerable: false,
@@ -92,7 +94,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     if (this.iterator) {
       throw new Error("Cannot configure after streaming has started");
     }
-    validatePort(overrides.port);
+    validateStreamOptions(overrides);
     for (const key of Object.keys(overrides)) {
       if (!STREAM_CONFIG_KEYS.has(key as keyof StreamConfig)) {
         throw invalidArgument(`Unknown config key: ${key}`);
@@ -134,7 +136,9 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
   /**
    * Get the delivered, committed checkpoint candidate. Persist it only after
-   * application processing succeeds; the stream does not provide exactly-once delivery.
+   * application processing succeeds; the stream does not provide exactly-once
+   * delivery. The last non-empty value survives {@link close}, so it can still
+   * be read after the iteration scope ends.
    */
   get currentGtid(): string {
     this.cacheCurrentGtid();
@@ -161,13 +165,16 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
   private async *generate(): AsyncGenerator<ChangeEvent> {
     this.engine = new CdcEngine();
-    this.engine.setMaxEventSize(this.config.maxEventSize ?? 32 * 1024 * 1024);
-    this.engine.setMaxQueueSize(this.config.maxQueueSize ?? 0);
+    this.engine.setMaxEventSize(this.config.maxEventSize ?? STREAM_DEFAULTS.maxEventSize);
+    this.engine.setMaxQueueSize(this.config.maxQueueSize ?? STREAM_DEFAULTS.maxQueueSize);
     this.applyFilters();
     this.enableMetadataSafe();
 
     let reconnectAttempts = 0;
-    const maxAttempts = Math.max(0, this.config.maxReconnectAttempts ?? 10);
+    const maxAttempts = Math.max(
+      0,
+      this.config.maxReconnectAttempts ?? STREAM_DEFAULTS.maxReconnectAttempts,
+    );
 
     try {
       while (!this.closed) {
@@ -186,6 +193,10 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
           while (!this.closed) {
             const results = await this.client.pollBatch();
+            // The native checkpoint advances as events leave the client queue,
+            // so the whole batch shares one value. Read it once here instead of
+            // once per decoded row.
+            this.cacheCurrentGtid();
             for (const result of results) {
               if (!result.data && !leftover) continue;
 
@@ -206,9 +217,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
                 // retry accounting. Framing metadata may be received before the
                 // same permanently undecodable event on every reconnect.
                 reconnectAttempts = 0;
-                this.cacheCurrentGtid();
                 yield ev;
-                this.cacheCurrentGtid();
               }
             }
           }
@@ -220,7 +229,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           // never succeed on retry. Fail fast instead of burning every
           // reconnect attempt plus backoff before surfacing the error.
           const code = errorCode(err);
-          if (code !== undefined && NON_RETRYABLE_CODES.has(code)) {
+          if (code !== undefined && NON_RETRYABLE_ERROR_CODES.has(code)) {
             throw err;
           }
 
@@ -231,23 +240,11 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           reconnectAttempts++;
           if (reconnectAttempts > maxAttempts) throw err;
 
-          // Linear backoff capped at kMaxDelayMs (10s), with 50%-100% jitter.
-          // Aligned with the Python binding (max_delay_s = 10.0).
-          const kBaseDelayMs = 1000;
-          const kMaxDelayMs = 10_000;
-          const kJitterMin = 0.5;
-          const baseDelay = Math.min(kBaseDelayMs * reconnectAttempts, kMaxDelayMs);
-          const delay = baseDelay * (kJitterMin + Math.random() * (1 - kJitterMin));
-          await this.waitForBackoff(delay);
+          await this.waitForBackoff(backoffDelayMs(reconnectAttempts, Math.random()));
           if (this.closed) break;
 
           this.engine!.reset();
-          this.config = {
-            ...this.config,
-            startGtid: gtid,
-            startBinlogFile: undefined,
-            startBinlogPosition: undefined,
-          };
+          this.config = this.resumeConfig(gtid);
           this.applyFilters();
           // Re-enable metadata after engine reset. Keeps the Node binding
           // consistent with the Python binding, which re-runs
@@ -260,6 +257,27 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
       // via .return() (break in for-await), or via .throw().
       this.cleanup();
     }
+  }
+
+  /**
+   * Derive the successor connection's config from a reconnect checkpoint.
+   *
+   * This is the only place a start position is rewritten, so the rule holds on
+   * every reconnect path. An empty checkpoint means none was ever published:
+   * the connection died before its first commit, or it was anchored to a file
+   * offset that produces no GTID. Forwarding that as `startGtid: ""` would
+   * request the empty GTID set, which the server reads as "send every binlog
+   * you still retain". Keep the configured start mode instead — at worst the
+   * successor replays from the original anchor.
+   */
+  private resumeConfig(checkpoint: string): StreamConfig {
+    if (checkpoint === "") return this.config;
+    return {
+      ...this.config,
+      startGtid: checkpoint,
+      startBinlogFile: undefined,
+      startBinlogPosition: undefined,
+    };
   }
 
   private waitForBackoff(delayMs: number): Promise<void> {

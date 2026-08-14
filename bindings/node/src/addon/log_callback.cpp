@@ -127,7 +127,15 @@ Napi::Value SetLogCallback(const Napi::CallbackInfo& info) {
 
   mes_log_level_t level = MES_LOG_WARN;
   if (info.Length() >= 2 && info[1].IsNumber()) {
-    level = static_cast<mes_log_level_t>(info[1].As<Napi::Number>().Int32Value());
+    // An out-of-range threshold reaches the core as a severity no record ever
+    // matches, which is indistinguishable from never installing a handler.
+    const int32_t raw = info[1].As<Napi::Number>().Int32Value();
+    if (raw < MES_LOG_ERROR || raw > MES_LOG_DEBUG) {
+      Napi::RangeError::New(env, "log level must be an integer between 0 and 3")
+          .ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    level = static_cast<mes_log_level_t>(raw);
   }
 
   // Detach when no function is supplied.

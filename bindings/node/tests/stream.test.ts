@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it, vi } from "vitest";
+import { NON_RETRYABLE_ERROR_CODES } from "../src/contract.js";
 import { CdcStream } from "../src/stream.js";
 import { MesErrorCode } from "../src/types.js";
+import { loadBindingContract } from "./contract-fixture.js";
+
+const contract = loadBindingContract();
 
 // Shared spies for the reconnect tests below. Hoisted so the vi.mock factories
 // (which are themselves hoisted above imports) can reference them.
@@ -175,6 +179,48 @@ describe("CdcStream", () => {
     mocks.currentGtidImpl.mockReturnValue("");
   });
 
+  it("reads the native checkpoint per poll batch, not per row event", async () => {
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl
+      .mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false })
+      .mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5),
+          ),
+      );
+    mocks.feedImpl.mockReset();
+    mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
+    mocks.nextEventImpl.mockReset();
+    const event = { type: "INSERT" };
+    mocks.nextEventImpl
+      .mockReturnValueOnce(event)
+      .mockReturnValueOnce(event)
+      .mockReturnValueOnce(event)
+      .mockReturnValue(null);
+    mocks.currentGtidImpl.mockReset();
+    mocks.currentGtidImpl.mockReturnValue("uuid:1-7");
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    let delivered = 0;
+    let readsWhileIterating = 0;
+    for await (const _ of stream) {
+      delivered++;
+      readsWhileIterating = mocks.currentGtidImpl.mock.calls.length;
+      if (delivered === 3) break;
+    }
+
+    expect(delivered).toBe(3);
+    // One batch delivered all three events, so one native read covers them all.
+    expect(readsWhileIterating).toBeLessThanOrEqual(
+      contract.checkpointRetention.maxNativeReadsPerPollBatch,
+    );
+    expect(stream.currentGtid).toBe("uuid:1-7");
+    mocks.currentGtidImpl.mockReturnValue("");
+  });
+
   it("close should be safe before streaming starts", async () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     await expect(stream.close()).resolves.toBeUndefined();
@@ -341,36 +387,32 @@ describe("CdcStream", () => {
       await stream.close();
     });
 
-    it.each([
-      MesErrorCode.InvalidArg,
-      MesErrorCode.Parse,
-      MesErrorCode.DecodeRow,
-      MesErrorCode.QueueFull,
-      MesErrorCode.GtidPurged,
-      MesErrorCode.GtidTaggedUnsupported,
-    ])("fails fast on a permanent stream error (%i)", async (code) => {
-      mocks.clientCtor.mockReset();
-      mocks.startImpl.mockReset();
-      mocks.startImpl.mockImplementation(() => {
-        const err: Error & { code?: number } = new Error("permanent stream error");
-        err.code = code;
-        throw err;
-      });
+    it.each([...NON_RETRYABLE_ERROR_CODES])(
+      "fails fast on a permanent stream error (%i)",
+      async (code) => {
+        mocks.clientCtor.mockReset();
+        mocks.startImpl.mockReset();
+        mocks.startImpl.mockImplementation(() => {
+          const err: Error & { code?: number } = new Error("permanent stream error");
+          err.code = code;
+          throw err;
+        });
 
-      const stream = new CdcStream({
-        host: "127.0.0.1",
-        maxReconnectAttempts: 10,
-      });
-      await expect(async () => {
-        for await (const _ of stream) {
-          // no events expected
-        }
-      }).rejects.toThrow("permanent stream error");
+        const stream = new CdcStream({
+          host: "127.0.0.1",
+          maxReconnectAttempts: 10,
+        });
+        await expect(async () => {
+          for await (const _ of stream) {
+            // no events expected
+          }
+        }).rejects.toThrow("permanent stream error");
 
-      expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
-      expect(mocks.startImpl).toHaveBeenCalledTimes(1);
-      await stream.close();
-    });
+        expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
+        expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+        await stream.close();
+      },
+    );
 
     it("retries a transient (non-auth) error", async () => {
       mocks.clientCtor.mockClear();
@@ -452,7 +494,7 @@ describe("CdcStream", () => {
       expect(mocks.pollImpl).toHaveBeenCalledTimes(2);
     });
 
-    it("reconnects with an explicit empty GTID checkpoint", async () => {
+    it("keeps the file/position anchor when no checkpoint was published", async () => {
       mocks.clientCtor.mockClear();
       mocks.startImpl.mockReset();
       mocks.startImpl.mockImplementation(() => {});
@@ -474,9 +516,97 @@ describe("CdcStream", () => {
       }).rejects.toThrow("temporary drop");
 
       expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
-      expect(mocks.clientCtor.mock.calls[1][0]).toMatchObject({ startGtid: "" });
+      const resumed = mocks.clientCtor.mock.calls[1][0];
+      // An empty checkpoint must never become an empty GTID set: the server
+      // answers that with every binlog it still retains.
+      expect(resumed.startGtid).toBeUndefined();
+      expect(resumed.startBinlogFile).toBe("binlog.000001");
+      expect(resumed.startBinlogPosition).toBe(4);
+    });
+
+    it("keeps the current-position start mode when the first connect fails", async () => {
+      mocks.clientCtor.mockReset();
+      let attempts = 0;
+      mocks.clientCtor.mockImplementation(() => {
+        attempts++;
+        if (attempts === 1) throw new Error("connect refused");
+      });
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {
+        throw new Error("still down");
+      });
+      mocks.pollImpl.mockReset();
+      mocks.currentGtidImpl.mockReset();
+      mocks.currentGtidImpl.mockReturnValue("");
+
+      const stream = new CdcStream({ host: "127.0.0.1", maxReconnectAttempts: 1 });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("still down");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+      // The client was never constructed on the first attempt, so there is no
+      // checkpoint to resume from. The implicit "snapshot the current position"
+      // start mode has to survive intact.
+      expect(mocks.clientCtor.mock.calls[1][0].startGtid).toBeUndefined();
       expect(mocks.clientCtor.mock.calls[1][0].startBinlogFile).toBeUndefined();
       expect(mocks.clientCtor.mock.calls[1][0].startBinlogPosition).toBeUndefined();
+    });
+
+    it("resumes from a published checkpoint instead of the file/position anchor", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {});
+      mocks.pollImpl.mockReset();
+      mocks.pollImpl.mockRejectedValue(new Error("temporary drop"));
+      mocks.currentGtidImpl.mockReset();
+      mocks.currentGtidImpl.mockReturnValue("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5");
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        startBinlogFile: "binlog.000001",
+        startBinlogPosition: 4,
+        maxReconnectAttempts: 1,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("temporary drop");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+      const resumed = mocks.clientCtor.mock.calls[1][0];
+      expect(resumed.startGtid).toBe("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5");
+      expect(resumed.startBinlogFile).toBeUndefined();
+      expect(resumed.startBinlogPosition).toBeUndefined();
+    });
+
+    it("keeps an explicitly configured startGtid when no checkpoint was published", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {});
+      mocks.pollImpl.mockReset();
+      mocks.pollImpl.mockRejectedValue(new Error("temporary drop"));
+      mocks.currentGtidImpl.mockReset();
+      mocks.currentGtidImpl.mockReturnValue("");
+
+      const stream = new CdcStream({
+        host: "127.0.0.1",
+        startGtid: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
+        maxReconnectAttempts: 1,
+      });
+      await expect(async () => {
+        for await (const _ of stream) {
+          // no events expected
+        }
+      }).rejects.toThrow("temporary drop");
+
+      expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+      expect(mocks.clientCtor.mock.calls[1][0].startGtid).toBe(
+        "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
+      );
     });
 
     it("close interrupts reconnect backoff", async () => {
