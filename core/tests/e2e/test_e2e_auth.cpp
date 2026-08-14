@@ -92,7 +92,7 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
   auto rc = rejected.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
                              0, "", "", "");
   EXPECT_EQ(rc, MES_ERR_AUTH);
-  EXPECT_NE(rejected.GetLastError().find("public-key retrieval is disabled"), std::string::npos);
+  EXPECT_NE(rejected.GetLastError().find("allow_public_key_retrieval"), std::string::npos);
 
   // Legacy behavior remains available only through an explicit, documented opt-in.
   mes::protocol::MysqlConnection opted_in;
@@ -102,6 +102,42 @@ TEST(E2EAuth, CachingSha2WithoutTlsColdCache) {
   opted_in.Disconnect();
 
   // Clean up temp user
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+}
+
+TEST(E2EAuth, CachingSha2RequiredTlsColdCacheReportsBothRemedies) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
+  // ssl_mode=required encrypts without authenticating the server, so the
+  // cleartext shortcut stays closed and full auth needs the opt-in. A fresh
+  // user guarantees the cold cache that makes the server ask for full auth.
+  const std::string temp_user = "sha2_required_tls_test_user";
+  const std::string temp_pass = "required_tls_pwd_123";
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+  auto dml_rc = ExecuteDML("CREATE USER '" + temp_user +
+                           "'@'%' IDENTIFIED WITH caching_sha2_password BY '" + temp_pass + "'");
+  ASSERT_EQ(dml_rc, MES_OK) << "Failed to create temp user";
+  ExecuteDML("GRANT SELECT ON *.* TO '" + temp_user + "'@'%'");
+  ExecuteDML("FLUSH PRIVILEGES");
+
+  mes::protocol::MysqlConnection rejected;
+  auto rc = rejected.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
+                             MES_SSL_REQUIRED, "", "", "");
+  EXPECT_EQ(rc, MES_ERR_AUTH);
+  // The failure must name both documented ways out, not just state a refusal.
+  EXPECT_NE(rejected.GetLastError().find("verify_ca"), std::string::npos)
+      << rejected.GetLastError();
+  EXPECT_NE(rejected.GetLastError().find("allow_public_key_retrieval"), std::string::npos)
+      << rejected.GetLastError();
+
+  // Raising ssl_mode to verify_ca is one of the two remedies the message names.
+  mes::protocol::MysqlConnection verified;
+  rc = verified.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
+                        MES_SSL_VERIFY_CA, CaCert(), "", "");
+  EXPECT_EQ(rc, MES_OK) << verified.GetLastError();
+  verified.Disconnect();
+
   ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
 }
 

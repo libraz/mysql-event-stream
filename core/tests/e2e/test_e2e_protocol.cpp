@@ -629,8 +629,12 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  // caching_sha2_password full auth needs certificate-verified TLS, so this
+  // test must not depend on another test having warmed the server's password
+  // cache for this account.
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
+  std::string ca_path = DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 
@@ -1165,8 +1169,12 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
   meta_config.start_gtid = nullptr;
   meta_config.connect_timeout_s = kTimeout;
   meta_config.read_timeout_s = kTimeout;
-  meta_config.ssl_mode = MES_SSL_DISABLED;
-  meta_config.ssl_ca = nullptr;
+  // Both connections below authenticate on their own: caching_sha2_password
+  // full auth needs certificate-verified TLS, and a test run in isolation has
+  // no other test to warm the server's password cache.
+  meta_config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
+  const std::string meta_ca_path = DefaultCa();
+  meta_config.ssl_ca = meta_ca_path.empty() ? nullptr : meta_ca_path.c_str();
   meta_config.ssl_cert = nullptr;
   meta_config.ssl_key = nullptr;
 
@@ -1207,8 +1215,9 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
   config.start_gtid = start_gtid.c_str();
   config.connect_timeout_s = kTimeout;
   config.read_timeout_s = 3;
-  config.ssl_mode = MES_SSL_DISABLED;
-  config.ssl_ca = nullptr;
+  config.ssl_mode = static_cast<mes_ssl_mode_t>(DefaultSslMode());
+  const std::string ca_path = DefaultCa();
+  config.ssl_ca = ca_path.empty() ? nullptr : ca_path.c_str();
   config.ssl_cert = nullptr;
   config.ssl_key = nullptr;
 

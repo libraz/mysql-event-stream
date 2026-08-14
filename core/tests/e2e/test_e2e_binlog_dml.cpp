@@ -1030,4 +1030,156 @@ TEST(E2EBinlogDML, VectorDelete) {
   e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.vec_test");
 }
 
+// A VECTOR column is a binary-charset character column as far as TABLE_MAP is
+// concerned, so it occupies a DEFAULT_CHARSET slot ahead of the text column.
+// The other VECTOR tests use tables without string columns and cannot observe
+// that: a decoder that skips VECTOR shifts the utf8mb4 exception onto the wrong
+// column and surfaces `label` as raw bytes.
+TEST(E2EBinlogDML, VectorOccupiesACharsetSlotAheadOfStringColumns) {
+  if (!e2e::IsMysql9OrLater()) {
+    GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
+  }
+
+  ASSERT_EQ(e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.vec_charset_values"), MES_OK);
+  e2e::ScopedCleanup cleanup("DROP TABLE IF EXISTS mes_test.vec_charset_values");
+  // Two binary-charset character columns (embedding, payload) against one
+  // utf8mb4 column make the server pack DEFAULT_CHARSET as "binary, with one
+  // exception at character-column index 1".
+  ASSERT_EQ(e2e::ExecuteDML("CREATE TABLE mes_test.vec_charset_values ("
+                            "id INT NOT NULL PRIMARY KEY, "
+                            "embedding VECTOR(3) NOT NULL, "
+                            "label VARCHAR(64) CHARACTER SET utf8mb4 NOT NULL, "
+                            "payload BLOB NOT NULL) ENGINE=InnoDB"),
+            MES_OK);
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.vec_charset_values VALUES "
+                            "(1, TO_VECTOR('[1.0, 2.0, 3.0]'), 'vector label', 'payload bytes')"),
+            MES_OK);
+
+  mes_error_t feed_error = MES_OK;
+  const auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlVectorCharsetSlots,
+                                              "vec_charset_values", 1, nullptr, &feed_error);
+  ASSERT_EQ(feed_error, MES_OK);
+  const auto filtered = e2e::FilterByTable(events, "vec_charset_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_EQ(filtered[0].after.size(), 4u);
+
+  EXPECT_EQ(filtered[0].after[0].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[0].int_val, 1);
+  // 3 float32 values, stored exactly like a BLOB payload.
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[1].str_data.size(), 12u);
+  EXPECT_EQ(filtered[0].after[2].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[2].str_data, "vector label");
+  EXPECT_EQ(filtered[0].after[3].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[3].str_data, "payload bytes");
+}
+
+// binlog_row_metadata=FULL is the documented route to schema-derived column
+// names without a metadata connection. The E2E containers run MINIMAL so that
+// the MINIMAL path stays covered, so this test raises the server setting for
+// its own DML and puts it back afterwards.
+TEST(E2EBinlogDML, FullRowMetadataResolvesColumnNamesWithoutAMetadataConnection) {
+  const std::string previous = e2e::QueryScalar("SELECT @@GLOBAL.binlog_row_metadata");
+  if (previous.empty()) {
+    GTEST_SKIP() << "server does not expose binlog_row_metadata";
+  }
+  e2e::ScopedCleanup restore_metadata("SET GLOBAL binlog_row_metadata = '" + previous + "'");
+  ASSERT_EQ(e2e::ExecuteDML("SET GLOBAL binlog_row_metadata = 'FULL'"), MES_OK);
+
+  ASSERT_EQ(e2e::ExecuteDML("DROP TABLE IF EXISTS mes_test.full_metadata_values"), MES_OK);
+  e2e::ScopedCleanup drop_table("DROP TABLE IF EXISTS mes_test.full_metadata_values");
+  // Two binary-charset columns against one utf8mb4 column force DEFAULT_CHARSET
+  // to be packed as "binary, with one exception". That exception's index counts
+  // character columns only, and ENUM and SET sit among them precisely so a
+  // parser that lets them consume a slot mislabels text_value as binary.
+  ASSERT_EQ(e2e::ExecuteDML("CREATE TABLE mes_test.full_metadata_values ("
+                            "id INT NOT NULL PRIMARY KEY, "
+                            "enum_value ENUM('first','second') NOT NULL, "
+                            "text_value VARCHAR(64) CHARACTER SET utf8mb4 NOT NULL, "
+                            "set_value SET('a','b','c') NOT NULL, "
+                            "binary_value VARBINARY(16) NOT NULL, "
+                            "blob_value BLOB NOT NULL) ENGINE=InnoDB"),
+            MES_OK);
+
+  const auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+  ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.full_metadata_values VALUES "
+                            "(1, 'second', 'full metadata text', 'a,c', "
+                            "UNHEX('00112233445566778899AABBCCDDEEFF'), 'blob bytes')"),
+            MES_OK);
+
+  mes_error_t feed_error = MES_OK;
+  const auto events = e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlFullRowMetadata,
+                                              "full_metadata_values", 1, nullptr, &feed_error);
+  ASSERT_EQ(feed_error, MES_OK);
+  const auto filtered = e2e::FilterByTable(events, "full_metadata_values");
+  ASSERT_EQ(filtered.size(), 1u);
+  ASSERT_EQ(filtered[0].after.size(), 6u);
+
+  // CaptureTableEvents configures no metadata connection, so resolved names can
+  // only have come from the TABLE_MAP COLUMN_NAME field that FULL adds.
+  EXPECT_TRUE(filtered[0].names_resolved);
+  EXPECT_EQ(filtered[0].after[0].col_name, "id");
+  EXPECT_EQ(filtered[0].after[1].col_name, "enum_value");
+  EXPECT_EQ(filtered[0].after[2].col_name, "text_value");
+  EXPECT_EQ(filtered[0].after[3].col_name, "set_value");
+  EXPECT_EQ(filtered[0].after[4].col_name, "binary_value");
+  EXPECT_EQ(filtered[0].after[5].col_name, "blob_value");
+
+  EXPECT_EQ(filtered[0].after[0].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[0].int_val, 1);
+  // ENUM is exposed as its 1-based ordinal, SET as its member bitmask.
+  EXPECT_EQ(filtered[0].after[1].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[1].int_val, 2);
+  EXPECT_EQ(filtered[0].after[3].type, MES_COL_INT);
+  EXPECT_EQ(filtered[0].after[3].int_val, 5);  // 'a,c'
+
+  EXPECT_EQ(filtered[0].after[2].type, MES_COL_STRING);
+  EXPECT_EQ(filtered[0].after[2].str_data, "full metadata text");
+  EXPECT_EQ(filtered[0].after[4].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[4].str_data, std::string("\x00\x11\x22\x33\x44\x55\x66\x77"
+                                                       "\x88\x99\xAA\xBB\xCC\xDD\xEE\xFF",
+                                                       16));
+  EXPECT_EQ(filtered[0].after[5].type, MES_COL_BYTES);
+  EXPECT_EQ(filtered[0].after[5].str_data, "blob bytes");
+}
+
+// MariaDB withholds ANNOTATE_ROWS unless the dump request asks for it, so the
+// documented source_sql field is only populated when that flag reaches the
+// wire. Cover all three DML statement kinds: each row event must carry back the
+// statement that produced it.
+TEST(E2EBinlogDML, MariaAnnotateRowsRestoresSourceSql) {
+  if (!e2e::IsMariaDB()) {
+    GTEST_SKIP() << "ANNOTATE_ROWS is a MariaDB-only event";
+  }
+
+  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.items WHERE name = 'annotate_sql'");
+
+  auto gtid = e2e::GetCurrentGtid();
+  ASSERT_FALSE(gtid.empty());
+
+  const std::string insert_sql =
+      "INSERT INTO mes_test.items (name, value) VALUES ('annotate_sql', 1)";
+  const std::string update_sql = "UPDATE mes_test.items SET value = 2 WHERE name = 'annotate_sql'";
+  const std::string delete_sql = "DELETE FROM mes_test.items WHERE name = 'annotate_sql'";
+  ASSERT_EQ(e2e::ExecuteDML(insert_sql), MES_OK);
+  ASSERT_EQ(e2e::ExecuteDML(update_sql), MES_OK);
+  ASSERT_EQ(e2e::ExecuteDML(delete_sql), MES_OK);
+
+  auto events =
+      e2e::CaptureTableEvents(gtid, e2e::server_ids::kDmlMariaAnnotateSourceSql, "items", 3);
+  auto filtered = e2e::FilterByTable(events, "items");
+  ASSERT_GE(filtered.size(), 3u);
+
+  EXPECT_EQ(filtered[0].type, MES_EVENT_INSERT);
+  EXPECT_EQ(filtered[0].source_sql, insert_sql);
+  EXPECT_EQ(filtered[1].type, MES_EVENT_UPDATE);
+  EXPECT_EQ(filtered[1].source_sql, update_sql);
+  EXPECT_EQ(filtered[2].type, MES_EVENT_DELETE);
+  EXPECT_EQ(filtered[2].source_sql, delete_sql);
+}
+
 }  // namespace

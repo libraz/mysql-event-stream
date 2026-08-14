@@ -9,6 +9,7 @@
 #ifndef MES_TEST_E2E_HELPERS_H_
 #define MES_TEST_E2E_HELPERS_H_
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -24,8 +25,14 @@ namespace e2e {
 
 // Each E2E test uses a unique server_id to avoid binlog session conflicts.
 // Ranges: Protocol 100-199, SSL 200-299, Auth 300-399,
-//         DML 500-599, Engine 600-699, Buffer 700-799
+//         DML 500-599, Engine 600-699, Buffer 700-799, Start modes 800-899
 namespace server_ids {
+// test_e2e_start_mode.cpp
+constexpr uint32_t kStartModeCurrent = 800;
+constexpr uint32_t kStartModeExplicitGtid = 801;
+constexpr uint32_t kStartModeFilePosition = 802;
+constexpr uint32_t kStartModeFilePositionCheckpoint = 803;
+
 // test_e2e_binlog_dml.cpp
 constexpr uint32_t kDmlInsertAllColumns = 500;
 constexpr uint32_t kDmlInsertWithNulls = 501;
@@ -55,6 +62,9 @@ constexpr uint32_t kDmlClientQueueByteBudget = 524;
 constexpr uint32_t kDmlYearSignedness = 525;
 constexpr uint32_t kDmlCharsetMetadata = 526;
 constexpr uint32_t kDmlExtendedTypes = 527;
+constexpr uint32_t kDmlMariaAnnotateSourceSql = 528;
+constexpr uint32_t kDmlFullRowMetadata = 529;
+constexpr uint32_t kDmlVectorCharsetSlots = 530;
 }  // namespace server_ids
 
 // Connection defaults
@@ -128,6 +138,7 @@ struct CapturedEvent {
   std::vector<CapturedColumn> after;
   uint32_t timestamp = 0;
   bool names_resolved = false;
+  std::string source_sql;
 };
 
 inline CapturedColumn CopyColumn(const mes_column_t& c) {
@@ -149,6 +160,7 @@ inline CapturedEvent CopyEvent(const mes_event_t* e) {
   ce.table = e->table ? e->table : "";
   ce.timestamp = e->timestamp;
   ce.names_resolved = e->names_resolved != 0;
+  ce.source_sql = e->source_sql ? e->source_sql : "";
   for (uint32_t i = 0; i < e->before_count; i++) {
     ce.before.push_back(CopyColumn(e->before_columns[i]));
   }
@@ -172,6 +184,53 @@ inline std::string GetCurrentGtid() {
   if (mes::protocol::ExecuteQuery(conn.Socket(), query, &qr, &err) != MES_OK) return "";
   if (qr.rows.empty()) return "";
   return qr.rows[0].values[0];
+}
+
+// Read one scalar column from a single-row query as root (flavor-aware TLS).
+// Returns an empty string when the query fails or returns no row.
+inline std::string QueryScalar(const std::string& sql) {
+  mes::protocol::MysqlConnection conn;
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                   DefaultCa(), "", "") != MES_OK)
+    return "";
+  mes::protocol::QueryResult qr;
+  std::string err;
+  if (mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err) != MES_OK) return "";
+  if (qr.rows.empty() || qr.rows[0].values.empty()) return "";
+  return qr.rows[0].values[0];
+}
+
+// Server-side binlog_checksum setting, uppercased ("CRC32" or "NONE").
+inline std::string GetBinlogChecksumSetting() {
+  std::string value = QueryScalar("SELECT @@GLOBAL.binlog_checksum");
+  for (char& ch : value) {
+    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  }
+  return value;
+}
+
+// Current binlog file name and offset, for MES_START_AT_POSITION starts.
+struct BinlogCoordinates {
+  std::string file;
+  uint64_t position = 0;
+};
+
+inline BinlogCoordinates GetCurrentBinlogCoordinates() {
+  BinlogCoordinates coords;
+  mes::protocol::MysqlConnection conn;
+  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                   DefaultCa(), "", "") != MES_OK)
+    return coords;
+  mes::protocol::QueryResult qr;
+  std::string err;
+  // SHOW MASTER STATUS was removed in MySQL 8.4 in favour of
+  // SHOW BINARY LOG STATUS; MariaDB only knows the former.
+  const char* query = IsMariaDB() ? "SHOW MASTER STATUS" : "SHOW BINARY LOG STATUS";
+  if (mes::protocol::ExecuteQuery(conn.Socket(), query, &qr, &err) != MES_OK) return coords;
+  if (qr.rows.empty() || qr.rows[0].values.size() < 2) return coords;
+  coords.file = qr.rows[0].values[0];
+  coords.position = std::strtoull(qr.rows[0].values[1].c_str(), nullptr, 10);
+  return coords;
 }
 
 // Execute a DML/DDL statement as root (flavor-aware TLS)
