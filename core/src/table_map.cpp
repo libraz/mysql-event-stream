@@ -15,16 +15,6 @@ namespace {
 // Maximum column count for safety.
 constexpr size_t kMaxColumns = 4096;
 
-// Maximum number of TABLE_MAP entries retained in the registry. When this
-// threshold is exceeded (e.g. after heavy DDL or long-running replication
-// that cycles through many table_ids), the entire registry is cleared to
-// prevent unbounded memory growth. The server re-emits TABLE_MAP events
-// before each ROWS event, so clearing is safe: the next ROWS event will
-// simply be preceded by a fresh TABLE_MAP that re-populates the cache.
-// A simple single-threshold flush is preferred over strict LRU because it
-// keeps the hot path allocation-free and the worst case affects at most
-// one stale table_id per cleared entry.
-
 struct MetadataValue {
   uint32_t value = 0;
   size_t consumed = 0;
@@ -179,6 +169,7 @@ enum class OptionalMetadataFieldType : uint8_t {
   kEnumAndSetDefaultCharset = 10,
   kEnumAndSetColumnCharset = 11,
   kColumnVisibility = 12,
+  kVectorDimensionality = 13,
 };
 
 // MySQL's Field::has_signedness_information_type() decides which TABLE_MAP
@@ -254,18 +245,42 @@ bool ApplyColumnNames(const uint8_t* data, size_t value_len, TableMetadata* meta
   return pos == value_len;
 }
 
-bool IsCharacterColumnType(ColumnType type) {
-  switch (type) {
+// MySQL's is_character_type() decides which columns the DEFAULT_CHARSET and
+// COLUMN_CHARSET fields index, and it is applied to each column's *real* type.
+// The index space must be reproduced exactly, because both fields are packed
+// positionally: counting one column too many or too few shifts every
+// following collation id onto the wrong column.
+//
+// ENUM and SET travel on the wire as MYSQL_TYPE_STRING and are therefore
+// easily miscounted here. The server keeps their collations in the separate
+// ENUM_AND_SET_DEFAULT_CHARSET / ENUM_AND_SET_COLUMN_CHARSET fields, so they
+// must not consume a slot. VECTOR (MySQL 9.0+) does consume one; its
+// collation is always binary.
+bool IsCharacterColumnType(const ColumnMetadata& column) {
+  switch (column.type) {
+    case ColumnType::kString: {
+      // Field_enum and Field_set write their real type into metadata byte 0.
+      // A CHAR column never collides with those values because byte 0 carries
+      // MYSQL_TYPE_STRING XORed with the high bits of the field length.
+      const uint8_t real_type = static_cast<uint8_t>(column.metadata >> 8);
+      return real_type != static_cast<uint8_t>(ColumnType::kEnum) &&
+             real_type != static_cast<uint8_t>(ColumnType::kSet);
+    }
     case ColumnType::kVarchar:
     case ColumnType::kVarcharCompressed:
     case ColumnType::kVarString:
-    case ColumnType::kString:
+    case ColumnType::kVector:
     case ColumnType::kBlob:
     case ColumnType::kBlobCompressed:
     case ColumnType::kTinyBlob:
     case ColumnType::kMediumBlob:
     case ColumnType::kLongBlob:
       return true;
+    // Servers transmit ENUM and SET as MYSQL_TYPE_STRING, but reject them
+    // explicitly as well so a raw type byte cannot re-open the shift.
+    case ColumnType::kEnum:
+    case ColumnType::kSet:
+      return false;
     default:
       return false;
   }
@@ -284,7 +299,7 @@ bool ReadPackedField(const uint8_t* data, size_t len, size_t* offset, uint32_t* 
 std::vector<ColumnMetadata*> CharacterColumns(TableMetadata* metadata) {
   std::vector<ColumnMetadata*> columns;
   for (auto& column : metadata->columns) {
-    if (IsCharacterColumnType(column.type)) columns.push_back(&column);
+    if (IsCharacterColumnType(column)) columns.push_back(&column);
   }
   return columns;
 }

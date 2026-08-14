@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+#include <string>
+
 #include "binary_util.h"
 
 namespace mes::binary {
@@ -70,6 +73,64 @@ TEST(BinaryUtilTest, ReadU24Be) {
 TEST(BinaryUtilTest, ReadU32Be) {
   uint8_t data[] = {0x12, 0x34, 0x56, 0x78};
   EXPECT_EQ(ReadU32Be(data), 0x12345678u);
+}
+
+// --- Fixed-width decimal formatting ---
+
+// Every expectation below is what printf("%0*d") produces for the same
+// arguments; the column formatters depend on that equivalence.
+std::string Padded(int value, int width) {
+  char buf[32];
+  return std::string(buf, static_cast<size_t>(WritePaddedInt(buf, value, width) - buf));
+}
+
+TEST(WritePaddedIntTest, PadsToWidth) {
+  EXPECT_EQ(Padded(7, 2), "07");
+  EXPECT_EQ(Padded(0, 2), "00");
+  EXPECT_EQ(Padded(59, 2), "59");
+  EXPECT_EQ(Padded(2026, 4), "2026");
+  EXPECT_EQ(Padded(1, 4), "0001");
+  EXPECT_EQ(Padded(123, 9), "000000123");
+}
+
+TEST(WritePaddedIntTest, WidthOneOrZeroWritesEveryDigit) {
+  EXPECT_EQ(Padded(0, 0), "0");
+  EXPECT_EQ(Padded(0, 1), "0");
+  EXPECT_EQ(Padded(4095, 1), "4095");
+}
+
+TEST(WritePaddedIntTest, ValueWiderThanWidthIsNotTruncated) {
+  EXPECT_EQ(Padded(32767, 4), "32767");
+  EXPECT_EQ(Padded(1234567890, 2), "1234567890");
+}
+
+TEST(WritePaddedIntTest, SignCountsTowardTheWidth) {
+  EXPECT_EQ(Padded(-5, 2), "-5");
+  EXPECT_EQ(Padded(-5, 4), "-005");
+  EXPECT_EQ(Padded(-123, 2), "-123");
+  EXPECT_EQ(Padded(-1, 9), "-00000001");
+}
+
+TEST(WritePaddedIntTest, ExtremeValues) {
+  EXPECT_EQ(Padded(std::numeric_limits<int>::max(), 2), "2147483647");
+  EXPECT_EQ(Padded(std::numeric_limits<int>::min(), 2), "-2147483648");
+  EXPECT_EQ(Padded(std::numeric_limits<int>::min(), 15), "-00002147483648");
+}
+
+TEST(WritePaddedIntTest, AppendLeavesExistingContent) {
+  std::string out = "12:";
+  AppendPaddedInt(out, 5, 2);
+  AppendPaddedInt(out, -7, 3);
+  EXPECT_EQ(out, "12:05-07");
+}
+
+TEST(DecimalDigitCountTest, CountsEveryMagnitude) {
+  EXPECT_EQ(DecimalDigitCount(0), 1);
+  EXPECT_EQ(DecimalDigitCount(9), 1);
+  EXPECT_EQ(DecimalDigitCount(10), 2);
+  EXPECT_EQ(DecimalDigitCount(999999999), 9);
+  EXPECT_EQ(DecimalDigitCount(1000000000), 10);
+  EXPECT_EQ(DecimalDigitCount(std::numeric_limits<unsigned>::max()), 10);
 }
 
 // --- ReadPackedInt ---
@@ -176,6 +237,17 @@ TEST(BinaryUtilTest, BitmapBytes) {
   EXPECT_EQ(BitmapBytes(9), 2u);
   EXPECT_EQ(BitmapBytes(16), 2u);
   EXPECT_EQ(BitmapBytes(17), 3u);
+}
+
+// A wire-derived bit count within 7 of SIZE_MAX must not roll the byte count
+// over to a small value; a caller checking "does the bitmap fit in the
+// buffer?" would then let the bitmap scan run off the end of the event.
+TEST(BinaryUtilTest, BitmapBytesSaturatesNearSizeMax) {
+  constexpr size_t kMax = std::numeric_limits<size_t>::max();
+  EXPECT_EQ(BitmapBytes(kMax - 7), kMax / 8);
+  EXPECT_EQ(BitmapBytes(kMax - 6), kMax / 8 + 1);
+  EXPECT_EQ(BitmapBytes(kMax - 1), kMax / 8 + 1);
+  EXPECT_EQ(BitmapBytes(kMax), kMax / 8 + 1);
 }
 
 TEST(BinaryUtilTest, BitmapIsSet) {
@@ -479,6 +551,17 @@ TEST(CalcFieldSizeTest, BlobPack4) {
 TEST(CalcFieldSizeTest, BlobUnsupportedPack) {
   uint8_t data[8] = {};
   EXPECT_EQ(CalcFieldSize(0xFC, data, sizeof(data), 5), 0u);
+}
+
+// A four-byte length prefix reaches UINT32_MAX. Adding the prefix width to it
+// would wrap the reported field size down to a handful of bytes, which then
+// passes the caller's "does this field fit in what is left?" check.
+TEST(CalcFieldSizeTest, VarPrefixLengthNearUint32MaxDoesNotWrap) {
+  uint8_t data[] = {0xFF, 0xFF, 0xFF, 0xFF, 'a', 'b', 'c', 'd'};
+  EXPECT_EQ(CalcFieldSize(0xFC, data, sizeof(data), 4), 0u);  // BLOB
+  EXPECT_EQ(CalcFieldSize(0xF5, data, sizeof(data), 4), 0u);  // JSON
+  EXPECT_EQ(CalcFieldSize(0xF2, data, sizeof(data), 4), 0u);  // VECTOR
+  EXPECT_EQ(CalcFieldSize(0xFF, data, sizeof(data), 4), 0u);  // GEOMETRY
 }
 
 // --- CalcFieldSize for GEOMETRY with various pack lengths ---

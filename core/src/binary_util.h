@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -73,6 +74,71 @@ inline uint32_t ReadU32Be(const uint8_t* data) {
          (static_cast<uint32_t>(data[2]) << 8) | static_cast<uint32_t>(data[3]);
 }
 
+// --- Fixed-width decimal formatting ---
+
+/** @brief Number of decimal digits in @p value (1 for zero) */
+inline int DecimalDigitCount(unsigned value) {
+  if (value < 10U) return 1;
+  if (value < 100U) return 2;
+  if (value < 1000U) return 3;
+  if (value < 10000U) return 4;
+  if (value < 100000U) return 5;
+  if (value < 1000000U) return 6;
+  if (value < 10000000U) return 7;
+  if (value < 100000000U) return 8;
+  if (value < 1000000000U) return 9;
+  return 10;
+}
+
+/**
+ * @brief Write @p value in decimal at @p out, zero-padded to @p width characters
+ *
+ * Reproduces printf's "%0*d" for int: the pad width counts a leading '-', and a
+ * value needing more digits than @p width is written in full rather than
+ * truncated. Nothing is null-terminated.
+ *
+ * Temporal and DECIMAL columns are formatted several times per row, so this
+ * deliberately avoids the varargs formatter: printf resolves the decimal point
+ * through localeconv_l on every call, which takes a process-wide lock and
+ * serializes concurrent decoders.
+ *
+ * @param out Destination; must have room for max(@p width, 11) characters.
+ * @return Pointer one past the last character written.
+ */
+inline char* WritePaddedInt(char* out, int value, int width) {
+  unsigned magnitude;
+  if (value < 0) {
+    *out++ = '-';
+    --width;
+    magnitude = 0U - static_cast<unsigned>(value);
+  } else {
+    magnitude = static_cast<unsigned>(value);
+  }
+
+  const int digits = DecimalDigitCount(magnitude);
+  const int len = width > digits ? width : digits;
+  char* const end = out + len;
+  char* cursor = end;
+  do {
+    *--cursor = static_cast<char>('0' + magnitude % 10);
+    magnitude /= 10;
+  } while (magnitude != 0);
+  while (cursor > out) {
+    *--cursor = '0';
+  }
+  return end;
+}
+
+/**
+ * @brief Append @p value zero-padded to @p width characters to @p out
+ *
+ * Formats exactly as @ref WritePaddedInt. @p width must not exceed 20.
+ */
+inline void AppendPaddedInt(std::string& out, int value, int width) {
+  char buf[24];
+  out.append(buf, static_cast<size_t>(WritePaddedInt(buf, value, width) - buf));
+}
+
 // --- MySQL packed integer (length-encoded integer) ---
 
 /**
@@ -96,10 +162,33 @@ inline uint32_t ReadU32Be(const uint8_t* data) {
  */
 [[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
 
+// --- Column count limit ---
+
+/**
+ * @brief Upper bound on the number of columns a binlog table may declare.
+ *
+ * Matches MySQL's and MariaDB's hard limit of 4096 columns per table. Wire
+ * formats carry the column count as a packed integer, so every parser must
+ * clamp it to this bound before the value reaches allocation or loop
+ * arithmetic.
+ */
+constexpr uint64_t kMaxTableColumns = 4096;
+
 // --- Bitmap utilities ---
 
-/** @brief Calculate number of bytes needed for a bitmap of bit_count bits */
-inline size_t BitmapBytes(size_t bit_count) { return (bit_count + 7) / 8; }
+/**
+ * @brief Calculate number of bytes needed for a bitmap of bit_count bits
+ *
+ * Saturates instead of wrapping. Column counts reach this function straight
+ * from the wire, and a value within 7 of SIZE_MAX would otherwise roll
+ * `bit_count + 7` over to a tiny (often zero) byte count, turning a caller's
+ * "is the bitmap inside the buffer?" check into a no-op.
+ */
+inline size_t BitmapBytes(size_t bit_count) {
+  constexpr size_t kMax = std::numeric_limits<size_t>::max();
+  if (bit_count > kMax - 7) return kMax / 8 + 1;
+  return (bit_count + 7) / 8;
+}
 
 /** @brief Check if a specific bit is set in a bitmap */
 inline bool BitmapIsSet(const uint8_t* bitmap, size_t bit_index) {

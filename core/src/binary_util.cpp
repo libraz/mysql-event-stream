@@ -4,8 +4,8 @@
 #include "binary_util.h"
 
 #include <array>
-#include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace mes::binary {
 
@@ -153,9 +153,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
         result += std::to_string(val);
       }
     } else {
-      char fmt_buf[16];
-      std::snprintf(fmt_buf, sizeof(fmt_buf), "%09d", val);
-      result += fmt_buf;
+      AppendPaddedInt(result, val, 9);
     }
   }
 
@@ -172,9 +170,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
       for (int j = 0; j < 4; j++) {
         val = (val << 8) | *ptr++;
       }
-      char fmt_buf[16];
-      std::snprintf(fmt_buf, sizeof(fmt_buf), "%09d", val);
-      result += fmt_buf;
+      AppendPaddedInt(result, val, 9);
     }
 
     if (frac_rem > 0) {
@@ -183,9 +179,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
       for (int i = 0; i < bytes; i++) {
         val = (val << 8) | *ptr++;
       }
-      char fmt_buf[16];
-      std::snprintf(fmt_buf, sizeof(fmt_buf), "%0*d", frac_rem, val);
-      result += fmt_buf;
+      AppendPaddedInt(result, val, frac_rem);
     }
   }
 
@@ -227,6 +221,10 @@ static uint32_t CalcVarPrefixFieldSize(uint8_t pack_len, const uint8_t* data, si
   size_t consumed = 0;
   uint32_t content_len = ReadVarLenPrefix(pack_len, data, buf_len, &consumed);
   if (consumed == 0) return 0;
+  // content_len comes from the wire and a four-byte prefix can hold
+  // UINT32_MAX. Adding the prefix width would wrap the total back to a small
+  // value that then passes the caller's "does this field fit?" check.
+  if (content_len > std::numeric_limits<uint32_t>::max() - consumed) return 0;
   return static_cast<uint32_t>(consumed) + content_len;
 }
 

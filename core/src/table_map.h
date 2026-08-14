@@ -41,6 +41,16 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
  */
 class TableMapRegistry {
  public:
+  /**
+   * @brief Number of TABLE_MAP entries retained before eviction begins.
+   *
+   * Long-running replication cycles through many table_ids (heavy DDL gives
+   * each new table definition a fresh one), so the registry is bounded. Once
+   * it is full, registering an unseen table_id evicts the least recently used
+   * entry -- only that one entry, not the whole cache. Eviction is safe
+   * because the server re-emits a TABLE_MAP event before every ROWS event, so
+   * an evicted table_id is repopulated the next time its rows arrive.
+   */
   static constexpr size_t kMaxEntries = 8192;
   /**
    * @brief Process a TABLE_MAP_EVENT body and register the table.

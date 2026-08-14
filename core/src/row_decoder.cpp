@@ -6,7 +6,6 @@
 #include <zlib.h>
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -27,9 +26,11 @@ uint64_t ReadBigEndian(const uint8_t* data, size_t bytes) {
 
 // Parse the common ROWS_EVENT post-header and return a pointer to row data.
 // Sets column_count, columns_present, and optionally columns_present_update.
+// expected_column_count is the count declared by the TABLE_MAP event.
 // Returns nullptr on error.
 const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2, bool is_update,
-                                   size_t* column_count, const uint8_t** columns_present,
+                                   size_t expected_column_count, size_t* column_count,
+                                   const uint8_t** columns_present,
                                    const uint8_t** columns_present_update, size_t* remaining) {
   // Minimum: 6 (table_id) + 2 (flags) = 8
   if (len < 8) return nullptr;
@@ -50,6 +51,14 @@ const uint8_t* ParseRowsPostHeader(const uint8_t* data, size_t len, bool is_v2, 
   size_t consumed = 0;
   uint64_t col_count = binary::ReadPackedInt(ptr, left, consumed);
   if (consumed == 0) return nullptr;
+  // Range-check before the count reaches any arithmetic. The packed-int
+  // nine-byte form accepts values up to UINT64_MAX, and both the bitmap byte
+  // count below and the scan loops derive from this value; a count within 7 of
+  // the maximum would collapse the byte count and let the scans walk past the
+  // buffer. Cross-checking against the TABLE_MAP declaration here (rather than
+  // after the scans) also keeps a mismatched count from being scanned at all.
+  if (col_count == 0 || col_count > binary::kMaxTableColumns) return nullptr;
+  if (col_count != expected_column_count) return nullptr;
   ptr += consumed;
   left -= consumed;
 
@@ -88,10 +97,11 @@ size_t CountPresentColumns(const uint8_t* bitmap, size_t column_count) {
   return count;
 }
 
-// Decode a single row from the data pointer. Advances ptr and remaining.
+// Decode a single row from the data pointer. Advances ptr and remaining, and
+// charges everything the row materializes against budget.
 bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& metadata,
                   size_t column_count, size_t present_count, const uint8_t* columns_present,
-                  RowData* row) {
+                  DecodeBudget& budget, RowData* row) {
   if (present_count == 0) return false;
 
   // Null bitmap
@@ -131,7 +141,8 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
 
     size_t consumed = 0;
     row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed,
-                                        charset_known, binary_charset);
+                                        charset_known, binary_charset, budget.Remaining());
+    if (!budget.Charge(row->columns[i].string_val.size())) return false;
     if (consumed == 0) {
       // consumed=0 serves a dual purpose — it signals
       // either a decode error OR a legitimate zero-size DECIMAL(0,0).
@@ -184,22 +195,50 @@ int FracToMicroseconds(int frac, uint16_t meta) {
   }
 }
 
-// Format the fractional part at the column's declared precision.
-void AppendFractional(std::string& out, int usec, uint16_t fsp) {
-  if (fsp == 0) return;
+// Room for any temporal rendering below: an optional sign, six integer fields
+// at the widest rendering binary::WritePaddedInt can produce (11 characters),
+// five separators and a fractional part.
+constexpr size_t kTemporalBufferSize = 96;
+
+// Write the fractional part at the column's declared precision. fsp must not
+// exceed 6.
+char* WriteFractional(char* out, int usec, uint16_t fsp) {
+  if (fsp == 0) return out;
   static constexpr int kDivisor[] = {1, 100000, 10000, 1000, 100, 10, 1};
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), ".%0*d", static_cast<int>(fsp), usec / kDivisor[fsp]);
-  out += buf;
+  *out++ = '.';
+  return binary::WritePaddedInt(out, usec / kDivisor[fsp], static_cast<int>(fsp));
 }
 
-// Column values are materialized in memory. Bound expansion independently of
-// the compact on-wire event so a malicious compressed field cannot turn a
-// small row event into an unbounded allocation.
-constexpr size_t kMaxDecompressedColumnBytes = 64U * 1024U * 1024U;
+// Append the fractional part at the column's declared precision.
+void AppendFractional(std::string& out, int usec, uint16_t fsp) {
+  char buf[24];
+  out.append(buf, static_cast<size_t>(WriteFractional(buf, usec, fsp) - buf));
+}
 
+// Write "YYYY-MM-DD" with MySQL's zero padding.
+char* WriteCalendarDate(char* out, int year, int month, int day) {
+  out = binary::WritePaddedInt(out, year, 4);
+  *out++ = '-';
+  out = binary::WritePaddedInt(out, month, 2);
+  *out++ = '-';
+  return binary::WritePaddedInt(out, day, 2);
+}
+
+// Write "hh:mm:ss" with MySQL's zero padding.
+char* WriteClockTime(char* out, int hour, int minute, int second) {
+  out = binary::WritePaddedInt(out, hour, 2);
+  *out++ = ':';
+  out = binary::WritePaddedInt(out, minute, 2);
+  *out++ = ':';
+  return binary::WritePaddedInt(out, second, 2);
+}
+
+// field_limit is the column type's own ceiling; value_limit is what the
+// event's decode budget still allows. Expansion is clamped to both before a
+// single byte is allocated, so a compressed field can never overshoot the
+// budget even transiently.
 bool DecodeMariaCompressedPayload(const uint8_t* data, size_t len, size_t field_limit,
-                                  std::string* output) {
+                                  size_t value_limit, std::string* output) {
   output->clear();
   if (len == 0) return true;  // MariaDB stores an empty value with no header.
 
@@ -207,6 +246,7 @@ bool DecodeMariaCompressedPayload(const uint8_t* data, size_t len, size_t field_
   const uint8_t method = static_cast<uint8_t>(header >> 4);
   if (method == 0) {
     if (header != 0) return false;
+    if (len - 1 > value_limit) return false;
     output->assign(reinterpret_cast<const char*>(data + 1), len - 1);
     return true;
   }
@@ -217,7 +257,7 @@ bool DecodeMariaCompressedPayload(const uint8_t* data, size_t len, size_t field_
     return false;
   }
   const uint64_t original_length = ReadBigEndian(data + 1, original_length_bytes);
-  const size_t safe_limit = std::min(field_limit, kMaxDecompressedColumnBytes);
+  const size_t safe_limit = std::min({field_limit, kMaxDecompressedColumnBytes, value_limit});
   if (original_length == 0 || original_length > safe_limit ||
       original_length > std::numeric_limits<uInt>::max()) {
     return false;
@@ -267,10 +307,9 @@ bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& meta
   if (!data || !ctx) return false;
   ctx->columns_present_update = nullptr;
   ctx->ptr =
-      ParseRowsPostHeader(data, len, is_v2, is_update, &ctx->column_count, &ctx->columns_present,
-                          &ctx->columns_present_update, &ctx->remaining);
+      ParseRowsPostHeader(data, len, is_v2, is_update, metadata.columns.size(), &ctx->column_count,
+                          &ctx->columns_present, &ctx->columns_present_update, &ctx->remaining);
   if (ctx->ptr == nullptr) return false;
-  if (ctx->column_count != metadata.columns.size()) return false;
   ctx->present_count = CountPresentColumns(ctx->columns_present, ctx->column_count);
   ctx->present_count_update =
       is_update ? CountPresentColumns(ctx->columns_present_update, ctx->column_count) : 0;
@@ -281,7 +320,7 @@ bool ParseRowsContext(const uint8_t* data, size_t len, const TableMetadata& meta
 
 ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, const uint8_t* data,
                               size_t len, size_t* bytes_consumed, bool charset_known,
-                              bool binary_charset) {
+                              bool binary_charset, size_t max_value_bytes) {
   *bytes_consumed = 0;
 
   switch (type) {
@@ -404,7 +443,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (payload_length > len - prefix_size) return ColumnValue::Null(type);
 
       std::string value;
-      if (!DecodeMariaCompressedPayload(data + prefix_size, payload_length, meta, &value)) {
+      if (!DecodeMariaCompressedPayload(data + prefix_size, payload_length, meta, max_value_bytes,
+                                        &value)) {
         return ColumnValue::Null(type);
       }
       *bytes_consumed = prefix_size + payload_length;
@@ -452,11 +492,15 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
                                                   : (size_t{1} << (pack_length * 8)) - 1;
       std::string value;
       if (!DecodeMariaCompressedPayload(data + prefix_consumed, payload_length, field_limit,
-                                        &value)) {
+                                        max_value_bytes, &value)) {
         return ColumnValue::Null(type);
       }
       *bytes_consumed = prefix_consumed + payload_length;
-      return ColumnValue::Bytes(type, reinterpret_cast<const uint8_t*>(value.data()), value.size());
+      // Move the inflated buffer in rather than copying it: a second copy
+      // would double the peak for exactly the field type most able to expand.
+      ColumnValue result = ColumnValue::String(type, std::move(value));
+      result.is_binary = true;
+      return result;
     }
 
     case ColumnType::kJson: {
@@ -555,9 +599,9 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       int day = val & 0x1F;
       int month = (val >> 5) & 0x0F;
       int year = val >> 9;
-      char buf[16];
-      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
-      return ColumnValue::String(type, std::string(buf));
+      char buf[kTemporalBufferSize];
+      char* end = WriteCalendarDate(buf, year, month, day);
+      return ColumnValue::String(type, std::string(buf, static_cast<size_t>(end - buf)));
     }
 
     case ColumnType::kTime: {
@@ -576,13 +620,11 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       int sec = val % 100;
       int min = (val / 100) % 100;
       int hour = val / 10000;
-      char buf[32];
-      if (negative) {
-        std::snprintf(buf, sizeof(buf), "-%02d:%02d:%02d", hour, min, sec);
-      } else {
-        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour, min, sec);
-      }
-      return ColumnValue::String(type, std::string(buf));
+      char buf[kTemporalBufferSize];
+      char* end = buf;
+      if (negative) *end++ = '-';
+      end = WriteClockTime(end, hour, min, sec);
+      return ColumnValue::String(type, std::string(buf, static_cast<size_t>(end - buf)));
     }
 
     case ColumnType::kTimestamp: {
@@ -608,10 +650,11 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       int month = sval % 100;
       sval /= 100;
       int year = static_cast<int>(sval);
-      char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, min,
-                    sec);
-      return ColumnValue::String(type, std::string(buf));
+      char buf[kTemporalBufferSize];
+      char* end = WriteCalendarDate(buf, year, month, day);
+      *end++ = ' ';
+      end = WriteClockTime(end, hour, min, sec);
+      return ColumnValue::String(type, std::string(buf, static_cast<size_t>(end - buf)));
     }
 
     case ColumnType::kDatetime2: {
@@ -678,18 +721,18 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       int minute = static_cast<int>((hms >> 6) & 0x3F);
       int hour = static_cast<int>(hms >> 12);
 
-      std::string result;
-      if (negative) result += "-";
-      char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour,
-                    minute, second);
-      result += buf;
+      char buf[kTemporalBufferSize];
+      char* end = buf;
+      if (negative) *end++ = '-';
+      end = WriteCalendarDate(end, year, month, day);
+      *end++ = ' ';
+      end = WriteClockTime(end, hour, minute, second);
 
       if (frac_bytes > 0) {
-        AppendFractional(result, micros, static_cast<uint16_t>(meta));
+        end = WriteFractional(end, micros, static_cast<uint16_t>(meta));
       }
 
-      return ColumnValue::String(type, result);
+      return ColumnValue::String(type, std::string(buf, static_cast<size_t>(end - buf)));
     }
 
     case ColumnType::kTimestamp2: {
@@ -764,17 +807,16 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       int minute = static_cast<int>((hms >> 6) & 0x3F);
       int second = static_cast<int>(hms & 0x3F);
 
-      std::string result;
-      if (negative) result += "-";
-      char buf[16];
-      std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", hour, minute, second);
-      result += buf;
+      char buf[kTemporalBufferSize];
+      char* end = buf;
+      if (negative) *end++ = '-';
+      end = WriteClockTime(end, hour, minute, second);
 
       if (frac_bytes > 0) {
-        AppendFractional(result, micros, static_cast<uint16_t>(meta));
+        end = WriteFractional(end, micros, static_cast<uint16_t>(meta));
       }
 
-      return ColumnValue::String(type, result);
+      return ColumnValue::String(type, std::string(buf, static_cast<size_t>(end - buf)));
     }
 
     case ColumnType::kNewDecimal: {
@@ -828,10 +870,13 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
 }
 
 static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadata& metadata,
-                             bool is_v2, std::vector<RowData>* rows) {
+                             bool is_v2, std::vector<RowData>* rows, DecodeBudget* budget) {
   if (!rows) return false;
   RowsContext ctx{};
   if (!ParseRowsContext(data, len, metadata, is_v2, false, &ctx)) return false;
+
+  DecodeBudget local_budget = DecodeBudget::ForEventBody(len);
+  DecodeBudget& event_budget = budget != nullptr ? *budget : local_budget;
 
   rows->clear();
   rows->reserve(8);  // typical rows per event; avoids reallocation in common case
@@ -839,7 +884,7 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
     const size_t remaining_before = ctx.remaining;
     RowData row;
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count,
-                      ctx.columns_present, &row)) {
+                      ctx.columns_present, event_budget, &row)) {
       return false;
     }
     if (ctx.remaining >= remaining_before) return false;
@@ -849,12 +894,12 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
 }
 
 bool DecodeWriteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
-                     std::vector<RowData>* rows) {
-  return DecodeSimpleRows(data, len, metadata, is_v2, rows);
+                     std::vector<RowData>* rows, DecodeBudget* budget) {
+  return DecodeSimpleRows(data, len, metadata, is_v2, rows, budget);
 }
 
 bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
-                      std::vector<UpdatePair>* pairs) {
+                      std::vector<UpdatePair>* pairs, DecodeBudget* budget) {
   if (!pairs) return false;
   RowsContext ctx{};
   // Note: When ParseRowsContext returns true with is_update=true,
@@ -866,17 +911,20 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
   // deref; it is not reachable. Keep the control flow intact.
   if (!ParseRowsContext(data, len, metadata, is_v2, true, &ctx)) return false;
 
+  DecodeBudget local_budget = DecodeBudget::ForEventBody(len);
+  DecodeBudget& event_budget = budget != nullptr ? *budget : local_budget;
+
   pairs->clear();
   pairs->reserve(8);
   while (ctx.remaining > 0) {
     const size_t remaining_before = ctx.remaining;
     UpdatePair pair;
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count,
-                      ctx.columns_present, &pair.before)) {
+                      ctx.columns_present, event_budget, &pair.before)) {
       return false;
     }
     if (!DecodeOneRow(ctx.ptr, ctx.remaining, metadata, ctx.column_count, ctx.present_count_update,
-                      ctx.columns_present_update, &pair.after)) {
+                      ctx.columns_present_update, event_budget, &pair.after)) {
       return false;
     }
     if (ctx.remaining >= remaining_before) return false;
@@ -886,8 +934,8 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
 }
 
 bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& metadata, bool is_v2,
-                      std::vector<RowData>* rows) {
-  return DecodeSimpleRows(data, len, metadata, is_v2, rows);
+                      std::vector<RowData>* rows, DecodeBudget* budget) {
+  return DecodeSimpleRows(data, len, metadata, is_v2, rows, budget);
 }
 
 }  // namespace mes

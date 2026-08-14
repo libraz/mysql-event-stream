@@ -25,6 +25,14 @@ class BinaryWriter : public test::EventBuilder {
   const uint8_t* Data() const { return DataPtr(); }
 };
 
+// Copy a body into an exactly-sized heap allocation. BinaryWriter grows its
+// buffer geometrically, so a one-byte overread off the end of a body usually
+// lands in the vector's spare capacity where ASan cannot see it. A snug
+// allocation puts a redzone immediately after the last body byte.
+std::vector<uint8_t> ExactSizedCopy(const BinaryWriter& w) {
+  return std::vector<uint8_t>(w.Data(), w.Data() + w.Size());
+}
+
 std::vector<uint8_t> BuildMariaZlibPayload(const std::string& input, bool raw_stream) {
   size_t length_bytes = 1;
   while (length_bytes < 4 && input.size() >= (size_t{1} << (length_bytes * 8))) {
@@ -546,6 +554,52 @@ TEST(DecodeColumnValueTest, JsonAsBlob) {
   auto result = DecodeColumnValue(ColumnType::kJson, 4, false, w.Data(), w.Size(), &consumed);
   EXPECT_EQ(consumed, 6u);
   EXPECT_EQ(result.bytes_size(), 2u);
+}
+
+// MySQL 9 stores VECTOR exactly like a BLOB: a pack_length-byte length prefix
+// followed by the raw little-endian float32 elements. TABLE_MAP records the
+// pack length (4) in the metadata low byte.
+TEST(DecodeColumnValueTest, Vector) {
+  const float elements[] = {1.0f, -2.5f, 3.25f};
+  BinaryWriter w;
+  w.WriteU32Le(static_cast<uint32_t>(sizeof(elements)));
+  w.WriteBytes(reinterpret_cast<const uint8_t*>(elements), sizeof(elements));
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kVector, 4, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 4u + sizeof(elements));
+  EXPECT_EQ(result.type, ColumnType::kVector);
+  EXPECT_FALSE(result.is_null);
+  EXPECT_TRUE(result.is_binary);
+  ASSERT_EQ(result.bytes_size(), sizeof(elements));
+  EXPECT_EQ(std::memcmp(result.bytes_data(), elements, sizeof(elements)), 0);
+}
+
+// A VECTOR's collation is always the binary one, so surfacing it as text is
+// never correct even when TABLE_MAP carried a charset for the column.
+TEST(DecodeColumnValueTest, VectorBinaryCharset) {
+  const float elements[] = {0.5f, 0.25f};
+  BinaryWriter w;
+  w.WriteU32Le(static_cast<uint32_t>(sizeof(elements)));
+  w.WriteBytes(reinterpret_cast<const uint8_t*>(elements), sizeof(elements));
+
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kVector, 4, false, w.Data(), w.Size(), &consumed,
+                                  /*charset_known=*/true, /*binary_charset=*/true);
+  EXPECT_EQ(consumed, 4u + sizeof(elements));
+  EXPECT_TRUE(result.is_binary);
+  ASSERT_EQ(result.bytes_size(), sizeof(elements));
+  EXPECT_EQ(std::memcmp(result.bytes_data(), elements, sizeof(elements)), 0);
+}
+
+TEST(DecodeColumnValueTest, VectorTruncatedPayload) {
+  BinaryWriter w;
+  w.WriteU32Le(12);          // declares three float32 elements
+  w.WriteU32Le(0x3F800000);  // only one is present
+  size_t consumed = 0;
+  auto result = DecodeColumnValue(ColumnType::kVector, 4, false, w.Data(), w.Size(), &consumed);
+  EXPECT_EQ(consumed, 0u);
+  EXPECT_TRUE(result.is_null);
 }
 
 TEST(DecodeColumnValueTest, NewDecimal) {
@@ -1459,6 +1513,261 @@ TEST(DecodeWriteRowsTest, RejectsColumnCountMismatch) {
 
   std::vector<RowData> rows;
   EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+}
+
+// The packed-integer nine-byte form reaches UINT64_MAX. Such a column count
+// makes the columns-present bitmap report zero bytes, so the "is the bitmap
+// inside the body?" guard passes trivially and the presence scan walks the
+// heap one bit at a time. Run this under ASan: a pass without the sanitizer
+// only shows that decoding failed, not that nothing was read out of bounds.
+TEST(DecodeWriteRowsTest, RejectsColumnCountNearUint64Max) {
+  TableMetadata metadata;
+  metadata.table_id = 0;
+  metadata.columns.resize(2);
+  metadata.columns[0].type = ColumnType::kLong;
+  metadata.columns[1].type = ColumnType::kLong;
+
+  BinaryWriter w;
+  w.WriteU48Le(0);  // table_id
+  w.WriteU16Le(0);  // flags
+  w.WriteU8(0xFE);  // packed integer, nine-byte form
+  for (int i = 0; i < 8; ++i) {
+    w.WriteU8(0xFF);  // column_count = UINT64_MAX
+  }
+  ASSERT_EQ(w.Size(), 17u);
+  const auto body = ExactSizedCopy(w);
+
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(body.data(), body.size(), metadata, false, &rows));
+  std::vector<RowData> deleted;
+  EXPECT_FALSE(DecodeDeleteRows(body.data(), body.size(), metadata, false, &deleted));
+}
+
+// UPDATE carries a second presence bitmap, scanned by its own loop. The
+// rejection has to happen before either loop, not between them.
+TEST(DecodeUpdateRowsTest, RejectsColumnCountNearUint64Max) {
+  TableMetadata metadata;
+  metadata.table_id = 0;
+  metadata.columns.resize(2);
+  metadata.columns[0].type = ColumnType::kLong;
+  metadata.columns[1].type = ColumnType::kLong;
+
+  BinaryWriter w;
+  w.WriteU48Le(0);
+  w.WriteU16Le(0);
+  w.WriteU8(0xFE);
+  for (int i = 0; i < 8; ++i) {
+    w.WriteU8(0xFF);
+  }
+  const auto body = ExactSizedCopy(w);
+
+  std::vector<UpdatePair> pairs;
+  EXPECT_FALSE(DecodeUpdateRows(body.data(), body.size(), metadata, false, &pairs));
+}
+
+// 4096 columns is the server's hard limit; one more is out of range even when
+// the TABLE_MAP agrees with the ROWS event about the count.
+TEST(DecodeWriteRowsTest, RejectsColumnCountAboveServerLimit) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(binary::kMaxTableColumns + 1);
+  for (auto& column : metadata.columns) {
+    column.type = ColumnType::kTiny;
+  }
+
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(0xFC);  // packed integer, three-byte form
+  w.WriteU16Le(static_cast<uint16_t>(binary::kMaxTableColumns + 1));
+  for (size_t i = 0; i < binary::BitmapBytes(binary::kMaxTableColumns + 1); ++i) {
+    w.WriteU8(0xFF);  // columns_present
+  }
+
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+}
+
+// --- Decode budget ---
+
+// An uncompressed value can never exceed the bytes it was decoded from, so the
+// default budget follows the event size above its floor. A fixed ceiling would
+// reject a large but perfectly legitimate event, and max_event_size is
+// configurable up to 1 GiB.
+TEST(DecodeBudgetTest, DefaultBudgetFloorsAtTheFieldCapThenFollowsEventSize) {
+  EXPECT_EQ(DecodeBudget::ForEventBody(0).limit, kMaxDecompressedColumnBytes);
+  EXPECT_EQ(DecodeBudget::ForEventBody(1024).limit, kMaxDecompressedColumnBytes);
+  EXPECT_EQ(DecodeBudget::ForEventBody(kMaxDecompressedColumnBytes).limit,
+            kMaxDecompressedColumnBytes);
+  EXPECT_EQ(DecodeBudget::ForEventBody(kMaxDecompressedColumnBytes + 1).limit,
+            kMaxDecompressedColumnBytes + 1);
+  EXPECT_EQ(DecodeBudget::ForEventBody(4096).used, 0u);
+}
+
+TEST(DecodeBudgetTest, ChargeRejectsWithoutConsuming) {
+  DecodeBudget budget;
+  budget.limit = 10;
+  EXPECT_TRUE(budget.Charge(6));
+  EXPECT_FALSE(budget.Charge(5));
+  EXPECT_EQ(budget.used, 6u);
+  EXPECT_EQ(budget.Remaining(), 4u);
+  EXPECT_TRUE(budget.Charge(4));
+  EXPECT_EQ(budget.Remaining(), 0u);
+}
+
+TEST(DecodeWriteRowsTest, DecodeBudgetChargesEveryRowAndColumn) {
+  TableMetadata metadata;
+  metadata.table_id = 7;
+  metadata.columns.resize(2);
+  metadata.columns[0].type = ColumnType::kLong;
+  metadata.columns[1].type = ColumnType::kVarchar;
+  metadata.columns[1].metadata = 100;
+
+  BinaryWriter w;
+  w.WriteU48Le(7);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(2);     // column_count
+  w.WriteU8(0x03);  // columns_present
+  // Row 1
+  w.WriteU8(0x00);
+  w.WriteU32Le(1);
+  w.WriteU8(5);
+  w.WriteString("Alice");
+  // Row 2
+  w.WriteU8(0x00);
+  w.WriteU32Le(2);
+  w.WriteU8(3);
+  w.WriteString("Bob");
+
+  DecodeBudget budget;
+  std::vector<RowData> rows;
+  ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows, &budget));
+  ASSERT_EQ(rows.size(), 2u);
+  // Both rows are charged: the "Alice" and "Bob" payloads. The INT columns
+  // carry no payload.
+  EXPECT_EQ(budget.used, 5u + 3u);
+  EXPECT_LE(budget.used, budget.limit);
+}
+
+TEST(DecodeUpdateRowsTest, DecodeBudgetChargesBothImages) {
+  TableMetadata metadata;
+  metadata.table_id = 7;
+  metadata.columns.resize(1);
+  metadata.columns[0].type = ColumnType::kVarchar;
+  metadata.columns[0].metadata = 100;
+
+  BinaryWriter w;
+  w.WriteU48Le(7);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(1);     // column_count
+  w.WriteU8(0x01);  // columns_present (before)
+  w.WriteU8(0x01);  // columns_present_update (after)
+  w.WriteU8(0x00);
+  w.WriteU8(4);
+  w.WriteString("aaaa");
+  w.WriteU8(0x00);
+  w.WriteU8(2);
+  w.WriteString("bb");
+
+  DecodeBudget budget;
+  std::vector<UpdatePair> pairs;
+  ASSERT_TRUE(DecodeUpdateRows(w.Data(), w.Size(), metadata, true, &pairs, &budget));
+  ASSERT_EQ(pairs.size(), 1u);
+  // Both images are charged, not just the after image.
+  EXPECT_EQ(budget.used, 4u + 2u);
+}
+
+// A deflate bomb spread across columns: the per-field 64 MiB cap says nothing
+// about how many fields a row may carry, so without a per-event budget this
+// event buys one maximally expanded field per column. Assert the heap the
+// decode actually charges, not merely that it failed.
+TEST(DecodeWriteRowsTest, CompressedColumnBombStaysWithinDecodeBudget) {
+  constexpr size_t kColumns = 8;
+  constexpr size_t kExpandedBytes = 4U * 1024U * 1024U;
+  constexpr size_t kBudgetBytes = 6U * 1024U * 1024U;
+
+  const std::string expanded(kExpandedBytes, 'a');
+  const auto payload = BuildMariaZlibPayload(expanded, true);
+  ASSERT_FALSE(payload.empty());
+
+  TableMetadata metadata;
+  metadata.table_id = 3;
+  metadata.columns.resize(kColumns);
+  for (auto& column : metadata.columns) {
+    column.type = ColumnType::kBlobCompressed;
+    column.metadata = 4;  // four-byte BLOB length prefix
+  }
+
+  BinaryWriter w;
+  w.WriteU48Le(3);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(static_cast<uint8_t>(kColumns));
+  w.WriteU8(0xFF);  // columns_present
+  w.WriteU8(0x00);  // null bitmap
+  for (size_t i = 0; i < kColumns; ++i) {
+    w.WriteU32Le(static_cast<uint32_t>(payload.size()));
+    w.WriteBytes(payload);
+  }
+
+  DecodeBudget budget;
+  budget.limit = kBudgetBytes;
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows, &budget));
+  EXPECT_LE(budget.used, budget.limit);
+  EXPECT_LT(budget.used, kColumns * kExpandedBytes);
+  // The wire bytes stay tiny relative to the heap they can buy, which is what
+  // makes the budget rather than the event size the operative bound.
+  EXPECT_LT(w.Size(), 64u * 1024u);
+}
+
+// The clamp has to reach the inflate call: charging after the fact would let
+// a field that does not fit the remaining budget be materialized first.
+TEST(DecodeColumnValueTest, MariaCompressedPayloadClampsToValueBudget) {
+  const std::string expected(4096, 'z');
+  const auto payload = BuildMariaZlibPayload(expected, true);
+  ASSERT_FALSE(payload.empty());
+
+  BinaryWriter w;
+  w.WriteU16Le(static_cast<uint16_t>(payload.size()));
+  w.WriteBytes(payload);
+
+  size_t consumed = 0;
+  auto rejected = DecodeColumnValue(ColumnType::kBlobCompressed, 2, false, w.Data(), w.Size(),
+                                    &consumed, false, false, expected.size() - 1);
+  EXPECT_TRUE(rejected.is_null);
+  EXPECT_EQ(consumed, 0u);
+
+  auto accepted = DecodeColumnValue(ColumnType::kBlobCompressed, 2, false, w.Data(), w.Size(),
+                                    &consumed, false, false, expected.size());
+  EXPECT_EQ(consumed, 2u + payload.size());
+  EXPECT_FALSE(accepted.is_null);
+  EXPECT_TRUE(accepted.is_binary);
+  ASSERT_EQ(accepted.bytes_size(), expected.size());
+  EXPECT_EQ(std::memcmp(accepted.bytes_data(), expected.data(), expected.size()), 0);
+}
+
+// The stored-uncompressed MariaDB framing copies the payload verbatim and must
+// honour the same ceiling.
+TEST(DecodeColumnValueTest, MariaUncompressedPayloadClampsToValueBudget) {
+  BinaryWriter w;
+  w.WriteU8(6);  // compressed-field payload length
+  w.WriteU8(0);  // method 0, stored verbatim
+  w.WriteString("hello");
+
+  size_t consumed = 0;
+  auto rejected = DecodeColumnValue(ColumnType::kVarcharCompressed, 100, false, w.Data(), w.Size(),
+                                    &consumed, false, false, 4);
+  EXPECT_TRUE(rejected.is_null);
+  EXPECT_EQ(consumed, 0u);
+
+  auto accepted = DecodeColumnValue(ColumnType::kVarcharCompressed, 100, false, w.Data(), w.Size(),
+                                    &consumed, false, false, 5);
+  EXPECT_EQ(consumed, 7u);
+  EXPECT_EQ(accepted.string_val, "hello");
 }
 
 TEST(DecodeWriteRowsTest, RejectsEmptyColumnsPresentBitmapWithTrailingData) {

@@ -3,11 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <vector>
 
 #include "binary_util.h"
+#include "row_decoder.h"
 #include "table_map.h"
 #include "test_helpers.h"
 
@@ -447,6 +449,159 @@ TEST(TableMapTest, ParseColumnCharsetOptionalMetadata) {
   EXPECT_EQ(metadata.columns[1].charset_id, 45u);
 }
 
+// Build a v2 WRITE_ROWS body for a fully present single-row image. `values`
+// holds the already-encoded column payloads in TABLE_MAP order.
+std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id, size_t column_count,
+                                        const std::vector<uint8_t>& values) {
+  test::EventBuilder rows;
+  rows.WriteU48Le(table_id);
+  rows.WriteU16Le(0);  // flags
+  rows.WriteU16Le(2);  // v2 extra header: length only, no payload
+  rows.WriteU8(static_cast<uint8_t>(column_count));
+  for (size_t i = 0; i < binary::BitmapBytes(column_count); i++) {
+    const size_t bits = std::min<size_t>(8, column_count - i * 8);
+    rows.WriteU8(static_cast<uint8_t>((1u << bits) - 1));  // every column present
+  }
+  for (size_t i = 0; i < binary::BitmapBytes(column_count); i++) {
+    rows.WriteU8(0x00);  // row null bitmap: no NULLs
+  }
+  rows.WriteBytes(values);
+  return rows.Data();
+}
+
+TEST(TableMapTest, DefaultCharsetSkipsEnumAndSetColumns) {
+  TableMapBuilder builder;
+  builder.WriteTableId(85);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  // (status ENUM, flags SET, name VARCHAR(200), data VARBINARY(100)).
+  // ENUM and SET are transmitted as MYSQL_TYPE_STRING with their real type in
+  // metadata byte 0; VARBINARY is transmitted as MYSQL_TYPE_VARCHAR.
+  builder.WriteColumnCount(4);
+  builder.WriteColumnTypes({
+      static_cast<uint8_t>(ColumnType::kString),
+      static_cast<uint8_t>(ColumnType::kString),
+      static_cast<uint8_t>(ColumnType::kVarchar),
+      static_cast<uint8_t>(ColumnType::kVarchar),
+  });
+  builder.WriteMetadataBlock({
+      0xF7, 0x01,  // ENUM, pack_length 1
+      0xF8, 0x01,  // SET, pack_length 1
+      0xC8, 0x00,  // VARCHAR(200)
+      0x64, 0x00,  // VARBINARY(100)
+  });
+  builder.WriteNullBitmap({0x0F});
+
+  // DEFAULT_CHARSET indexes only the two character columns, so index 1 is the
+  // VARBINARY column. ENUM_AND_SET_DEFAULT_CHARSET carries the enum/set
+  // collations in its own index space.
+  builder.WriteRawBytes({0x02, 0x03, 0x2D, 0x01, 0x3F});
+  builder.WriteRawBytes({0x0A, 0x01, 0x2D});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 4u);
+  EXPECT_FALSE(metadata.columns[0].charset_known);
+  EXPECT_FALSE(metadata.columns[1].charset_known);
+  EXPECT_TRUE(metadata.columns[2].charset_known);
+  EXPECT_EQ(metadata.columns[2].charset_id, 45u);
+  EXPECT_TRUE(metadata.columns[3].charset_known);
+  EXPECT_EQ(metadata.columns[3].charset_id, 63u);
+
+  // The collation assignment decides text vs. bytes at the C ABI, so assert
+  // the decoded row shape rather than the charset ids alone.
+  test::EventBuilder values;
+  values.WriteU8(2);  // ENUM ordinal
+  values.WriteU8(3);  // SET bitmask
+  values.WriteU8(2);  // VARCHAR length prefix
+  values.WriteString("hi");
+  values.WriteU8(2);  // VARBINARY length prefix
+  values.WriteBytes({0x00, 0xFF});
+
+  const std::vector<uint8_t> body = BuildWriteRowsBody(85, 4, values.Data());
+  std::vector<RowData> decoded;
+  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
+  ASSERT_EQ(decoded.size(), 1u);
+  ASSERT_EQ(decoded[0].columns.size(), 4u);
+  EXPECT_EQ(decoded[0].columns[0].type, ColumnType::kEnum);
+  EXPECT_EQ(decoded[0].columns[0].int_val, 2);
+  EXPECT_EQ(decoded[0].columns[1].type, ColumnType::kSet);
+  EXPECT_EQ(decoded[0].columns[1].int_val, 3);
+  EXPECT_FALSE(decoded[0].columns[2].is_binary);  // MES_COL_STRING
+  EXPECT_EQ(decoded[0].columns[2].string_val, "hi");
+  EXPECT_TRUE(decoded[0].columns[3].is_binary);  // MES_COL_BYTES
+  EXPECT_EQ(decoded[0].columns[3].string_val, std::string("\x00\xFF", 2));
+}
+
+TEST(TableMapTest, DefaultCharsetCountsVectorColumns) {
+  TableMapBuilder builder;
+  builder.WriteTableId(86);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  // (id INT, embedding VECTOR(3), name VARCHAR(50), payload BLOB).
+  // MySQL 9.x counts VECTOR as a character column when packing DEFAULT_CHARSET
+  // even though its collation is always binary, so it does occupy a slot.
+  builder.WriteColumnCount(4);
+  builder.WriteColumnTypes({
+      static_cast<uint8_t>(ColumnType::kLong),
+      static_cast<uint8_t>(ColumnType::kVector),
+      static_cast<uint8_t>(ColumnType::kVarchar),
+      static_cast<uint8_t>(ColumnType::kBlob),
+  });
+  builder.WriteMetadataBlock({
+      0x04,        // VECTOR pack_length 4
+      0x32, 0x00,  // VARCHAR(50)
+      0x02,        // BLOB pack_length 2
+  });
+  builder.WriteNullBitmap({0x0E});
+
+  builder.WriteRawBytes({0x01, 0x01, 0x00});  // SIGNEDNESS: id is signed
+  // DEFAULT_CHARSET over [VECTOR, VARCHAR, BLOB]: binary is the most used
+  // collation, and character-column index 1 (the VARCHAR) overrides to
+  // utf8mb4. Were VECTOR skipped, the VARCHAR would take binary and the BLOB
+  // would take utf8mb4 — the exact inversion this asserts against.
+  builder.WriteRawBytes({0x02, 0x03, 0x3F, 0x01, 0x2D});
+  builder.WriteRawBytes({0x0D, 0x01, 0x03});  // VECTOR_DIMENSIONALITY: 3
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 4u);
+  EXPECT_FALSE(metadata.columns[0].charset_known);
+  EXPECT_TRUE(metadata.columns[1].charset_known);
+  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
+  EXPECT_TRUE(metadata.columns[2].charset_known);
+  EXPECT_EQ(metadata.columns[2].charset_id, 45u);
+  EXPECT_TRUE(metadata.columns[3].charset_known);
+  EXPECT_EQ(metadata.columns[3].charset_id, 63u);
+
+  test::EventBuilder values;
+  values.WriteU32Le(42);  // id
+  values.WriteU32Le(12);  // VECTOR 4-byte length prefix
+  values.WriteFloat(1.0f);
+  values.WriteFloat(2.0f);
+  values.WriteFloat(3.0f);
+  values.WriteU8(2);  // VARCHAR length prefix
+  values.WriteString("ok");
+  values.WriteU16Le(3);  // BLOB 2-byte length prefix
+  values.WriteBytes({0x01, 0x02, 0x03});
+
+  const std::vector<uint8_t> body = BuildWriteRowsBody(86, 4, values.Data());
+  std::vector<RowData> decoded;
+  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
+  ASSERT_EQ(decoded.size(), 1u);
+  ASSERT_EQ(decoded[0].columns.size(), 4u);
+  EXPECT_EQ(decoded[0].columns[0].int_val, 42);
+  EXPECT_TRUE(decoded[0].columns[1].is_binary);   // MES_COL_BYTES
+  EXPECT_FALSE(decoded[0].columns[2].is_binary);  // MES_COL_STRING
+  EXPECT_EQ(decoded[0].columns[2].string_val, "ok");
+  EXPECT_TRUE(decoded[0].columns[3].is_binary);  // MES_COL_BYTES
+  EXPECT_EQ(decoded[0].columns[3].string_val, std::string("\x01\x02\x03", 3));
+}
+
 TEST(TableMapTest, SkipsEveryUnhandledOptionalMetadataField) {
   TableMapBuilder builder;
   builder.WriteTableId(83);
@@ -458,10 +613,10 @@ TEST(TableMapTest, SkipsEveryUnhandledOptionalMetadataField) {
   builder.WriteMetadataBlock({0xFF, 0x00});
   builder.WriteNullBitmap({0x01});
 
-  // Optional metadata field types 5-12 are currently not exposed by the
+  // Optional metadata field types 5-13 are currently not exposed by the
   // public event model, but each TLV must be skipped exactly so a following
   // recognized field remains aligned.
-  for (uint8_t type = 5; type <= 12; ++type) {
+  for (uint8_t type = 5; type <= 13; ++type) {
     builder.WriteRawBytes({type, 0x01, type});
   }
   // COLUMN_NAME after every skipped field confirms the parser did not lose
