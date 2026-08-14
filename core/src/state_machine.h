@@ -126,6 +126,9 @@ class EventStreamParser {
    * feeding raw bytes without a FORMAT_DESCRIPTION_EVENT. When an FDE is
    * present in the stream, the parser auto-detects the algorithm and
    * overrides this setting.
+   *
+   * The framing of an event whose header has already been parsed is frozen:
+   * a call made mid-event takes effect from the next event on.
    */
   void SetChecksumEnabled(bool enabled);
 
@@ -149,7 +152,8 @@ class EventStreamParser {
   /// Validate the trailing checksum of the complete buffered event.
   bool VerifyChecksum() const;
 
-  /// Detect the checksummed synthetic ROTATE emitted before an FDE.
+  /// Detect the checksummed synthetic ROTATE emitted before an FDE. Additive
+  /// only: it may turn the buffered event's checksum framing on, never off.
   void DetectArtificialRotateChecksum();
 
   ParserState state_ = ParserState::kWaitingHeader;

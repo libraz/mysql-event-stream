@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "crc32.h"
@@ -25,6 +26,16 @@ namespace {
 // Convenience wrapper matching the old local signature (server_id=1, next_position=0)
 std::vector<uint8_t> BuildEvent(uint8_t type_code, const std::vector<uint8_t>& body) {
   return test::BuildEvent(type_code, 1000, 0, body);
+}
+
+// MARIADB_GTID_EVENT body: seq_no (8) + domain_id (4) + flags (1). The server_id
+// half of a MariaDB GTID comes from the standard event header.
+std::vector<uint8_t> BuildMariaDbGtidBody(uint64_t seq_no, uint32_t domain_id, uint8_t flags) {
+  test::EventBuilder b;
+  b.WriteU64Le(seq_no);
+  b.WriteU32Le(domain_id);
+  b.WriteU8(flags);
+  return b.Data();
 }
 
 TEST(StateMachineTest, InitialState) {
@@ -124,6 +135,63 @@ TEST(StateMachineTest, FeedMultipleEventsSequentially) {
   EXPECT_EQ(consumed, event2.size());
   EXPECT_TRUE(parser.HasEvent());
   EXPECT_EQ(parser.CurrentHeader().type_code, 31);
+}
+
+// MariaDB streams two events MySQL never emits: a domain-scoped GTID event and
+// an ANNOTATE_ROWS event whose body is bare SQL text carrying no length of its
+// own. Feed a whole transaction group one byte at a time — partial byte-stream
+// buffering is a recurring defect area, and it has only ever been checked
+// against MySQL-shaped events.
+TEST(StateMachineTest, FramesMariaDbTransactionGroupFedOneByteAtATime) {
+  const std::string annotation = "INSERT INTO users VALUES (42)";
+  struct ExpectedEvent {
+    uint8_t type_code;
+    std::vector<uint8_t> body;
+  };
+  const std::vector<ExpectedEvent> expected = {
+      {static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent),
+       BuildMariaDbGtidBody(42, 7001, 0x08)},
+      {static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+       std::vector<uint8_t>(annotation.begin(), annotation.end())},
+      {static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       test::BuildTableMapBody(42, "testdb", "users")},
+      {static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), test::BuildWriteRowsBody(42, 42)},
+      {static_cast<uint8_t>(BinlogEventType::kXidEvent), {}},
+  };
+
+  std::vector<uint8_t> stream;
+  std::vector<size_t> event_ends;
+  for (const auto& e : expected) {
+    const auto encoded = BuildEvent(e.type_code, e.body);
+    stream.insert(stream.end(), encoded.begin(), encoded.end());
+    event_ends.push_back(stream.size());
+  }
+
+  EventStreamParser parser;
+  size_t next_event = 0;
+  for (size_t i = 0; i < stream.size(); ++i) {
+    ASSERT_EQ(parser.Feed(&stream[i], 1), 1u) << "byte " << i;
+    const bool at_boundary = next_event < event_ends.size() && i + 1 == event_ends[next_event];
+    ASSERT_EQ(parser.HasEvent(), at_boundary) << "byte " << i;
+    if (!at_boundary) continue;
+
+    EXPECT_EQ(parser.CurrentHeader().type_code, expected[next_event].type_code);
+    const uint8_t* body = nullptr;
+    size_t body_len = 0;
+    parser.CurrentBody(&body, &body_len);
+    ASSERT_EQ(body_len, expected[next_event].body.size()) << "event " << next_event;
+    if (body_len > 0) {
+      ASSERT_NE(body, nullptr);
+      EXPECT_EQ(std::vector<uint8_t>(body, body + body_len), expected[next_event].body)
+          << "event " << next_event;
+    }
+    parser.Advance();
+    ++next_event;
+  }
+
+  EXPECT_EQ(next_event, expected.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+  EXPECT_FALSE(parser.HasEvent());
 }
 
 TEST(StateMachineTest, ErrorOnTinyEventLength) {
@@ -595,6 +663,55 @@ TEST(StateMachineChecksumTest, ChecksumNoneStillStripsChecksummedArtificialRotat
   EXPECT_EQ(body_len, body.size());
   EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
   EXPECT_FALSE(parser.ChecksumEnabled());
+}
+
+TEST(StateMachineChecksumTest, ChecksumSetterDoesNotReframeTheEventBeingParsed) {
+  EventStreamParser parser;  // defaults to checksummed framing
+  const std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04, 0x05};
+  auto event = test::BuildEvent(30, 1000, 0, body);
+
+  // Fix the framing by parsing the header, then flip the setter mid-event.
+  const size_t prefix = kEventHeaderSize + 1;
+  ASSERT_EQ(parser.Feed(event.data(), prefix), prefix);
+  ASSERT_FALSE(parser.HasEvent());
+  parser.SetChecksumEnabled(false);
+  ASSERT_EQ(parser.Feed(event.data() + prefix, event.size() - prefix), event.size() - prefix);
+  ASSERT_TRUE(parser.HasEvent());
+
+  const uint8_t* body_ptr = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+  EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
+
+  // The new setting applies from the next event on.
+  parser.Advance();
+  auto next = test::BuildEventNoChecksum(30, 1001, 0, body);
+  ASSERT_EQ(parser.Feed(next.data(), next.size()), next.size());
+  ASSERT_TRUE(parser.HasEvent());
+  parser.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+}
+
+TEST(StateMachineChecksumTest, ArtificialRotateDetectionDoesNotReframeTheEventBeingParsed) {
+  EventStreamParser parser;  // defaults to checksummed framing
+  const auto body = test::BuildRotateBody(4, "mysql-bin.000010");
+  auto event = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, body);
+  event[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
+  const uint32_t crc = ComputeCRC32(event.data(), event.size() - kChecksumSize);
+  std::memcpy(event.data() + event.size() - kChecksumSize, &crc, sizeof(crc));
+
+  const size_t prefix = kEventHeaderSize + 1;
+  ASSERT_EQ(parser.Feed(event.data(), prefix), prefix);
+  parser.SetChecksumEnabled(false);
+  ASSERT_EQ(parser.Feed(event.data() + prefix, event.size() - prefix), event.size() - prefix);
+  ASSERT_TRUE(parser.HasEvent());
+
+  const uint8_t* body_ptr = nullptr;
+  size_t body_len = 0;
+  parser.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+  EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
 }
 
 }  // namespace

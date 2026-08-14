@@ -48,26 +48,13 @@ std::vector<uint8_t> DecodeHexCorpus(const uint8_t* data, size_t size) {
   return high_nibble < 0 ? decoded : std::vector<uint8_t>{};
 }
 
-}  // namespace
-
-/**
- * @brief libFuzzer entry point.
- *
- * Each input is fed to a fresh engine in chunks so that the incremental
- * feeding path (partial events spanning multiple mes_feed calls) is also
- * exercised. All drained events are read out to drive the decoder.
- */
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  const std::vector<uint8_t> decoded = DecodeHexCorpus(data, size);
-  if (!decoded.empty()) {
-    data = decoded.data();
-    size = decoded.size();
-  }
-
+// Feed one input to a fresh engine configured for the given checksum framing.
+void FeedWithChecksumFraming(const uint8_t* data, size_t size, bool checksum_enabled) {
   mes_engine_t* engine = mes_create();
   if (engine == nullptr) {
-    return 0;
+    return;
   }
+  mes_set_checksum_enabled(engine, checksum_enabled ? 1 : 0);
 
   // Feed in small chunks to exercise the partial-event reassembly path.
   constexpr size_t kChunk = 7;
@@ -89,6 +76,32 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   }
 
   mes_destroy(engine);
+}
+
+}  // namespace
+
+/**
+ * @brief libFuzzer entry point.
+ *
+ * Each input is fed to a fresh engine in chunks so that the incremental
+ * feeding path (partial events spanning multiple mes_feed calls) is also
+ * exercised. All drained events are read out to drive the decoder.
+ *
+ * The input is run twice, once per checksum framing. Checksums are enabled by
+ * default and a real-server corpus seed pins them on via its
+ * FORMAT_DESCRIPTION_EVENT, so a single run rejects every mutated byte at the
+ * CRC32 gate before the TABLE_MAP parser or the row decoder ever sees it. The
+ * checksum-disabled run is what carries mutated bytes into those parsers.
+ */
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  const std::vector<uint8_t> decoded = DecodeHexCorpus(data, size);
+  if (!decoded.empty()) {
+    data = decoded.data();
+    size = decoded.size();
+  }
+
+  FeedWithChecksumFraming(data, size, true);
+  FeedWithChecksumFraming(data, size, false);
   return 0;
 }
 
