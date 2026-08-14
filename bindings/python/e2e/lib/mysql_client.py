@@ -108,6 +108,27 @@ class MysqlClient:
                 return ""
             return row.get("gtid", "") or ""
 
+    def server_version(self) -> str:
+        """Return the server's reported version string, e.g. ``9.1.0``."""
+        rows = self.execute("SELECT VERSION() AS version")
+        if not rows:
+            raise RuntimeError("SELECT VERSION() returned no rows")
+        return str(rows[0].get("version", ""))
+
+    def supports_vector(self) -> bool:
+        """Whether this server has the VECTOR column type.
+
+        VECTOR arrived in MySQL 9.0 and has no MariaDB equivalent, so the
+        flavour has to gate the check before the version does: MariaDB 11.x
+        would otherwise pass a bare major-version comparison.
+        """
+        import os
+
+        if os.environ.get("DB_FLAVOR") == "mariadb":
+            return False
+        major = self.server_version().split(".", 1)[0]
+        return major.isdigit() and int(major) >= 9
+
     def ping(self) -> bool:
         """Check if MySQL is reachable."""
         try:
