@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import ctypes
+from collections.abc import Callable
 from typing import Any
 
 from ._ffi import (
     MES_COL_BYTES,
     MES_COL_DOUBLE,
     MES_COL_INT,
-    MES_COL_NULL,
     MES_COL_STRING,
     MES_ERR_CHECKSUM,
     MES_ERR_DECODE,
     MES_ERR_DECODE_COLUMN,
     MES_ERR_DECODE_ROW,
+    MES_ERR_INVALID_ARG,
     MES_ERR_NO_EVENT,
     MES_ERR_PARSE,
     MES_OK,
@@ -37,6 +38,26 @@ _pybytes_as_string.restype = ctypes.c_void_p
 
 def _borrow_bytes(data: bytes) -> Any:
     return ctypes.cast(_pybytes_as_string(data), ctypes.POINTER(ctypes.c_uint8))
+
+
+# Column payloads are copied by slicing a fixed-size ``c_char`` window laid over
+# the payload address instead of by calling ``ctypes.string_at``. ``string_at``
+# dispatches through libffi, and that per-call cost outweighs the copy itself at
+# the payload sizes a row event carries; the window slice performs the same copy
+# through the buffer protocol for roughly half the total.
+#
+# Placing the window is safe because ``from_address`` never reads memory -- only
+# the slice does, and it reads exactly ``str_len`` bytes. The window size is an
+# upper bound, not a claim about what is mapped. It does have to be respected,
+# though: a slice longer than the window is silently truncated rather than
+# rejected, so larger payloads fall back to ``string_at``, where the copy
+# dominates the call overhead anyway.
+#
+# typeshed types slicing a ``c_char`` array as ``list[bytes] | bytes`` even
+# though it always yields ``bytes``, so the alias is annotated rather than
+# every call site.
+_PAYLOAD_WINDOW_BYTES = 1 << 16
+_payload_window_at: Callable[[int], Any] = (ctypes.c_char * _PAYLOAD_WINDOW_BYTES).from_address
 
 
 def _raise_for_rc(rc: int, op: str) -> None:
@@ -86,7 +107,7 @@ class CdcEngine:
         self._column_name_cache: dict[bytes, str] = {}
         self._handle: int | None = self._lib.mes_create()
         if self._handle is None:
-            raise RuntimeError("Failed to create CDC engine")
+            raise exception_for_rc(MES_ERR_INVALID_ARG, "Failed to create CDC engine")
 
     def close(self) -> None:
         """Destroy the engine and free resources."""
@@ -106,9 +127,14 @@ class CdcEngine:
             self.close()
 
     def _check_open(self) -> None:
-        """Raise RuntimeError if the engine has been closed."""
+        """Raise RuntimeError if the engine has been closed.
+
+        The exception carries ``MES_ERR_INVALID_ARG`` so a closed handle is
+        classified like every other permanent misuse, matching the Node
+        binding and keeping the retry policy off it.
+        """
         if self._handle is None:
-            raise RuntimeError("Engine has been closed")
+            raise exception_for_rc(MES_ERR_INVALID_ARG, "Engine has been closed")
 
     def feed(self, data: bytes | bytearray) -> int:
         """Feed raw binlog bytes into the engine.
@@ -192,7 +218,7 @@ class CdcEngine:
         offset = ctypes.c_uint64(0)
         rc = self._lib.mes_get_position(self._handle, ctypes.byref(file_ptr), ctypes.byref(offset))
         if rc != MES_OK:
-            raise RuntimeError(f"mes_get_position failed with error code {rc}")
+            _raise_for_rc(rc, "mes_get_position")
 
         file_str = file_ptr.value.decode("utf-8") if file_ptr.value else ""
         return BinlogPosition(file=file_str, offset=offset.value)
@@ -204,9 +230,13 @@ class CdcEngine:
         bytes early. Drain events via next_event() then re-feed.
 
         Args:
-            max_size: Maximum queue size. 0 means unlimited (default).
+            max_size: Maximum queue size. 0 restores the bounded default of
+                10000 events. There is no unlimited setting: an unbounded
+                queue would let a producer that outruns the consumer grow it
+                without limit.
 
         Raises:
+            ValueError: If max_size is negative.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
@@ -214,7 +244,7 @@ class CdcEngine:
             raise ValueError(f"max_size must be non-negative, got {max_size}")
         rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
         if rc != MES_OK:
-            raise RuntimeError(f"mes_set_max_queue_size failed with error code {rc}")
+            _raise_for_rc(rc, "mes_set_max_queue_size")
 
     def set_max_event_size(self, max_event_size: int) -> None:
         """Override the maximum per-event size accepted by the parser.
@@ -236,7 +266,7 @@ class CdcEngine:
             raise ValueError(f"max_event_size must fit in uint32, got {max_event_size}")
         rc = self._lib.mes_set_max_event_size(self._handle, max_event_size)
         if rc != MES_OK:
-            raise RuntimeError(f"mes_set_max_event_size failed with error code {rc}")
+            _raise_for_rc(rc, "mes_set_max_event_size")
 
     def get_max_event_size(self) -> int:
         """Return the currently configured maximum event size (bytes).
@@ -278,7 +308,7 @@ class CdcEngine:
         self._check_open()
         rc = self._lib.mes_reset(self._handle)
         if rc != MES_OK:
-            raise RuntimeError(f"mes_reset failed with error code {rc}")
+            _raise_for_rc(rc, "mes_reset")
 
     def _set_string_filter(
         self,
@@ -300,7 +330,7 @@ class CdcEngine:
         arr = (ctypes.c_char_p * len(names))(*(n.encode("utf-8") for n in names))
         rc = func(self._handle, arr, len(names))
         if rc != MES_OK:
-            raise RuntimeError(f"{func_name} failed with error code {rc}")
+            _raise_for_rc(rc, func_name)
 
     def set_include_databases(self, databases: list[str]) -> None:
         """Set database include filter.
@@ -398,7 +428,9 @@ class CdcEngine:
             raise ValueError(f"port must be 1-65535, got {port}")
         if not self._client_lib_loaded:
             if not load_client_library(self._lib):
-                raise RuntimeError("Client API not available (built without MySQL support)")
+                raise exception_for_rc(
+                    MES_ERR_INVALID_ARG, "Client API not available (built without MySQL support)"
+                )
             self._client_lib_loaded = True
 
         # Keep explicit references to encoded bytes so they are not
@@ -427,7 +459,7 @@ class CdcEngine:
 
         rc = self._lib.mes_engine_set_metadata_conn(self._handle, ctypes.byref(cfg))
         if rc != MES_OK:
-            raise RuntimeError(f"Failed to connect metadata (error code {rc})")
+            _raise_for_rc(rc, "mes_engine_set_metadata_conn")
 
 
 def _convert_columns(
@@ -435,6 +467,7 @@ def _convert_columns(
 ) -> dict[str, Any]:
     """Convert C mes_column_t array to a Python dict."""
     result: dict[str, Any] = {}
+    window_at = _payload_window_at
     for i in range(count):
         col = cols[i]
 
@@ -453,35 +486,48 @@ def _convert_columns(
             name = raw_name.decode("utf-8") if raw_name else ""
         key = name if name else str(i)
 
+        # Ordered by how often each type turns up in a row: temporal, decimal
+        # and character columns all reach the binding as MES_COL_STRING, which
+        # makes it the most frequent arm by a wide margin.
         col_type = col.type
-        if col_type == MES_COL_NULL:
-            result[key] = None
-        elif col_type == MES_COL_INT:
-            result[key] = col.int_val
-        elif col_type == MES_COL_DOUBLE:
-            result[key] = col.double_val
-        elif col_type == MES_COL_STRING:
-            if col.str_data and col.str_len > 0:
-                result[key] = ctypes.string_at(col.str_data, col.str_len).decode(
-                    "utf-8", errors="surrogateescape"
+        if col_type == MES_COL_STRING:
+            data = col.str_data
+            length = col.str_len
+            if data and length > 0:
+                raw = (
+                    window_at(data)[:length]
+                    if length <= _PAYLOAD_WINDOW_BYTES
+                    else ctypes.string_at(data, length)
                 )
+                result[key] = raw.decode("utf-8", errors="surrogateescape")
             else:
                 result[key] = ""
+        elif col_type == MES_COL_INT:
+            result[key] = col.int_val
         elif col_type == MES_COL_BYTES:
             # A column whose C-side type is MES_COL_BYTES is by definition
             # a bytes value. Zero-length (str_len == 0) is a legitimate
             # empty payload and maps to b"", not None -- truly-null values
-            # arrive with type == MES_COL_NULL and are handled above, so
-            # conflating empty bytes with null here would lose information.
-            # ctypes.string_at requires a non-null pointer, so fall back to
-            # the explicit empty-bytes literal when the pointer is null
-            # (which should only happen in defensive tests; real C output
-            # always passes a valid pointer, even for empty vectors).
-            if col.str_data and col.str_len > 0:
-                result[key] = ctypes.string_at(col.str_data, col.str_len)
+            # arrive with type == MES_COL_NULL and fall through to the final
+            # arm, so conflating empty bytes with null here would lose
+            # information. Reading a payload requires a non-null pointer, so
+            # fall back to the explicit empty-bytes literal when the pointer
+            # is null (which should only happen in defensive tests; real C
+            # output always passes a valid pointer, even for empty vectors).
+            data = col.str_data
+            length = col.str_len
+            if data and length > 0:
+                result[key] = (
+                    window_at(data)[:length]
+                    if length <= _PAYLOAD_WINDOW_BYTES
+                    else ctypes.string_at(data, length)
+                )
             else:
                 result[key] = b""
+        elif col_type == MES_COL_DOUBLE:
+            result[key] = col.double_val
         else:
+            # MES_COL_NULL, and any type this binding does not know about.
             result[key] = None
 
     return result

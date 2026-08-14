@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable
 from enum import IntEnum
 
+from ._contract import LOG_LEVEL_MAX, LOG_LEVEL_MIN
 from ._ffi import (
     MES_LOG_CALLBACK,
     MES_LOG_DEBUG,
@@ -57,6 +58,20 @@ def _dispatch(c_level: int, message: bytes | None, _userdata: object) -> None:
 _stable_callback = MES_LOG_CALLBACK(_dispatch)
 
 
+def _validate_log_level(level: int) -> None:
+    """Reject a severity the C ABI does not define.
+
+    A level outside the documented range reaches the core as a threshold no
+    record ever matches, which looks identical to never installing a handler.
+    """
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise TypeError("level must be an integer")
+    if level < LOG_LEVEL_MIN or level > LOG_LEVEL_MAX:
+        raise ValueError(
+            f"level must be an integer between {LOG_LEVEL_MIN} and {LOG_LEVEL_MAX}, got {level}"
+        )
+
+
 def set_log_callback(
     callback: Callable[[LogLevel, str], None] | None,
     level: LogLevel = LogLevel.WARN,
@@ -73,9 +88,15 @@ def set_log_callback(
     Args:
         callback: Called as ``callback(level, message)`` for each log record.
             Pass ``None`` to remove the current handler.
-        level: Maximum verbosity to deliver. Ignored when ``callback`` is None.
+        level: Maximum verbosity to deliver. Unused when ``callback`` is None,
+            but still range-checked so a typo can never disable delivery
+            silently.
         lib_path: Optional path to the libmes instance whose process-wide
             callback should be configured. Defaults to the standard loader.
+
+    Raises:
+        TypeError: If ``level`` is not an integer.
+        ValueError: If ``level`` is not one of the four ``LogLevel`` values.
 
     Note:
         Exceptions raised inside ``callback`` are swallowed: a logging handler
@@ -85,6 +106,7 @@ def set_log_callback(
     """
     global _active_handler
 
+    _validate_log_level(level)
     lib = get_library(lib_path)
     with _callback_lock:
         _active_handler = callback

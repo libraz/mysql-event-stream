@@ -8,7 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mysql_event_stream._ffi import MESPollResult
+from mysql_event_stream._ffi import (
+    MES_ERR_DISCONNECTED,
+    MES_ERR_INVALID_ARG,
+    MES_ERR_STREAM,
+    MES_OK,
+    MESPollResult,
+)
 from mysql_event_stream.client import BinlogClient
 from mysql_event_stream.types import ServerFlavor
 
@@ -82,9 +88,131 @@ def test_poll_batch_copies_all_native_results(
         (b"\x01\x02\x03", False),
         (None, True),
     ]
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError, match="between 1 and 1024"):
         client.poll_batch(0)
     client.close()
+
+
+def _make_client(lib: MagicMock) -> BinlogClient:
+    lib.mes_client_create.return_value = 0xDEAD
+    lib.mes_error_string.return_value = b"disconnected"
+    lib.mes_client_last_error.return_value = b"reader thread ended"
+    return BinlogClient()
+
+
+def _batch_of(*errors: int) -> object:
+    """Build a poll_batch side effect writing one result per error code."""
+    payload = (ctypes.c_uint8 * 3)(0x01, 0x02, 0x03)
+
+    def poll_batch(
+        _handle: object,
+        results: ctypes.POINTER(MESPollResult),
+        _capacity: int,
+        result_count: ctypes.POINTER(ctypes.c_size_t),
+    ) -> int:
+        for index, error in enumerate(errors):
+            results[index].error = error
+            results[index].is_heartbeat = 0
+            if error == 0:
+                results[index].data = ctypes.cast(payload, ctypes.POINTER(ctypes.c_uint8))
+                results[index].size = len(payload)
+            else:
+                results[index].data = None
+                results[index].size = 0
+        ctypes.cast(result_count, ctypes.POINTER(ctypes.c_size_t))[0] = len(errors)
+        return 0
+
+    return poll_batch
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_poll_batch_delivers_events_that_precede_a_terminal_error(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    """Events written before the terminal element must reach the caller.
+
+    The native checkpoint advances on the next poll as if the whole batch was
+    consumed, so dropping them loses those events permanently.
+    """
+    lib = MagicMock()
+    lib.mes_client_poll_batch.side_effect = _batch_of(MES_OK, MES_OK, MES_ERR_DISCONNECTED)
+    mock_load.return_value = lib
+
+    client = _make_client(lib)
+    delivered = client.poll_batch(8)
+    assert [result.data for result in delivered] == [b"\x01\x02\x03", b"\x01\x02\x03"]
+
+    # The terminal error surfaces on the next call, exactly once.
+    with pytest.raises(RuntimeError) as excinfo:
+        client.poll_batch(8)
+    assert excinfo.value.code == MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+    assert str(excinfo.value).strip() not in ("", ":")
+
+    lib.mes_client_poll_batch.side_effect = _batch_of(MES_OK)
+    assert len(client.poll_batch(8)) == 1
+    client.close()
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_poll_batch_raises_at_once_when_no_event_precedes_the_error(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    lib = MagicMock()
+    lib.mes_client_poll_batch.side_effect = _batch_of(MES_ERR_DISCONNECTED)
+    mock_load.return_value = lib
+
+    client = _make_client(lib)
+    with pytest.raises(RuntimeError) as excinfo:
+        client.poll_batch(8)
+    assert excinfo.value.code == MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+    client.close()
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_a_latched_terminal_error_also_surfaces_from_poll(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    lib = MagicMock()
+    lib.mes_client_poll_batch.side_effect = _batch_of(MES_OK, MES_ERR_STREAM)
+    mock_load.return_value = lib
+
+    client = _make_client(lib)
+    assert len(client.poll_batch(8)) == 1
+    with pytest.raises(RuntimeError) as excinfo:
+        client.poll()
+    assert excinfo.value.code == MES_ERR_STREAM  # type: ignore[attr-defined]
+    lib.mes_client_poll.assert_not_called()
+    client.close()
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_every_native_failure_carries_the_c_abi_code(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    """A caller branching on ``.code`` must never meet a bare RuntimeError."""
+    lib = MagicMock()
+    mock_load.return_value = lib
+
+    lib.mes_client_set_max_event_size.return_value = MES_ERR_INVALID_ARG
+    client = _make_client(lib)
+    with pytest.raises(RuntimeError) as excinfo:
+        client.connect()
+    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+
+    lib.mes_client_set_max_event_size.return_value = MES_OK
+    lib.mes_client_set_max_queue_bytes.return_value = MES_ERR_INVALID_ARG
+    with pytest.raises(RuntimeError) as excinfo:
+        client.connect()
+    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+
+    client.close()
+    with pytest.raises(RuntimeError) as excinfo:
+        client.poll()
+    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
 
 
 class TestClientClose:

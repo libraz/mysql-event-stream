@@ -5,58 +5,52 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
-import warnings
 from collections.abc import Callable
 from typing import cast
 
-from ._ffi import (
-    MES_ERR_AUTH,
-    MES_ERR_CHECKSUM,
-    MES_ERR_DECODE,
-    MES_ERR_DECODE_COLUMN,
-    MES_ERR_DECODE_ROW,
-    MES_ERR_GTID_PURGED,
-    MES_ERR_GTID_TAGGED_UNSUPPORTED,
-    MES_ERR_PARSE,
-    MES_ERR_QUEUE_FULL,
-    MES_ERR_VALIDATION,
+from ._contract import (
+    NON_RETRYABLE_ERROR_CODES,
+    OPTION_RANGES,
+    backoff_delay_ms,
 )
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
 
-_NON_RETRYABLE_CODES = frozenset(
-    {
-        MES_ERR_AUTH,
-        MES_ERR_VALIDATION,
-        MES_ERR_PARSE,
-        MES_ERR_CHECKSUM,
-        MES_ERR_DECODE,
-        MES_ERR_DECODE_COLUMN,
-        MES_ERR_DECODE_ROW,
-        MES_ERR_QUEUE_FULL,
-        MES_ERR_GTID_PURGED,
-        MES_ERR_GTID_TAGGED_UNSUPPORTED,
-    }
-)
+# Public option name -> attribute holding it. Drives both construction-time and
+# configure() validation so the two paths can never accept different values.
+_FIELD_MAP = {
+    "host": "_host",
+    "port": "_port",
+    "user": "_user",
+    "password": "_password",
+    "server_id": "_server_id",
+    "start_gtid": "_start_gtid",
+    "start_binlog_file": "_start_binlog_file",
+    "start_binlog_position": "_start_binlog_position",
+    "connect_timeout_s": "_connect_timeout_s",
+    "read_timeout_s": "_read_timeout_s",
+    "ssl_mode": "_ssl_mode",
+    "ssl_ca": "_ssl_ca",
+    "ssl_cert": "_ssl_cert",
+    "ssl_key": "_ssl_key",
+    "max_queue_size": "_max_queue_size",
+    "max_queue_bytes": "_max_queue_bytes",
+    "max_event_size": "_max_event_size",
+    "include_databases": "_include_databases",
+    "include_tables": "_include_tables",
+    "exclude_tables": "_exclude_tables",
+    "allow_public_key_retrieval": "_allow_public_key_retrieval",
+    "lib_path": "_lib_path",
+    "max_reconnect_attempts": "_max_reconnect_attempts",
+    "on_metadata_error": "_on_metadata_error",
+}
 
 
 def _validate_stream_option(key: str, value: object) -> None:
-    """Validate runtime configure() values before they reach native code."""
-    integer_options = {
-        "port": (1, 65535),
-        "server_id": (1, 0xFFFFFFFF),
-        "connect_timeout_s": (0, 0xFFFFFFFF),
-        "read_timeout_s": (0, 0xFFFFFFFF),
-        "max_queue_size": (0, None),
-        "max_queue_bytes": (0, None),
-        "max_event_size": (0, 0xFFFFFFFF),
-        "max_reconnect_attempts": (0, None),
-        "ssl_mode": (0, 4),
-        "start_binlog_position": (0, 0xFFFFFFFF),
-    }
-    if key in integer_options:
-        minimum, maximum = integer_options[key]
+    """Validate a configuration value against the cross-binding contract."""
+    if key in OPTION_RANGES:
+        minimum, maximum = OPTION_RANGES[key]
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError(f"{key} must be an integer")
         if value < minimum or (maximum is not None and value > maximum):
@@ -71,6 +65,10 @@ def _validate_stream_option(key: str, value: object) -> None:
         if value is not None and not isinstance(value, str):
             raise TypeError(f"{key} must be a string or None")
         return
+    if key.startswith(("include_", "exclude_")):
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise TypeError(f"{key} must be a list of strings")
+        return
     if key == "allow_public_key_retrieval" and not isinstance(value, bool):
         raise TypeError("allow_public_key_retrieval must be a bool")
     if key == "on_metadata_error" and value is not None and not callable(value):
@@ -80,16 +78,17 @@ def _validate_stream_option(key: str, value: object) -> None:
 class CdcStream:
     """Async iterator that streams MySQL CDC events.
 
-    Usage::
-
-        async for event in CdcStream(host="127.0.0.1", user="root"):
-            print(event)
-
-    Or with async context manager::
+    Leaving the iteration early does not release the native client on its own,
+    so scope the stream and let ``__aexit__`` close it::
 
         async with CdcStream(host="127.0.0.1", user="root") as stream:
             async for event in stream:
                 print(event)
+                break
+        # stream.current_gtid still holds the last checkpoint here.
+
+    Without the context manager, call :meth:`aclose` (or :meth:`close`)
+    explicitly once iteration is done.
     """
 
     def __init__(
@@ -160,10 +159,13 @@ class CdcStream:
                 (default 10, 0 = disabled).
             on_metadata_error: Called when the optional metadata connection
                 cannot be enabled. Column names then fall back to indices.
-        """
-        if not (1 <= port <= 65535):
-            raise ValueError(f"port must be 1-65535, got {port}")
+                Without it the failure is silent, matching the library-wide rule
+                that nothing is written to stderr on the caller's behalf.
 
+        Raises:
+            TypeError: If an option has the wrong type.
+            ValueError: If an option falls outside its accepted range.
+        """
         self._host = host
         self._port = port
         self._user = user
@@ -188,6 +190,10 @@ class CdcStream:
         self._lib_path = lib_path
         self._max_reconnect_attempts = max_reconnect_attempts
         self._on_metadata_error = on_metadata_error
+        # Construction accepts exactly what configure() accepts: both paths
+        # range-check against the same contract table.
+        for key, attr in _FIELD_MAP.items():
+            _validate_stream_option(key, getattr(self, attr))
         self._reconnect_attempts = 0
 
         self._client: BinlogClient | None = None
@@ -200,6 +206,9 @@ class CdcStream:
         self._pending_poll_results: list[PollResult] = []
         self._backoff_task: asyncio.Task[None] | None = None
         self._leftover = b""
+        # Retains the last non-empty checkpoint after close() releases the
+        # native client, so it stays readable once the `async with` scope ends.
+        self._last_gtid = ""
 
     async def __aenter__(self) -> CdcStream:
         return self
@@ -247,43 +256,12 @@ class CdcStream:
         if self._started:
             raise RuntimeError("Cannot configure after streaming has started")
 
-        field_map = {
-            "host": "_host",
-            "port": "_port",
-            "user": "_user",
-            "password": "_password",
-            "server_id": "_server_id",
-            "start_gtid": "_start_gtid",
-            "start_binlog_file": "_start_binlog_file",
-            "start_binlog_position": "_start_binlog_position",
-            "connect_timeout_s": "_connect_timeout_s",
-            "read_timeout_s": "_read_timeout_s",
-            "ssl_mode": "_ssl_mode",
-            "ssl_ca": "_ssl_ca",
-            "ssl_cert": "_ssl_cert",
-            "ssl_key": "_ssl_key",
-            "max_queue_size": "_max_queue_size",
-            "max_queue_bytes": "_max_queue_bytes",
-            "max_event_size": "_max_event_size",
-            "include_databases": "_include_databases",
-            "include_tables": "_include_tables",
-            "exclude_tables": "_exclude_tables",
-            "allow_public_key_retrieval": "_allow_public_key_retrieval",
-            "lib_path": "_lib_path",
-            "max_reconnect_attempts": "_max_reconnect_attempts",
-            "on_metadata_error": "_on_metadata_error",
-        }
         for key, value in kwargs.items():
-            attr = field_map.get(key)
+            attr = _FIELD_MAP.get(key)
             if attr is None:
                 raise TypeError(f"Unknown config key: {key!r}")
-            if key.startswith(("include_", "exclude_")):
-                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-                    raise TypeError(f"{key} must be a list of strings")
-                setattr(self, attr, list(value))
-            else:
-                _validate_stream_option(key, value)
-                setattr(self, attr, value)
+            _validate_stream_option(key, value)
+            setattr(self, attr, list(cast(list[str], value)) if isinstance(value, list) else value)
 
     async def __anext__(self) -> ChangeEvent:
         # Note: close() is safe to call during iteration. It sets
@@ -383,6 +361,15 @@ class CdcStream:
                     break
                 continue
 
+    async def aclose(self) -> None:
+        """Release the stream from an iteration that ended early.
+
+        ``async for`` never finalizes the iterator it borrows, so an early
+        ``break`` leaves the native client alive. This is the async-iterator
+        spelling of :meth:`close`; ``async with`` calls it for you.
+        """
+        await self.close()
+
     async def close(self) -> None:
         """Stop the stream and release all resources."""
         if self._closed:
@@ -404,6 +391,10 @@ class CdcStream:
             with contextlib.suppress(BaseException):
                 await poll_task
             self._poll_task = None
+        # Capture the checkpoint before the client goes away: callers persist it
+        # after leaving the iteration scope. This has to run once no poll is in
+        # flight, because the accessor takes the same lock a blocking poll holds.
+        self._cache_current_gtid()
         if self._client is not None:
             # close() internally calls stop() and disconnect()
             self._client.close()
@@ -417,11 +408,40 @@ class CdcStream:
         """Get the delivered, committed checkpoint candidate.
 
         The stream is at-least-once, not exactly-once. Persist this value only
-        after application processing succeeds.
+        after application processing succeeds. The last non-empty value survives
+        :meth:`close`, so it can still be read after the ``async with`` scope
+        ends.
         """
+        self._cache_current_gtid()
+        return cast(str, getattr(self, "_last_gtid", ""))
+
+    def _cache_current_gtid(self) -> None:
+        """Retain the client's checkpoint so it outlives the native handle."""
         if self._client is None:
-            return ""
-        return self._client.current_gtid
+            return
+        gtid = self._client.current_gtid
+        if gtid:
+            self._last_gtid = gtid
+
+    def _adopt_resume_position(self, checkpoint: str) -> None:
+        """Point the successor connection at ``checkpoint``, or keep the start mode.
+
+        This is the only place a start position is rewritten, so the rule holds
+        on every reconnect path. An empty checkpoint means none was ever
+        published: the connection died before its first commit, or it was
+        anchored to a file offset that produces no GTID. Forwarding that as
+        ``start_gtid=""`` would request the empty GTID set, which the server
+        reads as "send every binlog you still retain". Keep the configured start
+        mode instead -- at worst the successor replays from the original anchor.
+
+        Args:
+            checkpoint: GTID set reported by the dropped connection, or ``""``.
+        """
+        if not checkpoint:
+            return
+        self._start_gtid = checkpoint
+        self._start_binlog_file = None
+        self._start_binlog_position = 0
 
     async def _reconnect(self) -> None:
         """Perform one reconnect attempt using the last known GTID."""
@@ -439,9 +459,7 @@ class CdcStream:
         if self._closed:
             return
 
-        self._start_gtid = gtid
-        self._start_binlog_file = None
-        self._start_binlog_position = 0
+        self._adopt_resume_position(gtid)
         # The engine resumes from a GTID checkpoint after reconnect. Bytes
         # buffered from the dropped transport must not be replayed into the
         # new connection's parser state.
@@ -513,7 +531,7 @@ class CdcStream:
         if (
             self._max_reconnect_attempts == 0
             or isinstance(error, ValueError)
-            or code in _NON_RETRYABLE_CODES
+            or code in NON_RETRYABLE_ERROR_CODES
         ):
             await self.close()
             raise error
@@ -527,9 +545,7 @@ class CdcStream:
 
     async def _wait_for_backoff(self) -> None:
         """Wait for jittered backoff, interruptible by close()."""
-        max_delay_s = 10.0
-        base_delay = min(float(self._reconnect_attempts), max_delay_s)
-        delay = base_delay * (0.5 + random.random() * 0.5)
+        delay = backoff_delay_ms(self._reconnect_attempts, random.random()) / 1000.0
         task = asyncio.create_task(asyncio.sleep(delay))
         self._backoff_task = task
         try:
@@ -609,12 +625,12 @@ class CdcStream:
         self._engine.set_exclude_tables(self._exclude_tables)
 
     def _report_metadata_error(self, error: RuntimeError) -> None:
-        """Report optional metadata failures consistently on start and reconnect."""
+        """Report optional metadata failures consistently on start and reconnect.
+
+        Without a handler the failure is silent: the library never writes
+        diagnostics on the caller's behalf. Column names fall back to numeric
+        indices, and embedders that want the detail pass ``on_metadata_error``
+        or install the native log callback.
+        """
         if self._on_metadata_error is not None:
             self._on_metadata_error(error)
-            return
-        warnings.warn(
-            f"Failed to enable column name metadata: {error}. "
-            "Column names will use numeric indices.",
-            stacklevel=3,
-        )

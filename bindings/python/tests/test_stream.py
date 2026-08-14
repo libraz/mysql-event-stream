@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
+from mysql_event_stream._contract import NON_RETRYABLE_ERROR_CODES
 from mysql_event_stream._ffi import (
     MES_ERR_GTID_PURGED,
     MES_ERR_GTID_TAGGED_UNSUPPORTED,
+    MES_ERR_INVALID_ARG,
     MES_ERR_PARSE,
     MES_ERR_QUEUE_FULL,
 )
 from mysql_event_stream.stream import CdcStream
 from mysql_event_stream.types import PollResult, exception_for_rc
+
+from .contract_fixture import load_binding_contract
+
+contract = load_binding_contract()
 
 
 async def _run_in_test(func: object, *args: object) -> object:
@@ -108,6 +114,105 @@ class TestStreamClose:
         mock_client.stop.assert_called_once()
         mock_client.close.assert_called_once()
         assert stream._poll_task is None
+
+
+class TestCheckpointRetention:
+    """The checkpoint must outlive the native client that published it."""
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_retains_current_gtid_after_an_early_break(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        client.current_gtid = "uuid:1-42"
+        client.poll.return_value = PollResult(b"\x01", False)
+        mock_client_cls.return_value = client
+        engine = MagicMock()
+        event = MagicMock()
+        engine.next_event.side_effect = [event, None]
+        engine.feed.return_value = 1
+        mock_engine_cls.return_value = engine
+
+        stream = CdcStream(host="127.0.0.1")
+        async with stream:
+            async for received in stream:
+                assert received is event
+                break
+
+        # The client is released, yet the checkpoint the caller has to persist
+        # after leaving the scope is still readable.
+        assert stream._client is None
+        assert stream.current_gtid == "uuid:1-42"
+
+    @pytest.mark.asyncio
+    async def test_close_caches_the_checkpoint_after_the_poll_returns(self) -> None:
+        # The accessor takes the same client lock a blocking poll holds, so
+        # reading it before the in-flight poll is unblocked would stall close().
+        stream = CdcStream.__new__(CdcStream)
+        stream._closed = False
+        stream._engine = MagicMock()
+        client = MagicMock()
+        stream._client = client
+
+        release = asyncio.Event()
+        poll_finished = False
+        read_while_polling: list[bool] = []
+
+        async def fake_poll() -> None:
+            nonlocal poll_finished
+            await release.wait()
+            poll_finished = True
+
+        def read_gtid() -> str:
+            read_while_polling.append(not poll_finished)
+            return "uuid:1-9"
+
+        type(client).current_gtid = PropertyMock(side_effect=read_gtid)
+        client.stop.side_effect = lambda: release.set()
+        stream._poll_task = asyncio.ensure_future(fake_poll())
+
+        await stream.close()
+
+        assert read_while_polling == [False]
+        assert stream.current_gtid == "uuid:1-9"
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_reads_the_native_checkpoint_per_poll_batch(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        gtid_reads = PropertyMock(return_value="uuid:1-7")
+        type(client).current_gtid = gtid_reads
+        client.poll.return_value = PollResult(b"\x01", False)
+        mock_client_cls.return_value = client
+        engine = MagicMock()
+        event = MagicMock()
+        engine.next_event.side_effect = [None, event, event, event, None]
+        engine.feed.return_value = 1
+        mock_engine_cls.return_value = engine
+
+        delivered = 0
+        reads_while_iterating = 0
+        stream = CdcStream(host="127.0.0.1")
+        async with stream:
+            async for _ in stream:
+                delivered += 1
+                reads_while_iterating = gtid_reads.call_count
+                if delivered == 3:
+                    break
+
+        assert delivered == 3
+        # One poll batch delivered all three events, so one native read covers
+        # them all; the count must not scale with row events.
+        assert (
+            reads_while_iterating <= contract["checkpointRetention"]["maxNativeReadsPerPollBatch"]
+        )
+        assert client.poll.call_count == 1
+        assert stream.current_gtid == "uuid:1-7"
 
 
 class TestStreamConfigure:
@@ -250,11 +355,10 @@ class TestReconnectAttempts:
     max_reconnect_attempts=1 means try one reconnect, then give up.
     """
 
-    @pytest.mark.asyncio
-    async def test_reconnect_passes_an_empty_checkpoint_explicitly(self) -> None:
-        stream = CdcStream(start_binlog_file="binlog.000001", start_binlog_position=4)
+    async def _reconnect_with_checkpoint(self, stream: CdcStream, checkpoint: str) -> MagicMock:
+        """Run one _reconnect() whose dropped client reported ``checkpoint``."""
         previous_client = MagicMock()
-        previous_client.current_gtid = ""
+        previous_client.current_gtid = checkpoint
         stream._client = previous_client
         stream._engine = MagicMock()
         replacement_client = MagicMock()
@@ -269,10 +373,76 @@ class TestReconnectAttempts:
         ):
             await stream._reconnect()
 
+        return client_cls
+
+    @pytest.mark.asyncio
+    async def test_reconnect_keeps_file_position_without_a_checkpoint(self) -> None:
+        # An empty checkpoint must never become an empty GTID set: the server
+        # answers that with every binlog it still retains.
+        stream = CdcStream(start_binlog_file="binlog.000001", start_binlog_position=4)
+        client_cls = await self._reconnect_with_checkpoint(stream, "")
+
         kwargs = client_cls.call_args.kwargs
-        assert kwargs["start_gtid"] == ""
+        assert kwargs["start_gtid"] is None
+        assert kwargs["start_binlog_file"] == "binlog.000001"
+        assert kwargs["start_binlog_position"] == 4
+
+    @pytest.mark.asyncio
+    async def test_reconnect_keeps_current_position_mode_without_a_checkpoint(self) -> None:
+        stream = CdcStream()
+        client_cls = await self._reconnect_with_checkpoint(stream, "")
+
+        kwargs = client_cls.call_args.kwargs
+        assert kwargs["start_gtid"] is None
+        assert kwargs["start_binlog_file"] is None
+
+    @pytest.mark.asyncio
+    async def test_reconnect_keeps_explicit_start_gtid_without_a_checkpoint(self) -> None:
+        stream = CdcStream(start_gtid="3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2")
+        client_cls = await self._reconnect_with_checkpoint(stream, "")
+
+        kwargs = client_cls.call_args.kwargs
+        assert kwargs["start_gtid"] == "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2"
+
+    @pytest.mark.asyncio
+    async def test_reconnect_prefers_a_published_checkpoint_over_the_anchor(self) -> None:
+        stream = CdcStream(start_binlog_file="binlog.000001", start_binlog_position=4)
+        client_cls = await self._reconnect_with_checkpoint(
+            stream, "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
+        )
+
+        kwargs = client_cls.call_args.kwargs
+        assert kwargs["start_gtid"] == "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
         assert kwargs["start_binlog_file"] is None
         assert kwargs["start_binlog_position"] == 0
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_initial_connect_failure_retries_with_the_same_start_mode(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        client = MagicMock()
+        client.poll.side_effect = RuntimeError("immediate drop")
+        mock_client_cls.side_effect = [ConnectionError("connect refused"), client]
+        engine = MagicMock()
+        engine.next_event.return_value = None
+        mock_engine_cls.return_value = engine
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=1)
+
+        with (
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()),
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+        ):
+            await stream.__anext__()
+
+        # No client existed on the first attempt, so no checkpoint could have
+        # been published. The implicit "snapshot the current position" start
+        # mode has to survive the retry intact.
+        assert mock_client_cls.call_count == 2
+        kwargs = mock_client_cls.call_args_list[1].kwargs
+        assert kwargs["start_gtid"] is None
+        assert kwargs["start_binlog_file"] is None
 
     @pytest.mark.asyncio
     async def test_max_reconnect_attempts_one_allows_one_retry(self) -> None:
@@ -439,6 +609,73 @@ class TestReconnectAttempts:
 
         assert backoff.done()
         assert stream._backoff_task is None
+
+
+class TestRetryClassification:
+    """Every contract error code has to be classified the same on both surfaces."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", sorted(NON_RETRYABLE_ERROR_CODES))
+    async def test_permanent_error_surfaces_on_the_first_attempt(self, code: int) -> None:
+        error = RuntimeError("permanent stream error")
+        error.code = code  # type: ignore[attr-defined]
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=10)
+
+        with (
+            patch.object(CdcStream, "_start", new=AsyncMock(side_effect=error)) as start,
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()) as backoff,
+            pytest.raises(RuntimeError, match="permanent stream error"),
+        ):
+            await stream.__anext__()
+
+        assert start.await_count == 1
+        backoff.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "code", sorted(entry["code"] for entry in contract["retryableErrorCodes"])
+    )
+    async def test_transient_error_consumes_the_retry_budget(self, code: int) -> None:
+        error = RuntimeError("transient stream error")
+        error.code = code  # type: ignore[attr-defined]
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=1)
+
+        with (
+            patch.object(CdcStream, "_start", new=AsyncMock(side_effect=error)) as start,
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()) as backoff,
+            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+        ):
+            await stream.__anext__()
+
+        # The initial attempt plus the one allowed retry.
+        assert start.await_count == 2
+        assert backoff.await_count == 1
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_permanent_configuration_error_surfaces_on_the_first_connect(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        # max_queue_bytes below max_event_size is rejected by the native
+        # connect with MES_ERR_INVALID_ARG. That is a configuration mistake, so
+        # it must not burn the reconnect budget before reaching the caller.
+        error = ConnectionError("max_queue_bytes must be greater than max_event_size")
+        error.code = MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+        client = MagicMock()
+        client.connect.side_effect = error
+        mock_client_cls.return_value = client
+        mock_engine_cls.return_value = MagicMock()
+
+        stream = CdcStream(host="127.0.0.1", max_queue_bytes=1024)
+        with (
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()) as backoff,
+            pytest.raises(ConnectionError, match="max_queue_bytes"),
+        ):
+            await stream.__anext__()
+
+        assert mock_client_cls.call_count == 1
+        backoff.assert_not_awaited()
 
 
 class TestEngineFailures:

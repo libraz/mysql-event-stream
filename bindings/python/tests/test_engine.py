@@ -1,11 +1,21 @@
 """Tests for CdcEngine - the Python wrapper around libmes."""
 
 import ctypes
+from collections.abc import Callable
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mysql_event_stream import CdcEngine, ChecksumError, EventType, ParseError
-from mysql_event_stream._ffi import MES_COL_BYTES, MES_COL_INT, MES_COL_STRING, MESColumn, MESEvent
+from mysql_event_stream._ffi import (
+    MES_COL_BYTES,
+    MES_COL_INT,
+    MES_COL_STRING,
+    MES_ERR_AUTH,
+    MES_ERR_INVALID_ARG,
+    MESColumn,
+    MESEvent,
+)
 from mysql_event_stream.engine import _convert_columns, _convert_event
 
 from .helpers import (
@@ -388,3 +398,60 @@ def test_column_name_cache_is_reused_across_rows() -> None:
     cached_name = cache[b"id"]
     assert _convert_columns(arr, 1, cache) == {"id": 7}
     assert cache[b"id"] is cached_name
+
+
+class TestNativeErrorCodes:
+    """Every native failure path must carry the C-ABI code on the exception.
+
+    The README tells callers to branch on ``.code`` rather than on the message
+    text, so a bare ``RuntimeError`` from any of these paths is a broken
+    promise, not a cosmetic difference.
+    """
+
+    @staticmethod
+    def _engine(lib: MagicMock) -> CdcEngine:
+        lib.mes_create.return_value = 0xBEEF
+        with patch("mysql_event_stream.engine.get_library", return_value=lib):
+            return CdcEngine()
+
+    @pytest.mark.parametrize(
+        ("native_name", "call"),
+        [
+            ("mes_get_position", lambda engine: engine.get_position()),
+            ("mes_set_max_queue_size", lambda engine: engine.set_max_queue_size(10)),
+            ("mes_set_max_event_size", lambda engine: engine.set_max_event_size(1024)),
+            ("mes_reset", lambda engine: engine.reset()),
+            ("mes_set_include_databases", lambda engine: engine.set_include_databases(["db"])),
+            ("mes_set_include_tables", lambda engine: engine.set_include_tables(["t"])),
+            ("mes_set_exclude_tables", lambda engine: engine.set_exclude_tables(["t"])),
+        ],
+    )
+    def test_setter_failures_carry_the_code(
+        self, native_name: str, call: Callable[[CdcEngine], object]
+    ) -> None:
+        lib = MagicMock()
+        getattr(lib, native_name).return_value = MES_ERR_INVALID_ARG
+        engine = self._engine(lib)
+        with pytest.raises(RuntimeError) as excinfo:
+            call(engine)
+        assert excinfo.value.code == MES_ERR_INVALID_ARG
+        engine.close()
+
+    def test_metadata_connection_failure_carries_the_code(self) -> None:
+        lib = MagicMock()
+        lib.mes_engine_set_metadata_conn.return_value = MES_ERR_AUTH
+        engine = self._engine(lib)
+        with (
+            patch("mysql_event_stream.engine.load_client_library", return_value=True),
+            pytest.raises(RuntimeError) as excinfo,
+        ):
+            engine.enable_metadata(host="127.0.0.1", port=3306)
+        assert excinfo.value.code == MES_ERR_AUTH
+        engine.close()
+
+    def test_closed_engine_reports_invalid_argument(self, lib_path: str) -> None:
+        engine = CdcEngine(lib_path=lib_path)
+        engine.close()
+        with pytest.raises(RuntimeError) as excinfo:
+            engine.get_position()
+        assert excinfo.value.code == MES_ERR_INVALID_ARG

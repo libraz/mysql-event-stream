@@ -5,7 +5,13 @@ from __future__ import annotations
 import ctypes
 import threading
 
+from ._contract import (
+    POLL_BATCH_DEFAULT_MAX_EVENTS,
+    POLL_BATCH_MAX_MAX_EVENTS,
+    POLL_BATCH_MIN_MAX_EVENTS,
+)
 from ._ffi import (
+    MES_ERR_INVALID_ARG,
     MES_OK,
     MESClientConfig,
     MESPollResult,
@@ -13,6 +19,20 @@ from ._ffi import (
     load_client_library,
 )
 from .types import ClientConfig, PollResult, ServerFlavor, exception_for_rc
+
+
+def validate_poll_batch_size(max_events: int) -> None:
+    """Reject a batch capacity outside the window the C ABI accepts."""
+    if (
+        isinstance(max_events, bool)
+        or not isinstance(max_events, int)
+        or max_events < POLL_BATCH_MIN_MAX_EVENTS
+        or max_events > POLL_BATCH_MAX_MAX_EVENTS
+    ):
+        raise ValueError(
+            "max_events must be an integer between "
+            f"{POLL_BATCH_MIN_MAX_EVENTS} and {POLL_BATCH_MAX_MAX_EVENTS}"
+        )
 
 
 def _error_message(lib: ctypes.CDLL, rc: int) -> str:
@@ -117,8 +137,9 @@ class BinlogClient:
 
         self._lib = get_library(lib_path)
         if not load_client_library(self._lib):
-            raise RuntimeError(
-                "BinlogClient is not available. Rebuild libmes with OpenSSL installed"
+            raise exception_for_rc(
+                MES_ERR_INVALID_ARG,
+                "BinlogClient is not available. Rebuild libmes with OpenSSL installed",
             )
 
         if config is not None:
@@ -156,9 +177,13 @@ class BinlogClient:
         # using a handle after close() has destroyed it.
         self._lifecycle_lock = threading.Lock()
 
+        # Holds a terminal poll error observed mid-batch until the next poll
+        # call; see poll_batch().
+        self._latched_error: BaseException | None = None
+
         self._handle: int | None = self._lib.mes_client_create()
         if self._handle is None:
-            raise RuntimeError("Failed to create BinlogClient")
+            raise exception_for_rc(MES_ERR_INVALID_ARG, "Failed to create BinlogClient")
 
     def connect(self) -> None:
         """Connect to MySQL server and validate configuration.
@@ -231,19 +256,23 @@ class BinlogClient:
 
         with self._poll_lock:
             self._check_open()
+            # A new session cannot inherit the terminal error of the previous one.
+            self._latched_error = None
             limit_rc = self._lib.mes_client_set_max_event_size(
                 self._handle, self._config.max_event_size
             )
             if limit_rc != MES_OK:
-                raise RuntimeError(
-                    f"mes_client_set_max_event_size failed with error code {limit_rc}"
+                raise exception_for_rc(
+                    limit_rc,
+                    f"mes_client_set_max_event_size failed: {_error_message(self._lib, limit_rc)}",
                 )
             limit_rc = self._lib.mes_client_set_max_queue_bytes(
                 self._handle, self._config.max_queue_bytes
             )
             if limit_rc != MES_OK:
-                raise RuntimeError(
-                    f"mes_client_set_max_queue_bytes failed with error code {limit_rc}"
+                raise exception_for_rc(
+                    limit_rc,
+                    f"mes_client_set_max_queue_bytes failed: {_error_message(self._lib, limit_rc)}",
                 )
 
             rc = self._lib.mes_client_connect(self._handle, ctypes.byref(config))
@@ -286,6 +315,9 @@ class BinlogClient:
         # buffer referenced by `result` cannot be freed while we read it.
         with self._poll_lock:
             self._check_open()
+            latched = self._take_latched_error()
+            if latched is not None:
+                raise latched
             result = self._lib.mes_client_poll(self._handle)
             if result.error != MES_OK:
                 error_msg = self._get_last_error()
@@ -305,17 +337,26 @@ class BinlogClient:
             data = ctypes.string_at(result.data, result.size)
             return PollResult(data=data, is_heartbeat=False)
 
-    def poll_batch(self, max_events: int = 64) -> list[PollResult]:
+    def poll_batch(self, max_events: int = POLL_BATCH_DEFAULT_MAX_EVENTS) -> list[PollResult]:
         """Block for one wire event, then drain further queued events.
 
         This amortizes the Python worker-thread handoff for busy streams. The
         returned bytes are copied before the next native poll/batch call, so
         each result has the same ownership guarantee as :meth:`poll`.
+
+        A terminal condition arrives as the final element of a batch whose
+        earlier elements are real events. Those events are returned and the
+        terminal error is raised by the next :meth:`poll` or
+        :meth:`poll_batch` call: the native checkpoint advances on that next
+        call as if the whole batch had been consumed, so discarding them would
+        lose events permanently.
         """
-        if max_events <= 0:
-            raise ValueError("max_events must be positive")
+        validate_poll_batch_size(max_events)
         with self._poll_lock:
             self._check_open()
+            latched = self._take_latched_error()
+            if latched is not None:
+                raise latched
             raw_results = (MESPollResult * max_events)()
             count = ctypes.c_size_t(0)
             rc = self._lib.mes_client_poll_batch(
@@ -330,7 +371,11 @@ class BinlogClient:
                 if result.error != MES_OK:
                     error_msg = self._get_last_error()
                     base_msg = _error_message(self._lib, result.error)
-                    raise exception_for_rc(result.error, f"{base_msg}: {error_msg}")
+                    terminal = exception_for_rc(result.error, f"{base_msg}: {error_msg}")
+                    if not results:
+                        raise terminal
+                    self._latched_error = terminal
+                    break
                 if result.is_heartbeat or result.size == 0 or not result.data:
                     results.append(PollResult(data=None, is_heartbeat=bool(result.is_heartbeat)))
                 else:
@@ -466,8 +511,16 @@ class BinlogClient:
             self.close()
 
     def _check_open(self) -> None:
+        # MES_ERR_INVALID_ARG matches the Node binding and keeps the stream
+        # retry policy from treating a permanent lifecycle violation as a
+        # transient failure.
         if self._handle is None:
-            raise RuntimeError("BinlogClient has been closed")
+            raise exception_for_rc(MES_ERR_INVALID_ARG, "BinlogClient has been closed")
+
+    def _take_latched_error(self) -> BaseException | None:
+        error = self._latched_error
+        self._latched_error = None
+        return error
 
     def _get_last_error(self) -> str:
         with self._poll_lock:
