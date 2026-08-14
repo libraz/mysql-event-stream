@@ -6,9 +6,12 @@
  * with colored output. Optionally filters by table name.
  *
  * Prerequisites:
- *   1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
- *   1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
- *       (same port 13308 / database mes_test; flavor auto-detected)
+ *   1a. Docker MySQL running:   (cd ../../e2e/docker && docker compose up -d)
+ *   1b. Or Docker MariaDB:      (cd ../../e2e/docker && docker compose -f docker-compose.mariadb.yml up -d)
+ *       (paths are relative to bindings/node, where this example is run. Both
+ *        repository-root compose files bind host port 13308 / database mes_test;
+ *        flavor auto-detected. The separate bindings/node/e2e/docker stack used
+ *        by `yarn test:e2e` binds 13307 instead.)
  *   2. Build native addon:      yarn build
  *
  * Usage:

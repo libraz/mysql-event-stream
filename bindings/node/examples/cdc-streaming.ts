@@ -6,10 +6,13 @@
  * Demonstrates the AsyncIterator pattern with `for await`.
  *
  * Prerequisites:
- *   1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
- *   1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
- *       (both expose the same port 13308 / database mes_test, so this example
- *        works unchanged against either server; CdcStream auto-detects flavor)
+ *   1a. Docker MySQL running:   (cd ../../e2e/docker && docker compose up -d)
+ *   1b. Or Docker MariaDB:      (cd ../../e2e/docker && docker compose -f docker-compose.mariadb.yml up -d)
+ *       (paths are relative to bindings/node, where this example is run. Both
+ *        repository-root compose files bind host port 13308 / database mes_test,
+ *        so this example works unchanged against either server; CdcStream
+ *        auto-detects the flavor. The separate bindings/node/e2e/docker stack
+ *        used by `yarn test:e2e` binds 13307 instead.)
  *   2. Build native addon:      yarn build
  *
  * Usage:

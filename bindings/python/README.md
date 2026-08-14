@@ -35,18 +35,22 @@ engine = CdcEngine()
 # Only needed when a checksum=NONE byte stream starts after its FDE:
 # engine.set_checksum_enabled(False)
 
-# Feed raw binlog bytes; retain the unconsumed suffix on backpressure.
+# Feed raw binlog bytes. feed() stops early once the event queue is full, so
+# drain the queue and re-feed the unconsumed tail instead of dropping it.
 offset = 0
 while offset < len(binlog_chunk):
     consumed = engine.feed(binlog_chunk[offset:])
-    if consumed == 0:
-        break
     offset += consumed
 
-while (event := engine.next_event()) is not None:
-    print(event.type, event.database, event.table)
-    print("before:", event.before)
-    print("after:", event.after)
+    while (event := engine.next_event()) is not None:
+        print(event.type, event.database, event.table)
+        print("before:", event.before)
+        print("after:", event.after)
+
+    if consumed == 0:
+        # Partial event at the tail: retain binlog_chunk[offset:] and prepend
+        # it to the next chunk.
+        break
 ```
 
 ### Streaming from MySQL
@@ -166,7 +170,7 @@ other lifecycle methods concurrently.
 - **Column names** — Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **SSL/TLS** — Full SSL/TLS support for secure MySQL connections
 - **Backpressure** — Internal reader thread with bounded event queue (default 10,000)
-- **Auto-reconnection** — Automatic reconnection with linear backoff on connection loss
+- **Auto-reconnection** — Automatic reconnection with jittered linear backoff on connection loss
 
 ## Server Requirements
 

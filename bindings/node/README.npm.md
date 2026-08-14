@@ -54,16 +54,23 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 // Only needed when a checksum=NONE byte stream starts after its FDE:
 // engine.setChecksumEnabled(false);
+
+// feed() stops early once the event queue is full, so drain the queue and
+// re-feed the unconsumed tail instead of dropping it.
 let offset = 0;
 while (offset < binlogChunk.length) {
   const consumed = engine.feed(binlogChunk.subarray(offset));
-  if (consumed === 0) break; // retain the remainder and drain backpressure
   offset += consumed;
-}
 
-while (engine.hasEvents()) {
-  const event = engine.nextEvent();
-  console.log(event.type, event.database, event.table);
+  while (engine.hasEvents()) {
+    const event = engine.nextEvent();
+    if (event === null) break;
+    console.log(event.type, event.database, event.table);
+  }
+
+  // Nothing consumed and nothing left to drain: the tail is a partial event.
+  // Retain binlogChunk.subarray(offset) and prepend it to the next chunk.
+  if (consumed === 0) break;
 }
 
 engine.destroy();
@@ -151,7 +158,7 @@ streams, set `UV_THREADPOOL_SIZE` before Node starts, for example
 - **Column names** -- Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **SSL/TLS** -- Secure MySQL connections with certificate verification
 - **Backpressure** -- Internal reader thread with bounded event queue (default 10,000)
-- **Auto-reconnection** -- Linear backoff on connection loss (default 10 attempts)
+- **Auto-reconnection** -- Jittered linear backoff on connection loss (default 10 attempts)
 - **Table filtering** -- Include/exclude databases and tables
 
 ## Server Requirements

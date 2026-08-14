@@ -44,15 +44,25 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 
 const engine = new CdcEngine();
 
-// レプリケーションストリームから受信した binlog バイト列を投入
-engine.feed(binlogChunk);
+// レプリケーションストリームから受信した binlog バイト列を投入する。
+// イベントキューが埋まると feed() は途中で止まるため、キューを空にしてから
+// 未消費の残りを投入し直す。
+let offset = 0;
+while (offset < binlogChunk.length) {
+  const consumed = engine.feed(binlogChunk.subarray(offset));
+  offset += consumed;
 
-while (engine.hasEvents()) {
-  const event = engine.nextEvent();
-  if (event === null) break;
-  console.log(event.type, event.database, event.table);
-  console.log("before:", event.before);
-  console.log("after:", event.after);
+  while (engine.hasEvents()) {
+    const event = engine.nextEvent();
+    if (event === null) break;
+    console.log(event.type, event.database, event.table);
+    console.log("before:", event.before);
+    console.log("after:", event.after);
+  }
+
+  // 1 バイトも消費されず、取り出せるイベントも無い場合は末尾がイベントの
+  // 途中。binlogChunk.subarray(offset) を保持し、次のチャンクの先頭に連結する。
+  if (consumed === 0) break;
 }
 
 engine.destroy();
@@ -65,14 +75,25 @@ from mysql_event_stream import CdcEngine
 
 engine = CdcEngine()
 
-# binlog バイト列を投入
-engine.feed(binlog_chunk)
+# binlog バイト列を投入する。イベントキューが埋まると feed() は途中で止まるため、
+# キューを空にしてから未消費の残りを投入し直す。
+offset = 0
+while offset < len(binlog_chunk):
+    consumed = engine.feed(binlog_chunk[offset:])
+    offset += consumed
 
-while engine.has_events():
-    event = engine.next_event()
-    print(event.type, event.database, event.table)
-    print("before:", event.before)
-    print("after:", event.after)
+    while engine.has_events():
+        event = engine.next_event()
+        if event is None:
+            break
+        print(event.type, event.database, event.table)
+        print("before:", event.before)
+        print("after:", event.after)
+
+    if consumed == 0:
+        # 末尾がイベントの途中。binlog_chunk[offset:] を保持して
+        # 次のチャンクの先頭に連結する。
+        break
 
 engine.close()
 ```
@@ -83,12 +104,24 @@ engine.close()
 #include "mes.h"
 
 mes_engine_t* engine = mes_create();
-size_t consumed;
-mes_feed(engine, data, len, &consumed);
+size_t offset = 0;
+while (offset < len) {
+    size_t consumed = 0;
+    if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
+        /* mes_reset() を呼び、デコード済みのイベントを取り出す */
+        break;
+    }
+    offset += consumed;
 
-const mes_event_t* event;
-while (mes_next_event(engine, &event) == MES_OK) {
-    printf("%s.%s: type=%d\n", event->database, event->table, event->type);
+    const mes_event_t* event;
+    while (mes_next_event(engine, &event) == MES_OK) {
+        printf("%s.%s: type=%d\n", event->database, event->table, event->type);
+    }
+
+    /* 1 バイトも消費されず、取り出せるイベントも無い場合は末尾がイベントの途中。
+       data + offset から data + len までを保持し、次のチャンクとともに投入し直す。
+       offset 0 からの再投入は不可。 */
+    if (consumed == 0) break;
 }
 
 mes_destroy(engine);
@@ -137,6 +170,7 @@ mes_destroy(engine);
 
 ## 特徴
 
+- **軽量** - 外部の MySQL クライアントライブラリに依存せず、バイナリサイズも小さい
 - **自己完結パッケージ** - MySQL クライアントライブラリ不要。配布物は OpenSSL と zlib を静的リンク
 - **ストリーミング処理** - バイト列の到着に合わせて逐次的にイベントを処理
 - **多言語対応** - C/C++、Node.js (N-API)、Python (ctypes) バインディング
@@ -148,7 +182,7 @@ mes_destroy(engine);
 - **カラム名解決** - `binlog_row_metadata=FULL` または `SELECT` 権限を持つメタデータ接続による自動カラム名解決
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 - **SSL/TLS** - MySQL 接続の SSL/TLS 暗号化に対応
-- **自動再接続** - 接続断時にバックオフ付きで自動再接続
+- **自動再接続** - 接続断時に jitter 付きリニアバックオフで自動再接続
 - **流量制御** - 内部リーダースレッド + 上限付きイベントキュー（デフォルト10,000件）により、アプリ側の処理遅延でストリームが切断されるのを防止
 - **テーブルフィルタ** - データベース・テーブル単位で取り込み対象を絞り込み
 - **構造化ログ** - コールバック形式の構造化ログ出力 (event=name key=value)
@@ -186,10 +220,23 @@ stream = CdcStream(
 
 native client が対応する MySQL 認証プラグインは `caching_sha2_password` と
 `mysql_native_password` です。これ以外をサーバーが要求した場合は、暗黙に
-フォールバックせず認証エラーになります。TLS なしで
-`caching_sha2_password` を使う際の RSA 公開鍵取得は
-`allowPublicKeyRetrieval` / `allow_public_key_retrieval` による明示的な opt-in
-です。可能な限り検証付き TLS を使ってください。
+フォールバックせず認証エラーになります。
+
+`caching_sha2_password` は MySQL 8.4+ の既定であり、9.x では唯一の選択肢です。
+サーバー側のパスワードキャッシュが冷えている場合 — 新規ユーザー、サーバー再起動、
+`FLUSH PRIVILEGES` の直後 — このプラグインは *full authentication* に切り替わります。
+これを完了するには次のどちらかが必要です。
+
+- `sslMode` / `ssl_mode` を `3`（`verify_ca`）または `4`（`verify_identity`）にし、
+  証明書を検証済みの TLS セッション上でパスワードを送る
+- `allowPublicKeyRetrieval` / `allow_public_key_retrieval` を有効にし、
+  現在のチャネル経由でサーバーの RSA 公開鍵を取得してパスワードを暗号化する
+
+`preferred`（`1`）と `required`（`2`）では**不十分**です。これらは通信を暗号化する
+だけでサーバーを認証しないため、MITM が平文パスワードを取得できてしまいます。
+これらのモードで `allowPublicKeyRetrieval` を設定せずに full authentication に
+入った場合は、上記 2 つの対処を明示した認証エラーになります。公開鍵取得の opt-in は
+その鍵自体が未認証であるため、検証付き TLS のほうを推奨します。
 
 ### テーブルフィルタリング
 
@@ -255,7 +302,9 @@ mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
 ### 自動再接続
 
 ```typescript
-// Node.js - リニアバックオフ付き自動再接続 (1秒, 2秒, ... 最大10秒)
+// Node.js - リニアバックオフ付き自動再接続。N 回目の待ち時間は
+// min(N 秒, 10 秒) を基準値とし、そこに 50-100% の jitter を掛ける
+// (0.5-1秒, 1-2秒, ... 上限到達後は 5-10秒)。Python バインディングも同じ。
 const stream = new CdcStream({
   host: "mysql.example.com",
   user: "replicator",
@@ -263,7 +312,38 @@ const stream = new CdcStream({
 });
 ```
 
+## エラーコード
+
+ネイティブ側のエラーには安定した数値の `mes_error_t` コードが付きます。Node では
+`error.code` に `MesErrorCode` の値が入り、Python でも例外の `.code` が同じ値を返します
+(`MesErrorCode` は両方でエクスポートされます)。再試行するかどうかの判断には、
+メッセージ文字列ではなくこのコードを使ってください。
+
+| コード | 意味 | 再試行の指針 |
+| --- | --- | --- |
+| 1–2 | API 引数が不正 | 設定を直す。再試行しない |
+| 100–101 | パースまたはチェックサム失敗 | 入力を調べたうえで reset / 再接続 |
+| 200–202 | 行デコード失敗 | 同じ入力での再試行は無意味 |
+| 301 | キューのバイト数・件数の上限超過 | 上限値を引き上げる。同じ入力での再試行は無意味 |
+| 400–401 | 接続または認証の失敗 | 一時的な接続失敗のみ再試行。401 は認証情報を修正 |
+| 402 | サーバー設定の検証失敗 | サーバー設定を直す。再試行しない |
+| 403–404 | ストリームの切断 | 保存済みの checkpoint から再接続 |
+| 405 | 要求した GTID がパージ済み | 復旧点・スナップショットを取り直す。再試行しない |
+
+C ABI の `mes_error_string()` は、数値コードに対応する正式な短い説明を返します。
+
 ## インストール
+
+### パッケージからインストール
+
+```bash
+npm install @libraz/mysql-event-stream
+pip install mysql-event-stream
+```
+
+Python パッケージはプラットフォーム別の wheel を配布します。npm パッケージは
+optional な platform 依存でアドオンを選択する仕組みを持たないため、同梱のアドオンが
+実行環境と合わない場合は、以下の手順で Node バインディングをソースからビルドしてください。
 
 ### 前提条件
 
@@ -351,7 +431,7 @@ mysql-event-stream/
 
 **MariaDB:**
 - バージョン: 10.11+ (10.11 / 11.4 で動作検証済み)
-- GTID レプリケーション有効 (`gtid_strict_mode`、行フォーマットの `log_bin`)
+- GTID レプリケーション有効 (行フォーマットの `log_bin`)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 - スキーマ由来のカラム名には `binlog_row_metadata=FULL` を設定するか、同じ認証情報に `SELECT` も付与します。メタデータクエリは別接続で実行されます。
 - メタデータ接続は binlog の過去時点ではなくサーバーの**現在の**スキーマを読みます。古い checkpoint から再生する場合、カラム名を信頼できるのは `binlog_row_metadata=FULL` を設定し、元の TABLE_MAP metadata を保持しているときだけです。

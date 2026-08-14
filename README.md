@@ -44,20 +44,24 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 
 const engine = new CdcEngine();
 
-// Feed raw binlog bytes from your replication stream
+// Feed raw binlog bytes from your replication stream. feed() stops early once
+// the event queue is full, so drain the queue and re-feed the unconsumed tail.
 let offset = 0;
 while (offset < binlogChunk.length) {
   const consumed = engine.feed(binlogChunk.subarray(offset));
-  if (consumed === 0) break; // retain the remainder and drain backpressure
   offset += consumed;
-}
 
-while (engine.hasEvents()) {
-  const event = engine.nextEvent();
-  if (event === null) break;
-  console.log(event.type, event.database, event.table);
-  console.log("before:", event.before);
-  console.log("after:", event.after);
+  while (engine.hasEvents()) {
+    const event = engine.nextEvent();
+    if (event === null) break;
+    console.log(event.type, event.database, event.table);
+    console.log("before:", event.before);
+    console.log("after:", event.after);
+  }
+
+  // Nothing consumed and nothing left to drain: the tail is a partial event.
+  // Retain binlogChunk.subarray(offset) and prepend it to the next chunk.
+  if (consumed === 0) break;
 }
 
 engine.destroy();
@@ -70,19 +74,25 @@ from mysql_event_stream import CdcEngine
 
 engine = CdcEngine()
 
-# Feed raw binlog bytes. Retain binlog_chunk[consumed:] on backpressure.
+# Feed raw binlog bytes. feed() stops early once the event queue is full, so
+# drain the queue and re-feed the unconsumed tail.
 offset = 0
 while offset < len(binlog_chunk):
     consumed = engine.feed(binlog_chunk[offset:])
-    if consumed == 0:
-        break
     offset += consumed
 
-while engine.has_events():
-    event = engine.next_event()
-    print(event.type, event.database, event.table)
-    print("before:", event.before)
-    print("after:", event.after)
+    while engine.has_events():
+        event = engine.next_event()
+        if event is None:
+            break
+        print(event.type, event.database, event.table)
+        print("before:", event.before)
+        print("after:", event.after)
+
+    if consumed == 0:
+        # Partial event at the tail: retain binlog_chunk[offset:] and prepend
+        # it to the next chunk.
+        break
 
 engine.close()
 ```
@@ -93,15 +103,24 @@ engine.close()
 #include "mes.h"
 
 mes_engine_t* engine = mes_create();
-size_t consumed = 0;
-if (mes_feed(engine, data, len, &consumed) != MES_OK) {
-    /* call mes_reset(), then drain already decoded events */
-}
-/* retain data + consumed through data + len and re-feed it later */
+size_t offset = 0;
+while (offset < len) {
+    size_t consumed = 0;
+    if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
+        /* call mes_reset(), then drain already decoded events */
+        break;
+    }
+    offset += consumed;
 
-const mes_event_t* event;
-while (mes_next_event(engine, &event) == MES_OK) {
-    printf("%s.%s: type=%d\n", event->database, event->table, event->type);
+    const mes_event_t* event;
+    while (mes_next_event(engine, &event) == MES_OK) {
+        printf("%s.%s: type=%d\n", event->database, event->table, event->type);
+    }
+
+    /* Nothing consumed and nothing left to drain: the tail is a partial event.
+       Retain data + offset through data + len and re-feed it with the next
+       chunk. Never re-feed from offset 0. */
+    if (consumed == 0) break;
 }
 
 mes_destroy(engine);
@@ -162,7 +181,7 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Column Names** - Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 - **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
-- **Auto-reconnection** - Automatic reconnection with linear backoff on connection loss
+- **Auto-reconnection** - Automatic reconnection with jittered linear backoff on connection loss
 - **Backpressure** - Internal reader thread with bounded event queue (default 10,000) prevents stream disconnection during consumer slowdowns
 - **Table filtering** - Include/exclude databases and tables to reduce processing overhead
 - **Structured logging** - Callback-based structured logging (event=name key=value format)
@@ -202,10 +221,25 @@ the OS trust store) for production credentials.
 
 The native client supports MySQL's `caching_sha2_password` and
 `mysql_native_password` plugins. A server-requested plugin outside this list
-fails with an authentication error rather than silently falling back. For
-`caching_sha2_password` without TLS, `allowPublicKeyRetrieval` /
-`allow_public_key_retrieval` explicitly opts into RSA public-key retrieval;
-prefer verified TLS.
+fails with an authentication error rather than silently falling back.
+
+`caching_sha2_password` is the default on MySQL 8.4+ and the only option on 9.x.
+When the server's password cache is cold — a fresh user, a server restart, or
+`FLUSH PRIVILEGES` — the plugin falls back to *full authentication*, which needs
+one of two things:
+
+- `sslMode` / `ssl_mode` of `3` (`verify_ca`) or `4` (`verify_identity`), so the
+  password travels over a TLS session whose certificate has been verified; or
+- `allowPublicKeyRetrieval` / `allow_public_key_retrieval`, which opts into
+  fetching the server's RSA public key over the current channel and encrypting
+  the password with it.
+
+`preferred` (`1`) and `required` (`2`) are **not** sufficient: they encrypt the
+channel without authenticating the server, so a MITM could collect the cleartext
+password. Full authentication under those modes without
+`allowPublicKeyRetrieval` fails with an authentication error naming both
+remedies. Verified TLS is the recommended one, because the public-key retrieval
+opt-in trusts a key that has not itself been authenticated.
 
 ### Table Filtering
 
@@ -274,7 +308,9 @@ mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
 ### Auto-Reconnection
 
 ```typescript
-// Node.js - automatic reconnection with linear backoff (1s, 2s, ... 10s cap)
+// Node.js - automatic reconnection with linear backoff: attempt N waits a base
+// of min(N seconds, 10s), multiplied by 50-100% jitter (so 0.5-1s, 1-2s, ...,
+// 5-10s once the cap is reached). The Python binding uses the same schedule.
 const stream = new CdcStream({
   host: "mysql.example.com",
   user: "replicator",
