@@ -60,20 +60,29 @@ export type ServerFlavor = (typeof ServerFlavor)[keyof typeof ServerFlavor];
 /**
  * A column value as represented in JavaScript.
  *
- * The mapping from MySQL column types is:
- * - `null` — SQL NULL.
- * - `number` — TINYINT through INT, safe BIGINT/YEAR/TIMESTAMP values,
- *   FLOAT/DOUBLE, ENUM, SET, and BIT. ENUM arrives as its 1-based numeric
- *   index, SET as its numeric bitmask, and BIT as the integer value of its
- *   bits. SET or BIT values above signed `int64_t` are exact decimal strings.
- * - `bigint` — signed or unsigned BIGINT values within `int64_t` that do not
- *   fit in a JS safe integer.
- * - `string` — character columns (CHAR, VARCHAR, TEXT) plus DECIMAL and
- *   temporal values, formatted by the core. BIGINT UNSIGNED and SET/BIT
- *   values above `int64_t` are also exact decimal strings.
- * - `Uint8Array` — binary columns (BINARY/VARBINARY/BLOB), GEOMETRY, and JSON.
- *   JSON columns arrive as raw bytes in MySQL's internal binary JSON format,
- *   not as a decoded string or object.
+ * SQL NULL is `null`. Every other MySQL column type maps to exactly one
+ * JavaScript type. This table mirrors the canonical one in `core/include/mes.h`
+ * and a test compares the two, so the two surfaces cannot drift apart:
+ *
+ *   number | bigint => TINYINT SMALLINT MEDIUMINT INT BIGINT YEAR BIT ENUM SET
+ *   number          => FLOAT DOUBLE
+ *   string          => CHAR VARCHAR TEXT DECIMAL DATE TIME DATETIME TIMESTAMP
+ *   Uint8Array      => BINARY VARBINARY BLOB JSON GEOMETRY VECTOR
+ *
+ * Reading the rows:
+ * - Integers arrive as `number`, or as `bigint` when the exact value does not
+ *   fit in a JS safe integer. ENUM is its 1-based numeric index, SET its
+ *   numeric bitmask, BIT the integer value of its bits.
+ * - A BIGINT UNSIGNED, SET, or BIT value above signed `int64_t` arrives as an
+ *   exact decimal `string`, because the core cannot represent it as an integer.
+ * - Every TIMESTAMP variant is a `string` holding decimal Unix epoch seconds,
+ *   with as many fractional digits as the column's declared precision (for
+ *   example `"1735689600"` or `"1735689600.123456"`). DECIMAL and the other
+ *   temporal types are formatted by the core as text too.
+ * - Character and BLOB-family columns follow their charset, so a TEXT column
+ *   with a binary collation is a `Uint8Array` and a BLOB with a text collation
+ *   is a `string`. JSON arrives as raw bytes in MySQL's internal binary JSON
+ *   format, not as a decoded string or object.
  *
  * String limitation: textual columns are decoded as UTF-8. Data stored in a
  * non-UTF-8 character set (e.g. latin1, sjis) is not transcoded; invalid byte

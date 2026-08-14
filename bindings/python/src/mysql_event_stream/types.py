@@ -131,28 +131,37 @@ class ChangeEvent:
     When column names are unavailable (standalone mode without metadata),
     string indices ("0", "1", ...) are used as keys.
 
-    Values are typed as: None, int, float, str, or bytes. TINYINT through
-    BIGINT within signed 64-bit range, YEAR, TIMESTAMP, ENUM, SET, and BIT
-    are ``int``; FLOAT and DOUBLE are ``float``. DECIMAL and temporal values
-    are ``str``. BIGINT UNSIGNED, SET, and BIT values above signed 64-bit
-    range are exact decimal ``str`` values rather than overflowing integers.
+    SQL NULL is ``None``. Every other MySQL column type maps to exactly one
+    Python type. This table mirrors the canonical one in ``core/include/mes.h``
+    and a test compares the two, so the surfaces cannot drift apart::
 
-    Special MySQL column types surface as follows:
+        int   => TINYINT SMALLINT MEDIUMINT INT BIGINT YEAR BIT ENUM SET
+        float => FLOAT DOUBLE
+        str   => CHAR VARCHAR TEXT DECIMAL DATE TIME DATETIME TIMESTAMP
+        bytes => BINARY VARBINARY BLOB JSON GEOMETRY VECTOR
 
-    - JSON columns arrive as raw ``bytes`` holding MySQL's binary JSON
-      representation (not decoded text). Use a MySQL binary-JSON parser to
-      obtain a structured value.
+    Reading the rows:
+
+    - A BIGINT UNSIGNED, SET, or BIT value above ``INT64_MAX`` arrives as an
+      exact decimal ``str`` rather than an overflowing integer, because the
+      core cannot represent it as an integer.
+    - Every TIMESTAMP variant is a ``str`` holding decimal Unix epoch seconds,
+      with as many fractional digits as the column's declared precision (for
+      example ``"1735689600"`` or ``"1735689600.123456"``). DECIMAL and the
+      other temporal types are formatted by the core as text too.
     - ENUM columns arrive as the 1-based numeric index (``int``) into the
       column's value list, not the string label.
     - SET columns arrive as a numeric bitmask (``int``); bit i (LSB first)
-      is set when the i-th member of the SET definition is present. Values
-      above ``INT64_MAX`` arrive as exact decimal ``str`` values.
-    - BIT columns arrive as an integer (``int``) holding the bit value; values
-      above ``INT64_MAX`` arrive as exact decimal ``str`` values.
-    - Character columns (including TEXT) arrive as ``str``; binary columns
-      (including BINARY/VARBINARY/BLOB) arrive as ``bytes``. This distinction
-      uses TABLE_MAP charset metadata. With ``binlog_row_metadata=NO_LOG``,
-      BLOB-family columns conservatively remain ``bytes``.
+      is set when the i-th member of the SET definition is present.
+    - BIT columns arrive as an integer (``int``) holding the bit value.
+    - JSON columns arrive as raw ``bytes`` holding MySQL's binary JSON
+      representation (not decoded text). Use a MySQL binary-JSON parser to
+      obtain a structured value.
+    - Character and BLOB-family columns follow their charset, so a TEXT column
+      declared with a binary collation arrives as ``bytes`` and a BLOB with a
+      text collation as ``str``. This distinction uses TABLE_MAP charset
+      metadata. With ``binlog_row_metadata=NO_LOG``, BLOB-family columns
+      conservatively remain ``bytes``.
       Invalid UTF-8 bytes use Python's ``surrogateescape`` handler, so a later
       ``value.encode("utf-8", errors="surrogateescape")`` round-trips the
       original bytes. Such strings are not directly JSON-serializable.
