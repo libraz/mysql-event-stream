@@ -368,9 +368,37 @@ TEST(GtidEncoderTest, ConvertMultiUuidDropsZero) {
             "00000000-0000-0000-0000-000000000002:1-5");
 }
 
-TEST(GtidEncoderTest, ConvertTaggedGtid) {
-  std::string gtid = "00000000-0000-0000-0000-000000000001:tag:5";
+TEST(GtidEncoderTest, ConvertTaggedSingleGtidWidensLikeTheUntaggedForm) {
+  // A tag names a TSID, it does not change interval semantics: "uuid:tag:5"
+  // denotes [5,6) exactly as "uuid:5" does. Leaving the tagged form untouched
+  // would make the server resend tagged transactions 1 through 4.
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange("00000000-0000-0000-0000-000000000001:tag:5"),
+            "00000000-0000-0000-0000-000000000001:tag:1-5");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange("00000000-0000-0000-0000-000000000001:5"),
+            "00000000-0000-0000-0000-000000000001:1-5");
+}
+
+TEST(GtidEncoderTest, ConvertTaggedRangeAndMultiIntervalUnchanged) {
+  // Explicit intervals are used as given, tagged or not.
+  for (const char* gtid : {"00000000-0000-0000-0000-000000000001:tag:1-5",
+                           "00000000-0000-0000-0000-000000000001:tag:1-3:7",
+                           "00000000-0000-0000-0000-000000000001:1-3:7"}) {
+    EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid), gtid);
+  }
+}
+
+TEST(GtidEncoderTest, ConvertLeavesUnparsableTagUntouched) {
+  // "9tag" is not a valid tag, so the text after the UUID is not a tag plus a
+  // transaction number and must not be rewritten into one.
+  std::string gtid = "00000000-0000-0000-0000-000000000001:9tag:5";
   EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid), gtid);
+}
+
+TEST(GtidEncoderTest, ConvertTaggedZeroIsDropped) {
+  // "tag:0" means no transactions for that TSID, same as the untagged form.
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange("00000000-0000-0000-0000-000000000001:tag:0,"
+                                                  "00000000-0000-0000-0000-000000000002:5"),
+            "00000000-0000-0000-0000-000000000002:1-5");
 }
 
 TEST(GtidEncoderTest, ConvertNoColon) {

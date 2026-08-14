@@ -132,10 +132,20 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
 }
 
 mes_error_t BinlogClient::StartStream() {
-  // Stop() is explicitly allowed from another thread. Hold the lifecycle lock
-  // until the queue and reader are fully published so Stop cannot close an old
-  // queue, then leave a newly created reader with an open queue and no owner.
-  std::lock_guard<std::mutex> lock(stop_mutex_);
+  // Setup spans five to eight blocking round trips. Holding stop_mutex_ across
+  // them would make Stop() -- the one entry point documented as callable from
+  // another thread -- wait for exactly the I/O it exists to interrupt. So the
+  // lifecycle lock is taken only for the two short sections that touch shared
+  // lifecycle state (reaping a finished reader, publishing the new queue and
+  // reader), and setup_in_progress_ excludes a second concurrent setup instead.
+  if (setup_in_progress_.exchange(true, std::memory_order_acq_rel)) {
+    SetLastError("Binlog stream setup is already in progress");
+    return MES_ERR_STREAM;
+  }
+  struct SetupScope {
+    std::atomic<bool>* flag;
+    ~SetupScope() { flag->store(false, std::memory_order_release); }
+  } setup_scope{&setup_in_progress_};
 
   if (!conn_.IsConnected()) {
     SetLastError("Not connected");
@@ -146,102 +156,215 @@ mes_error_t BinlogClient::StartStream() {
     return MES_OK;
   }
 
-  // A reader that terminated after delivering a terminal error remains
-  // joinable until the owner consumes that error. Reap it before assigning a
-  // new std::thread below: move-assigning over a joinable thread terminates
-  // the process. This may briefly wait for the reader's final return, but it
-  // is safe because streaming_ is false only after it has begun shutdown.
-  if (reader_thread_.joinable()) {
-    reader_thread_.join();
+  // Stop() shuts the transport down permanently; the socket is only replaced by
+  // a fresh Connect(), which is also what clears this flag. Refusing here keeps
+  // a post-Stop start from spending a round trip on a dead socket.
+  if (stop_requested_.load(std::memory_order_acquire)) {
+    SetLastError("Client was stopped; reconnect before starting a new stream");
+    return MES_ERR_DISCONNECTED;
   }
 
-  // At least one maximum-sized event (plus the protocol prefix/checkpoint
-  // bookkeeping charged by EventQueue) must be able to enter the queue.
-  if (max_queue_bytes_ <= static_cast<size_t>(max_event_size_)) {
-    SetLastError("max_queue_bytes must be greater than max_event_size");
+  {
+    // A reader that terminated after delivering a terminal error remains
+    // joinable until the owner consumes that error. Reap it before assigning a
+    // new std::thread below: move-assigning over a joinable thread terminates
+    // the process. This may briefly wait for the reader's final return, but it
+    // is safe because streaming_ is false only after it has begun shutdown.
+    std::lock_guard<std::mutex> lock(stop_mutex_);
+    if (reader_thread_.joinable()) {
+      reader_thread_.join();
+    }
+  }
+
+  // An event at the configured ceiling must always fit. Both sides of that
+  // promise come from MinQueueBytesForEvent(): the queue charges a buffer by
+  // the same rule this guard budgets for.
+  if (max_queue_bytes_ < MinQueueBytesForEvent(max_event_size_)) {
+    SetLastError("max_queue_bytes is smaller than one max_event_size event");
     return MES_ERR_INVALID_ARG;
   }
 
   gtid_tracker_.Reset();
   current_event_ = {};
 
-  mes_error_t rc = MES_OK;
+  // Re-checked after every stage so a Stop() that unblocked the round trip is
+  // reported as such instead of as whatever transport error the shutdown
+  // produced, and so no later stage is attempted on a socket already torn down.
+  const auto stopped_during_setup = [this] {
+    if (!stop_requested_.load(std::memory_order_acquire)) return false;
+    SetLastError("Binlog stream setup was interrupted by Stop()");
+    return true;
+  };
 
-  if (server_flavor_ == ServerFlavor::kMariaDB) {
-    rc = StartStreamMariaDB();
-  } else {
-    rc = StartStreamMySQL();
-  }
+  // Stream startup is three ordered stages, and the middle one is common to
+  // every flavor and every start mode. Keeping the split here (rather than
+  // inside each flavor's setup) means a future start mode is added inside
+  // SendBinlogDump*, which runs strictly after the state establishment it
+  // depends on and therefore cannot skip it.
+  const bool is_mariadb = server_flavor_ == ServerFlavor::kMariaDB;
 
+  mes_error_t rc = is_mariadb ? BeginSessionMariaDB() : BeginSessionMySQL();
+  if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
   if (rc != MES_OK) {
     return rc;
   }
 
-  streaming_.store(true, std::memory_order_release);
+  StartState start_state;
+  rc = EstablishStartState(&start_state);
+  if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
+  if (rc != MES_OK) {
+    return rc;
+  }
 
-  // Create bounded event queue and launch reader thread
-  size_t queue_size = config_.max_queue_size > 0 ? config_.max_queue_size : MES_DEFAULT_QUEUE_SIZE;
+  rc = is_mariadb ? SendBinlogDumpMariaDB(start_state) : SendBinlogDumpMySQL(start_state);
+  if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
+  if (rc != MES_OK) {
+    return rc;
+  }
+
+  const size_t queue_size =
+      config_.max_queue_size > 0 ? config_.max_queue_size : MES_DEFAULT_QUEUE_SIZE;
+
+  // Publish the queue and the reader as one step under the lifecycle lock, with
+  // the stop flag re-checked inside it. A Stop() that already ran must not be
+  // followed by a live reader; a Stop() that runs after this section sees both
+  // the queue and the thread, so it can never close an old queue and then leave
+  // a newly created reader owning an open one.
+  std::lock_guard<std::mutex> lock(stop_mutex_);
+  if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
   event_queue_ = std::make_unique<EventQueue>(queue_size, max_queue_bytes_);
+  streaming_.store(true, std::memory_order_release);
   reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
 
   return MES_OK;
 }
 
-mes_error_t BinlogClient::StartStreamMySQL() {
+mes_error_t BinlogClient::BeginSessionMySQL() {
   // A BinlogClient instance may be disconnected and reused with a different
   // start position. Never let a prior stream's encoded GTID set leak into the
   // next COM_BINLOG_DUMP_GTID packet, including when setup fails part-way.
   gtid_encoded_.clear();
 
-  // Advertise checksum support, then read the source's actual storage mode.
-  // The session SET does not rewrite binlogs produced with checksum=NONE.
-  {
-    protocol::QueryResult qr;
-    std::string err;
-    if (protocol::ExecuteQuery(conn_.Socket(), "SET @source_binlog_checksum='CRC32'", &qr, &err,
-                               conn_.DeprecateEofNegotiated()) != MES_OK) {
-      SetLastError(err);
-      return MES_ERR_STREAM;
-    }
+  // Advertise checksum support. The session SET does not rewrite binlogs
+  // produced with checksum=NONE, so the source's actual storage mode is read
+  // separately by DetectBinlogChecksum().
+  protocol::QueryResult qr;
+  std::string err;
+  if (protocol::ExecuteQuery(conn_.Socket(), "SET @source_binlog_checksum='CRC32'", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
+    SetLastError(err);
+    return MES_ERR_STREAM;
   }
-  {
-    protocol::QueryResult checksum_qr;
-    std::string checksum_err;
-    if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@GLOBAL.binlog_checksum", &checksum_qr,
-                               &checksum_err, conn_.DeprecateEofNegotiated()) != MES_OK ||
-        checksum_qr.rows.size() != 1 || checksum_qr.rows[0].values.size() != 1 ||
-        checksum_qr.rows[0].is_null.size() != 1 || checksum_qr.rows[0].is_null[0]) {
-      SetLastError("Failed to detect MySQL binlog checksum setting: " + checksum_err);
-      return MES_ERR_STREAM;
-    }
-    std::string value = checksum_qr.rows[0].values[0];
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
-    if (value == "CRC32") {
-      checksum_enabled_ = true;
-    } else if (value == "NONE") {
-      checksum_enabled_ = false;
-    } else {
-      SetLastError("Unsupported MySQL binlog checksum setting: " + value);
-      return MES_ERR_STREAM;
-    }
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::BeginSessionMariaDB() {
+  gtid_encoded_.clear();
+
+  protocol::QueryResult qr;
+  std::string err;
+
+  // Advertise MariaDB slave capability so the server sends GTID events
+  // (type 162) instead of the legacy replication format that omits
+  // per-transaction GTID events. The capability on its own does not enable
+  // ANNOTATE_ROWS: the server still withholds those events unless the dump
+  // request carries kBinlogSendAnnotateRows (see SendBinlogDumpMariaDB()).
+  // Capability 4 = MARIA_SLAVE_CAPABILITY_GTID (MariaDB 10.0.2+)
+  if (protocol::ExecuteQuery(conn_.Socket(), "SET @mariadb_slave_capability = 4", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
+    SetLastError("Failed to set MariaDB slave capability: " + err);
+    StructuredLog().Event("mariadb_slave_capability_failed").Field("error", err).Error();
+    return MES_ERR_STREAM;
   }
 
-  if (ConfigureHeartbeat() != MES_OK) return MES_ERR_STREAM;
+  // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
+  if (protocol::ExecuteQuery(conn_.Socket(),
+                             "SET @master_binlog_checksum = @@global.binlog_checksum", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
+    SetLastError("Failed to set MariaDB binlog checksum: " + err);
+    return MES_ERR_STREAM;
+  }
 
-  if (config_.start_at_file_position) {
-    protocol::BinlogStreamConfig stream_config;
-    stream_config.server_id = config_.server_id;
-    stream_config.binlog_filename = config_.binlog_file;
-    stream_config.binlog_position = config_.binlog_position;
-    const auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
-    if (rc != MES_OK) {
-      SetLastError("Failed to start binlog stream at requested position");
-      return rc;
-    }
+  // Strict GTID mode: fail on GTID gap rather than silently skipping
+  if (protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
+    StructuredLog().Event("mariadb_strict_mode_failed").Field("error", err).Warn();
+  }
+
+  // Don't skip duplicate GTIDs
+  if (protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK) {
+    StructuredLog().Event("mariadb_ignore_duplicates_failed").Field("error", err).Warn();
+  }
+
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::DetectBinlogChecksum() {
+  // Assume "no checksum" until the server says otherwise, so a stale `true`
+  // left by a previous stream on a reused object cannot survive a partial
+  // detection failure. Detection must succeed: without the server's setting we
+  // would not know whether to strip and validate the trailing CRC32, leading to
+  // silent corruption or spurious checksum failures.
+  checksum_enabled_ = false;
+
+  protocol::QueryResult qr;
+  std::string err;
+  if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@GLOBAL.binlog_checksum", &qr, &err,
+                             conn_.DeprecateEofNegotiated()) != MES_OK ||
+      qr.rows.size() != 1 || qr.rows[0].values.size() != 1 || qr.rows[0].is_null.size() != 1 ||
+      qr.rows[0].is_null[0]) {
+    SetLastError(std::string("Failed to detect ") + GetServerFlavorName(server_flavor_) +
+                 " binlog checksum setting: " + err);
+    return MES_ERR_STREAM;
+  }
+
+  std::string value = qr.rows[0].values[0];
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+  if (value == "CRC32") {
+    checksum_enabled_ = true;
     return MES_OK;
   }
+  if (value == "NONE") {
+    checksum_enabled_ = false;
+    return MES_OK;
+  }
+  SetLastError(std::string("Unsupported ") + GetServerFlavorName(server_flavor_) +
+               " binlog checksum setting: " + value);
+  return MES_ERR_STREAM;
+}
 
+mes_error_t BinlogClient::EstablishStartState(StartState* state) {
+  mes_error_t rc = DetectBinlogChecksum();
+  if (rc != MES_OK) return rc;
+  if (ConfigureHeartbeat() != MES_OK) return MES_ERR_STREAM;
+
+  state->gtid_set.clear();
+  state->from_file_position = config_.start_at_file_position;
+  if (!state->from_file_position) {
+    rc = server_flavor_ == ServerFlavor::kMariaDB ? ResolveStartGtidMariaDB(&state->gtid_set)
+                                                  : ResolveStartGtidMySQL(&state->gtid_set);
+    if (rc != MES_OK) return rc;
+  }
+
+  // A file/position start carries no GTID, but the tracker still has to be
+  // bound to this flavor so the first observed transaction yields a valid
+  // checkpoint. current_gtid_ stays empty until then, and an empty checkpoint
+  // means "none established yet" -- never "the empty GTID set".
+  if (!gtid_tracker_.Reset(state->gtid_set, server_flavor_)) {
+    SetLastError(std::string("Invalid ") + GetServerFlavorName(server_flavor_) +
+                 " GTID checkpoint set");
+    return MES_ERR_INVALID_ARG;
+  }
+  {
+    std::lock_guard<std::mutex> lock(gtid_mutex_);
+    current_gtid_ = state->gtid_set;
+  }
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::ResolveStartGtidMySQL(std::string* gtid_set) {
   // An omitted start GTID means "from the connection's current executed
   // position", not "from the beginning". Snapshot the full set immediately
   // before starting the dump so transactions committed afterwards are sent.
@@ -261,15 +384,11 @@ mes_error_t BinlogClient::StartStreamMySQL() {
     requested_gtid = current_qr.rows[0].values[0];
   }
 
-  std::string start_gtid = GtidEncoder::ConvertSingleGtidToRange(requested_gtid);
+  const std::string start_gtid = GtidEncoder::ConvertSingleGtidToRange(requested_gtid);
   mes_error_t encode_rc = GtidEncoder::Encode(start_gtid.c_str(), &gtid_encoded_);
   if (encode_rc != MES_OK) {
     SetLastError(std::string("Failed to encode GTID set: ") + mes_error_string(encode_rc));
     return encode_rc;
-  }
-  if (!gtid_tracker_.Reset(start_gtid, ServerFlavor::kMySQL)) {
-    SetLastError("Failed to initialize MySQL GTID checkpoint set");
-    return MES_ERR_INVALID_ARG;
   }
 
   // MySQL closes the replication connection for a request behind gtid_purged
@@ -305,121 +424,12 @@ mes_error_t BinlogClient::StartStreamMySQL() {
       return MES_ERR_GTID_PURGED;
     }
   }
-  {
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
-    current_gtid_ = start_gtid;
-  }
 
-  // Start binlog stream via COM_BINLOG_DUMP_GTID
-  protocol::BinlogStreamConfig stream_config;
-  stream_config.server_id = config_.server_id;
-  stream_config.binlog_position = kBinlogMagicOffset;
-  stream_config.gtid_encoded = gtid_encoded_;
-
-  auto rc = binlog_stream_.Start(conn_.Socket(), stream_config);
-  if (rc != MES_OK) {
-    SetLastError("Failed to start binlog stream");
-    return MES_ERR_STREAM;
-  }
-
+  *gtid_set = start_gtid;
   return MES_OK;
 }
 
-mes_error_t BinlogClient::StartStreamMariaDB() {
-  // Default to "no checksum" until detection proves otherwise. This mirrors the
-  // explicit reset in StartStreamMySQL() and prevents a stale `true` (left over
-  // from a previous MySQL stream on a reused object) from causing spurious
-  // MES_ERR_CHECKSUM failures against a MariaDB server with binlog_checksum=NONE
-  // (MariaDB's historical default).
-  checksum_enabled_ = false;
-
-  protocol::QueryResult qr;
-  std::string err;
-
-  // Advertise MariaDB slave capability so the server sends GTID events (type 162)
-  // and ANNOTATE_ROWS events. Without this, MariaDB falls back to the legacy
-  // replication format that omits per-transaction GTID events.
-  // Capability 4 = MARIA_SLAVE_CAPABILITY_GTID (MariaDB 10.0.2+)
-  {
-    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @mariadb_slave_capability = 4",
-                                            &qr, &err, conn_.DeprecateEofNegotiated());
-    if (rc != MES_OK) {
-      SetLastError("Failed to set MariaDB slave capability: " + err);
-      StructuredLog().Event("mariadb_slave_capability_failed").Field("error", err).Error();
-      return MES_ERR_STREAM;
-    }
-  }
-
-  // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
-  if (protocol::ExecuteQuery(conn_.Socket(),
-                             "SET @master_binlog_checksum = @@global.binlog_checksum", &qr, &err,
-                             conn_.DeprecateEofNegotiated()) != MES_OK) {
-    SetLastError("Failed to set MariaDB binlog checksum: " + err);
-    return MES_ERR_STREAM;
-  }
-
-  // Strict GTID mode: fail on GTID gap rather than silently skipping
-  {
-    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_strict_mode = 1", &qr,
-                                            &err, conn_.DeprecateEofNegotiated());
-    if (rc != MES_OK) {
-      StructuredLog().Event("mariadb_strict_mode_failed").Field("error", err).Warn();
-    }
-  }
-
-  // Don't skip duplicate GTIDs
-  {
-    mes_error_t rc = protocol::ExecuteQuery(conn_.Socket(), "SET @slave_gtid_ignore_duplicates = 0",
-                                            &qr, &err, conn_.DeprecateEofNegotiated());
-    if (rc != MES_OK) {
-      StructuredLog().Event("mariadb_ignore_duplicates_failed").Field("error", err).Warn();
-    }
-  }
-
-  if (ConfigureHeartbeat() != MES_OK) return MES_ERR_STREAM;
-
-  if (config_.start_at_file_position) {
-    protocol::BinlogStreamConfig stream_config;
-    stream_config.server_id = config_.server_id;
-    stream_config.binlog_filename = config_.binlog_file;
-    stream_config.binlog_position = config_.binlog_position;
-    const auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
-    if (rc != MES_OK) {
-      SetLastError("Failed to start MariaDB binlog stream at requested position");
-      return rc;
-    }
-    return MES_OK;
-  }
-
-  // Detect whether checksum is actually enabled. This must succeed: if we
-  // cannot read the server's setting we would not know whether to strip and
-  // validate the trailing CRC32, leading to silent corruption or spurious
-  // checksum failures, so treat detection failure as a hard stream error.
-  {
-    protocol::QueryResult checksum_qr;
-    std::string checksum_err;
-    if (protocol::ExecuteQuery(conn_.Socket(), "SELECT @@global.binlog_checksum", &checksum_qr,
-                               &checksum_err, conn_.DeprecateEofNegotiated()) != MES_OK ||
-        checksum_qr.rows.empty() || checksum_qr.rows[0].values.empty()) {
-      SetLastError("Failed to detect MariaDB binlog checksum setting: " + checksum_err);
-      return MES_ERR_STREAM;
-    }
-    std::string val = checksum_qr.rows[0].values[0];
-    std::transform(val.begin(), val.end(), val.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
-    if (val == "CRC32") {
-      checksum_enabled_ = true;
-    } else if (val == "NONE") {
-      checksum_enabled_ = false;
-    } else {
-      SetLastError("Unsupported MariaDB binlog checksum setting: " + val);
-      return MES_ERR_STREAM;
-    }
-  }
-
-  // Set MariaDB GTID position via session variable.
-  // MariaDB reads @slave_connect_state to know which GTIDs the replica has.
-  // Empty string means "start from current binlog position".
+mes_error_t BinlogClient::ResolveStartGtidMariaDB(std::string* gtid_set) {
   std::string gtid = config_.start_gtid;
   if (config_.start_at_current) {
     auto query_gtid_position = [this](const char* query, std::string* value,
@@ -454,34 +464,80 @@ mes_error_t BinlogClient::StartStreamMariaDB() {
     SetLastError("Invalid MariaDB GTID format: contains disallowed characters");
     return MES_ERR_INVALID_ARG;
   }
-  if (!gtid_tracker_.Reset(gtid, ServerFlavor::kMariaDB)) {
-    SetLastError("Invalid MariaDB GTID set");
+
+  *gtid_set = gtid;
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::SendBinlogDumpMySQL(const StartState& state) {
+  protocol::BinlogStreamConfig stream_config;
+  stream_config.server_id = config_.server_id;
+
+  if (state.from_file_position) {
+    stream_config.binlog_filename = config_.binlog_file;
+    stream_config.binlog_position = config_.binlog_position;
+    const mes_error_t rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
+    if (rc != MES_OK) {
+      SetLastError("Failed to start binlog stream at requested position");
+      return rc;
+    }
+    return MES_OK;
+  }
+
+  // Start binlog stream via COM_BINLOG_DUMP_GTID
+  stream_config.binlog_position = kBinlogMagicOffset;
+  stream_config.gtid_encoded = gtid_encoded_;
+  if (binlog_stream_.Start(conn_.Socket(), stream_config) != MES_OK) {
+    SetLastError("Failed to start binlog stream");
+    return MES_ERR_STREAM;
+  }
+  return MES_OK;
+}
+
+mes_error_t BinlogClient::SendBinlogDumpMariaDB(const StartState& state) {
+  protocol::BinlogStreamConfig stream_config;
+  stream_config.server_id = config_.server_id;
+  // ANNOTATE_ROWS carries the originating statement published as
+  // mes_event_t.source_sql. MariaDB drops those events unless every dump
+  // request -- GTID or file/position -- asks for them explicitly.
+  stream_config.flags |= protocol::kBinlogSendAnnotateRows;
+
+  if (state.from_file_position) {
+    stream_config.binlog_filename = config_.binlog_file;
+    stream_config.binlog_position = config_.binlog_position;
+    const mes_error_t rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
+    if (rc != MES_OK) {
+      SetLastError("Failed to start MariaDB binlog stream at requested position");
+      return rc;
+    }
+    return MES_OK;
+  }
+
+  // MariaDB reads @slave_connect_state to know which GTIDs the replica has.
+  // An empty string means the replica holds nothing, so the server streams from
+  // the oldest retained binlog. Re-check the character set next to the
+  // interpolation itself; the set reaches here from ResolveStartGtidMariaDB(),
+  // and this query is the injection sink.
+  if (!IsValidMariaDBGtidSet(state.gtid_set)) {
+    SetLastError("Invalid MariaDB GTID format: contains disallowed characters");
     return MES_ERR_INVALID_ARG;
   }
-  std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
+  protocol::QueryResult qr;
+  std::string err;
+  const std::string gtid_query = "SET @slave_connect_state = '" + state.gtid_set + "'";
   if (protocol::ExecuteQuery(conn_.Socket(), gtid_query, &qr, &err,
                              conn_.DeprecateEofNegotiated()) != MES_OK) {
     SetLastError("Failed to set slave_connect_state: " + err);
     return MES_ERR_STREAM;
   }
-
-  StructuredLog().Event("mariadb_gtid_state_set").Field("gtid", gtid).Debug();
-  {
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
-    current_gtid_ = gtid;
-  }
+  StructuredLog().Event("mariadb_gtid_state_set").Field("gtid", state.gtid_set).Debug();
 
   // Start binlog stream via COM_BINLOG_DUMP (not COM_BINLOG_DUMP_GTID)
-  protocol::BinlogStreamConfig stream_config;
-  stream_config.server_id = config_.server_id;
   stream_config.binlog_position = kBinlogMagicOffset;
-
-  auto rc = binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config);
-  if (rc != MES_OK) {
+  if (binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config) != MES_OK) {
     SetLastError("Failed to start MariaDB binlog stream");
     return MES_ERR_STREAM;
   }
-
   return MES_OK;
 }
 
@@ -684,7 +740,11 @@ PollResult BinlogClient::Poll() {
   PromoteDeliveredCheckpoint();
   batch_events_.clear();
 
+  // Both disconnect paths record a message: the C ABI exposes the last error
+  // as the only description a binding can attach to the rejected poll, and an
+  // empty one leaves the consumer with a bare error code.
   if (!streaming_.load(std::memory_order_acquire) || !event_queue_) {
+    SetLastError("Poll on a client that is not streaming; call start() first");
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
@@ -692,6 +752,7 @@ PollResult BinlogClient::Poll() {
   if (!event_queue_->Pop(&event)) {
     // Queue closed (shutdown)
     streaming_.store(false, std::memory_order_release);
+    SetLastError("Binlog stream stopped while polling");
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 

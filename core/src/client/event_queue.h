@@ -18,6 +18,35 @@ namespace mes {
 
 constexpr size_t kDefaultEventQueueBytes = MES_DEFAULT_QUEUE_BYTES;
 
+/// MySQL prefixes every streamed binlog event with a one-byte OK marker. The
+/// reader keeps that byte in the queued buffer instead of copying the event to
+/// strip it, so a wire event of N bytes is held as N + 1 bytes.
+constexpr size_t kQueuedEventPrefixBytes = 1;
+
+/**
+ * @brief Bytes a queued buffer of @p buffer_bytes charges to the byte budget.
+ *
+ * This is the single definition of what `max_queue_bytes` counts. Only the
+ * buffered wire payload is charged. A queued event also carries a checkpoint
+ * GTID set and, for a sentinel, an error message; those are reader-side
+ * bookkeeping whose length grows with the number of source UUIDs rather than
+ * with the event, so charging them would make the admissible event size depend
+ * on a quantity no caller can size a budget for -- and would let an event
+ * within max_event_size be refused by a budget that claims to accommodate it.
+ */
+constexpr size_t QueuedEventCharge(size_t buffer_bytes) { return buffer_bytes; }
+
+/**
+ * @brief Smallest queue byte budget that always admits a wire event of
+ *        @p max_event_size bytes.
+ *
+ * Derived from QueuedEventCharge() so BinlogClient's start-up guard and the
+ * queue's admission test cannot drift apart.
+ */
+constexpr size_t MinQueueBytesForEvent(size_t max_event_size) {
+  return QueuedEventCharge(max_event_size + kQueuedEventPrefixBytes);
+}
+
 // Note: this queue intentionally uses std::queue + mutex + condition
 // variables rather than a lock-free SPSC ring buffer. Rationale:
 //   * Each QueuedEvent owns a std::vector<uint8_t> payload; the per-event
@@ -92,7 +121,7 @@ class EventQueue {
   /** @brief Current number of events in the queue (approximate under concurrency). */
   size_t Size() const;
 
-  /** @brief Current payload bytes in the queue (vector/string size, not capacity). */
+  /** @brief Current charged payload bytes in the queue (buffer size, not capacity). */
   size_t QueuedBytes() const;
 
   /** @brief Configured queue byte budget. */

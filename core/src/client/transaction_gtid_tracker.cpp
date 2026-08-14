@@ -11,12 +11,24 @@
 
 #include "binary_util.h"
 #include "event_header.h"
+#include "logger.h"
 #include "mariadb_event_parser.h"
 
 namespace mes {
 namespace {
 
 constexpr size_t kMySQLGtidBodySize = 25;
+
+/// ROWS_EVENT post-header: 6-byte table id, then 2 flag bytes.
+constexpr size_t kRowsEventFlagsOffset = 6;
+/// Set on the last ROWS_EVENT of a statement.
+constexpr uint16_t kRowsEventStmtEndFlag = 0x0001;
+
+bool IsStatementEndRowsEvent(const uint8_t* data, size_t content_size) {
+  if (content_size < kEventHeaderSize + kRowsEventFlagsOffset + sizeof(uint16_t)) return false;
+  const uint16_t flags = binary::ReadU16Le(data + kEventHeaderSize + kRowsEventFlagsOffset);
+  return (flags & kRowsEventStmtEndFlag) != 0;
+}
 
 bool ReadVarUInt(const uint8_t* data, size_t size, size_t* offset, uint64_t* value) {
   if (data == nullptr || offset == nullptr || value == nullptr || *offset >= size) return false;
@@ -257,7 +269,16 @@ std::string TransactionGtidTracker::CommitPending() {
   } else {
     if (!mysql_set_.Add(pending_gtid_.sid, pending_gtid_.tag,
                         {pending_gtid_.sequence_no, pending_gtid_.sequence_no + 1})) {
-      pending_gtid_ = {};
+      // The committed GTID cannot join the set, so no checkpoint may advance.
+      // Keep it pending and report it: dropping it silently would freeze the
+      // checkpoint at an older position with no way to notice.
+      StructuredLog()
+          .Event("gtid_checkpoint_merge_failed")
+          .Field("reason", "sid_interval_capacity_exhausted")
+          .Field("gtid",
+                 FormatMySQLGtid(pending_gtid_.sid, pending_gtid_.tag, pending_gtid_.sequence_no))
+          .Field("max_intervals_per_sid", static_cast<uint64_t>(GtidSet::kMaxIntervalsPerSid))
+          .Error();
       return {};
     }
   }
@@ -339,13 +360,11 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
     transaction_open_ = false;
     flavor_ = ServerFlavor::kMariaDB;
     received_gtid_ = std::move(gtid_string);
-    pending_gtid_ = {true, ServerFlavor::kMariaDB, {}, "", 0, gtid};
-    if (standalone) {
-      std::string standalone_checkpoint = CommitPending();
-      // This complete set also contains a preceding pending group, if this
-      // event was the proof that it completed.
-      return standalone_checkpoint;
-    }
+    // FL_STANDALONE only says the group ends without a COMMIT/XID event; the
+    // payload of the group still arrives after this event. Checkpointing here
+    // would advertise a GTID whose rows the consumer has not seen, so the
+    // group is closed by its terminating event instead.
+    pending_gtid_ = {true, ServerFlavor::kMariaDB, {}, "", 0, gtid, standalone};
     return committed;
   }
 
@@ -360,6 +379,18 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   if (event_type == static_cast<uint8_t>(BinlogEventType::kXidEvent)) {
     transaction_open_ = false;
     return CommitPending();
+  }
+
+  if (IsRowEvent(event_type)) {
+    // A standalone group has no COMMIT/XID, so its last ROWS_EVENT (the one
+    // carrying STMT_END) is the point at which every event of the group has
+    // been seen. Inside an open transaction STMT_END only ends a statement,
+    // never the group.
+    if (pending_gtid_.standalone && !transaction_open_ &&
+        IsStatementEndRowsEvent(data, content_size)) {
+      return CommitPending();
+    }
+    return {};
   }
 
   if (event_type != static_cast<uint8_t>(BinlogEventType::kQueryEvent)) return {};
@@ -379,7 +410,10 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   // pending checkpoint merely because a DDL word appears inside an explicitly
   // open transaction group. In particular, ROLLBACK TO SAVEPOINT is not a
   // transaction rollback and must leave its GTID pending until COMMIT/XID.
-  if (!transaction_open_ && IsDdlKeyword(first)) return CommitPending();
+  // A standalone group carries exactly one statement, so this QUERY is its
+  // terminating event whether or not the statement is DDL.
+  if (transaction_open_) return {};
+  if (pending_gtid_.standalone || IsDdlKeyword(first)) return CommitPending();
   return {};
 }
 

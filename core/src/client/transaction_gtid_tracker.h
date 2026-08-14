@@ -30,15 +30,25 @@ class TransactionGtidTracker {
   /**
    * Observe one complete event and return a safe complete-set checkpoint.
    *
-   * A checkpoint is returned at a transaction commit boundary, or when a
-   * PREVIOUS_GTIDS/GTID_LIST baseline event has been completely received.
-   * The caller is responsible for promoting it only after delivering the
-   * corresponding event to the consumer.
+   * A checkpoint is returned at a transaction commit boundary, at the
+   * terminating event of a group that commits without one (MariaDB
+   * FL_STANDALONE), or when a PREVIOUS_GTIDS/GTID_LIST baseline event has been
+   * completely received. The caller is responsible for promoting it only after
+   * delivering the corresponding event to the consumer.
    */
   std::string Observe(const uint8_t* data, size_t size, bool has_checksum);
 
   /** Last transaction GTID received from the wire (may be uncommitted). */
   const std::string& received_gtid() const { return received_gtid_; }
+
+  /**
+   * True while a received GTID is still waiting for its commit boundary.
+   *
+   * Also stays true when a commit boundary was reached but the GTID could not
+   * be merged into the set, which keeps that failure diagnosable instead of
+   * silently dropping the checkpoint.
+   */
+  bool has_pending_gtid() const { return pending_gtid_.present; }
 
  private:
   using Sid = GtidSet::Sid;
@@ -52,6 +62,8 @@ class TransactionGtidTracker {
     std::string tag;
     uint64_t sequence_no = 0;
     MariaDBGtid mariadb;
+    /// MariaDB FL_STANDALONE: the group ends without a COMMIT/XID event.
+    bool standalone = false;
   };
 
   static void MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid& gtid);

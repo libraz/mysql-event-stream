@@ -24,6 +24,14 @@ namespace mes::protocol {
 // Forward declaration; defined in protocol/mysql_socket.h
 class SocketHandle;
 
+/**
+ * @brief MariaDB dump flag requesting ANNOTATE_ROWS events.
+ *
+ * MariaDB withholds ANNOTATE_ROWS unless the dump request carries this flag,
+ * regardless of the negotiated @\@mariadb_slave_capability.
+ */
+constexpr uint16_t kBinlogSendAnnotateRows = 0x0002;
+
 /** @brief Configuration for starting a binlog replication stream */
 struct BinlogStreamConfig {
   uint32_t server_id = 1;

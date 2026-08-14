@@ -45,13 +45,21 @@ class GtidSet {
   std::string ToString() const;
   void Clear() { sets_.clear(); }
 
+  /**
+   * Validate a TSID tag and write its lower-cased form to @p out.
+   *
+   * A tag is 1-32 characters, starts with a letter or underscore, and holds
+   * only letters, digits and underscores. Shared so that every place which
+   * splits a tag out of a GTID string applies one rule.
+   */
+  static bool NormalizeTag(const std::string& text, std::string* out);
+
  private:
   using SetMap = std::map<Tsid, std::vector<Interval>>;
 
   static bool NormalizeIntervals(std::vector<Interval>* intervals);
   static mes_error_t ParseUuid(const std::string& text, Sid* out);
   static mes_error_t ParseInterval(const std::string& text, Interval* out);
-  static bool NormalizeTag(const std::string& text, std::string* out);
   static void StoreU64Le(std::vector<uint8_t>* out, uint64_t value);
   static std::string FormatSid(const Sid& sid);
 

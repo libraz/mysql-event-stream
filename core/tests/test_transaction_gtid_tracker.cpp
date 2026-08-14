@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "client/gtid_encoder.h"
+#include "client/gtid_set.h"
 #include "client/transaction_gtid_tracker.h"
 #include "event_header.h"
+#include "logger.h"
 #include "server_flavor.h"
 #include "test_helpers.h"
 
@@ -19,6 +21,17 @@ constexpr char kGtid[] = "00000000-0000-0000-0000-000000000001:42";
 constexpr char kNextGtid[] = "00000000-0000-0000-0000-000000000001:43";
 constexpr char kSid1[] = "00000000-0000-0000-0000-000000000001";
 constexpr char kSid2[] = "00000000-0000-0000-0000-000000000002";
+
+int g_merge_failure_count = 0;
+std::string g_merge_failure_message;
+
+void CaptureMergeFailure(mes_log_level_t level, const char* message, void*) {
+  if (level != MES_LOG_ERROR || message == nullptr) return;
+  const std::string text(message);
+  if (text.find("event=gtid_checkpoint_merge_failed") == std::string::npos) return;
+  ++g_merge_failure_count;
+  g_merge_failure_message = text;
+}
 
 std::vector<uint8_t> BuildMySQLGtid(uint64_t gno) {
   test::EventBuilder body;
@@ -79,6 +92,26 @@ std::vector<uint8_t> BuildPreviousGtidsWithIntervalCount(uint64_t interval_count
     body.WriteU64Le(i * 2 + 2);
   }
   return test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent), 0, 0,
+                          body.Data());
+}
+
+std::vector<uint8_t> BuildMariaDBGtid(uint64_t sequence_no, uint32_t domain_id, bool standalone) {
+  test::EventBuilder body;
+  body.WriteU64Le(sequence_no);
+  body.WriteU32Le(domain_id);
+  body.WriteU8(standalone ? 0x01 : 0x00);  // MariaDB FL_STANDALONE
+  return test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent), 0, 0,
+                          body.Data());
+}
+
+std::vector<uint8_t> BuildRowsEvent(bool stmt_end) {
+  test::EventBuilder body;
+  body.WriteU48Le(1);                           // table id
+  body.WriteU16Le(stmt_end ? 0x0001 : 0x0000);  // STMT_END_F
+  body.WriteU16Le(2);                           // v2 extra header length
+  body.WriteU8(1);                              // column count
+  body.WriteU8(0x01);                           // columns-present bitmap
+  return test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 0, 0,
                           body.Data());
 }
 
@@ -198,12 +231,7 @@ TEST(TransactionGtidTrackerTest, ResetDropsUncommittedState) {
 
 TEST(TransactionGtidTrackerTest, MariaDBGtidAlsoWaitsForXid) {
   TransactionGtidTracker tracker;
-  test::EventBuilder body;
-  body.WriteU64Le(42);  // sequence number
-  body.WriteU32Le(7);   // domain ID
-  body.WriteU8(0);      // flags
-  auto gtid =
-      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent), 0, 0, body.Data());
+  auto gtid = BuildMariaDBGtid(42, 7, /*standalone=*/false);
   EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
   EXPECT_EQ(tracker.received_gtid(), "7-1-42");
 
@@ -211,17 +239,44 @@ TEST(TransactionGtidTrackerTest, MariaDBGtidAlsoWaitsForXid) {
   EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), "7-1-42");
 }
 
-TEST(TransactionGtidTrackerTest, MariaDBStandaloneGtidCheckpointsAtTheGtidEvent) {
+TEST(TransactionGtidTrackerTest, MariaDBStandaloneGtidCheckpointsOnlyAfterTheGroupTerminator) {
   TransactionGtidTracker tracker;
-  test::EventBuilder body;
-  body.WriteU64Le(42);
-  body.WriteU32Le(7);
-  body.WriteU8(1);  // MariaDB FL_STANDALONE: no terminating COMMIT/XID follows.
-  auto gtid =
-      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent), 0, 0, body.Data());
+  auto gtid = BuildMariaDBGtid(42, 7, /*standalone=*/true);
 
-  EXPECT_EQ(tracker.Observe(gtid.data(), gtid.size(), true), "7-1-42");
+  // The rows of the group arrive in later packets, so no checkpoint may be
+  // published while the GTID event is the only thing seen.
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
   EXPECT_EQ(tracker.received_gtid(), "7-1-42");
+
+  auto partial = BuildRowsEvent(/*stmt_end=*/false);
+  EXPECT_TRUE(tracker.Observe(partial.data(), partial.size(), true).empty());
+
+  auto last = BuildRowsEvent(/*stmt_end=*/true);
+  EXPECT_EQ(tracker.Observe(last.data(), last.size(), true), "7-1-42");
+}
+
+TEST(TransactionGtidTrackerTest, MariaDBStandaloneDdlCheckpointsAtItsQueryEvent) {
+  TransactionGtidTracker tracker;
+  auto gtid = BuildMariaDBGtid(42, 7, /*standalone=*/true);
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+
+  auto ddl = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
+                              test::BuildQueryEventBody("db", "CREATE TABLE t (id INT)"));
+  EXPECT_EQ(tracker.Observe(ddl.data(), ddl.size(), true), "7-1-42");
+}
+
+TEST(TransactionGtidTrackerTest, TransactionalRowsEventWithStmtEndDoesNotCheckpoint) {
+  TransactionGtidTracker tracker;
+  auto gtid = BuildMariaDBGtid(42, 7, /*standalone=*/false);
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+
+  // STMT_END ends a statement, not the transaction: a second statement may
+  // still follow before the XID.
+  auto rows = BuildRowsEvent(/*stmt_end=*/true);
+  EXPECT_TRUE(tracker.Observe(rows.data(), rows.size(), true).empty());
+
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+  EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), "7-1-42");
 }
 
 TEST(TransactionGtidTrackerTest, MySQLCommitAdvancesCompleteMultiSidSet) {
@@ -285,12 +340,7 @@ TEST(TransactionGtidTrackerTest, MariaDBGtidListAndCommitKeepAllDomainHighWaters
   auto list = BuildMariaDBGtidList({{7, 3, 12}, {8, 4, 4}, {9, 6, 19}});
   EXPECT_EQ(tracker.Observe(list.data(), list.size(), true), "7-3-12,8-4-4,9-2-20");
 
-  test::EventBuilder body;
-  body.WriteU64Le(21);
-  body.WriteU32Le(9);
-  body.WriteU8(0);
-  auto gtid =
-      test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent), 0, 0, body.Data());
+  auto gtid = BuildMariaDBGtid(21, 9, /*standalone=*/false);
   EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
   auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
   EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), "7-3-12,8-4-4,9-1-21");
@@ -300,6 +350,31 @@ TEST(TransactionGtidTrackerTest, ResetRejectsInvalidInitialSets) {
   TransactionGtidTracker tracker;
   EXPECT_FALSE(tracker.Reset("not-a-gtid", ServerFlavor::kMySQL));
   EXPECT_FALSE(tracker.Reset("7-1-bad", ServerFlavor::kMariaDB));
+}
+
+TEST(TransactionGtidTrackerTest, CommitAtIntervalCapacityIsReportedAndKeepsTheGtidPending) {
+  g_merge_failure_count = 0;
+  g_merge_failure_message.clear();
+  LogConfig::SetCallback(CaptureMergeFailure, MES_LOG_ERROR, nullptr);
+
+  TransactionGtidTracker tracker;
+  auto saturating = BuildPreviousGtidsWithIntervalCount(GtidSet::kMaxIntervalsPerSid);
+  ASSERT_FALSE(tracker.Observe(saturating.data(), saturating.size(), true).empty());
+
+  auto gtid = BuildMySQLGtid(1000001);
+  ASSERT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+
+  // The set cannot hold another interval, so the commit boundary produces no
+  // checkpoint. That must be diagnosable, and the GTID must stay pending.
+  EXPECT_TRUE(tracker.Observe(xid.data(), xid.size(), true).empty());
+  EXPECT_TRUE(tracker.has_pending_gtid());
+  LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr);
+
+  EXPECT_EQ(g_merge_failure_count, 1);
+  EXPECT_NE(g_merge_failure_message.find("reason=sid_interval_capacity_exhausted"),
+            std::string::npos);
+  EXPECT_NE(g_merge_failure_message.find(std::string(kSid1) + ":1000001"), std::string::npos);
 }
 
 TEST(TransactionGtidTrackerTest, PreviousGtidsRejectsExcessiveIntervalsWithoutMutatingCheckpoint) {

@@ -17,12 +17,25 @@ std::string GtidEncoder::NormalizeSingleSid(const std::string& gtid) {
   const size_t colon_pos = gtid.find(':');
   if (colon_pos == std::string::npos) return gtid;
 
-  const std::string after_colon = gtid.substr(colon_pos + 1);
-  if (after_colon == "0") return {};
-  if (after_colon.find('-') != std::string::npos || after_colon.find(':') != std::string::npos) {
+  // A tag carries no interval semantics: "uuid:tag:N" denotes the same single
+  // transaction as "uuid:N", so split a leading tag off before deciding
+  // whether what remains is a bare transaction number.
+  size_t intervals_pos = colon_pos + 1;
+  const size_t tag_separator = gtid.find(':', intervals_pos);
+  if (tag_separator != std::string::npos) {
+    std::string tag;
+    if (!GtidSet::NormalizeTag(gtid.substr(intervals_pos, tag_separator - intervals_pos), &tag)) {
+      return gtid;
+    }
+    intervals_pos = tag_separator + 1;
+  }
+
+  const std::string intervals = gtid.substr(intervals_pos);
+  if (intervals == "0") return {};
+  if (intervals.find('-') != std::string::npos || intervals.find(':') != std::string::npos) {
     return gtid;
   }
-  return gtid.substr(0, colon_pos) + ":1-" + after_colon;
+  return gtid.substr(0, intervals_pos) + "1-" + intervals;
 }
 
 std::string GtidEncoder::ConvertSingleGtidToRange(const std::string& gtid) {

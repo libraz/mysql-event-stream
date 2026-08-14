@@ -3,7 +3,6 @@
 
 #include "client/event_queue.h"
 
-#include <limits>
 #include <utility>
 
 namespace mes {
@@ -87,14 +86,9 @@ bool EventQueue::IsClosed() const {
 }
 
 size_t EventQueue::EventMemoryBytes(const QueuedEvent& event) {
-  const size_t data_bytes = event.data.size();
-  const size_t checkpoint_bytes = event.checkpoint_gtid.empty() ? 0 : event.checkpoint_gtid.size();
-  const size_t message_bytes = event.error_message.empty() ? 0 : event.error_message.size();
-  if (data_bytes > std::numeric_limits<size_t>::max() - checkpoint_bytes ||
-      data_bytes + checkpoint_bytes > std::numeric_limits<size_t>::max() - message_bytes) {
-    return std::numeric_limits<size_t>::max();
-  }
-  return data_bytes + checkpoint_bytes + message_bytes;
+  // event.data holds kQueuedEventPrefixBytes followed by the wire event, which
+  // is exactly what MinQueueBytesForEvent() budgets for.
+  return QueuedEventCharge(event.data.size());
 }
 
 }  // namespace mes

@@ -74,7 +74,8 @@ struct PollResult {
  * events into a bounded queue. Poll() dequeues from this buffer.
  *
  * Thread safety:
- *   - Stop() may be called from any thread to interrupt a blocking Poll().
+ *   - Stop() may be called from any thread to interrupt a blocking Poll() or a
+ *     StartStream() that is waiting on the server.
  *   - GetCurrentGtid() may be called from any thread.
  *   - All other methods must be called from a single thread.
  *
@@ -177,7 +178,13 @@ class BinlogClient {
   /** @brief Get the normalized reader event-size ceiling. */
   uint32_t MaxEventSize() const;
 
-  /** @brief Set/get the total payload byte budget for queued events. */
+  /**
+   * @brief Set/get the total payload byte budget for queued events.
+   *
+   * StartStream() rejects a budget below MinQueueBytesForEvent(MaxEventSize()),
+   * so a configuration that survives start always admits an event at the
+   * ceiling.
+   */
   void SetMaxQueueBytes(size_t max_queue_bytes);
   size_t MaxQueueBytes() const;
   size_t QueuedBytes() const;
@@ -220,6 +227,12 @@ class BinlogClient {
   // component is usable on its own; only the kChecksumSize constant is shared.
   std::atomic<bool> checksum_enabled_{true};
   std::atomic<bool> stop_requested_{false};
+  // Set for the duration of StartStream(). Setup performs blocking socket round
+  // trips, so it must not run under stop_mutex_; this flag excludes a second
+  // concurrent setup in its place, leaving Stop() free to shut the socket down
+  // mid-setup. Stop() deliberately does not wait on it: waiting would reinstate
+  // the very dependency on setup I/O that the split removes.
+  std::atomic<bool> setup_in_progress_{false};
   // Keep the default below the 48 MiB queue budget so a valid maximum-sized
   // event can always enter the queue. Larger events remain an explicit opt-in
   // together with a larger max_queue_bytes setting.
@@ -232,7 +245,11 @@ class BinlogClient {
   QueuedEvent current_event_;              // Holds data for current Poll() result
   std::vector<QueuedEvent> batch_events_;  // Holds data for current PollBatch() results
   TransactionGtidTracker gtid_tracker_;    // Reader-thread received/commit state
-  std::mutex stop_mutex_;                  // Serializes Stop() calls
+  // Lifecycle lock. Guards the queue swap, the reader join and the teardown
+  // flags, and nothing else. It is never held across a blocking socket
+  // operation, because Stop() and Disconnect() must acquire it before reaching
+  // SocketHandle::Shutdown() -- the call that unblocks such an operation.
+  std::mutex stop_mutex_;
 
   // Reusable scratch buffer for FetchEvent() packet reads. Lives on the
   // reader thread: after a successful non-heartbeat read, the buffer is
@@ -257,17 +274,54 @@ class BinlogClient {
   // CRC error tracking (reader thread writes, GetCRCErrors reads)
   std::atomic<uint64_t> crc_errors_{0};
 
+  /**
+   * @brief The start position resolved once, shared by every start mode.
+   *
+   * Produced by EstablishStartState() and consumed by the flavor's dump
+   * request, so a new start mode cannot reach the wire without first passing
+   * through the common establishment step.
+   */
+  struct StartState {
+    std::string gtid_set;             ///< Resolved GTID set; empty for a file/position start.
+    bool from_file_position = false;  ///< True when the caller pinned an exact file offset.
+  };
+
   /** @brief Reader thread main loop */
   void ReaderLoop();
 
   /** @brief Stop reader thread, join, clear queue */
   void StopReaderThread();
 
-  /** @brief MySQL-specific stream setup (COM_BINLOG_DUMP_GTID) */
-  mes_error_t StartStreamMySQL();
+  /** @brief Negotiate MySQL session variables before any state is read. */
+  mes_error_t BeginSessionMySQL();
 
-  /** @brief MariaDB-specific stream setup (COM_BINLOG_DUMP) */
-  mes_error_t StartStreamMariaDB();
+  /** @brief Negotiate MariaDB session variables before any state is read. */
+  mes_error_t BeginSessionMariaDB();
+
+  /**
+   * @brief Establish everything StartStream() promises on success.
+   *
+   * Detects the source's checksum mode, configures the heartbeat, resolves the
+   * start position, and seeds both the GTID tracker and the published
+   * checkpoint. Every flavor and every start mode goes through this function,
+   * so the set of established state cannot vary by start mode.
+   */
+  mes_error_t EstablishStartState(StartState* state);
+
+  /** @brief Read @\@global.binlog_checksum into checksum_enabled_. */
+  mes_error_t DetectBinlogChecksum();
+
+  /** @brief Resolve and pre-validate the MySQL start GTID set. */
+  mes_error_t ResolveStartGtidMySQL(std::string* gtid_set);
+
+  /** @brief Resolve and validate the MariaDB start GTID set. */
+  mes_error_t ResolveStartGtidMariaDB(std::string* gtid_set);
+
+  /** @brief Issue COM_BINLOG_DUMP_GTID (or COM_BINLOG_DUMP for a file offset). */
+  mes_error_t SendBinlogDumpMySQL(const StartState& state);
+
+  /** @brief Issue COM_BINLOG_DUMP with the MariaDB dump flags. */
+  mes_error_t SendBinlogDumpMariaDB(const StartState& state);
 
   /** Configure a heartbeat period safely below the socket read timeout. */
   mes_error_t ConfigureHeartbeat();

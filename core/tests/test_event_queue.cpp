@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -376,6 +377,46 @@ TEST(EventQueueTest, ChargesPayloadSizeRatherThanVectorCapacity) {
   ASSERT_GT(event.data.capacity(), event.data.size());
 
   EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
+  EXPECT_EQ(q.QueuedBytes(), 4u);
+}
+
+TEST(EventQueueTest, EventAtMaxEventSizeFitsTheMinimumBudget) {
+  // The budget a client is allowed to configure for a given max_event_size and
+  // the charge the queue applies come from the same definition, so an event at
+  // the ceiling must be admitted rather than terminating the stream. The
+  // checkpoint attached by the reader must not eat into that budget.
+  constexpr size_t kMaxEventSize = 4096;
+  mes::EventQueue q(100, mes::MinQueueBytesForEvent(kMaxEventSize));
+
+  mes::QueuedEvent event;
+  event.data.assign(kMaxEventSize + mes::kQueuedEventPrefixBytes, 0x7F);
+  event.data_offset = mes::kQueuedEventPrefixBytes;
+  event.checkpoint_gtid = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1000000";
+
+  EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
+  EXPECT_EQ(q.QueuedBytes(), q.MaxBytes());
+
+  mes::QueuedEvent out;
+  ASSERT_TRUE(q.Pop(&out));
+  EXPECT_EQ(out.data.size() - out.data_offset, kMaxEventSize);
+  EXPECT_EQ(q.QueuedBytes(), 0u);
+}
+
+TEST(EventQueueTest, CheckpointAndErrorTextAreNotChargedToTheBudget) {
+  mes::EventQueue q(100, 4);
+
+  mes::QueuedEvent event;
+  event.data = {1, 2, 3, 4};
+  event.checkpoint_gtid = std::string(512, 'a');
+  ASSERT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
+  EXPECT_EQ(q.QueuedBytes(), 4u);
+
+  // A terminal error sentinel carries no payload, so it can always reach the
+  // consumer however long its message is and however full the byte budget is.
+  mes::QueuedEvent sentinel;
+  sentinel.error = MES_ERR_STREAM;
+  sentinel.error_message = std::string(4096, 'e');
+  EXPECT_EQ(q.PushWithStatus(std::move(sentinel)), mes::EventQueue::PushResult::kPushed);
   EXPECT_EQ(q.QueuedBytes(), 4u);
 }
 

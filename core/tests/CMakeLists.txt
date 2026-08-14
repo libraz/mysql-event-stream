@@ -66,6 +66,9 @@ mes_add_gtest(test_mysql_binlog_stream test_mysql_binlog_stream.cpp)
 # test_event_queue
 mes_add_gtest(test_event_queue test_event_queue.cpp)
 
+# test_binlog_client_lifecycle
+mes_add_gtest(test_binlog_client_lifecycle test_binlog_client_lifecycle.cpp)
+
 # test_transaction_gtid_tracker
 mes_add_gtest(test_transaction_gtid_tracker test_transaction_gtid_tracker.cpp)
 

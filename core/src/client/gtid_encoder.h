@@ -46,14 +46,17 @@ class GtidEncoder {
    * COM_BINLOG_DUMP_GTID semantics: "send events NOT in this set".
    * A single GTID "uuid:101" means interval [101,102), causing duplicates.
    * Converting to "uuid:1-101" excludes all transactions 1 through 101.
+   * The tagged form is widened identically ("uuid:tag:101" ->
+   * "uuid:tag:1-101"): a tag does not change interval semantics. An explicit
+   * range is always used as given.
    *
    * @param gtid GTID string to convert
-   * @return Converted string (unchanged if already a range or multi-UUID)
+   * @return Converted string (unchanged if already a range)
    */
   static std::string ConvertSingleGtidToRange(const std::string& gtid);
 
  private:
-  /// Normalize a single comma-free SID ("uuid:N" -> "uuid:1-N").
+  /// Normalize a single comma-free TSID ("uuid[:tag]:N" -> "uuid[:tag]:1-N").
   static std::string NormalizeSingleSid(const std::string& gtid);
 };
 
