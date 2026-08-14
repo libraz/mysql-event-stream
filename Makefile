@@ -1,7 +1,8 @@
 # mysql-event-stream Makefile
 # Convenience wrapper for CMake + Node.js + Python build systems
 
-.PHONY: help build test test-tsan benchmark clean rebuild install uninstall format format-check \
+.PHONY: help build test test-tsan benchmark benchmark-socket benchmark-python clean rebuild \
+        install uninstall format format-check \
         node-build node-test node-check node-fix \
         py-test py-lint py-format py-typecheck \
         e2e e2e-cpp build-wheel configure lint
@@ -23,7 +24,8 @@ help:
 	@echo "  make build          - Build C++ core (default)"
 	@echo "  make test           - Run C++ unit tests"
 	@echo "  make test-tsan      - Run non-E2E C++ tests under ThreadSanitizer"
-	@echo "  make benchmark      - Measure synthetic feed/decode throughput, latency and RSS"
+	@echo "  make benchmark      - Measure decode throughput, latency, RSS and per-event bytes"
+	@echo "  make benchmark-socket - Measure plaintext ReadExact staging over loopback"
 	@echo "  make clean          - Clean build directory"
 	@echo "  make rebuild        - Clean and rebuild"
 	@echo "  make install        - Install library"
@@ -43,6 +45,7 @@ help:
 	@echo "  make py-lint        - Lint with ruff"
 	@echo "  make py-format      - Format with ruff"
 	@echo "  make py-typecheck   - Type check with mypy"
+	@echo "  make benchmark-python - Measure ctypes column marshalling cost"
 	@echo "  make build-wheel    - Build Python wheel"
 	@echo ""
 	@echo "Cross-cutting:"
@@ -70,10 +73,31 @@ test-tsan:
 	cmake --build build-tsan --parallel
 	ctest --test-dir build-tsan --output-on-failure --parallel -E "E2E"
 
+BENCH_DIR    := build-bench
+BENCH_STREAMS ?= $(BENCH_DIR)/streams
+BENCH_LIB_EXT := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
+
 benchmark:
-	cmake -B build-bench -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON $(CMAKE_OPTIONS)
-	cmake --build build-bench --target mes_benchmark_feed --parallel
-	build-bench/core/mes_benchmark_feed
+	cmake -B $(BENCH_DIR) -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON $(CMAKE_OPTIONS)
+	cmake --build $(BENCH_DIR) --target mes_benchmark_feed mes_benchmark_workloads mes_benchmark_workloads_mem --parallel
+	$(BENCH_DIR)/core/mes_benchmark_feed
+	$(BENCH_DIR)/core/mes_benchmark_workloads
+	$(BENCH_DIR)/core/mes_benchmark_workloads_mem
+
+# Separate target: the loopback run moves gigabytes and takes minutes.
+benchmark-socket:
+	cmake -B $(BENCH_DIR) -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON $(CMAKE_OPTIONS)
+	cmake --build $(BENCH_DIR) --target mes_benchmark_socket_read --parallel
+	$(BENCH_DIR)/core/mes_benchmark_socket_read
+
+# Feeds the Python binding the same event streams the core benchmarks decode.
+benchmark-python:
+	cmake -B $(BENCH_DIR) -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON $(CMAKE_OPTIONS)
+	cmake --build $(BENCH_DIR) --target mes_benchmark_workloads mes-shared --parallel
+	mkdir -p $(BENCH_STREAMS)
+	$(BENCH_DIR)/core/mes_benchmark_workloads --emit $(BENCH_STREAMS)
+	python3 bindings/python/benchmarks/bench_convert_columns.py \
+		--streams $(BENCH_STREAMS) --lib $(BENCH_DIR)/core/libmes.$(BENCH_LIB_EXT)
 
 clean:
 	rm -rf $(BUILD_DIR)

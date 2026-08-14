@@ -222,6 +222,30 @@ if(MES_BUILD_BENCHMARKS)
   target_include_directories(mes_benchmark_feed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   target_link_libraries(mes_benchmark_feed PRIVATE mes-core)
   target_compile_options(mes_benchmark_feed PRIVATE -fno-exceptions -fno-rtti)
+
+  # Production-shaped workloads (wide/string/temporal/UPDATE/ANNOTATE). Built
+  # twice: the plain binary times decoding with the stock allocator, the _mem
+  # binary links the operator-new replacement and reports per-event bytes.
+  add_executable(mes_benchmark_workloads benchmarks/benchmark_workloads.cpp)
+  target_include_directories(mes_benchmark_workloads PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(mes_benchmark_workloads PRIVATE mes-core)
+  target_compile_options(mes_benchmark_workloads PRIVATE -fno-exceptions -fno-rtti)
+
+  add_executable(mes_benchmark_workloads_mem
+    benchmarks/benchmark_workloads.cpp
+    benchmarks/alloc_tracker.cpp
+  )
+  target_include_directories(mes_benchmark_workloads_mem PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(mes_benchmark_workloads_mem PRIVATE mes-core)
+  target_compile_definitions(mes_benchmark_workloads_mem PRIVATE MES_BENCH_ALLOC_TRACKING)
+  target_compile_options(mes_benchmark_workloads_mem PRIVATE -fno-exceptions -fno-rtti)
+
+  # Plaintext ReadExact staging cost against a bare recv loop over loopback.
+  if(NOT WIN32)
+    add_executable(mes_benchmark_socket_read benchmarks/benchmark_socket_read.cpp)
+    target_link_libraries(mes_benchmark_socket_read PRIVATE mes-core OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_options(mes_benchmark_socket_read PRIVATE -fno-exceptions -fno-rtti)
+  endif()
 endif()
 
 # Tests are disabled for wheel/native artifact builds with BUILD_TESTING=OFF.
