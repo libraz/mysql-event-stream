@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "protocol/mysql_packet.h"
@@ -16,9 +17,24 @@ namespace {
 
 // Result sets are retained in memory because callers need random access to
 // the completed response. Bound both dimensions so a malicious or broken
-// server cannot make the connection caller allocate indefinitely.
+// server cannot make the connection caller allocate indefinitely. The byte
+// budget covers everything QueryResult retains: column names as well as row
+// values.
 constexpr size_t kMaxResultRows = 100000;
 constexpr size_t kMaxResultBytes = 64u * 1024u * 1024u;
+
+// A column definition packet carries six length-encoded identifiers plus a
+// fixed tail, so it cannot legitimately approach the 64 MiB packet default.
+// Capping it here bounds a single allocation independently of the cumulative
+// byte budget below.
+constexpr size_t kMaxColumnDefBytes = 64u * 1024u;
+
+// A zero-length payload never appears in a well-formed result set: packet
+// reassembly consumes the terminating empty packet of a multi-packet sequence
+// internally. Tolerate a handful so a quirky server is not fatal, but bound
+// them so a server emitting nothing but empty packets cannot spin the row loop
+// forever while keeping the read timeout from firing.
+constexpr size_t kMaxEmptyRowPackets = 4;
 
 /** @brief Skip a length-encoded string at the current position */
 void SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
@@ -179,18 +195,28 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
   if (column_count > kMaxColumnCount) {
     *error_msg = "Column count exceeds maximum (" + std::to_string(column_count) + ")";
-    return fail_after_response(MES_ERR_PARSE);
+    return fail_after_response(MES_ERR_STREAM);
   }
 
-  // Read column definition packets
+  // Read column definition packets. Retained column names share the byte
+  // budget with row values: the caller holds both until the QueryResult dies.
+  size_t result_bytes = 0;
   result->column_names.resize(column_count);
   for (uint64_t i = 0; i < column_count; ++i) {
-    rc = ReadPacket(sock, &payload, &seq_id);
+    rc = ReadPacket(sock, &payload, &seq_id, kMaxColumnDefBytes);
     if (rc != MES_OK) {
       *error_msg = "Failed to read column definition";
       return fail_after_response(rc);
     }
-    result->column_names[i] = ParseColumnName(payload);
+    std::string column_name = ParseColumnName(payload);
+    // Subtraction form: result_bytes never exceeds kMaxResultBytes, so the
+    // right-hand side cannot underflow.
+    if (column_name.size() > kMaxResultBytes - result_bytes) {
+      *error_msg = "Result set byte size exceeds maximum (" + std::to_string(kMaxResultBytes) + ")";
+      return fail_after_response(MES_ERR_QUEUE_FULL);
+    }
+    result_bytes += column_name.size();
+    result->column_names[i] = std::move(column_name);
   }
 
   // Without CLIENT_DEPRECATE_EOF, read intermediate EOF packet after column defs
@@ -209,7 +235,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
 
   // Read row data packets until end-of-rows marker.
   result->rows.clear();
-  size_t result_bytes = 0;
+  size_t empty_packets = 0;
   for (;;) {
     rc = ReadPacket(sock, &payload, &seq_id);
     if (rc != MES_OK) {
@@ -218,6 +244,10 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     }
 
     if (payload.empty()) {
+      if (++empty_packets > kMaxEmptyRowPackets) {
+        *error_msg = "Server sent only empty packets while reading result-set rows";
+        return fail_after_response(MES_ERR_STREAM);
+      }
       continue;
     }
 
@@ -245,7 +275,7 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     QueryResultRow row;
     if (!ParseTextResultRow(payload, static_cast<size_t>(column_count), &row)) {
       *error_msg = "Truncated result-set row";
-      return fail_after_response(MES_ERR_PARSE);
+      return fail_after_response(MES_ERR_STREAM);
     }
     if (result->rows.size() == kMaxResultRows) {
       *error_msg = "Result set row count exceeds maximum (" + std::to_string(kMaxResultRows) + ")";

@@ -288,13 +288,26 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
     return MES_ERR_CONNECT;
   }
 
-  // Try each resolved address until one succeeds.
+  const mes_error_t connect_err = ConnectToResolvedAddresses(result, host, port, timeout_s);
+  freeaddrinfo(result);
+  return connect_err;
+}
+
+mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addresses,
+                                                     const char* host, uint16_t port,
+                                                     uint32_t timeout_s) {
+  // One deadline for the whole call. Applying timeout_s per address would let a
+  // dual-stack name block the caller for a multiple of the configured budget.
+  const bool has_deadline = timeout_s > 0;
+  const auto deadline = SteadyClock::now() + std::chrono::seconds(timeout_s);
+
+  // Try each resolved address until one succeeds or the budget runs out.
   mes_error_t connect_err = MES_ERR_CONNECT;
-  for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+  for (const struct addrinfo* rp = addresses; rp != nullptr; rp = rp->ai_next) {
     fd_.store(static_cast<int>(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)));
     if (fd_.load() < 0) continue;
 
-    if (timeout_s > 0) {
+    if (has_deadline) {
       // Non-blocking connect with timeout via poll().
       if (SetNonBlocking(fd_.load(), true) < 0) {
         CloseSocket(fd_.load());
@@ -302,7 +315,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
         continue;
       }
 
-      rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+      int rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
       if (rc < 0) {
 #ifdef _WIN32
         int err = WSAGetLastError();
@@ -316,20 +329,20 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
           continue;
         }
 
-        // Wait for connect to complete.
+        // Wait for connect to complete, using whatever is left of the budget.
+        const auto remaining = deadline - SteadyClock::now();
+        const int64_t remaining_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+        const int timeout_ms =
+            remaining_ms <= 0 ? 0 : static_cast<int>(std::min<int64_t>(remaining_ms, INT_MAX));
+
         struct pollfd pfd {};
         pfd.fd = fd_.load();
         pfd.events = POLLOUT;
 
 #ifdef _WIN32
-        int timeout_ms = (timeout_s > static_cast<uint32_t>(INT_MAX / 1000))
-                             ? INT_MAX
-                             : static_cast<int>(timeout_s) * 1000;
         rc = WSAPoll(&pfd, 1, timeout_ms);
 #else
-        int timeout_ms = (timeout_s > static_cast<uint32_t>(INT_MAX / 1000))
-                             ? INT_MAX
-                             : static_cast<int>(timeout_s) * 1000;
         rc = poll(&pfd, 1, timeout_ms);
 #endif
         if (rc <= 0) {
@@ -342,6 +355,9 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
               .Error();
           CloseSocket(fd_.load());
           fd_.store(-1);
+          // Remaining candidates would each need a budget that no longer
+          // exists; stop rather than overrunning the caller's timeout.
+          if (SteadyClock::now() >= deadline) break;
           continue;
         }
 
@@ -350,6 +366,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
         if (sock_err != 0) {
           CloseSocket(fd_.load());
           fd_.store(-1);
+          if (SteadyClock::now() >= deadline) break;
           continue;
         }
       }
@@ -362,7 +379,7 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
       }
     } else {
       // Blocking connect (no timeout).
-      rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+      int rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
       if (rc < 0) {
         CloseSocket(fd_.load());
         fd_.store(-1);
@@ -379,8 +396,6 @@ mes_error_t SocketHandle::Connect(const char* host, uint16_t port, uint32_t time
     connect_err = MES_OK;
     break;
   }
-
-  freeaddrinfo(result);
 
   if (connect_err != MES_OK) {
     StructuredLog()

@@ -9,6 +9,7 @@
 
 #include "mariadb_event_parser.h"
 #include "protocol/mysql_auth.h"
+#include "protocol/mysql_connection.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_query.h"
 
@@ -36,6 +37,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   std::vector<uint8_t> payload(data, data + size);
   mes::protocol::QueryResultRow row;
   mes::protocol::ParseTextResultRow(payload, size == 0 ? 0 : data[0] % 32, &row);
+
+  // Anything a remote peer places in the Initial Handshake Packet, including
+  // truncations at every field boundary and any auth_plugin_data_len.
+  mes::protocol::ServerHandshake handshake;
+  std::string handshake_error;
+  mes::protocol::detail::ParseServerHandshakePayload(data, size, &handshake, &handshake_error);
+  mes::protocol::detail::ParseServerHandshakePayload(data, size, &handshake, nullptr);
 
   std::string gtid;
   bool standalone = false;

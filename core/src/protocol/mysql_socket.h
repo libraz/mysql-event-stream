@@ -23,6 +23,9 @@ struct ssl_ctx_st;
 typedef struct ssl_st SSL;
 typedef struct ssl_ctx_st SSL_CTX;
 
+// Forward declaration to avoid pulling <netdb.h> / <ws2tcpip.h> into consumers.
+struct addrinfo;
+
 namespace mes::protocol {
 
 /**
@@ -53,7 +56,9 @@ class SocketHandle {
    * @brief Establish a TCP connection to the given host and port.
    *
    * Uses non-blocking connect with poll() to enforce the timeout, then
-   * switches the socket back to blocking mode.
+   * switches the socket back to blocking mode. @p timeout_s is the budget for
+   * the whole call, not per resolved address: a dual-stack host does not double
+   * the time the caller can be blocked.
    *
    * @param host      Hostname or IP address (resolved via getaddrinfo).
    * @param port      TCP port number.
@@ -61,6 +66,22 @@ class SocketHandle {
    * @return MES_OK on success, MES_ERR_CONNECT on failure.
    */
   mes_error_t Connect(const char* host, uint16_t port, uint32_t timeout_s);
+
+  /**
+   * @brief Connect to the first reachable address of a pre-resolved list.
+   *
+   * The body of Connect() once name resolution has produced @p addresses.
+   * Exposed separately so tests can drive the multi-address path with a
+   * synthetic list; production callers use Connect().
+   *
+   * @param addresses Linked list of candidate addresses (getaddrinfo result).
+   * @param host      Host name used for log fields only.
+   * @param port      TCP port used for log fields only.
+   * @param timeout_s Budget in seconds shared by all candidates (0 = OS default).
+   * @return MES_OK on success, MES_ERR_CONNECT if no candidate connected in time.
+   */
+  mes_error_t ConnectToResolvedAddresses(const struct addrinfo* addresses, const char* host,
+                                         uint16_t port, uint32_t timeout_s);
 
   /**
    * @brief Upgrade the existing TCP connection to TLS.

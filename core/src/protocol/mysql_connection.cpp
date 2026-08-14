@@ -175,58 +175,55 @@ bool MysqlConnection::DeprecateEofNegotiated() const {
 
 ServerFlavor MysqlConnection::GetServerFlavor() const { return server_flavor_; }
 
-mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& packet) {
-  const uint8_t* data = packet.data();
-  const size_t len = packet.size();
+namespace detail {
+
+mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerHandshake* out,
+                                        std::string* error) {
+  if (out == nullptr) return MES_ERR_AUTH;
 
   if (len < 4) {
-    last_error_ = "Server handshake packet too short";
+    if (error) *error = "Server handshake packet too short";
     return MES_ERR_AUTH;
-  }
-
-  // Check for ERR packet (server immediately rejected the connection)
-  if (data[0] == kPacketErr) {
-    return ProcessOkOrError(packet);
   }
 
   size_t pos = 0;
 
   // Protocol version (must be 10)
-  server_info_.protocol_version = data[pos++];
-  if (server_info_.protocol_version != 10) {
-    last_error_ = "Unsupported protocol version: " + std::to_string(server_info_.protocol_version);
+  out->protocol_version = data[pos++];
+  if (out->protocol_version != 10) {
+    if (error) *error = "Unsupported protocol version: " + std::to_string(out->protocol_version);
     return MES_ERR_AUTH;
   }
 
   // Server version: NUL-terminated string
   const uint8_t* nul = static_cast<const uint8_t*>(std::memchr(data + pos, 0, len - pos));
   if (nul == nullptr) {
-    last_error_ = "Invalid handshake: missing server version terminator";
+    if (error) *error = "Invalid handshake: missing server version terminator";
     return MES_ERR_AUTH;
   }
-  server_info_.server_version.assign(reinterpret_cast<const char*>(data + pos),
-                                     reinterpret_cast<const char*>(nul));
+  out->server_version.assign(reinterpret_cast<const char*>(data + pos),
+                             reinterpret_cast<const char*>(nul));
   pos = static_cast<size_t>(nul - data) + 1;
 
   // Connection ID (4 bytes LE)
   uint64_t conn_id = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 4, &conn_id)) {
-    last_error_ = "Invalid handshake: truncated connection ID";
+    if (error) *error = "Invalid handshake: truncated connection ID";
     return MES_ERR_AUTH;
   }
-  server_info_.connection_id = static_cast<uint32_t>(conn_id);
+  out->connection_id = static_cast<uint32_t>(conn_id);
 
   // auth_plugin_data_part_1 (8 bytes)
   if (pos + 8 > len) {
-    last_error_ = "Invalid handshake: truncated auth data part 1";
+    if (error) *error = "Invalid handshake: truncated auth data part 1";
     return MES_ERR_AUTH;
   }
-  server_info_.auth_data.assign(data + pos, data + pos + 8);
+  out->auth_data.assign(data + pos, data + pos + 8);
   pos += 8;
 
   // Filler (1 byte, 0x00)
   if (pos + 1 > len) {
-    last_error_ = "Invalid handshake: truncated filler";
+    if (error) *error = "Invalid handshake: truncated filler";
     return MES_ERR_AUTH;
   }
   pos += 1;
@@ -234,52 +231,52 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
   // Capability flags lower 2 bytes
   uint64_t cap_lower_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_lower_raw)) {
-    last_error_ = "Invalid handshake: truncated capabilities lower";
+    if (error) *error = "Invalid handshake: truncated capabilities lower";
     return MES_ERR_AUTH;
   }
   uint32_t cap_lower = static_cast<uint32_t>(cap_lower_raw);
 
   // Charset (1 byte)
   if (pos + 1 > len) {
-    last_error_ = "Invalid handshake: truncated charset";
+    if (error) *error = "Invalid handshake: truncated charset";
     return MES_ERR_AUTH;
   }
-  server_info_.charset = data[pos++];
+  out->charset = data[pos++];
 
   // Status flags (2 bytes LE)
   uint64_t status_flags_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &status_flags_raw)) {
-    last_error_ = "Invalid handshake: truncated status flags";
+    if (error) *error = "Invalid handshake: truncated status flags";
     return MES_ERR_AUTH;
   }
-  server_info_.status_flags = static_cast<uint16_t>(status_flags_raw);
+  out->status_flags = static_cast<uint16_t>(status_flags_raw);
 
   // Capability flags upper 2 bytes
   uint64_t cap_upper_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_upper_raw)) {
-    last_error_ = "Invalid handshake: truncated capabilities upper";
+    if (error) *error = "Invalid handshake: truncated capabilities upper";
     return MES_ERR_AUTH;
   }
   uint32_t cap_upper = static_cast<uint32_t>(cap_upper_raw);
 
-  server_info_.server_capabilities = cap_lower | (cap_upper << 16);
+  out->server_capabilities = cap_lower | (cap_upper << 16);
 
   // auth_plugin_data_length (1 byte)
   if (pos + 1 > len) {
-    last_error_ = "Invalid handshake: truncated auth data length";
+    if (error) *error = "Invalid handshake: truncated auth data length";
     return MES_ERR_AUTH;
   }
   uint8_t auth_plugin_data_len = data[pos++];
 
   // Reserved (10 bytes, zeros)
   if (pos + 10 > len) {
-    last_error_ = "Invalid handshake: truncated reserved bytes";
+    if (error) *error = "Invalid handshake: truncated reserved bytes";
     return MES_ERR_AUTH;
   }
   pos += 10;
 
   // auth_plugin_data_part_2
-  if (server_info_.server_capabilities & kClientSecureConnection) {
+  if (out->server_capabilities & kClientSecureConnection) {
     // Length of part2 to read: max(13, auth_plugin_data_len - 8)
     size_t part2_read_len = 13;
     if (auth_plugin_data_len > 8) {
@@ -288,7 +285,7 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
     }
 
     if (pos + part2_read_len > len) {
-      last_error_ = "Invalid handshake: truncated auth data part 2";
+      if (error) *error = "Invalid handshake: truncated auth data part 2";
       return MES_ERR_AUTH;
     }
 
@@ -307,32 +304,48 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
       part2_use_len = static_cast<size_t>(auth_plugin_data_len - 8 - 1);
     }
 
-    server_info_.auth_data.insert(server_info_.auth_data.end(), data + pos,
-                                  data + pos + part2_use_len);
+    out->auth_data.insert(out->auth_data.end(), data + pos, data + pos + part2_use_len);
     pos += part2_read_len;
   }
 
   // auth_plugin_name (NUL-terminated, if CLIENT_PLUGIN_AUTH)
-  if (server_info_.server_capabilities & kClientPluginAuth) {
+  if (out->server_capabilities & kClientPluginAuth) {
     if (pos < len) {
       const uint8_t* plugin_nul =
           static_cast<const uint8_t*>(std::memchr(data + pos, 0, len - pos));
       if (plugin_nul != nullptr) {
-        server_info_.auth_plugin_name.assign(reinterpret_cast<const char*>(data + pos),
-                                             reinterpret_cast<const char*>(plugin_nul));
+        out->auth_plugin_name.assign(reinterpret_cast<const char*>(data + pos),
+                                     reinterpret_cast<const char*>(plugin_nul));
         pos = static_cast<size_t>(plugin_nul - data) + 1;
       } else {
         // No NUL terminator: use remaining bytes
-        server_info_.auth_plugin_name.assign(reinterpret_cast<const char*>(data + pos),
-                                             reinterpret_cast<const char*>(data + len));
+        out->auth_plugin_name.assign(reinterpret_cast<const char*>(data + pos),
+                                     reinterpret_cast<const char*>(data + len));
       }
     }
   }
 
   // Default plugin if none specified
-  if (server_info_.auth_plugin_name.empty()) {
-    server_info_.auth_plugin_name = kPluginCachingSha2Password;
+  if (out->auth_plugin_name.empty()) {
+    out->auth_plugin_name = kPluginCachingSha2Password;
   }
+
+  return MES_OK;
+}
+
+}  // namespace detail
+
+mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& packet) {
+  // An ERR packet in place of a handshake means the server rejected the
+  // connection outright (too many connections, host blocked). It is a
+  // different packet shape and carries the real diagnostic.
+  if (packet.size() >= 4 && packet[0] == kPacketErr) {
+    return ProcessOkOrError(packet);
+  }
+
+  const mes_error_t rc = detail::ParseServerHandshakePayload(packet.data(), packet.size(),
+                                                             &server_info_, &last_error_);
+  if (rc != MES_OK) return rc;
 
   // The server version normally comes from the handshake's NUL-terminated
   // server-version field parsed above. If it is empty (malformed/stripped
@@ -504,7 +517,15 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
       }
 
       if (status == kCachingSha2FullAuthRequired) {
-        // Full authentication required
+        // Full authentication required.
+        //
+        // An active TLS session is not sufficient on its own: ssl_mode
+        // preferred/required encrypt the channel but authenticate nothing, so a
+        // MITM that terminates TLS with its own certificate would receive the
+        // cleartext password. The cleartext shortcut therefore stays gated on
+        // certificate verification rather than on encryption, and the
+        // preferred/required + cold-cache combination is directed to the
+        // opt-in RSA path by the error below.
         if (socket_.IsTlsActive() && ssl_mode_ >= MES_SSL_VERIFY_CA) {
           // Send cleartext password only over certificate-verified TLS.
           std::vector<uint8_t> cleartext_payload(password.begin(), password.end());
@@ -522,8 +543,14 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           // Require an explicit opt-in; verified TLS is the safe default.
           if (!allow_public_key_retrieval_) {
             last_error_ =
-                "caching_sha2_password full auth requires certificate-verified TLS; "
-                "unauthenticated public-key retrieval is disabled";
+                "caching_sha2_password full auth needs either certificate-verified TLS or "
+                "unauthenticated public-key retrieval, and this connection has neither "
+                "(ssl_mode=" +
+                std::to_string(ssl_mode_) + ", tls=" + (socket_.IsTlsActive() ? "on" : "off") +
+                "). Either raise ssl_mode to verify_ca (3) or verify_identity (4) so the "
+                "password can be sent over a verified TLS session, or set "
+                "allow_public_key_retrieval to fetch the server's RSA key over this "
+                "unverified channel";
             return MES_ERR_AUTH;
           }
 
@@ -757,6 +784,14 @@ mes_error_t MysqlConnection::ComputeAuthResponse(const std::string& plugin,
                                                  const std::string& password,
                                                  const std::vector<uint8_t>& salt,
                                                  std::vector<uint8_t>* response) {
+  // Validate the plugin before looking at the password. An empty password must
+  // not become a way past the allow-list: a server that names an unimplemented
+  // plugin has to be rejected regardless of what the credential looks like.
+  if (plugin != kPluginNativePassword && plugin != kPluginCachingSha2Password) {
+    last_error_ = "Unsupported auth plugin: " + plugin;
+    return MES_ERR_AUTH;
+  }
+
   if (password.empty()) {
     response->clear();
     return MES_OK;
@@ -773,16 +808,12 @@ mes_error_t MysqlConnection::ComputeAuthResponse(const std::string& plugin,
     return AuthNativePassword(password, salt.data(), salt.size(), response);
   }
 
-  if (plugin == kPluginCachingSha2Password) {
-    if (salt.size() < kMinCachingSha2SaltLen) {
-      last_error_ = "Auth salt too short for caching_sha2_password";
-      return MES_ERR_AUTH;
-    }
-    return AuthCachingSha2Password(password, salt.data(), salt.size(), response);
+  // caching_sha2_password: the only remaining possibility after the allow-list.
+  if (salt.size() < kMinCachingSha2SaltLen) {
+    last_error_ = "Auth salt too short for caching_sha2_password";
+    return MES_ERR_AUTH;
   }
-
-  last_error_ = "Unsupported auth plugin: " + plugin;
-  return MES_ERR_AUTH;
+  return AuthCachingSha2Password(password, salt.data(), salt.size(), response);
 }
 
 mes_error_t MysqlConnection::SendPacket(const std::vector<uint8_t>& payload) {

@@ -65,12 +65,13 @@ bool ParseTextResultRow(const std::vector<uint8_t>& payload, size_t column_count
  * @param deprecate_eof  Whether CLIENT_DEPRECATE_EOF is negotiated (default:
  *                       true)
  * @return MES_OK on success, MES_ERR_VALIDATION when MySQL returns an ERR
- *         packet, MES_ERR_STREAM on transport/protocol failure;
- *         MES_ERR_QUEUE_FULL when the 100,000-row or 64 MiB retained-result
- *         limit is exceeded. A transport, framing, row-decoding, or limit
- *         failure closes @p sock because
- *         a partially consumed result set cannot be safely followed by another
- *         command; reconnect before calling ExecuteQuery again.
+ *         packet, MES_ERR_STREAM on transport, framing or row-decoding
+ *         failure; MES_ERR_QUEUE_FULL when the 100,000-row or 64 MiB
+ *         retained-result limit is exceeded. The byte limit counts column
+ *         names as well as row values, since @p result retains both. A
+ *         transport, framing, row-decoding, or limit failure closes @p sock
+ *         because a partially consumed result set cannot be safely followed by
+ *         another command; reconnect before calling ExecuteQuery again.
  */
 mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResult* result,
                          std::string* error_msg, bool deprecate_eof = true);

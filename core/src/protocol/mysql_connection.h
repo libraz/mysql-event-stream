@@ -13,6 +13,7 @@
 #ifndef MES_PROTOCOL_MYSQL_CONNECTION_H_
 #define MES_PROTOCOL_MYSQL_CONNECTION_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -36,6 +37,27 @@ struct ServerHandshake {
   uint16_t status_flags = 0;
   std::string auth_plugin_name;
 };
+
+namespace detail {
+
+/**
+ * @brief Parse an Initial Handshake Packet v10 payload.
+ *
+ * Exposed separately from MysqlConnection so the parse can be unit-tested and
+ * fuzzed against arbitrary remote bytes without a live socket. The caller is
+ * responsible for the ERR-packet case: this function treats every input as a
+ * handshake and reports malformed ones as MES_ERR_AUTH.
+ *
+ * @param data   Packet payload; may be null when @p len is zero.
+ * @param len    Payload length in bytes.
+ * @param[out] out    Parsed handshake. Partially filled on failure.
+ * @param[out] error  Human-readable reason on failure. May be null.
+ * @return MES_OK on success, MES_ERR_AUTH on any malformed input.
+ */
+mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerHandshake* out,
+                                        std::string* error);
+
+}  // namespace detail
 
 /**
  * @brief MySQL connection with handshake and authentication support
