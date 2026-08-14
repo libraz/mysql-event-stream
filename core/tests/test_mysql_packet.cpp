@@ -5,12 +5,62 @@
 
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "protocol/mysql_packet.h"
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MES_TEST_CONTAINER_ANNOTATIONS 1
+#endif
+#elif defined(__SANITIZE_ADDRESS__)
+#define MES_TEST_CONTAINER_ANNOTATIONS 1
+#endif
+
+#if defined(MES_TEST_CONTAINER_ANNOTATIONS)
+extern "C" void __sanitizer_annotate_contiguous_container(const void* beg, const void* end,
+                                                          const void* old_mid, const void* new_mid);
+#endif
+
 namespace mes::protocol {
 namespace {
+
+/**
+ * @brief Treats a container's whole allocation as valid for the object's scope.
+ *
+ * A sanitizer-instrumented std::vector poisons the bytes between size() and
+ * capacity(), which is precisely the region a scrubbing test has to read. This
+ * lifts that poison for the read and restores it afterwards, so the rest of
+ * the suite keeps full container-overflow detection. Without a sanitizer it
+ * compiles away.
+ */
+class ScopedContiguousContainerFullyValid {
+ public:
+  ScopedContiguousContainerFullyValid(const void* begin, size_t capacity, size_t valid)
+      : begin_(static_cast<const uint8_t*>(begin)), capacity_(capacity), valid_(valid) {
+    Annotate(valid_, capacity_);
+  }
+
+  ~ScopedContiguousContainerFullyValid() { Annotate(capacity_, valid_); }
+
+  ScopedContiguousContainerFullyValid(const ScopedContiguousContainerFullyValid&) = delete;
+  ScopedContiguousContainerFullyValid& operator=(const ScopedContiguousContainerFullyValid&) =
+      delete;
+
+ private:
+  void Annotate([[maybe_unused]] size_t old_mid, [[maybe_unused]] size_t new_mid) const {
+#if defined(MES_TEST_CONTAINER_ANNOTATIONS)
+    if (begin_ == nullptr || capacity_ == 0) return;
+    __sanitizer_annotate_contiguous_container(begin_, begin_ + capacity_, begin_ + old_mid,
+                                              begin_ + new_mid);
+#endif
+  }
+
+  const uint8_t* begin_;
+  size_t capacity_;
+  size_t valid_;
+};
 
 // --- ReadFixedInt / WriteFixedInt round-trip ---
 
@@ -195,6 +245,35 @@ TEST(PacketBufferTest, ClearResetsSizeToZero) {
 
   pb.Clear();
   EXPECT_EQ(pb.Size(), 0u);
+}
+
+TEST(PacketBufferTest, ClearWipesPayloadBytesInPlace) {
+  // Handshake and cleartext-password packets pass through PacketBuffer, so the
+  // bytes must be scrubbed rather than merely forgotten. Clear() keeps the
+  // capacity, which lets the test inspect the very storage that held them.
+  PacketBuffer pb;
+  const std::string secret = "correct horse battery staple";
+  uint8_t seq = 0;
+  pb.WritePacket(reinterpret_cast<const uint8_t*>(secret.data()), secret.size(), &seq);
+
+  const uint8_t* storage = pb.Data();
+  const size_t written = pb.Size();
+  const size_t capacity = pb.Capacity();
+  ASSERT_EQ(written, 4u + secret.size());
+  ASSERT_LE(written, capacity);
+  ASSERT_EQ(std::memcmp(storage + 4, secret.data(), secret.size()), 0);
+
+  pb.Clear();
+  EXPECT_EQ(pb.Size(), 0u);
+  EXPECT_EQ(pb.Capacity(), capacity) << "Clear() must keep the storage it scrubbed";
+
+  // The scrubbed bytes now live between size() and capacity(), which a
+  // container-overflow-aware sanitizer poisons. Lift the annotation for the
+  // read: this region is exactly what the assertion is about.
+  ScopedContiguousContainerFullyValid unpoisoned(storage, capacity, 0);
+  for (size_t i = 0; i < written; ++i) {
+    EXPECT_EQ(storage[i], 0) << "byte " << i << " survived Clear()";
+  }
 }
 
 // --- ReadFixedInt width guard ---

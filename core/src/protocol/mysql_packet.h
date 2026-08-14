@@ -37,10 +37,22 @@ class SocketHandle;
  *
  * Accumulates one or more wire-format packets into an internal buffer.
  * Handles multi-packet splitting for payloads larger than 0xFFFFFF bytes.
+ *
+ * Handshake response and cleartext-password packets pass through this buffer,
+ * so both Clear() and the destructor wipe the accumulated bytes: a plain
+ * vector release would hand the credential back to the allocator intact.
  */
 class PacketBuffer {
  public:
-  /** @brief Clear the internal buffer */
+  PacketBuffer() = default;
+  ~PacketBuffer();
+
+  // Non-copyable: a copy would duplicate secret bytes into a buffer whose
+  // lifetime the original no longer controls.
+  PacketBuffer(const PacketBuffer&) = delete;
+  PacketBuffer& operator=(const PacketBuffer&) = delete;
+
+  /** @brief Wipe and clear the internal buffer */
   void Clear();
 
   /**
@@ -63,6 +75,15 @@ class PacketBuffer {
 
   /** @brief Total size of accumulated wire data in bytes */
   size_t Size() const;
+
+  /**
+   * @brief Bytes of storage the buffer currently holds.
+   *
+   * Clear() wipes but deliberately keeps this storage, so the retained region
+   * beyond Size() is where a credential would linger if the wipe regressed.
+   * Exposed so that can be asserted.
+   */
+  size_t Capacity() const;
 
  private:
   std::vector<uint8_t> buf_;

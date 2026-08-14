@@ -3,6 +3,8 @@
 
 #include "protocol/mysql_packet.h"
 
+#include <openssl/crypto.h>
+
 #include <cstring>
 
 #include "protocol/mysql_socket.h"
@@ -16,9 +18,25 @@ constexpr size_t kPacketHeaderSize = 4;         // 3 length + 1 sequence
 
 // --- PacketBuffer ---
 
-void PacketBuffer::Clear() { buf_.clear(); }
+PacketBuffer::~PacketBuffer() { Clear(); }
+
+void PacketBuffer::Clear() {
+  if (!buf_.empty()) {
+    // Wipe before the bytes become unreachable. Capacity is deliberately kept:
+    // shrinking here would release the very allocation we just scrubbed to the
+    // allocator, and the wipe must not be elided, hence OPENSSL_cleanse.
+    OPENSSL_cleanse(buf_.data(), buf_.size());
+  }
+  buf_.clear();
+}
 
 void PacketBuffer::WritePacket(const uint8_t* payload, size_t len, uint8_t* sequence_id) {
+  // Reserve the whole wire size up front. Growing incrementally would leave
+  // copies of already-written payload bytes in reallocated-away blocks that no
+  // longer belong to this buffer and can never be wiped.
+  const size_t packet_count = (len / kMaxPacketPayload) + 1;
+  buf_.reserve(buf_.size() + len + packet_count * kPacketHeaderSize);
+
   size_t offset = 0;
 
   // Split into chunks of kMaxPacketPayload
@@ -57,6 +75,8 @@ void PacketBuffer::WritePacket(const uint8_t* payload, size_t len, uint8_t* sequ
 const uint8_t* PacketBuffer::Data() const { return buf_.data(); }
 
 size_t PacketBuffer::Size() const { return buf_.size(); }
+
+size_t PacketBuffer::Capacity() const { return buf_.capacity(); }
 
 // --- ReadPacket ---
 

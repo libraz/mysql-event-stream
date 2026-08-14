@@ -6,6 +6,8 @@
  * @brief C ABI wrapper for BinlogClient
  */
 
+#include <openssl/crypto.h>
+
 #include <new>
 
 #include "client/binlog_client.h"
@@ -59,7 +61,14 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   cfg.max_queue_size = config->max_queue_size;
   cfg.allow_public_key_retrieval = config->allow_public_key_retrieval != 0;
 
-  return c->client.Connect(cfg);
+  const mes_error_t rc = c->client.Connect(cfg);
+  // BinlogClient keeps its own copy of the credential for reconnection; this
+  // staging copy is about to go back to the allocator, so wipe it rather than
+  // leaving the password readable in freed memory.
+  if (!cfg.password.empty()) {
+    OPENSSL_cleanse(cfg.password.data(), cfg.password.size());
+  }
+  return rc;
 }
 
 MES_API mes_error_t mes_client_start(mes_client_t* c) {
