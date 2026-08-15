@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pymysql
@@ -122,8 +123,6 @@ class MysqlClient:
         flavour has to gate the check before the version does: MariaDB 11.x
         would otherwise pass a bare major-version comparison.
         """
-        import os
-
         if os.environ.get("DB_FLAVOR") == "mariadb":
             return False
         major = self.server_version().split(".", 1)[0]
