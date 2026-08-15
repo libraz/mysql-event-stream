@@ -208,7 +208,17 @@ void CapiInstallUnconnectedMetadataFetcher(mes_engine_t* engine) {
 
 extern "C" {
 
-MES_API const char* mes_version(void) { return "1.6.1"; }
+/* Composed from the header macros so the reported version cannot drift from
+ * the one callers compile against. CheckVersionConsistency.cmake ties those
+ * macros to the CMake project version and to both binding manifests. */
+#define MES_STRINGIFY_EXPANDED(value) #value
+#define MES_STRINGIFY(value) MES_STRINGIFY_EXPANDED(value)
+
+#define MES_VERSION_STRING         \
+  MES_STRINGIFY(MES_VERSION_MAJOR) \
+  "." MES_STRINGIFY(MES_VERSION_MINOR) "." MES_STRINGIFY(MES_VERSION_PATCH)
+
+MES_API const char* mes_version(void) { return MES_VERSION_STRING; }
 
 MES_API uint32_t mes_abi_version(void) { return MES_ABI_VERSION; }
 

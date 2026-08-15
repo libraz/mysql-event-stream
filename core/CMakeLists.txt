@@ -154,7 +154,8 @@ target_include_directories(mes-shared PUBLIC
 
 set_target_properties(mes-shared PROPERTIES
   OUTPUT_NAME mes
-  VERSION 1.6.1
+  VERSION ${PROJECT_VERSION}
+  # Tracks MES_ABI_VERSION, not the package major; bump only when the ABI breaks.
   SOVERSION 1
 )
 

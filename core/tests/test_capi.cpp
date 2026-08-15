@@ -37,8 +37,15 @@ TEST(CApi, SizeofEventMatchesStruct) { EXPECT_EQ(mes_sizeof_event(), sizeof(mes_
 
 TEST(CApi, SizeofColumnMatchesStruct) { EXPECT_EQ(mes_sizeof_column(), sizeof(mes_column_t)); }
 
+// The literal version is not asserted here: it lives in the header macros, and
+// CheckVersionConsistency.cmake fails configuration when those drift from the
+// CMake project version or either binding manifest. What this asserts is that
+// mes_version() reports exactly what a caller compiles against.
 TEST(CApi, VersionAndAbiAreExposed) {
-  EXPECT_STREQ(mes_version(), "1.6.1");
+  const std::string expected = std::to_string(MES_VERSION_MAJOR) + "." +
+                               std::to_string(MES_VERSION_MINOR) + "." +
+                               std::to_string(MES_VERSION_PATCH);
+  EXPECT_EQ(mes_version(), expected);
   EXPECT_EQ(mes_abi_version(), MES_ABI_VERSION);
 }
 
