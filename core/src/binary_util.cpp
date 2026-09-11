@@ -12,6 +12,29 @@ namespace mes::binary {
 // Bytes needed for 1-9 remaining digits (used for NEWDECIMAL)
 static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
 
+// Largest value a full nine-digit DECIMAL group may hold (MySQL's DIG_MAX).
+static constexpr uint32_t kDecimalDigMax = 999999999;
+
+// 10^n for n = 0..9, bounding a partial DECIMAL group of n digits.
+static const uint32_t kPowers10[10] = {1,      10,      100,      1000,      10000,
+                                       100000, 1000000, 10000000, 100000000, 1000000000};
+
+/**
+ * @brief Read a big-endian DECIMAL group of @p bytes bytes, advancing @p ptr.
+ *
+ * The accumulator is unsigned on purpose: a group whose leading byte exceeds
+ * 0x7F would set bit 31 of a signed accumulator, which is signed-overflow
+ * undefined behaviour. Callers must range-check the returned magnitude against
+ * the group's declared digit count before using it.
+ */
+inline uint32_t ReadDecimalGroup(const uint8_t*& ptr, int bytes) {
+  uint32_t val = 0;
+  for (int i = 0; i < bytes; i++) {
+    val = (val << 8) | *ptr++;
+  }
+  return val;
+}
+
 /** @brief Calculate the binary size in bytes for a DECIMAL(precision, scale). */
 inline size_t DecimalBinarySize(uint8_t precision, uint8_t scale) {
   if (scale > precision) return 0;
@@ -130,12 +153,17 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   std::string result;
   result.reserve(static_cast<size_t>(precision) + 3);
 
+  // Every group is range-checked against the digit count it declares, the way
+  // bin2decimal() does: a group that cannot hold its own digits is not
+  // something a well-formed encoding produces, so the whole value is rejected
+  // rather than rendered as silently wrong numeric text.
+
   // Process integer remainder (leading partial group)
   if (intg_rem > 0) {
-    int bytes = kDig2Bytes[intg_rem];
-    int32_t val = 0;
-    for (int i = 0; i < bytes; i++) {
-      val = (val << 8) | *ptr++;
+    uint32_t val = ReadDecimalGroup(ptr, kDig2Bytes[intg_rem]);
+    if (val >= kPowers10[intg_rem]) {
+      bytes_consumed = 0;
+      return "";
     }
     if (val != 0) {
       result += std::to_string(val);
@@ -144,16 +172,17 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
 
   // Process full 4-byte groups in integer part
   for (int i = 0; i < intg0; i++) {
-    int32_t val = 0;
-    for (int j = 0; j < 4; j++) {
-      val = (val << 8) | *ptr++;
+    uint32_t val = ReadDecimalGroup(ptr, 4);
+    if (val > kDecimalDigMax) {
+      bytes_consumed = 0;
+      return "";
     }
     if (result.empty()) {
       if (val != 0) {
         result += std::to_string(val);
       }
     } else {
-      AppendPaddedInt(result, val, 9);
+      AppendPaddedInt(result, static_cast<int>(val), 9);
     }
   }
 
@@ -166,20 +195,21 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
     result += ".";
 
     for (int i = 0; i < frac0; i++) {
-      int32_t val = 0;
-      for (int j = 0; j < 4; j++) {
-        val = (val << 8) | *ptr++;
+      uint32_t val = ReadDecimalGroup(ptr, 4);
+      if (val > kDecimalDigMax) {
+        bytes_consumed = 0;
+        return "";
       }
-      AppendPaddedInt(result, val, 9);
+      AppendPaddedInt(result, static_cast<int>(val), 9);
     }
 
     if (frac_rem > 0) {
-      int bytes = kDig2Bytes[frac_rem];
-      int32_t val = 0;
-      for (int i = 0; i < bytes; i++) {
-        val = (val << 8) | *ptr++;
+      uint32_t val = ReadDecimalGroup(ptr, kDig2Bytes[frac_rem]);
+      if (val >= kPowers10[frac_rem]) {
+        bytes_consumed = 0;
+        return "";
       }
-      AppendPaddedInt(result, val, frac_rem);
+      AppendPaddedInt(result, static_cast<int>(val), frac_rem);
     }
   }
 

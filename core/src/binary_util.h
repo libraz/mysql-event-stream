@@ -231,11 +231,20 @@ uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
  * - Positive values: MSB set; to decode, XOR first byte with 0x80
  * - Negative values: MSB clear; to decode, XOR all bytes with 0xFF
  *
+ * Digits are carried in nine-digit groups, and each group is validated against
+ * the digit count it declares (a full group below 1e9, a partial group below
+ * 10^digits) exactly as bin2decimal() does. A group outside its range cannot
+ * come from a well-formed encoding, so the value is reported as malformed
+ * instead of decoded into silently wrong numeric text.
+ *
  * @param data Pointer to binary decimal data
+ * @param available Bytes readable at @p data
  * @param precision Total number of digits
  * @param scale Number of digits after decimal point
- * @param bytes_consumed Set to the number of bytes consumed
- * @return String representation of the decimal value
+ * @param bytes_consumed Set to the number of bytes consumed, or 0 if the input
+ *   is truncated or malformed
+ * @return String representation of the decimal value, or an empty string when
+ *   @p bytes_consumed is 0
  */
 std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision, uint8_t scale,
                           size_t& bytes_consumed);

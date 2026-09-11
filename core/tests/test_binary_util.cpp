@@ -5,6 +5,7 @@
 
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "binary_util.h"
 
@@ -749,6 +750,81 @@ TEST(CalcFieldSizeTest, StringCharEmptyBuffer) {
 TEST(CalcFieldSizeTest, VarStringEmptyBuffer) {
   EXPECT_EQ(CalcFieldSize(0xFD, nullptr, 0, 100), 0u);
   EXPECT_EQ(CalcFieldSize(0xFD, nullptr, 0, 500), 0u);
+}
+
+// --- DecodeDecimal group range validation ---
+
+// One DECIMAL wire encoding, written as the bytes a server would emit: the
+// sign bit is already folded into the first byte, and negative values are
+// stored complemented.
+struct DecimalCase {
+  const char* what;
+  uint8_t precision;
+  uint8_t scale;
+  std::vector<uint8_t> bytes;
+  const char* expected;
+};
+
+TEST(DecodeDecimalTest, RejectsGroupsOutsideTheirDigitRange) {
+  // Every group here carries more than the digits it declares, which no
+  // well-formed encoding produces. Groups past the first can also set bit 31,
+  // the case a signed accumulator could not assemble without overflowing.
+  const std::vector<DecimalCase> cases = {
+      {"second integer group with bit 31 set",
+       18,
+       0,
+       {0x80, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF},
+       ""},
+      {"second integer group one past nine digits",
+       18,
+       0,
+       {0x80, 0x00, 0x00, 0x01, 0x3B, 0x9A, 0xCA, 0x00},
+       ""},
+      {"negative second integer group one past nine digits",
+       18,
+       0,
+       {0x7F, 0xFF, 0xFF, 0xFE, 0xC4, 0x65, 0x35, 0xFF},
+       ""},
+      {"fractional group with bit 31 set", 11, 9, {0x8C, 0xFF, 0xFF, 0xFF, 0xFF}, ""},
+      {"fractional group one past nine digits", 11, 9, {0x8C, 0x3B, 0x9A, 0xCA, 0x00}, ""},
+      {"leading partial group past its digit count", 5, 0, {0x81, 0x86, 0xA0}, ""},
+      {"trailing partial group past its digit count", 2, 2, {0xFF}, ""},
+  };
+
+  for (const auto& c : cases) {
+    size_t consumed = 99;
+    EXPECT_EQ(DecodeDecimal(c.bytes.data(), c.bytes.size(), c.precision, c.scale, consumed), "")
+        << c.what;
+    EXPECT_EQ(consumed, 0u) << c.what;
+  }
+}
+
+TEST(DecodeDecimalTest, AcceptsGroupsAtTheirMaximum) {
+  // The largest value each group shape can hold: one byte below the encodings
+  // rejected above, so the bound admits everything a server can emit.
+  const std::vector<DecimalCase> cases = {
+      {"integer groups at nine digits",
+       18,
+       0,
+       {0x80, 0x00, 0x00, 0x01, 0x3B, 0x9A, 0xC9, 0xFF},
+       "1999999999"},
+      {"negative integer groups at nine digits",
+       18,
+       0,
+       {0x7F, 0xFF, 0xFF, 0xFE, 0xC4, 0x65, 0x36, 0x00},
+       "-1999999999"},
+      {"fractional group at nine digits", 11, 9, {0x8C, 0x3B, 0x9A, 0xC9, 0xFF}, "12.999999999"},
+      {"leading partial group at its digit count", 5, 0, {0x81, 0x86, 0x9F}, "99999"},
+      {"trailing partial group at its digit count", 2, 2, {0xE3}, "0.99"},
+  };
+
+  for (const auto& c : cases) {
+    size_t consumed = 0;
+    EXPECT_EQ(DecodeDecimal(c.bytes.data(), c.bytes.size(), c.precision, c.scale, consumed),
+              c.expected)
+        << c.what;
+    EXPECT_EQ(consumed, c.bytes.size()) << c.what;
+  }
 }
 
 }  // namespace
