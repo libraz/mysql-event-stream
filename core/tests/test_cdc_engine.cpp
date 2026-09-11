@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -1225,6 +1227,67 @@ TEST(CdcEngineTest, WarnsOnDestructionOnlyWhenNoIncludeFilterMatches) {
   LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr);
 
   EXPECT_EQ(g_include_filter_warning_count, 1);
+}
+
+// An engine held with static storage duration, the way a C++ consumer may keep
+// one in a global. Its destructor runs during process teardown, after the point
+// at which the logging state it emits through would ordinarily be destroyed.
+CdcEngine g_static_engine;
+
+void WriteMessageToStderr(mes_log_level_t, const char* message, void*) {
+  std::fputs(message, stderr);
+  std::fputc('\n', stderr);
+  std::fflush(stderr);
+}
+
+TEST(CdcEngineTest, StaticStorageEngineCompletesDestructionAtProcessExit) {
+  // The child gives the static engine an include filter that matches nothing,
+  // so its destructor has a warning to emit, installs a callback (initializing
+  // the logging state, hence after the engine was constructed) and exits. The
+  // warning reaching stderr together with the exit status shows the destructor
+  // ran to completion against logging machinery that was still alive.
+  EXPECT_EXIT(
+      {
+        g_static_engine.SetIncludeTables({"mydb.missing"});
+        const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+                                          1000, 100, BuildTableMapBody(1, "mydb", "users"));
+        g_static_engine.Feed(table_map.data(), table_map.size());
+        LogConfig::SetCallback(WriteMessageToStderr, MES_LOG_WARN, nullptr);
+        std::exit(0);
+      },
+      ::testing::ExitedWithCode(0), "event=include_filter_matched_nothing");
+}
+
+// A second static engine, used to keep decoded rows queued past the end of
+// main(). Nothing in CdcEngine's constructor allocates a row, so the memory
+// resource backing RowData::columns is first used later than this engine was
+// constructed.
+CdcEngine g_static_queued_rows_engine;
+
+TEST(CdcEngineTest, StaticStorageEngineDestroysQueuedRowsAtProcessExit) {
+  // The child queues several row events and deliberately never drains them, so
+  // the pmr::vector<ColumnValue> of each one is still owned by the engine when
+  // its destructor runs at process teardown. A clean exit shows those vectors
+  // deallocated into a memory resource that was still alive at that point.
+  EXPECT_EXIT(
+      {
+        const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+                                          1000, 100, BuildTableMapBody(42, "testdb", "users"));
+        const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                      150, BuildWriteRowsBody(42, 7777));
+        g_static_queued_rows_engine.Feed(table_map.data(), table_map.size());
+        for (int i = 0; i < 8; ++i) {
+          g_static_queued_rows_engine.Feed(write.data(), write.size());
+        }
+        if (!g_static_queued_rows_engine.HasEvents()) {
+          std::fputs("no rows queued\n", stderr);
+          std::exit(1);
+        }
+        std::fputs("rows left queued\n", stderr);
+        std::fflush(stderr);
+        std::exit(0);
+      },
+      ::testing::ExitedWithCode(0), "rows left queued");
 }
 
 TEST(CdcEngineTest, ExcludeTableUnqualifiedName) {

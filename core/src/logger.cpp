@@ -4,25 +4,41 @@
 #include "logger.h"
 
 #include <mutex>
+#include <new>
 
 namespace mes {
 
 namespace {
 
-// Serializes updates to snapshot_. Reads take a local shared_ptr copy
-// under the same lock, which is cheap (atomic refcount bump) and ensures
-// that the observed (callback, level, userdata) triple is always internally
-// consistent. std::atomic<std::shared_ptr> is C++20-only; this lock is the
-// portable C++17 equivalent.
-std::mutex& SnapshotMutex() {
-  static std::mutex m;
-  return m;
+/// The snapshot and the mutex serializing updates to it.
+///
+/// Reads take a local shared_ptr copy under the same lock, which is cheap (an
+/// atomic refcount bump) and ensures the observed (callback, level, userdata)
+/// triple is always internally consistent. std::atomic<std::shared_ptr> is
+/// C++20-only; this lock is the portable C++17 equivalent.
+struct LogState {
+  std::mutex mutex;
+  std::shared_ptr<const LogConfigSnapshot> snapshot = std::make_shared<const LogConfigSnapshot>();
+};
+
+/// @brief The process-wide logging state, constructed on first use and never
+///        destroyed.
+///
+/// A consumer may own an engine with static storage duration, and an engine
+/// emits log messages from its own destructor. Ordinary function-local statics
+/// here are initialized on the first log call, hence after such an engine, and
+/// are therefore destroyed before it: locking the mutex or reading the snapshot
+/// during static teardown would then touch objects whose lifetime has already
+/// ended. Constructing into static storage that is never reclaimed keeps both
+/// valid for the whole process lifetime, and unlike a leaked heap allocation it
+/// gives the leak sanitizers nothing to report.
+LogState& State() {
+  alignas(LogState) static unsigned char storage[sizeof(LogState)];
+  static LogState* state = new (storage) LogState();
+  return *state;
 }
 
 }  // namespace
-
-std::shared_ptr<const LogConfigSnapshot> LogConfig::snapshot_ =
-    std::make_shared<const LogConfigSnapshot>();
 
 void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t log_level,
                             void* userdata) {
@@ -30,13 +46,15 @@ void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t log_lev
   next->callback = callback;
   next->level = log_level;
   next->userdata = userdata;
-  std::lock_guard<std::mutex> lock(SnapshotMutex());
-  snapshot_ = std::move(next);
+  LogState& state = State();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.snapshot = std::move(next);
 }
 
 std::shared_ptr<const LogConfigSnapshot> LogConfig::GetSnapshot() {
-  std::lock_guard<std::mutex> lock(SnapshotMutex());
-  return snapshot_;
+  LogState& state = State();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.snapshot;
 }
 
 mes_log_callback_t LogConfig::GetCallback() { return GetSnapshot()->callback; }

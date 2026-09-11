@@ -4,7 +4,6 @@
 #ifndef MES_LOGGER_H_
 #define MES_LOGGER_H_
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -30,6 +29,10 @@ struct LogConfigSnapshot {
  * previous per-field std::atomic layout permitted a reader to observe a
  * torn configuration where, for example, the old callback was paired with
  * the new userdata.
+ *
+ * The snapshot and its mutex live in storage that is never reclaimed, so an
+ * object with static storage duration can still log from its destructor during
+ * process teardown, whatever the destruction order turns out to be.
  */
 class LogConfig {
  public:
@@ -44,11 +47,6 @@ class LogConfig {
 
   /** @brief Get a consistent snapshot of the current configuration. */
   static std::shared_ptr<const LogConfigSnapshot> GetSnapshot();
-
- private:
-  // Owned snapshot. Accessed via std::atomic<std::shared_ptr> free functions
-  // so that updates and reads are race-free without exposing the lock.
-  static std::shared_ptr<const LogConfigSnapshot> snapshot_;
 };
 
 /** @brief Structured log entry builder with fluent API.

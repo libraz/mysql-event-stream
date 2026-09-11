@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -180,10 +181,22 @@ struct ColumnValue {
  * small, same-shaped allocations made by RowData::columns across events and
  * consumer threads.  Individual string/blob payloads retain their normal
  * ownership and are bounded by the parser and column decoders.
+ *
+ * The pool is constructed on first use and never destroyed. A consumer may hold
+ * an engine with static storage duration whose queued ChangeEvents still own
+ * rows allocated here; an ordinary function-local static is initialized on the
+ * first row decode, hence after such an engine, and would therefore be
+ * destroyed before it, leaving those rows to deallocate into a pool whose
+ * lifetime has already ended. Constructing into static storage that is never
+ * reclaimed keeps the resource valid for the whole process lifetime whatever
+ * order the consumer's own statics were initialized in, and unlike a leaked
+ * heap allocation it gives the leak sanitizers nothing to report.
  */
 inline std::pmr::memory_resource* RowColumnMemoryResource() {
-  static std::pmr::synchronized_pool_resource resource;
-  return &resource;
+  using PoolResource = std::pmr::synchronized_pool_resource;
+  alignas(PoolResource) static unsigned char storage[sizeof(PoolResource)];
+  static PoolResource* resource = new (storage) PoolResource();
+  return resource;
 }
 
 /**
