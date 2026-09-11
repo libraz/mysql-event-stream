@@ -93,6 +93,24 @@ OPTION_RANGES: dict[str, OptionRange] = {
     "start_binlog_position": OptionRange(0, 4294967295),
 }
 
+
+class ConditionalMinimum(NamedTuple):
+    """Floor that holds for an option only while its companion option is set."""
+
+    minimum: int
+    companion: str
+
+
+#: Floors that hold only while a companion option is set. :data:`OPTION_RANGES`
+#: keeps the unconditional window, which stays in force otherwise:
+#: ``start_binlog_position`` is left at 0 when no file/offset start was
+#: requested, so the tighter floor applies only once ``start_binlog_file`` names
+#: a file. The first binlog event begins after the file's 4-byte magic number,
+#: so an offset into a named file cannot be below 4.
+CONDITIONAL_OPTION_MINIMUMS: dict[str, ConditionalMinimum] = {
+    "start_binlog_position": ConditionalMinimum(minimum=4, companion="start_binlog_file"),
+}
+
 # Accepted max_events window for a batched poll.
 POLL_BATCH_DEFAULT_MAX_EVENTS = 64
 POLL_BATCH_MIN_MAX_EVENTS = 1

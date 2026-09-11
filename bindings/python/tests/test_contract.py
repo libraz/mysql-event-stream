@@ -10,12 +10,16 @@ from __future__ import annotations
 import contextlib
 import inspect
 import io
+import re
 import warnings
+from collections.abc import Iterator
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mysql_event_stream._contract import (
+    CONDITIONAL_OPTION_MINIMUMS,
     LOG_LEVEL_DEFAULT,
     LOG_LEVEL_MAX,
     LOG_LEVEL_MIN,
@@ -36,9 +40,30 @@ from mysql_event_stream.client import BinlogClient, validate_poll_batch_size
 from mysql_event_stream.logging import set_log_callback
 from mysql_event_stream.stream import CdcStream
 
-from .contract_fixture import load_binding_contract
+from .contract_fixture import load_binding_contract, load_header_field_doc
 
 contract = load_binding_contract()
+
+#: Start-position offset the contract declares a conditional floor for.
+START_POSITION = next(
+    (option for option in contract["options"] if option["canonical"] == "startBinlogPosition"),
+    None,
+)
+
+#: How a supplied offset relates to the windows the contract states. Crossed
+#: with the companion file option's two states and with both entry points that
+#: accept the option, this enumerates the whole start-position surface instead
+#: of sampling it.
+POSITION_CLASSES = (
+    "omitted",
+    "range_minimum",
+    "below_floor",
+    "at_floor",
+    "at_maximum",
+    "above_maximum",
+)
+
+_HEADER_WINDOW = re.compile(r"(\d+) through UINT32_MAX")
 
 
 def _start_position_of(stream: CdcStream) -> dict[str, Any]:
@@ -60,6 +85,68 @@ def _config_for(start: dict[str, Any]) -> dict[str, Any]:
     if start["startBinlogPosition"] is not None:
         kwargs["start_binlog_position"] = start["startBinlogPosition"]
     return kwargs
+
+
+def _position_for(option: dict[str, Any], position_class: str) -> int | None:
+    """Return the offset a class stands for, derived from the contract's numbers."""
+    values = {
+        "omitted": None,
+        "range_minimum": option["min"],
+        "below_floor": option["minWhenFileSet"] - 1,
+        "at_floor": option["minWhenFileSet"],
+        "at_maximum": option["max"],
+        "above_maximum": option["max"] + 1,
+    }
+    return values[position_class]
+
+
+def _rejects(
+    option: dict[str, Any], file_set: bool, position: int | None, entry_point: str
+) -> bool:
+    """Report whether an entry point must refuse one combination.
+
+    ``options`` is the shared option table, which range-checks each key on its
+    own and so never sees the companion; ``client`` is the connect path, the
+    only place the conditional floor applies. An offset supplied without a file
+    is currently accepted and silently ignored here while the Node surface
+    refuses it outright: the two surfaces disagree, and this predicate pins
+    what each one does today rather than stating what it should do.
+    """
+    if position is not None and (position < option["min"] or position > option["max"]):
+        return True
+    if entry_point == "options":
+        return False
+    if not file_set:
+        return False
+    # An omitted offset reaches the check as the constructor's default, which
+    # is below the floor.
+    default = inspect.signature(BinlogClient.__init__).parameters[option["python"]].default
+    return (default if position is None else position) < option["minWhenFileSet"]
+
+
+def _case_kwargs(option: dict[str, Any], file_set: bool, position: int | None) -> dict[str, Any]:
+    """Build the option subset one case supplies, leaving everything else unset."""
+    kwargs: dict[str, Any] = {}
+    if file_set:
+        kwargs[option["fileOption"]["python"]] = "binlog.000001"
+    if position is not None:
+        kwargs[option["python"]] = position
+    return kwargs
+
+
+@contextlib.contextmanager
+def _mocked_client_library() -> Iterator[None]:
+    """Stand in for libmes so a client can be built and connected without a server."""
+    lib = MagicMock()
+    lib.mes_client_create.return_value = 0xDEAD
+    lib.mes_client_set_max_event_size.return_value = 0
+    lib.mes_client_set_max_queue_bytes.return_value = 0
+    lib.mes_client_connect.return_value = 0
+    with (
+        patch("mysql_event_stream.client.get_library", return_value=lib),
+        patch("mysql_event_stream.client.load_client_library", return_value=True),
+    ):
+        yield
 
 
 class TestBindingContract:
@@ -141,6 +228,73 @@ class TestBindingContract:
                 continue
             with pytest.raises(ValueError):
                 validate_option(name, maximum + 1)
+
+    def test_mirrors_the_contract_conditional_start_position_floor(self) -> None:
+        assert START_POSITION is not None, "startBinlogPosition declared in the contract options"
+        option = START_POSITION
+        assert isinstance(option["minWhenFileSet"], int), "conditional floor stated in the contract"
+        assert option["fileOption"]["python"] == "start_binlog_file"
+
+        # The floor is conditional, so the stated range keeps a lower minimum:
+        # the value the constructor passes when no file/offset start was
+        # requested has to stay acceptable.
+        unset = inspect.signature(BinlogClient.__init__).parameters[option["python"]].default
+        assert option["min"] <= unset < option["minWhenFileSet"]
+        validate_option(option["python"], unset)
+
+        assert CONDITIONAL_OPTION_MINIMUMS[option["python"]] == (
+            option["minWhenFileSet"],
+            option["fileOption"]["python"],
+        )
+
+    def test_documents_the_contract_start_position_floor_in_the_abi_header(self) -> None:
+        assert START_POSITION is not None
+        documented = load_header_field_doc("binlog_position")
+        window = _HEADER_WINDOW.search(documented)
+        assert window is not None, f"mes.h states an accepted offset window: {documented}"
+        assert int(window.group(1)) == START_POSITION["minWhenFileSet"]
+        # UINT32_MAX as the header spells the upper bound the contract states.
+        assert START_POSITION["max"] == 2**32 - 1
+        # The header states the same trigger the contract does: the floor holds
+        # for a file/offset start, not for every offset the field can carry.
+        assert "MES_START_AT_POSITION" in documented
+        # A parse that stops matching has to fail rather than hand back nothing
+        # for the assertions above to pass over.
+        with pytest.raises(RuntimeError):
+            load_header_field_doc("no_such_field")
+
+    def test_applies_the_start_position_floor_only_when_the_companion_file_is_set(self) -> None:
+        assert START_POSITION is not None
+        option = START_POSITION
+        floor = option["minWhenFileSet"]
+
+        for file_set in (False, True):
+            for position_class in POSITION_CLASSES:
+                position = _position_for(option, position_class)
+                kwargs = _case_kwargs(option, file_set, position)
+                label = f"{position_class}, file {'set' if file_set else 'unset'}"
+
+                if position is not None:
+                    if _rejects(option, file_set, position, "options"):
+                        with pytest.raises(ValueError):
+                            validate_option(option["python"], position)
+                    else:
+                        validate_option(option["python"], position)
+
+                with _mocked_client_library():
+                    if _rejects(option, file_set, position, "client"):
+                        with pytest.raises(ValueError) as rejection:
+                            BinlogClient(**kwargs).connect()
+                        # A refusal the floor itself decides names the option
+                        # and the floor; the stated range is another refusal
+                        # with its own wording.
+                        if position is None or position <= option["max"]:
+                            assert option["python"] in str(rejection.value), label
+                            assert str(floor) in str(rejection.value), label
+                    else:
+                        client = BinlogClient(**kwargs)
+                        client.connect()
+                        client.close()
 
     def test_enforces_the_contract_poll_batch_window(self) -> None:
         assert contract["pollBatch"]["defaultMaxEvents"] == POLL_BATCH_DEFAULT_MAX_EVENTS

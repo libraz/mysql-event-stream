@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from "vitest";
+import { BinlogClient } from "../src/client.js";
 import {
   backoffDelayMs,
+  CONDITIONAL_OPTION_MINIMUMS,
   LOG_LEVEL_RANGE,
   METADATA_ERROR_DEFAULT,
   NON_RETRYABLE_ERROR_CODES,
@@ -14,9 +16,14 @@ import {
 } from "../src/contract.js";
 import { setLogCallback } from "../src/logging.js";
 import { CdcStream } from "../src/stream.js";
-import type { StreamConfig } from "../src/types.js";
+import { MesErrorCode, type StreamConfig } from "../src/types.js";
 import { validatePollBatchSize, validateStreamOptions } from "../src/validation.js";
-import { loadBindingContract, type StartPosition } from "./contract-fixture.js";
+import {
+  type ContractOption,
+  loadBindingContract,
+  loadHeaderFieldDoc,
+  type StartPosition,
+} from "./contract-fixture.js";
 
 const contract = loadBindingContract();
 
@@ -73,6 +80,88 @@ function captureStderr(body: () => void): string[] {
     process.stderr.write = original;
   }
   return written;
+}
+
+/** Start-position offset the contract declares a conditional floor for. */
+const startPosition = contract.options.find((option) => option.canonical === "startBinlogPosition");
+
+/**
+ * How a supplied offset relates to the windows the contract states. Crossed
+ * with the companion file option's two states and with both entry points that
+ * accept the option, this enumerates the whole start-position surface instead
+ * of sampling it.
+ */
+const POSITION_CLASSES = [
+  "omitted",
+  "rangeMinimum",
+  "belowFloor",
+  "atFloor",
+  "atMaximum",
+  "aboveMaximum",
+] as const;
+
+type PositionClass = (typeof POSITION_CLASSES)[number];
+
+/** Offset each class stands for, derived from the contract's own numbers. */
+function positionFor(option: ContractOption, positionClass: PositionClass): number | undefined {
+  const floor = option.minWhenFileSet as number;
+  const maximum = option.max as number;
+  switch (positionClass) {
+    case "omitted":
+      return undefined;
+    case "rangeMinimum":
+      return option.min as number;
+    case "belowFloor":
+      return floor - 1;
+    case "atFloor":
+      return floor;
+    case "atMaximum":
+      return maximum;
+    case "aboveMaximum":
+      return maximum + 1;
+  }
+}
+
+/**
+ * Whether an entry point must refuse one combination.
+ *
+ * `options` is the shared option table, which range-checks each key on its own
+ * and so never sees the companion; `client` is the native config parse, the
+ * only place the conditional floor applies. An offset supplied without a file
+ * is currently refused outright here while the Python surface accepts and
+ * silently ignores it: the two surfaces disagree, and this predicate pins what
+ * each one does today rather than stating what it should do.
+ */
+function rejects(
+  option: ContractOption,
+  fileSet: boolean,
+  position: number | undefined,
+  entryPoint: "options" | "client",
+): boolean {
+  if (
+    position !== undefined &&
+    (position < (option.min as number) || position > (option.max as number))
+  ) {
+    return true;
+  }
+  if (entryPoint === "options") return false;
+  if (fileSet) {
+    // An omitted offset reaches the parse as unset, which is below the floor.
+    return (position ?? 0) < (option.minWhenFileSet as number);
+  }
+  return position !== undefined;
+}
+
+/** Build the option subset one case supplies, leaving everything else unset. */
+function caseConfig(
+  option: ContractOption,
+  fileSet: boolean,
+  position: number | undefined,
+): Partial<StreamConfig> {
+  const config: Record<string, unknown> = {};
+  if (fileSet) config[option.fileOption?.node as string] = "binlog.000001";
+  if (position !== undefined) config[option.node] = position;
+  return config as Partial<StreamConfig>;
 }
 
 describe("binding contract", () => {
@@ -177,6 +266,91 @@ describe("binding contract", () => {
         () => validateStreamOptions({ [option.node]: option.max + 1 } as Partial<StreamConfig>),
         `${option.node} above maximum`,
       ).toThrow();
+    }
+  });
+
+  it("mirrors the contract's conditional start-position floor", () => {
+    expect(startPosition, "startBinlogPosition declared in the contract options").toBeDefined();
+    const option = startPosition as ContractOption;
+    expect(typeof option.minWhenFileSet, "conditional floor stated in the contract").toBe("number");
+    expect(option.fileOption?.node, "companion option named for this surface").toBe(
+      "startBinlogFile",
+    );
+    // The floor is conditional, so the stated range keeps a lower minimum: a
+    // zero-initialized config carries 0 to mean no file/offset start was
+    // requested, and raising the stated minimum to the floor would refuse it.
+    expect(option.min).toBe(0);
+    expect(option.min).toBeLessThan(option.minWhenFileSet as number);
+
+    expect(CONDITIONAL_OPTION_MINIMUMS[option.node as "startBinlogPosition"]).toEqual({
+      minimum: option.minWhenFileSet,
+      companion: option.fileOption?.node,
+    });
+  });
+
+  it("documents the contract's start-position floor in the C ABI header", () => {
+    const option = startPosition as ContractOption;
+    const documented = loadHeaderFieldDoc("binlog_position");
+    const window = documented.match(/(\d+) through UINT32_MAX/);
+    expect(window, `mes.h states an accepted offset window: ${documented}`).not.toBeNull();
+    expect(Number((window as RegExpMatchArray)[1])).toBe(option.minWhenFileSet);
+    // UINT32_MAX as the header spells the upper bound the contract states.
+    expect(option.max).toBe(2 ** 32 - 1);
+    // The header states the same trigger the contract does: the floor holds for
+    // a file/offset start, not for every offset the field can carry.
+    expect(documented).toContain("MES_START_AT_POSITION");
+    // A parse that stops matching has to fail rather than hand back nothing
+    // for the assertions above to pass over.
+    expect(() => loadHeaderFieldDoc("no_such_field")).toThrow();
+  });
+
+  it("applies the start-position floor exactly when the companion file is set", () => {
+    const option = startPosition as ContractOption;
+    const floor = option.minWhenFileSet as number;
+    // No server listens here, so a config the native parse accepts fails at the
+    // connection instead — which is how acceptance is observed.
+    const unreachablePort = 19999;
+
+    for (const fileSet of [false, true]) {
+      for (const positionClass of POSITION_CLASSES) {
+        const position = positionFor(option, positionClass);
+        const config = caseConfig(option, fileSet, position);
+        const label = `${positionClass}, file ${fileSet ? "set" : "unset"}`;
+
+        const optionsCall = () => validateStreamOptions(config);
+        if (rejects(option, fileSet, position, "options")) {
+          expect(optionsCall, `shared options reject ${label}`).toThrow();
+        } else {
+          expect(optionsCall, `shared options accept ${label}`).not.toThrow();
+        }
+
+        let thrown: unknown;
+        try {
+          new BinlogClient({ host: "127.0.0.1", port: unreachablePort, ...config }).destroy();
+        } catch (error) {
+          thrown = error;
+        }
+        const code = (thrown as { code?: number } | undefined)?.code;
+        if (rejects(option, fileSet, position, "client")) {
+          expect(code, `client rejects ${label}`).toBe(MesErrorCode.InvalidArg);
+          // A refusal the floor itself decides names the option and the floor.
+          // The pair being required together, and the stated range, are other
+          // refusals with their own wording.
+          const floorDecided =
+            fileSet &&
+            position !== undefined &&
+            position >= (option.min as number) &&
+            position < floor;
+          if (floorDecided) {
+            const message = String((thrown as Error).message);
+            expect(message, `rejection cites the option for ${label}`).toContain(option.node);
+            expect(message, `rejection cites the floor for ${label}`).toContain(String(floor));
+          }
+        } else {
+          expect(thrown, `client reaches the connection for ${label}`).toBeDefined();
+          expect(code, `client accepts ${label}`).not.toBe(MesErrorCode.InvalidArg);
+        }
+      }
     }
   });
 

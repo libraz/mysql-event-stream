@@ -89,6 +89,25 @@ export const OPTION_RANGES = {
   startBinlogPosition: { min: 0, max: 4294967295 },
 } as const satisfies Record<string, OptionRange>;
 
+/** A floor that holds for an option only while its companion option is set. */
+export interface ConditionalMinimum {
+  readonly minimum: number;
+  /** Option whose presence brings the floor into force. */
+  readonly companion: string;
+}
+
+/**
+ * Floors that hold only while a companion option is set. {@link OPTION_RANGES}
+ * keeps the unconditional window, which stays in force otherwise:
+ * `startBinlogPosition` is left at 0 when no file/offset start was requested,
+ * so the tighter floor applies only once `startBinlogFile` names a file. The
+ * first binlog event begins after the file's 4-byte magic number, so an offset
+ * into a named file cannot be below 4.
+ */
+export const CONDITIONAL_OPTION_MINIMUMS = {
+  startBinlogPosition: { minimum: 4, companion: "startBinlogFile" },
+} as const satisfies Record<string, ConditionalMinimum>;
+
 /** Accepted `maxEvents` window for a batched poll. */
 export const POLL_BATCH = {
   defaultMaxEvents: 64,
