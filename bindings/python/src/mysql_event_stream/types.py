@@ -160,8 +160,11 @@ class ChangeEvent:
     - Character and BLOB-family columns follow their charset, so a TEXT column
       declared with a binary collation arrives as ``bytes`` and a BLOB with a
       text collation as ``str``. This distinction uses TABLE_MAP charset
-      metadata. With ``binlog_row_metadata=NO_LOG``, BLOB-family columns
-      conservatively remain ``bytes``.
+      metadata. With ``binlog_row_metadata=NO_LOG`` that metadata is absent and
+      both the character and the BLOB families conservatively remain ``bytes``,
+      because each text/binary pair shares one binlog type byte and bytes are
+      then the only lossless reading. MINIMAL or FULL restores ``str`` for the
+      character families.
       Invalid UTF-8 bytes use Python's ``surrogateescape`` handler, so a later
       ``value.encode("utf-8", errors="surrogateescape")`` round-trips the
       original bytes. Such strings are not directly JSON-serializable.
