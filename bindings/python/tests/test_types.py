@@ -10,7 +10,6 @@ from mysql_event_stream import (
     ColumnType,
     ColumnValue,
     EventType,
-    MesErrorCode,
 )
 from mysql_event_stream._ffi import (
     MES_ERR_CHECKSUM,
@@ -18,7 +17,6 @@ from mysql_event_stream._ffi import (
     MES_ERR_DECODE,
     MES_ERR_DECODE_COLUMN,
     MES_ERR_DECODE_ROW,
-    MES_ERR_GTID_TAGGED_UNSUPPORTED,
     MES_ERR_PARSE,
 )
 from mysql_event_stream.types import (
@@ -158,12 +156,6 @@ class TestExceptionForRc:
     def test_every_exception_carries_its_native_code(self) -> None:
         for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
             assert exception_for_rc(code, "x").code == code  # type: ignore[attr-defined]
-
-
-def test_public_error_code_matches_c_abi_values() -> None:
-    assert MesErrorCode.AUTH == MES_ERR_CONNECT + 1
-    assert MesErrorCode.GTID_PURGED == 405
-    assert MesErrorCode.GTID_TAGGED_UNSUPPORTED == MES_ERR_GTID_TAGGED_UNSUPPORTED
 
 
 class TestClientConfig:

@@ -19,6 +19,18 @@ from mysql_event_stream._ffi import (
 from mysql_event_stream.client import BinlogClient
 from mysql_event_stream.types import ServerFlavor
 
+from .abi_fixture import load_abi_enums
+
+_abi_enums = load_abi_enums()
+
+# The native flavor code as the C ABI header declares it. Seeding a mock that
+# stands in for the C ABI with ServerFlavor.MARIADB instead would compare the
+# enum against itself and pass whatever value it held.
+MARIADB_NATIVE_FLAVOR = _abi_enums["mes_server_flavor_t"]["MES_SERVER_FLAVOR_MARIADB"]
+
+# mes_start_position_mode_t, which connect() selects with bare integers.
+START_POSITION_MODE = _abi_enums["mes_start_position_mode_t"]
+
 
 def test_client_ffi_signatures_are_applied_to_the_real_library(lib_path: str) -> None:
     """Exercise load_client_library instead of replacing both FFI layers with mocks."""
@@ -298,11 +310,12 @@ class TestClientClose:
     ) -> None:
         lib = MagicMock()
         lib.mes_client_create.return_value = 0xDEAD
-        lib.mes_client_flavor.return_value = ServerFlavor.MARIADB
+        lib.mes_client_flavor.return_value = MARIADB_NATIVE_FLAVOR
         mock_load.return_value = lib
 
         client = BinlogClient()
         assert client.flavor is ServerFlavor.MARIADB
+        lib.mes_client_flavor.assert_called_once_with(0xDEAD)
         client.close()
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
@@ -375,14 +388,14 @@ class TestClientClose:
         current = BinlogClient()
         current.connect()
         current_config = lib.mes_client_connect.call_args.args[1]._obj
-        assert current_config.start_position_mode == 0
+        assert current_config.start_position_mode == START_POSITION_MODE["MES_START_AT_CURRENT"]
         current.close()
 
         lib.mes_client_connect.reset_mock()
         empty = BinlogClient(start_gtid="")
         empty.connect()
         empty_config = lib.mes_client_connect.call_args.args[1]._obj
-        assert empty_config.start_position_mode == 1
+        assert empty_config.start_position_mode == START_POSITION_MODE["MES_START_AT_GTID"]
         assert empty_config.start_gtid == b""
         empty.close()
 
@@ -390,7 +403,7 @@ class TestClientClose:
         position = BinlogClient(start_binlog_file="binlog.000123", start_binlog_position=9876)
         position.connect()
         position_config = lib.mes_client_connect.call_args.args[1]._obj
-        assert position_config.start_position_mode == 2
+        assert position_config.start_position_mode == START_POSITION_MODE["MES_START_AT_POSITION"]
         assert position_config.binlog_file == b"binlog.000123"
         assert position_config.binlog_position == 9876
         position.close()
@@ -670,7 +683,7 @@ class TestNonOwnerCallsDoNotQueueBehindAPoll:
         lib.mes_client_crc_errors.return_value = 3
         lib.mes_client_current_gtid.return_value = b"uuid:1-9"
         lib.mes_client_last_error.return_value = b"reader stalled"
-        lib.mes_client_flavor.return_value = ServerFlavor.MARIADB
+        lib.mes_client_flavor.return_value = MARIADB_NATIVE_FLAVOR
         mock_load.return_value = lib
 
         poll_entered = threading.Event()
