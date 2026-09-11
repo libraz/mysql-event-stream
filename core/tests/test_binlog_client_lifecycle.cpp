@@ -32,6 +32,15 @@
 #endif
 
 namespace mes {
+
+/** @brief Reads the credential the client retains after Connect(). */
+class BinlogClientTestAccess {
+ public:
+  static const std::string& RetainedPassword(const BinlogClient& client) {
+    return client.config_.password;
+  }
+};
+
 namespace {
 
 #ifdef _WIN32
@@ -357,6 +366,72 @@ TEST(BinlogClientLifecycle, StartStreamRejectsAQueueBudgetBelowOneMaxSizedEvent)
   EXPECT_EQ(client.StartStream(), MES_ERR_INVALID_ARG);
   EXPECT_FALSE(client.IsStreaming());
   client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, PollAfterARejectedStartReturnsInsteadOfWaitingForAProducer) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream);
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 2)), MES_OK) << client.GetLastError();
+
+  client.SetMaxEventSize(4096);
+  client.SetMaxQueueBytes(MinQueueBytesForEvent(client.MaxEventSize()) - 1);
+  ASSERT_EQ(client.StartStream(), MES_ERR_INVALID_ARG);
+
+  // A start that never reached the reader must leave the client not streaming:
+  // Poll() has to report that rather than block in the queue waiting for an
+  // event no thread will ever push.
+  EXPECT_FALSE(client.IsStreaming());
+  const auto poll_started = steady_clock::now();
+  const PollResult result = client.Poll();
+  EXPECT_EQ(result.error, MES_ERR_DISCONNECTED);
+  EXPECT_LT(steady_clock::now() - poll_started, seconds(1));
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, ConnectDoesNotRetainThePlaintextPassword) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream);
+  BinlogClient client;
+  const BinlogClientConfig config = PeerConfig(peer, 2);
+  ASSERT_FALSE(config.password.empty());
+  ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+
+  // Authentication is over, so the client keeps no plaintext copy of the
+  // credential it was handed.
+  EXPECT_TRUE(BinlogClientTestAccess::RetainedPassword(client).empty());
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, QueuedBytesIsSampledWhileTheStreamIsRestarted) {
+  BinlogClient client;
+  std::atomic<bool> sampling{true};
+  std::atomic<uint64_t> samples{0};
+  // A monitoring thread, which the C ABI documents as a supported caller of
+  // this accessor, reading the queue pointer while the owner thread below
+  // replaces it and destroys the queue it pointed at.
+  std::thread monitor([&] {
+    while (sampling.load(std::memory_order_acquire)) {
+      client.QueuedBytes();
+      samples.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+
+  for (int restart = 0; restart < 3; ++restart) {
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256));
+    ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+    ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+    // Polling the event proves the restarted stream has a live reader behind
+    // the queue the sampler is reading from.
+    const PollResult result = client.Poll();
+    EXPECT_EQ(result.error, MES_OK) << client.GetLastError();
+    EXPECT_EQ(result.size, 256u);
+    client.Stop();
+    client.Disconnect();
+  }
+
+  sampling.store(false, std::memory_order_release);
+  monitor.join();
+  EXPECT_GT(samples.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(client.QueuedBytes(), 0u);
 }
 
 TEST(BinlogClientLifecycle, EventAtMaxEventSizeSurvivesTheMinimumQueueBudget) {

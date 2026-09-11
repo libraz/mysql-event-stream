@@ -13,8 +13,15 @@
  * @note Thread safety: CdcEngine (mes_engine_t) instances are NOT thread-safe.
  * All calls to a single engine instance must be serialized by the caller.
  * Different engine instances may be used concurrently from different threads.
- * BinlogClient (mes_client_t) is NOT thread-safe except for mes_client_stop(),
- * which may be called from any thread to interrupt a blocking mes_client_poll().
+ * BinlogClient (mes_client_t) is NOT thread-safe either: every entry point not
+ * named below must be called from the single owner thread. The exceptions are
+ * mes_client_stop(), which may be called from any thread to interrupt a
+ * blocking mes_client_poll() or mes_client_start(), and the observers
+ * mes_client_is_connected(), mes_client_is_streaming(),
+ * mes_client_checksum_enabled(), mes_client_queued_bytes() and
+ * mes_client_crc_errors(), which may be sampled from another thread while the
+ * owner thread is inside any client call except mes_client_destroy(). The
+ * per-function @threadsafety annotation is authoritative.
  */
 
 #ifndef MES_H_
@@ -779,7 +786,11 @@ MES_API size_t mes_client_get_max_queue_bytes(mes_client_t* client);
 
 /**
  * @brief Get the current charged payload bytes waiting in the event queue.
- * @threadsafety Thread-safe against the reader thread. Do not race with
+ * @threadsafety May be sampled from a thread other than the owner thread,
+ *               concurrently with the reader thread and with
+ *               mes_client_start(), mes_client_poll() or mes_client_stop() on
+ *               the owner thread: the queue a restart replaces is not released
+ *               while this call is reading it. Do not race with
  *               mes_client_destroy().
  */
 MES_API size_t mes_client_queued_bytes(mes_client_t* client);

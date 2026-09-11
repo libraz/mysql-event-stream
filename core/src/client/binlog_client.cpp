@@ -3,6 +3,8 @@
 
 #include "client/binlog_client.h"
 
+#include <openssl/crypto.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -122,8 +124,11 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   if (config_.start_at_current && !config_.start_gtid.empty()) {
     config_.start_at_current = false;
   }
+  // The retained copy is not needed after authentication. shrink_to_fit()
+  // hands the buffer back to the allocator immediately, so the wipe has to be
+  // one the compiler may not treat as a dead store.
   if (!config_.password.empty()) {
-    std::fill(config_.password.begin(), config_.password.end(), '\0');
+    OPENSSL_cleanse(config_.password.data(), config_.password.size());
     config_.password.clear();
     config_.password.shrink_to_fit();
   }
@@ -232,9 +237,24 @@ mes_error_t BinlogClient::StartStream() {
   // a newly created reader owning an open one.
   std::lock_guard<std::mutex> lock(stop_mutex_);
   if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
-  event_queue_ = std::make_unique<EventQueue>(queue_size, max_queue_bytes_);
-  streaming_.store(true, std::memory_order_release);
+  {
+    // Installing the replacement destroys the queue the previous stream used,
+    // so publish the pointer under the lock every cross-thread read of it
+    // takes. Poll() and the reader read it unlocked, which is safe: Poll() runs
+    // on the owner thread that is executing this function, and the reader only
+    // starts below.
+    std::lock_guard<std::mutex> queue_lock(queue_ptr_mutex_);
+    event_queue_ = std::make_unique<EventQueue>(queue_size, max_queue_bytes_);
+  }
+
+  // streaming_ is published only once the reader exists, so the flag is never
+  // true while nothing can push to or close the queue -- a Poll() in that state
+  // would block in Pop() forever. The core is built -fno-exceptions, so a
+  // std::thread construction failure (thread-resource exhaustion) aborts here
+  // instead of unwinding out through the C ABI; a caller that does survive it
+  // observes a client that is not streaming rather than one that hangs.
   reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
+  streaming_.store(true, std::memory_order_release);
 
   return MES_OK;
 }
@@ -731,7 +751,12 @@ void BinlogClient::SetMaxQueueBytes(size_t max_queue_bytes) {
 
 size_t BinlogClient::MaxQueueBytes() const { return max_queue_bytes_; }
 
-size_t BinlogClient::QueuedBytes() const { return event_queue_ ? event_queue_->QueuedBytes() : 0; }
+size_t BinlogClient::QueuedBytes() const {
+  // Held across the queue's own accessor so the pointer cannot be replaced --
+  // and the queue behind it destroyed -- between the test and the call.
+  std::lock_guard<std::mutex> queue_lock(queue_ptr_mutex_);
+  return event_queue_ ? event_queue_->QueuedBytes() : 0;
+}
 
 PollResult BinlogClient::Poll() {
   // Calling Poll() again is the implicit acknowledgement that the caller has

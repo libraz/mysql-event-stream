@@ -77,6 +77,9 @@ struct PollResult {
  *   - Stop() may be called from any thread to interrupt a blocking Poll() or a
  *     StartStream() that is waiting on the server.
  *   - GetCurrentGtid() may be called from any thread.
+ *   - IsConnected(), IsStreaming(), ChecksumEnabled(), GetCRCErrors() and
+ *     QueuedBytes() may be called from a thread other than the owner thread,
+ *     including while the owner thread is inside StartStream() or Poll().
  *   - All other methods must be called from a single thread.
  *
  * Usage:
@@ -187,6 +190,14 @@ class BinlogClient {
    */
   void SetMaxQueueBytes(size_t max_queue_bytes);
   size_t MaxQueueBytes() const;
+
+  /**
+   * @brief Payload bytes currently charged to the event queue.
+   *
+   * Callable from a monitoring thread while the owner thread polls, starts or
+   * restarts the stream: the queue pointer is read under queue_ptr_mutex_, the
+   * same lock StartStream() holds while it installs a replacement queue.
+   */
   size_t QueuedBytes() const;
 
  private:
@@ -204,16 +215,18 @@ class BinlogClient {
   std::string last_error_;
   mutable std::string last_error_snapshot_;  // stable buffer for c_str()
   // streaming_ is "reader thread is alive and Poll() may dequeue events".
-  // Written by Poll() on error/drain and by StopReaderThread() under
-  // stop_mutex_. It is also read from Poll() before taking any lock, so
-  // make it atomic to avoid torn reads / data races.
+  // Written by StartStream() once the reader exists, by Poll() on error/drain
+  // and by StopReaderThread() under stop_mutex_. It is also read from Poll()
+  // before taking any lock, so make it atomic to avoid torn reads / data races.
   //
   // Note: Poll() reads event_queue_ without a lock. The thread
   // contract (see class-level Doxygen) requires that Poll(), Connect(),
   // and StartStream() be serialised on the single owner thread, so the
   // event_queue_ unique_ptr cannot be reassigned by StartStream() while
   // a Poll() on the same thread is in progress. Stop() may run from any
-  // thread but does not reassign event_queue_; it only Close()s it.
+  // thread but does not reassign event_queue_; it only Close()s it, and it
+  // shares stop_mutex_ with the reassignment. QueuedBytes() is the one
+  // cross-thread reader of the pointer itself, so it takes queue_ptr_mutex_.
   std::atomic<bool> streaming_{false};
   std::atomic<bool> connected_{false};
   // Whether the server emits a CRC32 trailer on every binlog event. This is
@@ -250,6 +263,14 @@ class BinlogClient {
   // operation, because Stop() and Disconnect() must acquire it before reaching
   // SocketHandle::Shutdown() -- the call that unblocks such an operation.
   std::mutex stop_mutex_;
+  // Guards the event_queue_ pointer itself against the reassignment in
+  // StartStream(), which destroys the queue the previous stream used. It is
+  // deliberately not stop_mutex_: that lock is held across the reader join, so
+  // a monitoring thread sampling QueuedBytes() would wait for reader shutdown.
+  // Only the pointer is guarded -- the queue's own state stays behind its
+  // internal mutex -- and it is never held across a blocking queue operation,
+  // so Poll()'s blocking Pop() must not take it.
+  mutable std::mutex queue_ptr_mutex_;
 
   // Reusable scratch buffer for FetchEvent() packet reads. Lives on the
   // reader thread: after a successful non-heartbeat read, the buffer is
