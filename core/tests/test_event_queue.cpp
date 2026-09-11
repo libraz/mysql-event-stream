@@ -8,10 +8,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "client/event_queue.h"
@@ -282,7 +284,30 @@ TEST(EventQueueTest, MultiProducerSingleConsumer) {
   for (auto& t : producers) t.join();
   consumer.join();
 
-  EXPECT_EQ(received.size(), static_cast<size_t>(kTotal));
+  ASSERT_EQ(received.size(), static_cast<size_t>(kTotal));
+
+  // Cardinality alone also accepts a queue that delivered one producer's event
+  // twice while dropping another's, so compare the delivered payloads against
+  // every (producer, index) pair that was pushed. kPerProducer stays below 256,
+  // so each pair is unique once the index is narrowed to a byte.
+  std::vector<std::pair<uint8_t, uint8_t>> delivered;
+  delivered.reserve(received.size());
+  for (const auto& ev : received) {
+    ASSERT_EQ(ev.data.size(), 2u);
+    delivered.emplace_back(ev.data[0], ev.data[1]);
+  }
+  std::sort(delivered.begin(), delivered.end());
+
+  std::vector<std::pair<uint8_t, uint8_t>> expected;
+  expected.reserve(kTotal);
+  for (int p = 0; p < kProducers; p++) {
+    for (int i = 0; i < kPerProducer; i++) {
+      expected.emplace_back(static_cast<uint8_t>(p), static_cast<uint8_t>(i & 0xFF));
+    }
+  }
+  std::sort(expected.begin(), expected.end());
+
+  EXPECT_EQ(delivered, expected);
 }
 
 TEST(EventQueueTest, StressTest) {

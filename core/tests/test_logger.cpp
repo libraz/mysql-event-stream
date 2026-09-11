@@ -4,9 +4,11 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,6 +33,16 @@ void TestCallback(mes_log_level_t level, const char* message, void* userdata) {
   g_capture.last_level = level;
   g_capture.last_message = message;
   g_capture.last_userdata = userdata;
+}
+
+/// @brief A second registrable callback, so two configurations differ in all
+///        three fields and a mix of them is recognizable.
+void OtherTestCallback(mes_log_level_t, const char*, void*) {}
+
+/// @brief Whether an observed configuration is one that was actually published.
+bool SameConfiguration(const LogConfigSnapshot& observed, const LogConfigSnapshot& published) {
+  return observed.callback == published.callback && observed.level == published.level &&
+         observed.userdata == published.userdata;
 }
 
 class LoggerTest : public ::testing::Test {
@@ -82,29 +94,61 @@ TEST_F(LoggerTest, UserdataPassedThrough) {
   EXPECT_EQ(g_capture.last_userdata, &userdata_value);
 }
 
-TEST_F(LoggerTest, SetCallbackUsesReleaseAcquireOrdering) {
-  // Verify that stores done before SetCallback are visible after
-  // GetCallback returns non-null. The release store in SetCallback
-  // should synchronize with the acquire load in GetCallback, making
-  // shared_data and log_level visible to the reader thread.
-  //
-  // Deterministic: write on main thread, then read on a separate thread.
-  int shared_data = 0;
+TEST_F(LoggerTest, ConcurrentReaderNeverObservesAMixedConfiguration) {
+  // The configuration is published as one immutable snapshot so that a reader
+  // can never pair one generation's callback with another generation's level or
+  // userdata. Showing that requires the reader to be polling while the writer
+  // republishes: a reader that only looks after being joined is satisfied by the
+  // happens-before edge of thread creation alone, whatever the publication
+  // mechanism, and so would accept a torn read.
+  static int first_userdata = 0;
+  static int second_userdata = 0;
+  const LogConfigSnapshot first{TestCallback, MES_LOG_DEBUG, &first_userdata};
+  const LogConfigSnapshot second{OtherTestCallback, MES_LOG_WARN, &second_userdata};
 
-  shared_data = 12345;
-  LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
+  std::atomic<bool> reader_has_polled{false};
+  std::atomic<bool> stop{false};
+  std::atomic<int64_t> unset_observations{0};
+  std::atomic<int64_t> published_observations{0};
+  std::atomic<int64_t> mixed_observations{0};
 
-  std::atomic<bool> reader_passed{false};
   std::thread reader([&] {
-    auto* cb = LogConfig::GetCallback();
-    ASSERT_NE(cb, nullptr);
-    EXPECT_EQ(shared_data, 12345);
-    EXPECT_EQ(LogConfig::GetLogLevel(), MES_LOG_DEBUG);
-    reader_passed.store(true, std::memory_order_relaxed);
+    while (!stop.load(std::memory_order_relaxed)) {
+      const std::shared_ptr<const LogConfigSnapshot> observed = LogConfig::GetSnapshot();
+      if (observed->callback == nullptr && observed->userdata == nullptr) {
+        unset_observations.fetch_add(1, std::memory_order_relaxed);
+      } else if (SameConfiguration(*observed, first) || SameConfiguration(*observed, second)) {
+        published_observations.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        mixed_observations.fetch_add(1, std::memory_order_relaxed);
+      }
+      reader_has_polled.store(true, std::memory_order_relaxed);
+    }
   });
 
+  // Publishing only once the reader has classified something guarantees it was
+  // already running for the unset-to-published transition.
+  while (!reader_has_polled.load(std::memory_order_relaxed)) {
+  }
+
+  constexpr int kGenerations = 4000;
+  for (int generation = 0; generation < kGenerations; generation++) {
+    const LogConfigSnapshot& next = (generation % 2 == 0) ? first : second;
+    LogConfig::SetCallback(next.callback, next.level, next.userdata);
+  }
+
+  // The last configuration stays published, so waiting for one published
+  // observation terminates regardless of how the reader was scheduled.
+  while (published_observations.load(std::memory_order_relaxed) == 0) {
+  }
+  stop.store(true, std::memory_order_relaxed);
   reader.join();
-  EXPECT_TRUE(reader_passed.load());
+
+  EXPECT_EQ(mixed_observations.load(), 0)
+      << "a reader observed a callback paired with a level or userdata from another generation";
+  EXPECT_GT(unset_observations.load(), 0)
+      << "the reader saw nothing before the first publication, so no transition was raced";
+  EXPECT_GT(published_observations.load(), 0) << "the reader never observed a published callback";
 }
 
 // Stands in for a consumer that keeps an engine in a global and lets it log
