@@ -870,6 +870,11 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       uint32_t extra_bits = meta & 0xFF;
       uint32_t total_bytes = full_bytes + (extra_bits > 0 ? 1 : 0);
       if (total_bytes == 0) total_bytes = 1;
+      // A BIT column holds at most 64 bits, so a wider declared width can only
+      // come from a corrupt TABLE_MAP. Reading it would keep the low 8 bytes as
+      // the value and still advance bytes_consumed by the declared width,
+      // desyncing every later column in the row.
+      if (total_bytes > sizeof(uint64_t)) return ColumnValue::Null(type);
       if (len < total_bytes) return ColumnValue::Null(type);
       *bytes_consumed = total_bytes;
       uint64_t val = ReadBigEndian(data, total_bytes);

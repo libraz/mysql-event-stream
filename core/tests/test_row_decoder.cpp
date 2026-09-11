@@ -663,6 +663,26 @@ TEST(DecodeColumnValueTest, Bit64AboveSignedRangeUsesDecimalString) {
   EXPECT_EQ(result.string_val, "9223372036854775808");
 }
 
+TEST(DecodeColumnValueTest, BitWiderThanSixtyFourBitsIsRejected) {
+  // A BIT column holds at most 64 bits, so these widths can only come from a
+  // corrupt TABLE_MAP. Reading them would keep the low 8 bytes as the value and
+  // consume the declared width, shifting every column after it in the row.
+  const uint16_t too_wide_metas[] = {static_cast<uint16_t>((9 << 8) | 0),
+                                     static_cast<uint16_t>((8 << 8) | 1),
+                                     static_cast<uint16_t>((255 << 8) | 7)};
+  // Long enough that the declared width is present in the buffer, so the width
+  // bound is what rejects these and not the remaining-length check.
+  std::vector<uint8_t> data(256);
+  for (size_t i = 0; i < data.size(); ++i) data[i] = static_cast<uint8_t>(i + 1);
+  for (uint16_t meta : too_wide_metas) {
+    size_t consumed = 0;
+    auto result =
+        DecodeColumnValue(ColumnType::kBit, meta, false, data.data(), data.size(), &consumed);
+    EXPECT_EQ(consumed, 0u) << "meta=" << meta;
+    EXPECT_TRUE(result.is_null) << "meta=" << meta;
+  }
+}
+
 TEST(DecodeColumnValueTest, StringEnum1Byte) {
   // ENUM encoded in STRING: real_type = 0xF7, size = 1
   // meta = (0xF7 << 8) | 1
