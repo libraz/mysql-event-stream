@@ -53,21 +53,31 @@ ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* contex
 }  // namespace detail
 
 /**
- * @brief Validates MySQL server configuration for binlog streaming
+ * @brief Validates MySQL/MariaDB server configuration for binlog streaming
  *
- * Checks:
- * 1. log_bin = ON
- * 2. gtid_mode = ON
- * 3. binlog_format = ROW
- * 4. binlog_row_image = FULL
- * 5. binlog_transaction_compression = OFF
+ * These are the settings that gate Connect() with MES_ERR_VALIDATION, in the
+ * order they run; the first failure returns and the rest are never queried:
+ * 1. log_bin must be ON
+ * 2. gtid_mode must be ON (MySQL only: MariaDB has no such variable)
+ * 3. binlog_format must be ROW
+ * 4. binlog_row_image must be FULL
+ * 5. log_bin_compress must not be ON (MariaDB only)
+ * 6. binlog_transaction_compression must not be ON (MySQL only)
+ * 7. binlog_row_value_options must not be PARTIAL_JSON (MySQL only)
+ *
+ * The two phrasings differ in how they treat a server that does not define the
+ * variable at all. A must-be check fails, because the stream cannot proceed
+ * without knowing the setting. A must-not-be check passes, because a server too
+ * old to define the variable is also too old to have enabled what it rejects.
  */
 class ConnectionValidator {
  public:
   /**
    * @brief Validate server configuration
    * @param conn Active MySQL connection
-   * @return ValidationResult with error/message/uuid
+   * @param flavor Server flavor, which selects the flavor-specific checks
+   * @return ValidationResult carrying MES_OK, or MES_ERR_VALIDATION and the
+   *         message naming the setting that failed
    */
   static ValidationResult Validate(protocol::MysqlConnection* conn,
                                    ServerFlavor flavor = ServerFlavor::kMySQL);
