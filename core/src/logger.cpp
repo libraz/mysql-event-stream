@@ -57,10 +57,6 @@ std::shared_ptr<const LogConfigSnapshot> LogConfig::GetSnapshot() {
   return state.snapshot;
 }
 
-mes_log_callback_t LogConfig::GetCallback() { return GetSnapshot()->callback; }
-mes_log_level_t LogConfig::GetLogLevel() { return GetSnapshot()->level; }
-void* LogConfig::GetUserdata() { return GetSnapshot()->userdata; }
-
 void StructuredLog::Emit(mes_log_level_t level) {
   // Reuse the snapshot captured in the StructuredLog constructor so that
   // every Field()/Emit() within this builder observes the same

@@ -24,11 +24,12 @@ struct LogConfigSnapshot {
 /**
  * @brief Global log configuration that dispatches to the registered callback.
  *
- * Internally stores an immutable snapshot as a shared_ptr so that readers
- * always observe a consistent triple of (callback, level, userdata). The
- * previous per-field std::atomic layout permitted a reader to observe a
- * torn configuration where, for example, the old callback was paired with
- * the new userdata.
+ * The configuration is published as an immutable snapshot behind a shared_ptr,
+ * and GetSnapshot() is the only way to read it. That is what makes a reader's
+ * (callback, level, userdata) a consistent triple: all three come from one
+ * generation, so no reader can pair one generation's callback with another's
+ * userdata. Single-field accessors would forfeit precisely that, because two
+ * calls can straddle a republication, which is why none are offered.
  *
  * The snapshot and its mutex live in storage that is never reclaimed, so an
  * object with static storage duration can still log from its destructor during
@@ -37,13 +38,6 @@ struct LogConfigSnapshot {
 class LogConfig {
  public:
   static void SetCallback(mes_log_callback_t callback, mes_log_level_t log_level, void* userdata);
-
-  // NOTE(perf): Each accessor independently acquires the snapshot mutex.
-  // Hot paths that need multiple fields should call GetSnapshot() once
-  // and read fields from the returned shared_ptr.
-  static mes_log_callback_t GetCallback();
-  static mes_log_level_t GetLogLevel();
-  static void* GetUserdata();
 
   /** @brief Get a consistent snapshot of the current configuration. */
   static std::shared_ptr<const LogConfigSnapshot> GetSnapshot();
@@ -55,11 +49,10 @@ class LogConfig {
  *   StructuredLog().Event("binlog_error").Field("gtid", gtid).Error();
  *
  * NOTE(perf): The constructor takes a single snapshot of the global log
- * configuration and caches it for the lifetime of the builder. Each
- * Field() therefore performs no synchronization and costs only the
- * emplace_back. Previously every Field() acquired SnapshotMutex via
- * LogConfig::GetCallback(), which dominated hot-path logging cost when
- * many fields were attached in a reader-thread loop.
+ * configuration and caches it for the lifetime of the builder, so each
+ * Field() performs no synchronization and costs only the emplace_back.
+ * Acquiring the snapshot mutex once per Field() instead dominates hot-path
+ * logging cost when many fields are attached in a reader-thread loop.
  */
 class StructuredLog {
  public:
