@@ -4,7 +4,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
-import { MesErrorCode } from "../src/types.js";
+import { type ChangeEvent, MesErrorCode } from "../src/types.js";
 import {
   buildColumnEvents,
   Collation,
@@ -378,6 +378,101 @@ function buildHeldRowEvents(
     },
   ];
   return buildColumnEvents(tableId, db, table, columns, timestamp);
+}
+
+describe("CdcEngine partial feeds", () => {
+  // A stream arrives in chunks whose boundaries fall wherever the transport
+  // puts them, and the remainder of a chunk is re-offered as a view into the
+  // same buffer rather than a copy. Such a view carries a non-zero byteOffset
+  // that has to reach the parser as the start of the data: read from the
+  // buffer's origin instead and every byte shifts, which decodes into
+  // well-formed events holding the wrong values rather than into an error.
+  const pair = buildInsertPair(1, 42);
+
+  /** Feed one chunk sequence into a fresh engine and collect what it decodes. */
+  async function feedAndDrain(chunks: readonly Uint8Array[]): Promise<ChangeEvent[]> {
+    const engine = await CdcEngine.create();
+    try {
+      feedChunks(engine, chunks);
+      const events: ChangeEvent[] = [];
+      for (let event = engine.nextEvent(); event !== null; event = engine.nextEvent()) {
+        events.push(event);
+      }
+      return events;
+    } finally {
+      engine.destroy();
+    }
+  }
+
+  it("decodes the same events whichever byte a feed is split at", async () => {
+    const unsplit = await feedAndDrain([pair]);
+    expect(unsplit).toHaveLength(1);
+    expect(unsplit[0]?.after?.["0"]).toBe(42);
+
+    // Every boundary is covered, the event headers included: a shift is
+    // invisible except at the offsets it happens to disturb.
+    for (let split = 0; split <= pair.length; split++) {
+      // The remainder as a view and as a copy of the same bytes. The two
+      // differ only in the byteOffset the view carries, so they are the pair
+      // of feeds the parser has to treat alike.
+      const asView = [pair.subarray(0, split), pair.subarray(split)];
+      const asCopy = [pair.slice(0, split), pair.slice(split)];
+      expect(await feedAndDrain(asView), `remainder of a split at ${split} as a view`).toEqual(
+        unsplit,
+      );
+      expect(await feedAndDrain(asCopy), `remainder of a split at ${split} copied`).toEqual(
+        unsplit,
+      );
+    }
+  });
+
+  it("decodes the same events when fed one byte at a time", async () => {
+    const single = Array.from({ length: pair.length }, (_, index) =>
+      pair.subarray(index, index + 1),
+    );
+    expect(await feedAndDrain(single)).toEqual(await feedAndDrain([pair]));
+  });
+
+  it("starts at the byteOffset of the view it is given, not at the buffer origin", async () => {
+    // The bytes before the view are themselves a decodable pair of the same
+    // length, differing only in what they decode to. Reading from the buffer
+    // origin therefore yields one well-formed INSERT that consumed every byte
+    // offered -- indistinguishable from success by a byte count, and caught
+    // only by comparing the decoded event.
+    const preceding = buildInsertPair(2, 4242, 2000);
+    expect(preceding.length).toBe(pair.length);
+
+    const view = concat(preceding, pair).subarray(preceding.length);
+    expect(view.byteOffset).toBe(preceding.length);
+
+    expect(await feedAndDrain([view])).toEqual(await feedAndDrain([pair]));
+  });
+});
+
+/** Build the TABLE_MAP + WRITE_ROWS pair that decodes to one INSERT of `value`. */
+function buildInsertPair(tableId: number, value: number, timestamp = 1000): Uint8Array {
+  return concat(
+    buildEvent(TABLE_MAP_EVENT, timestamp, buildTableMapBody(tableId, "testdb", "users")),
+    buildEvent(WRITE_ROWS_EVENT, timestamp, buildWriteRowsBody(tableId, value)),
+  );
+}
+
+/**
+ * Feed chunks the way `CdcStream` does: each chunk is offered whole, and a
+ * partial consume re-offers what is left as a view starting at that point.
+ * Bytes still unconsumed once every chunk of a complete stream has been
+ * offered would be silently dropped data, so they throw instead.
+ */
+function feedChunks(engine: CdcEngine, chunks: readonly Uint8Array[]): void {
+  let leftover: Uint8Array | null = null;
+  for (const chunk of chunks) {
+    const buffered: Uint8Array = leftover === null ? chunk : concat(leftover, chunk);
+    const consumed = engine.feed(buffered);
+    leftover = consumed < buffered.length ? buffered.subarray(consumed) : null;
+  }
+  if (leftover !== null) {
+    throw new Error(`${leftover.length} bytes were never consumed`);
+  }
 }
 
 /** Call an engine method with a value its declared parameter type forbids. */
