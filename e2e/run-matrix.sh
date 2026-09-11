@@ -139,6 +139,41 @@ overall_pass=0
 overall_fail=0
 declare -a summary_lines
 
+# Every runner here reports a green exit for a run in which nothing ran: ctest
+# prints "No tests were found!!!" and exits 0 when a selection matches no test,
+# pytest exits 0 when every collected test is skipped (and 5 when it collects
+# none), and vitest exits 0 when every test is filtered out. So a tier's exit
+# status alone cannot distinguish a pass from a vacuous run, and each runner's
+# own count of executed, passing tests is required as well. The count pattern
+# excludes zero, the way the Makefile's ctest selections do.
+CTEST_EXECUTED_RE='^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed'
+PYTEST_EXECUTED_RE='^=+ .*[1-9][0-9]* passed'
+VITEST_EXECUTED_RE='^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed'
+
+# Run one tier and decide its result. Kept as the single place that decision is
+# made, so a new invocation inherits the check instead of having to remember it.
+# Usage: run_tier <tier label> <executed-tests regex> <command...>
+run_tier() {
+    local tier="$1" executed_re="$2"
+    shift 2
+
+    local output
+    output="$(mktemp)"
+    "$@" 2>&1 | tee "$output"
+    local status=${PIPESTATUS[0]}
+
+    local result=0
+    if [[ "$status" -ne 0 ]]; then
+        echo "  [$tier] FAIL: the test runner exited $status"
+        result=1
+    elif ! grep -Eq "$executed_re" "$output"; then
+        echo "  [$tier] FAIL: no test executed; the run recorded no passing test"
+        result=1
+    fi
+    rm -f "$output"
+    return "$result"
+}
+
 # Stop all test containers
 stop_all_containers() {
     # C++ / Python E2E containers (port 13308)
@@ -186,29 +221,24 @@ for target in "${TARGETS[@]}"; do
             if [[ "$RUN_CPP" == true ]]; then
                 echo "  [C++] Running E2E tests..."
                 cd "$BUILD_DIR"
-                cpp_output="$(mktemp)"
-                if ! DB_FLAVOR="$DB_FLAVOR" ctest -R "E2E" \
+                if ! run_tier "C++" "$CTEST_EXECUTED_RE" \
+                    env DB_FLAVOR="$DB_FLAVOR" ctest -R "E2E" \
                     --output-on-failure \
                     --timeout 60 \
-                    "${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"}" \
-                    2>&1 | tee "$cpp_output"; then
-                    target_pass=false
-                elif ! grep -Eq '^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed' "$cpp_output"; then
-                    echo "  [C++] FAIL: all E2E tests were skipped; no test result was recorded"
+                    "${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"}"; then
                     target_pass=false
                 fi
-                rm -f "$cpp_output"
                 cd "$SCRIPT_DIR"
             fi
 
             if [[ "$RUN_PYTHON" == true ]]; then
                 echo "  [Python] Running E2E tests..."
                 cd "$PYTHON_DIR"
-                MES_LIB_PATH="$LIB_PATH" \
+                if ! run_tier "Python" "$PYTEST_EXECUTED_RE" \
+                    env MES_LIB_PATH="$LIB_PATH" \
                     MES_MYSQL_PORT=13308 \
                     DB_FLAVOR="$DB_FLAVOR" \
-                    "$PYTEST" e2e/tests -v --timeout=120 2>&1
-                if [[ $? -ne 0 ]]; then
+                    "$PYTEST" e2e/tests -v --timeout=120; then
                     target_pass=false
                 fi
                 cd "$SCRIPT_DIR"
@@ -228,8 +258,8 @@ for target in "${TARGETS[@]}"; do
         else
             echo "  [Node] Running E2E tests..."
             cd "$NODE_DIR"
-            DB_FLAVOR="$DB_FLAVOR" yarn test:e2e 2>&1
-            if [[ $? -ne 0 ]]; then
+            if ! run_tier "Node" "$VITEST_EXECUTED_RE" \
+                env DB_FLAVOR="$DB_FLAVOR" yarn test:e2e; then
                 target_pass=false
             fi
             cd "$SCRIPT_DIR"
