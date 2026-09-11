@@ -30,6 +30,9 @@ mes_add_gtest(test_event_header test_event_header.cpp)
 # test_table_map
 mes_add_gtest(test_table_map test_table_map.cpp)
 
+# test_binlog_length_fields
+mes_add_gtest(test_binlog_length_fields test_binlog_length_fields.cpp)
+
 # test_rotate_event
 mes_add_gtest(test_rotate_event test_rotate_event.cpp)
 
@@ -86,5 +89,8 @@ mes_add_gtest(test_mariadb_gtid test_mariadb_gtid.cpp)
 
 # test_mariadb_event_parser
 mes_add_gtest(test_mariadb_event_parser test_mariadb_event_parser.cpp)
+
+# test_secure_cleanse
+mes_add_gtest(test_secure_cleanse test_secure_cleanse.cpp OpenSSL::Crypto)
 
 add_subdirectory(e2e)
