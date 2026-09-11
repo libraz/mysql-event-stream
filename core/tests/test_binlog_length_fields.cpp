@@ -31,6 +31,7 @@
 #include "cdc_engine.h"
 #include "event_header.h"
 #include "row_decoder.h"
+#include "source_scan.h"
 #include "table_map.h"
 #include "test_helpers.h"
 
@@ -527,58 +528,10 @@ INSTANTIATE_TEST_SUITE_P(AtTheBoundary, ColumnCountCeilingTest, ::testing::Value
 
 // --- One definition of the ceiling ---
 
-/** @brief The repository root, located relative to this test's own source. */
-std::filesystem::path RepoRoot() {
-  return std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
-}
-
-/** @brief Every regular file under @p root, or an empty list if it is unreadable. */
-std::vector<std::filesystem::path> FilesUnder(const std::filesystem::path& root) {
-  std::vector<std::filesystem::path> files;
-  std::error_code ec;
-  // The error_code overloads are used throughout: this translation unit is
-  // built without exceptions, so a throwing filesystem call would abort.
-  for (std::filesystem::recursive_directory_iterator it(root, ec), end; !ec && it != end;
-       it.increment(ec)) {
-    if (it->is_regular_file(ec)) {
-      files.push_back(it->path());
-    }
-  }
-  return files;
-}
-
-/** @brief Number of lines in @p file containing @p needle; -1 if unreadable. */
-int CountLinesContaining(const std::filesystem::path& file, const std::string& needle) {
-  std::ifstream in(file);
-  if (!in.is_open()) {
-    return -1;
-  }
-  int hits = 0;
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.find(needle) != std::string::npos) {
-      ++hits;
-    }
-  }
-  return hits;
-}
-
-/** @brief Number of lines in @p file containing both needles; -1 if unreadable. */
-int CountLinesContainingBoth(const std::filesystem::path& file, const std::string& first,
-                             const std::string& second) {
-  std::ifstream in(file);
-  if (!in.is_open()) {
-    return -1;
-  }
-  int hits = 0;
-  std::string line;
-  while (std::getline(in, line)) {
-    if (line.find(first) != std::string::npos && line.find(second) != std::string::npos) {
-      ++hits;
-    }
-  }
-  return hits;
-}
+using source_scan::CountLinesContaining;
+using source_scan::CountLinesContainingBoth;
+using source_scan::FilesUnder;
+using source_scan::RepoRoot;
 
 /**
  * @brief The binlog column-count ceiling has one definition and every parser

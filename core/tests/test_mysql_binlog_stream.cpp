@@ -3,7 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <string>
 #include <thread>
+#include <vector>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -15,6 +18,7 @@
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
+#include "source_scan.h"
 
 namespace mes::protocol {
 namespace {
@@ -26,6 +30,71 @@ TEST(BinlogStreamConfigTest, DefaultValues) {
   EXPECT_EQ(config.binlog_position, 4u);
   EXPECT_TRUE(config.gtid_encoded.empty());
   EXPECT_EQ(config.flags, 0u);
+}
+
+/**
+ * @brief The binlog magic offset has one definition, and every structure
+ *        defaulting a start offset reads it rather than restating the value.
+ *
+ * A second constant holding the same offset changes no behaviour until one of
+ * the two is edited, so no test that drives the stream can observe it: the
+ * default and the lowest accepted offset would simply stop agreeing, and a
+ * dump would then be requested from inside the file's magic number. Scanning
+ * the sources is what proves the duplicate is absent.
+ *
+ * The value itself is pinned by BinlogStreamConfigTest.DefaultValues and by
+ * the client's own range check, so this test deliberately asserts uniqueness
+ * only. Patterns are assembled from fragments so that this file does not
+ * become a hit in the search it exists to keep empty.
+ */
+TEST(BinlogMagicOffsetTest, IsDefinedOnceAndReadByEveryStartOffset) {
+  const std::string constant_name = std::string("kBinlogMagic") + "Offset";
+  const std::string definition_keyword = std::string("const") + "expr";
+  const std::string offset_field = std::string("binlog_") + "position";
+  const std::string inline_value = std::string("= ") + "4";
+
+  const std::filesystem::path root = source_scan::RepoRoot();
+  const std::filesystem::path definition_file = root / "core" / "src" / "event_header.h";
+  // Every structure that carries a start offset, plus the one range check that
+  // refuses an offset below it.
+  const std::filesystem::path readers[] = {
+      root / "core" / "src" / "protocol" / "mysql_binlog_stream.h",
+      root / "core" / "src" / "client" / "binlog_client.h",
+      root / "core" / "src" / "client" / "binlog_client.cpp",
+  };
+
+  const std::filesystem::path scanned_root = root / "core" / "src";
+  const std::vector<std::filesystem::path> files = source_scan::FilesUnder(scanned_root);
+  ASSERT_FALSE(files.empty()) << "no files found under " << scanned_root;
+
+  int definitions = 0;
+  std::vector<std::string> restated;
+  for (const std::filesystem::path& file : files) {
+    const int definition_hits =
+        source_scan::CountLinesContainingBoth(file, definition_keyword, constant_name);
+    const int restated_hits =
+        source_scan::CountLinesContainingBoth(file, offset_field, inline_value);
+    ASSERT_GE(definition_hits, 0) << "cannot read " << file;
+    ASSERT_GE(restated_hits, 0) << "cannot read " << file;
+    definitions += definition_hits;
+    if (restated_hits > 0) {
+      restated.push_back(file.string());
+    }
+  }
+
+  // The scan reaches the file that is supposed to hold the definition, so a
+  // zero count above would mean the shape is gone rather than unfound.
+  ASSERT_GT(source_scan::CountLinesContaining(definition_file, constant_name), 0)
+      << constant_name << " not found in " << definition_file;
+
+  EXPECT_EQ(definitions, 1) << "the binlog magic offset is defined more than once";
+  EXPECT_EQ(restated, std::vector<std::string>{})
+      << "a start offset is defaulted to the magic offset's value instead of the constant";
+
+  for (const std::filesystem::path& reader : readers) {
+    EXPECT_GT(source_scan::CountLinesContaining(reader, constant_name), 0)
+        << reader << " does not read " << constant_name;
+  }
 }
 
 TEST(BinlogEventPacketTest, DefaultValues) {
