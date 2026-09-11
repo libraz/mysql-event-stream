@@ -185,7 +185,7 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **Backpressure** - Internal reader thread with bounded event queue (default 10,000) prevents stream disconnection during consumer slowdowns
 - **Table filtering** - Include/exclude databases and tables to reduce processing overhead
 - **Structured logging** - Callback-based structured logging (event=name key=value format)
-- **Graceful shutdown** - Thread-safe stream cancellation via `stop()` -- immediately unblocks consumer and reader threads
+- **Graceful shutdown** - `BinlogClient.stop()` is callable from any thread and immediately unblocks the consumer and reader threads; `CdcStream` cancels through `close()` on the task that owns it
 
 ## Configuration
 
@@ -291,8 +291,11 @@ same engine instance. Use one engine per thread/task or serialize access
 externally.
 
 `BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
-connection lifecycle calls are single-owner operations; `stop()` is the intended
-any-thread cancellation path and may be used to unblock a pending poll/iterator.
+connection lifecycle calls are single-owner operations. `BinlogClient.stop()` is
+the any-thread cancellation path and may be called from another thread to unblock
+a pending `poll()`. `CdcStream` has no `stop` method: cancel it with `close()`
+from the task that owns the stream, which interrupts the native poll first and
+then finalizes the iterator.
 
 ### Logging
 

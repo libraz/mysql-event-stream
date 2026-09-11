@@ -124,8 +124,11 @@ same engine instance. Use one engine per worker/task or serialize access
 externally.
 
 `BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
-connection lifecycle calls are single-owner operations; `stop()` is the intended
-any-thread cancellation path and may be used to unblock a pending poll/iterator.
+connection lifecycle calls are single-owner operations. `BinlogClient.stop()` is
+the any-thread cancellation path and may be called from another thread to unblock
+a pending `poll()`. `CdcStream` has no `stop` method: cancel it with
+`await stream.close()` from the task that owns the stream, which interrupts the
+native poll first and then finalizes the iterator.
 
 Each active stream has one blocking native poll worker. `pollBatch()` drains up
 to 64 already queued events after the first result, but an idle stream still uses

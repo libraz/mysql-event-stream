@@ -74,8 +74,8 @@ The native addon statically links the C++ core (protocol layer, CDC engine, Binl
 `new BinlogClient(config)` connects and validates configuration immediately;
 connection errors are thrown by the constructor. Call `start()` before polling,
 then call `destroy()` when finished. `destroy()` is idempotent. Only one
-`poll()` may be in flight; use `stop()` to cancel it before changing connection
-lifecycle state. `CdcStream` owns this sequence and `await stream.close()` is
+`poll()` may be in flight; use `BinlogClient.stop()` to cancel it before
+changing connection lifecycle state. `CdcStream` owns this sequence and `await stream.close()` is
 the corresponding idempotent cleanup operation.
 
 ## Thread Safety
@@ -86,8 +86,11 @@ same engine instance. Use one engine per worker/task or serialize access
 externally.
 
 `BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
-connection lifecycle calls are single-owner operations; `stop()` is the intended
-any-thread cancellation path and may be used to unblock a pending poll/iterator.
+connection lifecycle calls are single-owner operations. `BinlogClient.stop()` is
+the any-thread cancellation path and may be called from another thread to unblock
+a pending `poll()`. `CdcStream` has no `stop` method: cancel it with
+`await stream.close()` from the task that owns the stream, which interrupts the
+native poll first and then finalizes the iterator.
 
 Each active stream has one blocking native poll worker. `pollBatch()` amortizes
 that handoff by draining up to 64 queued events after the first result, but the

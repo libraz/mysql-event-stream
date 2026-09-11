@@ -61,15 +61,23 @@ from mysql_event_stream import CdcStream
 
 
 async def main():
-    async for event in CdcStream(
+    # `async for` never finalizes the iterator it borrows, so scope the stream
+    # and let the context manager close it. Leaving the loop early otherwise
+    # keeps the native client, its reader thread, and the socket alive.
+    async with CdcStream(
         host="127.0.0.1",
         port=3306,
         user="replicator",
         password="secret",
-    ):
-        print(f"{event.type.name} {event.database}.{event.table}")
-        print(f"  before: {event.before}")
-        print(f"  after:  {event.after}")
+    ) as stream:
+        async for event in stream:
+            print(f"{event.type.name} {event.database}.{event.table}")
+            print(f"  before: {event.before}")
+            print(f"  after:  {event.after}")
+
+    # The last checkpoint survives the scope. Delivery is at-least-once, so
+    # persist this only after your own processing has succeeded.
+    print(f"checkpoint: {stream.current_gtid}")
 
 
 asyncio.run(main())
@@ -154,8 +162,10 @@ externally.
 
 `CdcStream` uses an internal reader thread through the native binlog client.
 Iteration and connection lifecycle operations should be owned by one task.
-Cancellation should go through the stream/client stop path instead of calling
-other lifecycle methods concurrently.
+`CdcStream` has no `stop` method: cancel it with `await stream.aclose()` (or
+`close()`, which it forwards to) from the task that owns the stream. Only
+`BinlogClient.stop()` is callable from another thread, and it is what unblocks a
+pending `poll()`.
 
 ## Features
 
