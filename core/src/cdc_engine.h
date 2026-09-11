@@ -98,6 +98,11 @@ class CdcEngine {
    * WRITE_ROWS/UPDATE_ROWS/DELETE_ROWS event is pushed atomically, so the
    * queue may temporarily exceed @p max_size by up to (rows_per_event - 1)
    * items before backpressure is re-evaluated on the next Feed() iteration.
+   *
+   * Nothing set here bounds rows_per_event: it is bounded by how many rows fit
+   * in one event body, which makes SetMaxEventSize() the lever over the entry
+   * overshoot rather than this setting. The bytes that overshoot can occupy are
+   * bounded on their own terms by SetMaxQueueBytes().
    */
   void SetMaxQueueSize(size_t max_size);
 

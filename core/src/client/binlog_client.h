@@ -76,10 +76,14 @@ struct PollResult {
  * Thread safety:
  *   - Stop() may be called from any thread to interrupt a blocking Poll() or a
  *     StartStream() that is waiting on the server.
- *   - GetCurrentGtid() may be called from any thread.
  *   - IsConnected(), IsStreaming(), ChecksumEnabled(), GetCRCErrors() and
  *     QueuedBytes() may be called from a thread other than the owner thread,
  *     including while the owner thread is inside StartStream() or Poll().
+ *   - GetLastError() and GetCurrentGtid() may be called on those same terms,
+ *     but each returns a pointer into one buffer shared by all of its callers:
+ *     the next call to the same accessor, from any thread, overwrites what the
+ *     previous one returned. Making the call needs no external lock; holding
+ *     the result does, unless each caller copies it before releasing control.
  *   - All other methods must be called from a single thread.
  *
  * Usage:
@@ -157,15 +161,22 @@ class BinlogClient {
   /** @brief Get the server flavor detected during Connect(). */
   ServerFlavor GetServerFlavor() const;
 
-  /** @brief Get last error message */
+  /** @brief Get last error message, or an empty string if there is none.
+   *
+   * Safe to call from any thread: the read is serialised on last_error_mutex_,
+   * which is also what a Stop() from another thread takes to write the message.
+   * The returned pointer refers to a buffer shared by every caller, so it stays
+   * valid only until the next GetLastError() call on this client, from any
+   * thread. Copy the string to keep it past that point.
+   */
   const char* GetLastError() const;
 
   /** @brief Get the current GTID position as a string.
    *
-   * Thread-safe: protected by gtid_mutex_. The returned pointer is valid
-   * until the next call to GetCurrentGtid() from the same thread.
-   * At the C ABI boundary (mes_client_current_gtid), this is documented
-   * as single-owner-thread for pointer lifetime safety.
+   * Safe to call from any thread: the read is serialised on gtid_mutex_. As
+   * with GetLastError(), the returned pointer refers to a buffer shared by
+   * every caller and stays valid only until the next GetCurrentGtid() call on
+   * this client, from any thread.
    */
   const char* GetCurrentGtid() const;
 

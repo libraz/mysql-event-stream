@@ -175,6 +175,31 @@ inline std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id, int32_t value)
   return b.Data();
 }
 
+// Build a WRITE_ROWS_EVENT V2 body carrying one INT row per supplied value.
+// A ROWS event holds as many rows as fit in its body, and the engine queues one
+// entry per row, so this is what a test needs to observe a per-row bound that a
+// single-row body cannot distinguish from a per-event one.
+inline std::vector<uint8_t> BuildWriteRowsBodyMultiRow(uint64_t table_id,
+                                                       const std::vector<int32_t>& values) {
+  EventBuilder b;
+  // table_id
+  b.WriteU48Le(table_id);
+  // flags
+  b.WriteU16Le(0);
+  // V2 var_header_len = 2
+  b.WriteU16Le(2);
+  // column_count = 1
+  b.WriteU8(1);
+  // columns_present = 0x01
+  b.WriteU8(0x01);
+  for (int32_t value : values) {
+    // null_bitmap = 0x00 (not null), then the INT value
+    b.WriteU8(0x00);
+    b.WriteU32Le(static_cast<uint32_t>(value));
+  }
+  return b.Data();
+}
+
 // Build an UPDATE_ROWS_EVENT V2 body for a single INT row.
 inline std::vector<uint8_t> BuildUpdateRowsBody(uint64_t table_id, int32_t before_val,
                                                 int32_t after_val) {

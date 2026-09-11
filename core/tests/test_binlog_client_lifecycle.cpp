@@ -951,5 +951,49 @@ TEST(BinlogClientLifecycle, CApiReadTimeoutReachesTheNegotiatedHeartbeat) {
 
 #endif
 
+/**
+ * @brief The two cross-thread accessors share one buffer, not one per caller.
+ *
+ * GetLastError() and GetCurrentGtid() are what a binding exposes as properties
+ * readable at any moment, so the header states they are safe to call from any
+ * thread and that the pointer each returns survives only until the next call to
+ * the same accessor -- from any thread, not merely the caller's own. That second
+ * half is a property of the shared snapshot buffer they copy into, and this is
+ * what observes it: a call made on another thread comes back with the address
+ * the first call already handed out. Given per-caller storage instead, the
+ * documented caveat would be stricter than the code, and a binding author would
+ * be copying strings to escape a hazard that no longer existed.
+ *
+ * Placed outside the scripted-peer guard: refusing a start needs no socket.
+ */
+TEST(BinlogClientLifecycle, CrossThreadAccessorsShareOneBufferAcrossThreads) {
+  BinlogClient client;
+
+  // Refused locally, before any transport exists, which is enough to put a real
+  // message in the buffer rather than exercising an empty one.
+  ASSERT_EQ(client.StartStream(), MES_ERR_DISCONNECTED);
+
+  const char* error_here = client.GetLastError();
+  ASSERT_NE(error_here, nullptr);
+  ASSERT_STRNE(error_here, "");
+  const char* gtid_here = client.GetCurrentGtid();
+  ASSERT_NE(gtid_here, nullptr);
+
+  const char* error_there = nullptr;
+  const char* gtid_there = nullptr;
+  // Joined rather than overlapped: what is under test is where the second call
+  // writes, which does not require the two calls to be concurrent.
+  std::thread other([&] {
+    error_there = client.GetLastError();
+    gtid_there = client.GetCurrentGtid();
+  });
+  other.join();
+
+  EXPECT_EQ(error_there, error_here);
+  EXPECT_EQ(gtid_there, gtid_here);
+  // And the address the other thread wrote through still holds a whole string.
+  EXPECT_STRNE(error_here, "");
+}
+
 }  // namespace
 }  // namespace mes

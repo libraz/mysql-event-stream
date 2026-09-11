@@ -344,8 +344,15 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * @warning The default is MES_DEFAULT_QUEUE_SIZE (10000), preventing a
  * producer that outruns mes_next_event() from growing the internal queue
  * without bound. Use the feed/drain/re-feed loop above for a slow or bursty
- * consumer. Because the cap is rechecked per binlog event (not per row), a
- * single multi-row event may push the queue slightly past it.
+ * consumer. The cap is rechecked once per binlog event, not per row, and each
+ * row of a ROWS event is queued as its own entry, so the queue can come to
+ * hold up to (rows in that one event - 1) entries beyond @p max_size. Nothing
+ * set here bounds that row count: it is bounded by how many rows fit in one
+ * event body, which makes mes_set_max_event_size() the lever over the entry
+ * overshoot, and for a narrow table an event at the default ceiling carries
+ * millions of rows. In practice the server is the tighter bound, since
+ * binlog_row_event_max_size defaults to 8 KiB. The memory such an overshoot
+ * can occupy is bounded independently, by the byte budget described below.
  *
  * @note An entry count cannot bound the queue's memory on its own, because a
  * compressed column decodes to a size its on-wire length does not predict. The
@@ -765,8 +772,13 @@ MES_API int mes_client_is_streaming(mes_client_t* client);
 MES_API mes_server_flavor_t mes_client_flavor(mes_client_t* client);
 
 /** @brief Get last error message. Returns empty string if no error.
- *  @threadsafety Single-owner thread. The returned pointer is valid until
- *                the next mes_client_* call on the same client.
+ *  @threadsafety Single-owner thread. The streaming client's own message is
+ *                read under a lock, but a configuration rejected at this
+ *                boundary before the client was reached is recorded outside
+ *                one, by the entry point that rejected it -- so a call from
+ *                another thread races any entry point in progress. The
+ *                returned pointer is valid until the next mes_client_* call on
+ *                the same client.
  */
 MES_API const char* mes_client_last_error(mes_client_t* client);
 
@@ -784,7 +796,13 @@ MES_API const char* mes_client_last_error(mes_client_t* client);
  *        point the underlying buffer may be overwritten. Callers must copy
  *        the result (e.g. via strdup or std::string) if they need it to
  *        persist beyond the next call.
- *  @threadsafety Single-owner thread.
+ *  @threadsafety May be called from any thread, including while another thread
+ *                is inside mes_client_poll() or mes_client_poll_batch() on the
+ *                same client: the read is serialised internally, so no caller
+ *                has to add a lock to make the call. The buffer behind the
+ *                returned pointer is shared by every caller, though, so the
+ *                "until the next call" note above counts calls from all
+ *                threads, not just the calling one.
  */
 MES_API const char* mes_client_current_gtid(mes_client_t* client);
 

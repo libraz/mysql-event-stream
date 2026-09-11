@@ -40,6 +40,7 @@ using test::BuildRotateBody;
 using test::BuildTableMapBody;
 using test::BuildUpdateRowsBody;
 using test::BuildWriteRowsBody;
+using test::BuildWriteRowsBodyMultiRow;
 
 int g_include_filter_warning_count = 0;
 std::string g_include_filter_warning_message;
@@ -1102,7 +1103,60 @@ TEST(CdcEngineTest, BackpressureStopsFeedingWhenQueueFull) {
   EXPECT_FALSE(engine.HasEvents());
 }
 
-TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
+/**
+ * @brief The entry overshoot is every row of the event that crossed the limit.
+ *
+ * The cap is looked at once per binlog event while a ROWS event queues one
+ * entry per row, and that gap is what the documented overshoot bound describes:
+ * not a rounding allowance, but as many entries beyond the limit as the event
+ * carried rows. A single-row body cannot tell those two readings apart, which
+ * is why this feeds a body holding several.
+ */
+TEST(CdcEngineTest, QueueOvershootIsEveryRowOfTheEventThatCrossedTheLimit) {
+  CdcEngine engine;
+  engine.SetMaxQueueSize(1);
+
+  auto table_map_body = BuildTableMapBody(1, "db", "t");
+  auto table_map_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+
+  const std::vector<int32_t> rows = {10, 20, 30, 40, 50};
+  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                BuildWriteRowsBodyMultiRow(1, rows));
+
+  std::vector<uint8_t> combined;
+  combined.insert(combined.end(), table_map_event.begin(), table_map_event.end());
+  combined.insert(combined.end(), write_event.begin(), write_event.end());
+
+  // Nothing stops this call: the queue is under the limit at every point the
+  // limit is examined, which is once before the event rather than once per row.
+  ASSERT_EQ(engine.Feed(combined.data(), combined.size()), combined.size());
+
+  EXPECT_EQ(engine.PendingEventCount(), rows.size());
+  EXPECT_GT(engine.PendingEventCount(), engine.MaxQueueSize());
+
+  // The backlog is that one event's own rows, in order -- the bound is a
+  // function of rows per event, not an unrelated amount of accumulated queue.
+  ChangeEvent event;
+  for (int32_t expected : rows) {
+    ASSERT_TRUE(engine.NextEvent(&event));
+    EXPECT_EQ(event.after.columns[0].int_val, expected);
+  }
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+/**
+ * @brief A drain-and-re-feed loop finishes a buffer that backpressure stopped.
+ *
+ * At a limit of one, the first Feed() returns short and the caller has to
+ * alternate draining and re-feeding to get through the rest. What ends each
+ * Feed() is the capacity check at the top of the outer loop: the stream parser
+ * readies at most one event per call, so the check inside the per-event loop
+ * sees the queue the outer one just accepted and cannot be the mechanism.
+ * The property worth holding is that the loop terminates and delivers every
+ * row once, which is what this asserts.
+ */
+TEST(CdcEngineTest, BackpressureLetsADrainAndRefeedLoopFinishTheBuffer) {
   CdcEngine engine;
   engine.SetMaxQueueSize(1);
 
@@ -1111,9 +1165,8 @@ TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
   auto table_map_event =
       BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
 
-  // Build 3 write events and combine them into one buffer.
-  // When the stream parser processes this buffer in a single Feed call,
-  // the inner loop should stop after 1 event due to backpressure.
+  // Three single-row write events combined into one buffer, so that one Feed()
+  // call has more than one event's worth of bytes available to it.
   auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
                            BuildWriteRowsBody(1, 10));
   auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
@@ -1127,7 +1180,7 @@ TEST(CdcEngineTest, BackpressureInnerLoopStopsWhenQueueFull) {
   combined.insert(combined.end(), write2.begin(), write2.end());
   combined.insert(combined.end(), write3.begin(), write3.end());
 
-  // Feed entire buffer; inner loop should stop after 1 event
+  // Feed the whole buffer; the capacity check ends the call after one event
   size_t consumed = engine.Feed(combined.data(), combined.size());
   EXPECT_LT(consumed, combined.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
