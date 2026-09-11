@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "event_header.h"
 #include "mes.h"
 
 namespace mes::protocol {
@@ -36,7 +37,7 @@ constexpr uint16_t kBinlogSendAnnotateRows = 0x0002;
 struct BinlogStreamConfig {
   uint32_t server_id = 1;
   std::string binlog_filename;  ///< Empty string means no specific file
-  uint64_t binlog_position = 4;
+  uint64_t binlog_position = kBinlogMagicOffset;
   std::vector<uint8_t> gtid_encoded;  ///< Binary-encoded GTID set
   uint16_t flags = 0;
 };

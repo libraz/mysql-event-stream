@@ -37,10 +37,6 @@ bool IsValidMariaDBGtidSet(const std::string& gtid) {
   return true;
 }
 
-/// Binlog files begin with a 4-byte magic number (0xFE 0x62 0x69 0x6E).
-/// Streaming starts at offset 4 to skip the magic header.
-constexpr uint32_t kBinlogMagicOffset = 4;
-
 /// Default heartbeat period in nanoseconds (3 seconds).
 constexpr uint64_t kDefaultHeartbeatPeriodNs = 3'000'000'000ULL;
 

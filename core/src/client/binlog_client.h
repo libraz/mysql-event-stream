@@ -45,7 +45,7 @@ struct BinlogClientConfig {
   bool start_at_current = true;
   bool start_at_file_position = false;
   std::string binlog_file;
-  uint64_t binlog_position = 4;
+  uint64_t binlog_position = kBinlogMagicOffset;
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
   mes_ssl_mode_t ssl_mode = MES_SSL_DISABLED;

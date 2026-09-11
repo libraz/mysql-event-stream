@@ -85,6 +85,15 @@ struct EventHeader {
 inline constexpr size_t kEventHeaderSize = 19;
 inline constexpr size_t kChecksumSize = 4;
 
+/**
+ * Offset of the first event in a binlog file.
+ *
+ * A binlog file opens with a 4-byte magic number (0xFE 0x62 0x69 0x6E), so this
+ * is both where a dump of a whole file starts and the lowest offset a caller
+ * may name: an offset below it addresses the magic number rather than an event.
+ */
+inline constexpr uint64_t kBinlogMagicOffset = 4;
+
 /// Binlog checksum algorithm descriptor values (FORMAT_DESCRIPTION_EVENT).
 inline constexpr uint8_t kBinlogChecksumAlgOff = 0;
 inline constexpr uint8_t kBinlogChecksumAlgCrc32 = 1;
