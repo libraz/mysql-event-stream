@@ -3,11 +3,16 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iterator>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "client/metadata_fetcher.h"
@@ -963,21 +968,6 @@ TEST(CApi, ClientMaxEventSizeDefaultAndRoundTrip) {
   mes_client_destroy(client);
 }
 
-TEST(CApi, ClientMaxEventSizeNull) {
-  EXPECT_EQ(mes_client_set_max_event_size(nullptr, 1024), MES_ERR_NULL_ARG);
-  EXPECT_EQ(mes_client_get_max_event_size(nullptr), 0u);
-  EXPECT_EQ(mes_client_is_connected(nullptr), 0);
-  EXPECT_EQ(mes_client_is_streaming(nullptr), 0);
-}
-
-TEST(CApi, ClientFlavorDefaultsToMysqlBeforeConnection) {
-  EXPECT_EQ(mes_client_flavor(nullptr), MES_SERVER_FLAVOR_MYSQL);
-  mes_client_t* client = mes_client_create();
-  ASSERT_NE(client, nullptr);
-  EXPECT_EQ(mes_client_flavor(client), MES_SERVER_FLAVOR_MYSQL);
-  mes_client_destroy(client);
-}
-
 TEST(CApi, ClientMaxQueueBytesDefaultAndRoundTrip) {
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
@@ -990,42 +980,406 @@ TEST(CApi, ClientMaxQueueBytesDefaultAndRoundTrip) {
   mes_client_destroy(client);
 }
 
-TEST(CApi, ClientMaxQueueBytesNull) {
-  EXPECT_EQ(mes_client_set_max_queue_bytes(nullptr, 1024), MES_ERR_NULL_ARG);
-  EXPECT_EQ(mes_client_get_max_queue_bytes(nullptr), 0u);
-  EXPECT_EQ(mes_client_queued_bytes(nullptr), 0u);
-  EXPECT_EQ(mes_client_crc_errors(nullptr), 0u);
-}
-
-TEST(CApi, ClientPollBatchValidatesArguments) {
+// A caller holding a valid handle is told why the call was refused: the error
+// code alone does not distinguish a missing output buffer from a zero capacity.
+TEST(CApi, ClientPollBatchValidatesOutputArguments) {
   mes_poll_result_t results[2]{};
   size_t count = 0;
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
-  EXPECT_EQ(mes_client_poll_batch(nullptr, results, 2, &count), MES_ERR_NULL_ARG);
   EXPECT_EQ(mes_client_poll_batch(client, nullptr, 2, &count), MES_ERR_NULL_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), "results and result_count must not be NULL");
   EXPECT_EQ(mes_client_poll_batch(client, results, 2, nullptr), MES_ERR_NULL_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), "results and result_count must not be NULL");
   EXPECT_EQ(mes_client_poll_batch(client, results, 0, &count), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), "capacity must be at least 1");
   mes_client_destroy(client);
 }
 
+// Each sub-case below is a configuration valid in every respect other than the
+// condition it tests, so the rejection cannot be satisfied by an unrelated
+// defect in the fixture: a zero server_id, for instance, is refused earlier and
+// would mask whether the start position is checked at all. Every message is
+// asserted for the same reason -- a bare MES_ERR_INVALID_ARG does not say which
+// branch fired.
 TEST(CApi, ClientRejectsInvalidStartPositionConfigurationBeforeConnecting) {
   mes_client_t* client = mes_client_create();
   ASSERT_NE(client, nullptr);
 
   mes_client_config_t config{};
+  config.server_id = 1;
   config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
   EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client),
+               "start_position_mode must be current, gtid or position");
+
+  const char* const kPositionRequired =
+      "binlog_file and binlog_position (4 through UINT32_MAX) are required";
 
   config = {};
+  config.server_id = 1;
   config.start_position_mode = MES_START_AT_POSITION;
   config.binlog_file = "binlog.000001";
   config.binlog_position = 3;
   EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), kPositionRequired);
+
+  config.binlog_position = 0x100000000ull;
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), kPositionRequired);
 
   config.binlog_file = nullptr;
   config.binlog_position = 4;
   EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client), kPositionRequired);
+  mes_client_destroy(client);
+}
+
+TEST(CApi, ClientLastErrorDescribesTheCallThatFailedMostRecently) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.server_id = 1;
+  config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
+  EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(mes_client_last_error(client),
+               "start_position_mode must be current, gtid or position");
+
+  // A rejection decided at the C ABI boundary must not outlive the call it
+  // describes, or the next failure is reported with the wrong reason.
+  EXPECT_EQ(mes_client_start(client), MES_ERR_DISCONNECTED);
+  EXPECT_STREQ(mes_client_last_error(client), "Not connected");
+  mes_client_destroy(client);
+}
+
+// ---- Client entry-point inventory ----
+
+/**
+ * @brief One mes_client_* entry point and the contracts a caller may rely on.
+ *
+ * Every entry point declared in mes.h appears exactly once in
+ * kClientEntryPoints below, and both the NULL-handle sweep and the state matrix
+ * are generated from that one list. An entry point added to the header without
+ * being listed therefore fails
+ * ClientEntryPointInventoryCoversEveryHeaderDeclaration instead of shipping
+ * with no coverage at all.
+ */
+struct ClientEntryPoint {
+  const char* name;
+  /** Asserts the documented behavior for a NULL client handle. */
+  void (*reject_null_handle)();
+  /**
+   * Asserts the documented behavior on a client that is neither connected nor
+   * streaming. Probes run against a shared client, so a probe must leave the
+   * client in the state it received: nothing here may make it connected, and
+   * anything it configures it restores.
+   */
+  void (*probe_unconnected)(mes_client_t* client);
+};
+
+/** @brief A config rejected at the C ABI boundary, before any socket is used. */
+mes_client_config_t RejectedBeforeAnyIo() {
+  mes_client_config_t config{};
+  config.server_id = 1;
+  config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
+  return config;
+}
+
+const ClientEntryPoint kClientEntryPoints[] = {
+    {"mes_client_create",
+     [] {
+       // Creation takes no handle. Its contract is that a successful create
+       // yields an independent, destroyable instance.
+       mes_client_t* client = mes_client_create();
+       ASSERT_NE(client, nullptr);
+       mes_client_destroy(client);
+     },
+     [](mes_client_t* client) {
+       mes_client_t* other = mes_client_create();
+       ASSERT_NE(other, nullptr);
+       EXPECT_NE(other, client);
+       mes_client_destroy(other);
+     }},
+    {"mes_client_destroy", [] { mes_client_destroy(nullptr); },
+     [](mes_client_t* client) {
+       // Destroying an unrelated instance leaves this one usable.
+       mes_client_destroy(mes_client_create());
+       EXPECT_EQ(mes_client_is_connected(client), 0);
+     }},
+    {"mes_client_connect",
+     [] {
+       mes_client_config_t config = RejectedBeforeAnyIo();
+       EXPECT_EQ(mes_client_connect(nullptr, &config), MES_ERR_NULL_ARG);
+     },
+     [](mes_client_t* client) {
+       EXPECT_EQ(mes_client_connect(client, nullptr), MES_ERR_NULL_ARG);
+       EXPECT_STRNE(mes_client_last_error(client), "");
+       mes_client_config_t config = RejectedBeforeAnyIo();
+       EXPECT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+       EXPECT_STRNE(mes_client_last_error(client), "");
+     }},
+    {"mes_client_start", [] { EXPECT_EQ(mes_client_start(nullptr), MES_ERR_NULL_ARG); },
+     [](mes_client_t* client) {
+       EXPECT_EQ(mes_client_start(client), MES_ERR_DISCONNECTED);
+       EXPECT_EQ(mes_client_is_streaming(client), 0);
+     }},
+    {"mes_client_poll",
+     [] {
+       const mes_poll_result_t result = mes_client_poll(nullptr);
+       EXPECT_EQ(result.error, MES_ERR_NULL_ARG);
+       EXPECT_EQ(result.data, nullptr);
+       EXPECT_EQ(result.size, 0u);
+       EXPECT_EQ(result.is_heartbeat, 0);
+     },
+     [](mes_client_t* client) {
+       const mes_poll_result_t result = mes_client_poll(client);
+       EXPECT_EQ(result.error, MES_ERR_DISCONNECTED);
+       EXPECT_EQ(result.data, nullptr);
+       EXPECT_EQ(result.is_heartbeat, 0);
+     }},
+    {"mes_client_poll_batch",
+     [] {
+       mes_poll_result_t results[2]{};
+       size_t count = 0;
+       EXPECT_EQ(mes_client_poll_batch(nullptr, results, 2, &count), MES_ERR_NULL_ARG);
+     },
+     [](mes_client_t* client) {
+       mes_poll_result_t results[2]{};
+       size_t count = 0;
+       // A well formed batch call reports the terminal state in the result, not
+       // in its return value.
+       EXPECT_EQ(mes_client_poll_batch(client, results, 2, &count), MES_OK);
+       ASSERT_EQ(count, 1u);
+       EXPECT_EQ(results[0].error, MES_ERR_DISCONNECTED);
+     }},
+    {"mes_client_stop", [] { mes_client_stop(nullptr); },
+     [](mes_client_t* client) {
+       mes_client_stop(client);
+       mes_client_stop(client);
+       EXPECT_EQ(mes_client_is_streaming(client), 0);
+       EXPECT_EQ(mes_client_is_connected(client), 0);
+     }},
+    {"mes_client_disconnect", [] { mes_client_disconnect(nullptr); },
+     [](mes_client_t* client) {
+       mes_client_disconnect(client);
+       mes_client_disconnect(client);
+       EXPECT_EQ(mes_client_is_connected(client), 0);
+     }},
+    {"mes_client_is_connected", [] { EXPECT_EQ(mes_client_is_connected(nullptr), 0); },
+     [](mes_client_t* client) { EXPECT_EQ(mes_client_is_connected(client), 0); }},
+    {"mes_client_is_streaming", [] { EXPECT_EQ(mes_client_is_streaming(nullptr), 0); },
+     [](mes_client_t* client) { EXPECT_EQ(mes_client_is_streaming(client), 0); }},
+    {"mes_client_flavor", [] { EXPECT_EQ(mes_client_flavor(nullptr), MES_SERVER_FLAVOR_MYSQL); },
+     [](mes_client_t* client) {
+       // No handshake has completed, so the flavor is still the default.
+       EXPECT_EQ(mes_client_flavor(client), MES_SERVER_FLAVOR_MYSQL);
+     }},
+    {"mes_client_last_error", [] { EXPECT_STREQ(mes_client_last_error(nullptr), ""); },
+     [](mes_client_t* client) {
+       // The message depends on what this client has already been asked to do;
+       // what every state owes the caller is a readable string.
+       EXPECT_NE(mes_client_last_error(client), nullptr);
+     }},
+    {"mes_client_current_gtid", [] { EXPECT_STREQ(mes_client_current_gtid(nullptr), ""); },
+     [](mes_client_t* client) { EXPECT_STREQ(mes_client_current_gtid(client), ""); }},
+    {"mes_client_checksum_enabled", [] { EXPECT_EQ(mes_client_checksum_enabled(nullptr), 0); },
+     [](mes_client_t* client) {
+       // CRC32 is assumed until the server reports otherwise during start.
+       EXPECT_EQ(mes_client_checksum_enabled(client), 1);
+     }},
+    {"mes_client_set_max_event_size",
+     [] { EXPECT_EQ(mes_client_set_max_event_size(nullptr, 1024), MES_ERR_NULL_ARG); },
+     [](mes_client_t* client) {
+       const uint32_t previous = mes_client_get_max_event_size(client);
+       EXPECT_EQ(mes_client_set_max_event_size(client, 128u * 1024u * 1024u), MES_OK);
+       EXPECT_EQ(mes_client_get_max_event_size(client), 128u * 1024u * 1024u);
+       EXPECT_EQ(mes_client_set_max_event_size(client, previous), MES_OK);
+     }},
+    {"mes_client_get_max_event_size", [] { EXPECT_EQ(mes_client_get_max_event_size(nullptr), 0u); },
+     [](mes_client_t* client) {
+       EXPECT_EQ(mes_client_get_max_event_size(client), 32u * 1024u * 1024u);
+     }},
+    {"mes_client_set_max_queue_bytes",
+     [] { EXPECT_EQ(mes_client_set_max_queue_bytes(nullptr, 1024), MES_ERR_NULL_ARG); },
+     [](mes_client_t* client) {
+       const size_t previous = mes_client_get_max_queue_bytes(client);
+       EXPECT_EQ(mes_client_set_max_queue_bytes(client, 512u * 1024u * 1024u), MES_OK);
+       EXPECT_EQ(mes_client_get_max_queue_bytes(client), 512u * 1024u * 1024u);
+       EXPECT_EQ(mes_client_set_max_queue_bytes(client, previous), MES_OK);
+     }},
+    {"mes_client_get_max_queue_bytes",
+     [] { EXPECT_EQ(mes_client_get_max_queue_bytes(nullptr), 0u); },
+     [](mes_client_t* client) {
+       EXPECT_EQ(mes_client_get_max_queue_bytes(client), MES_DEFAULT_QUEUE_BYTES);
+     }},
+    {"mes_client_queued_bytes", [] { EXPECT_EQ(mes_client_queued_bytes(nullptr), 0u); },
+     [](mes_client_t* client) { EXPECT_EQ(mes_client_queued_bytes(client), 0u); }},
+    {"mes_client_crc_errors", [] { EXPECT_EQ(mes_client_crc_errors(nullptr), 0u); },
+     [](mes_client_t* client) { EXPECT_EQ(mes_client_crc_errors(client), 0u); }},
+};
+
+/** @brief Client states reachable from the C ABI without a live server. */
+enum class ClientState {
+  kFresh,
+  kConnectFailed,
+  kStopped,
+  kStoppedTwice,
+  kDisconnected,
+};
+
+const char* ClientStateName(ClientState state) {
+  switch (state) {
+    case ClientState::kFresh:
+      return "never connected";
+    case ClientState::kConnectFailed:
+      return "failed to connect";
+    case ClientState::kStopped:
+      return "stopped";
+    case ClientState::kStoppedTwice:
+      return "stopped twice";
+    case ClientState::kDisconnected:
+      return "disconnected";
+  }
+  return "unknown";
+}
+
+/**
+ * @brief Drive a freshly created client into @p state.
+ *
+ * Every state here is "not connected, not streaming": the connected and
+ * streaming states need a real handshake and are exercised in the E2E tier.
+ */
+void DriveClientToState(mes_client_t* client, ClientState state) {
+  switch (state) {
+    case ClientState::kFresh:
+      break;
+    case ClientState::kConnectFailed: {
+      mes_client_config_t config{};
+      // Nothing listens on loopback port 1, so the attempt fails on the socket
+      // without needing a server, and the timeout bounds the wait.
+      config.host = "127.0.0.1";
+      config.port = 1;
+      config.user = "repl";
+      config.server_id = 1;
+      config.connect_timeout_s = 1;
+      config.read_timeout_s = 1;
+      EXPECT_NE(mes_client_connect(client, &config), MES_OK);
+      break;
+    }
+    case ClientState::kStopped:
+      mes_client_stop(client);
+      break;
+    case ClientState::kStoppedTwice:
+      mes_client_stop(client);
+      mes_client_stop(client);
+      break;
+    case ClientState::kDisconnected:
+      mes_client_disconnect(client);
+      break;
+  }
+}
+
+/** @brief Name declared by a `MES_API <return type> name(` line, else empty. */
+std::string DeclaredFunctionName(const std::string& line) {
+  if (line.rfind("MES_API ", 0) != 0) return "";
+  const size_t paren = line.find('(');
+  if (paren == std::string::npos) return "";
+  size_t begin = paren;
+  while (begin > 0) {
+    const auto ch = static_cast<unsigned char>(line[begin - 1]);
+    if (std::isalnum(ch) == 0 && ch != '_') break;
+    --begin;
+  }
+  return line.substr(begin, paren - begin);
+}
+
+/** @brief The public header, located relative to this test's own source file. */
+std::string PublicHeaderPath() {
+  const std::string self = __FILE__;
+  const size_t slash = self.find_last_of("/\\");
+  const std::string dir = slash == std::string::npos ? std::string(".") : self.substr(0, slash);
+  return dir + "/../include/mes.h";
+}
+
+TEST(CApi, ClientEntryPointInventoryCoversEveryHeaderDeclaration) {
+  const std::string header_path = PublicHeaderPath();
+  std::ifstream header(header_path);
+  ASSERT_TRUE(header.is_open()) << "cannot read the public header at " << header_path;
+
+  std::vector<std::string> declared;
+  std::string line;
+  while (std::getline(header, line)) {
+    const std::string name = DeclaredFunctionName(line);
+    if (name.rfind("mes_client_", 0) == 0) declared.push_back(name);
+  }
+  ASSERT_FALSE(declared.empty()) << "no mes_client_* declarations found in " << header_path;
+
+  std::vector<std::string> listed;
+  for (const ClientEntryPoint& entry : kClientEntryPoints) listed.emplace_back(entry.name);
+  std::sort(declared.begin(), declared.end());
+  std::sort(listed.begin(), listed.end());
+  // Equality covers both directions: an unlisted entry point and a listed name
+  // the header no longer declares.
+  EXPECT_EQ(listed, declared);
+  EXPECT_EQ(std::size(kClientEntryPoints), declared.size());
+}
+
+TEST(CApi, ClientEntryPointsRejectNullHandle) {
+  for (const ClientEntryPoint& entry : kClientEntryPoints) {
+    SCOPED_TRACE(entry.name);
+    entry.reject_null_handle();
+  }
+}
+
+TEST(CApi, ClientEntryPointsHonorTheirContractInEveryUnconnectedState) {
+  const ClientState states[] = {
+      ClientState::kFresh,        ClientState::kConnectFailed, ClientState::kStopped,
+      ClientState::kStoppedTwice, ClientState::kDisconnected,
+  };
+  for (ClientState state : states) {
+    mes_client_t* client = mes_client_create();
+    ASSERT_NE(client, nullptr);
+    DriveClientToState(client, state);
+    for (const ClientEntryPoint& entry : kClientEntryPoints) {
+      SCOPED_TRACE(std::string(entry.name) + " on a client that " + ClientStateName(state));
+      entry.probe_unconnected(client);
+    }
+    mes_client_destroy(client);
+  }
+}
+
+TEST(CApi, ClientStopIsCallableFromOtherThreadsAndIsIdempotent) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  // Stop is the one entry point the C ABI allows on a thread other than the
+  // owner. Several threads request it, twice each, while the owner keeps polling
+  // the same client, so losing the internal serialization shows up here rather
+  // than in a binding's finalizer.
+  constexpr int kStoppers = 4;
+  std::atomic<int> ready{0};
+  std::vector<std::thread> stoppers;
+  stoppers.reserve(kStoppers);
+  for (int i = 0; i < kStoppers; ++i) {
+    stoppers.emplace_back([client, &ready] {
+      ready.fetch_add(1, std::memory_order_release);
+      mes_client_stop(client);
+      mes_client_stop(client);
+    });
+  }
+  while (ready.load(std::memory_order_acquire) < kStoppers) std::this_thread::yield();
+
+  // A client that was never started has nothing to drain, so each poll returns
+  // the terminal state instead of blocking on the queue.
+  for (int i = 0; i < 100; ++i) {
+    EXPECT_EQ(mes_client_poll(client).error, MES_ERR_DISCONNECTED);
+  }
+  for (std::thread& stopper : stoppers) stopper.join();
+
+  EXPECT_EQ(mes_client_is_streaming(client), 0);
+  EXPECT_EQ(mes_client_is_connected(client), 0);
+  EXPECT_STRNE(mes_client_last_error(client), "");
   mes_client_destroy(client);
 }
 

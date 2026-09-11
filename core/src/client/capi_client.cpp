@@ -9,13 +9,57 @@
 #include <openssl/crypto.h>
 
 #include <new>
+#include <string>
 
 #include "client/binlog_client.h"
 #include "mes.h"
 
 struct mes_client {
   mes::BinlogClient client;
+  /**
+   * Message for a configuration rejected at this boundary, before
+   * BinlogClient::Connect() is reached. Such a rejection has nowhere else to
+   * record itself, and mes_client_last_error() is documented to describe every
+   * failed call. Cleared at the start of each connect attempt so a stale
+   * rejection cannot be mistaken for the outcome of a later one.
+   */
+  std::string boundary_error;
 };
+
+namespace {
+
+/**
+ * @brief Drop a stale boundary rejection before an entry point records its own.
+ *
+ * mes_client_last_error() describes the call that most recently failed, so a
+ * rejection decided here must not outlive it. Only the owner thread reaches
+ * this: every entry point that can produce a message is documented
+ * single-owner, and mes_client_stop() -- the one callable from another thread --
+ * does not touch this field.
+ */
+void ClearBoundaryError(mes_client_t* c) {
+  if (!c->boundary_error.empty()) {
+    c->boundary_error.clear();
+  }
+}
+
+/**
+ * @brief Wipe a secret-bearing std::string when it leaves scope.
+ *
+ * A staging copy built from the caller's `const char*` goes back to the
+ * allocator as soon as the entry point returns, so the wipe must reach the
+ * error returns too and must be one the compiler may not drop as a dead store.
+ */
+struct SecureCleanseString {
+  std::string& value;
+  ~SecureCleanseString() {
+    if (!value.empty()) {
+      OPENSSL_cleanse(value.data(), value.size());
+    }
+  }
+};
+
+}  // namespace
 
 extern "C" {
 
@@ -24,22 +68,36 @@ MES_API mes_client_t* mes_client_create(void) { return new (std::nothrow) mes_cl
 MES_API void mes_client_destroy(mes_client_t* c) { delete c; }
 
 MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_t* config) {
-  if (c == nullptr || config == nullptr) {
+  if (c == nullptr) {
+    return MES_ERR_NULL_ARG;
+  }
+  ClearBoundaryError(c);
+  if (config == nullptr) {
+    c->boundary_error = "config must not be NULL";
     return MES_ERR_NULL_ARG;
   }
 
+  // The start position mode is an enumerator of the C ABI alone, so this is the
+  // only layer that can reject an out-of-range value. Everything the mode maps
+  // onto -- including binlog_file and binlog_position -- is validated once, by
+  // BinlogClient::Connect(), which records the message describing it. Checking
+  // any of that a second time here would let a configuration be rejected by a
+  // branch other than the one that reports why.
+  if (config->start_position_mode != MES_START_AT_CURRENT &&
+      config->start_position_mode != MES_START_AT_GTID &&
+      config->start_position_mode != MES_START_AT_POSITION) {
+    c->boundary_error = "start_position_mode must be current, gtid or position";
+    return MES_ERR_INVALID_ARG;
+  }
+
   mes::BinlogClientConfig cfg;
+  SecureCleanseString password_cleanse{cfg.password};
   cfg.host = config->host != nullptr ? config->host : "127.0.0.1";
   cfg.port = config->port;
   cfg.user = config->user != nullptr ? config->user : "";
   cfg.password = config->password != nullptr ? config->password : "";
   cfg.server_id = config->server_id;
   cfg.start_gtid = config->start_gtid != nullptr ? config->start_gtid : "";
-  if (config->start_position_mode != MES_START_AT_CURRENT &&
-      config->start_position_mode != MES_START_AT_GTID &&
-      config->start_position_mode != MES_START_AT_POSITION) {
-    return MES_ERR_INVALID_ARG;
-  }
   // Preserve the established C ABI behavior for callers compiled before the
   // explicit mode was added: a non-empty start_gtid has always meant resume
   // from that GTID. Empty sets require MES_START_AT_GTID to be unambiguous.
@@ -48,10 +106,6 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   cfg.start_at_file_position = config->start_position_mode == MES_START_AT_POSITION;
   cfg.binlog_file = config->binlog_file != nullptr ? config->binlog_file : "";
   cfg.binlog_position = config->binlog_position;
-  if (cfg.start_at_file_position &&
-      (cfg.binlog_file.empty() || cfg.binlog_position < 4 || cfg.binlog_position > UINT32_MAX)) {
-    return MES_ERR_INVALID_ARG;
-  }
   cfg.connect_timeout_s = config->connect_timeout_s;
   cfg.read_timeout_s = config->read_timeout_s;
   cfg.ssl_mode = config->ssl_mode;
@@ -61,20 +115,18 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   cfg.max_queue_size = config->max_queue_size;
   cfg.allow_public_key_retrieval = config->allow_public_key_retrieval != 0;
 
-  const mes_error_t rc = c->client.Connect(cfg);
-  // BinlogClient keeps its own copy of the credential for reconnection; this
-  // staging copy is about to go back to the allocator, so wipe it rather than
-  // leaving the password readable in freed memory.
-  if (!cfg.password.empty()) {
-    OPENSSL_cleanse(cfg.password.data(), cfg.password.size());
-  }
-  return rc;
+  // BinlogClient wipes its own copy once authentication is done and never keeps
+  // the credential for a self-initiated reconnection, so after this call the
+  // staged copy above is the last plaintext in the process; the scope guard
+  // wipes it on whichever path leaves this function.
+  return c->client.Connect(cfg);
 }
 
 MES_API mes_error_t mes_client_start(mes_client_t* c) {
   if (c == nullptr) {
     return MES_ERR_NULL_ARG;
   }
+  ClearBoundaryError(c);
   return c->client.StartStream();
 }
 
@@ -84,6 +136,7 @@ MES_API mes_poll_result_t mes_client_poll(mes_client_t* c) {
     out.error = MES_ERR_NULL_ARG;
     return out;
   }
+  ClearBoundaryError(c);
 
   auto result = c->client.Poll();
   out.error = result.error;
@@ -95,8 +148,16 @@ MES_API mes_poll_result_t mes_client_poll(mes_client_t* c) {
 
 MES_API mes_error_t mes_client_poll_batch(mes_client_t* c, mes_poll_result_t* results,
                                           size_t capacity, size_t* result_count) {
-  if (c == nullptr || results == nullptr || result_count == nullptr) return MES_ERR_NULL_ARG;
-  if (capacity == 0) return MES_ERR_INVALID_ARG;
+  if (c == nullptr) return MES_ERR_NULL_ARG;
+  ClearBoundaryError(c);
+  if (results == nullptr || result_count == nullptr) {
+    c->boundary_error = "results and result_count must not be NULL";
+    return MES_ERR_NULL_ARG;
+  }
+  if (capacity == 0) {
+    c->boundary_error = "capacity must be at least 1";
+    return MES_ERR_INVALID_ARG;
+  }
 
   std::vector<mes::PollResult> batch;
   c->client.PollBatch(capacity, &batch);
@@ -142,6 +203,9 @@ MES_API mes_server_flavor_t mes_client_flavor(mes_client_t* c) {
 MES_API const char* mes_client_last_error(mes_client_t* c) {
   if (c == nullptr) {
     return "";
+  }
+  if (!c->boundary_error.empty()) {
+    return c->boundary_error.c_str();
   }
   return c->client.GetLastError();
 }
