@@ -124,45 +124,124 @@ class MESPollResult(ctypes.Structure):
     ]
 
 
+# Names the library can carry inside a distribution, across platforms.
+_LIB_NAMES = ("libmes.dylib", "libmes.so", "mes.dll")
+
+# Development build directories, in the order every harness in the repository
+# prefers them: the client-enabled build first, then the default one.
+_BUILD_DIRS = ("build-client", "build")
+
+
+def _platform_lib_name() -> str:
+    """Return the library file name used on the running platform."""
+    system = platform.system()
+    if system == "Darwin":
+        return "libmes.dylib"
+    if system == "Windows":
+        return "mes.dll"
+    return "libmes.so"
+
+
+def _source_tree_root(pkg_dir: Path) -> Path | None:
+    """Return the repository root when the package is imported from a checkout.
+
+    In a distribution the package directory is a plain site-packages entry. In
+    the repository it sits at ``bindings/python/src/mysql_event_stream``, beside
+    the binding's ``pyproject.toml``; that file is what tells the two apart, and
+    it is also what makes the development build directories addressable.
+
+    Args:
+        pkg_dir: Directory this package is being imported from.
+
+    Returns:
+        The repository root, or None when this is not a source checkout.
+    """
+    binding_root = pkg_dir.parent.parent
+    if pkg_dir.parent.name != "src" or not (binding_root / "pyproject.toml").exists():
+        return None
+    return binding_root.parent.parent
+
+
+def _resolve_library_path(pkg_dir: Path, lib_name: str) -> Path | None:
+    """Return the library that belongs to the environment the package lives in.
+
+    A source checkout resolves to the development build. Building a wheel stages
+    a copy of the library next to the package, and nothing refreshes that copy
+    when the core is rebuilt, so preferring it inside a checkout would bind a
+    superseded image while the test and example harnesses bind the fresh one.
+    Outside a checkout the staged copy is the library the distribution ships and
+    the only one there is, so it wins.
+
+    Args:
+        pkg_dir: Directory this package is being imported from.
+        lib_name: Library file name used on the running platform.
+
+    Returns:
+        Path to the library to load, or None when no candidate exists.
+    """
+    source_root = _source_tree_root(pkg_dir)
+    if source_root is not None:
+        for build_dir in _BUILD_DIRS:
+            candidate = source_root / build_dir / "core" / lib_name
+            if candidate.exists():
+                return candidate
+        return None
+
+    for name in _LIB_NAMES:
+        candidate = pkg_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _find_library() -> str:
     """Find the libmes shared library.
 
     Search order:
-        1. MES_LIB_PATH environment variable
-        2. Package-adjacent (wheel distribution)
-        3. Build directory (development)
+        1. ``MES_LIB_PATH``, which must name an existing file
+        2. The development build, when imported from a source checkout
+        3. The library shipped next to the package, otherwise
         4. System library path
+
+    An ``MES_LIB_PATH`` that does not exist is an error rather than a fallback:
+    resolving to a different library than the caller asked for would load a
+    second image of libmes into the process, and the two images share no state.
+
+    Returns:
+        Path to the shared library.
+
+    Raises:
+        OSError: If ``MES_LIB_PATH`` does not exist, or no library is found.
     """
     env_path = os.environ.get("MES_LIB_PATH")
-    if env_path and Path(env_path).exists():
+    if env_path:
+        if not Path(env_path).exists():
+            raise OSError(f"MES_LIB_PATH is set to {env_path}, which does not exist.")
         return env_path
 
     pkg_dir = Path(__file__).parent
-    for name in ("libmes.dylib", "libmes.so", "mes.dll"):
-        candidate = pkg_dir / name
-        if candidate.exists():
-            return str(candidate)
-
-    # Dev build dir: src/mysql_event_stream/ -> bindings/python -> bindings -> project root
-    project_root = pkg_dir.parent.parent.parent.parent
-    system = platform.system()
-    if system == "Darwin":
-        lib_name = "libmes.dylib"
-    elif system == "Windows":
-        lib_name = "mes.dll"
-    else:
-        lib_name = "libmes.so"
-    build_path = project_root / "build" / "core" / lib_name
-    if build_path.exists():
-        return str(build_path)
+    lib_name = _platform_lib_name()
+    resolved = _resolve_library_path(pkg_dir, lib_name)
+    if resolved is not None:
+        return str(resolved)
 
     path = ctypes.util.find_library("mes")
     if path:
         return path
 
+    source_root = _source_tree_root(pkg_dir)
+    if source_root is not None:
+        checked = ", ".join(str(source_root / d / "core" / lib_name) for d in _BUILD_DIRS)
+        raise OSError(
+            f"libmes shared library not found. Checked: {checked}. Build it with "
+            "'cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build "
+            "--parallel', or set MES_LIB_PATH to an existing library. A copy staged "
+            "next to the package for wheel building is not used from a source "
+            "checkout, because rebuilding the core does not refresh it."
+        )
     raise OSError(
-        "libmes shared library not found. "
-        "Set MES_LIB_PATH or build with: cmake --build build --parallel"
+        f"libmes shared library not found next to the installed package in {pkg_dir}. "
+        "The distribution is incomplete; set MES_LIB_PATH to an existing library."
     )
 
 
