@@ -110,7 +110,15 @@ TEST(MysqlConnection, HandshakeReadUsesConfiguredTimeout) {
  */
 class HandshakePeer {
  public:
-  HandshakePeer(const std::string& auth_plugin, std::function<void(int)> respond) {
+  /**
+   * @param auth_plugin Plugin name the greeting advertises.
+   * @param respond Handed the accepted socket once the greeting is sent.
+   * @param auth_plugin_data_len Value the greeting declares for that field. The
+   *        bytes written are unchanged, so lowering this shortens only the salt
+   *        the parser is willing to take from them.
+   */
+  HandshakePeer(const std::string& auth_plugin, std::function<void(int)> respond,
+                uint8_t auth_plugin_data_len = 21) {
     listener_ = socket(AF_INET, SOCK_STREAM, 0);
     EXPECT_GE(listener_, 0);
     sockaddr_in address{};
@@ -123,10 +131,11 @@ class HandshakePeer {
     EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length), 0);
     port_ = ntohs(address.sin_port);
 
-    thread_ = std::thread([this, plugin = auth_plugin, responder = std::move(respond)] {
+    thread_ = std::thread([this, plugin = auth_plugin, declared = auth_plugin_data_len,
+                           responder = std::move(respond)] {
       const int peer = accept(listener_, nullptr, nullptr);
       if (peer < 0) return;
-      if (SendPacket(peer, 0, BuildHandshake(plugin))) responder(peer);
+      if (SendPacket(peer, 0, BuildHandshake(plugin, declared))) responder(peer);
       close(peer);
     });
   }
@@ -170,7 +179,8 @@ class HandshakePeer {
  private:
   // Protocol41 + SecureConnection in the lower half, PluginAuth in the upper.
   // CLIENT_SSL is deliberately absent: these tests exercise the plaintext path.
-  static std::vector<uint8_t> BuildHandshake(const std::string& plugin) {
+  static std::vector<uint8_t> BuildHandshake(const std::string& plugin,
+                                             uint8_t auth_plugin_data_len) {
     std::vector<uint8_t> payload;
     payload.push_back(10);
     const std::string version = "8.4.0";
@@ -186,7 +196,7 @@ class HandshakePeer {
     payload.push_back(0x00);
     payload.push_back(0x08);  // capabilities upper (PluginAuth)
     payload.push_back(0x00);
-    payload.push_back(21);                 // auth plugin data length
+    payload.push_back(auth_plugin_data_len);
     payload.insert(payload.end(), 10, 0);  // reserved
     for (uint8_t i = 0; i < 12; ++i) payload.push_back(static_cast<uint8_t>('A' + i));
     payload.push_back(0);  // scramble terminator
@@ -209,6 +219,34 @@ TEST(MysqlConnection, UnknownAuthPluginIsRejectedEvenForAnEmptyPassword) {
   // An empty password must not skip the plugin allow-list: without the check
   // the client would answer with an empty response and wait for the server.
   EXPECT_EQ(connection.GetLastError(), "Unsupported auth plugin: sha256_password");
+}
+
+/**
+ * @brief A server declaring too little auth data is refused before any hashing.
+ *
+ * The handshake parser takes any declared auth_plugin_data_len and returns
+ * however many salt bytes that leaves, so a declaration of nine or below yields
+ * an eight-byte salt -- fewer than either plugin's algorithm is defined over.
+ * What refuses it is the minimum-length check ahead of the response
+ * computation, and nothing exercised either branch of it, so removing one
+ * narrowed the input a scramble is computed over without failing a test.
+ */
+TEST(MysqlConnection, AnUndersizedAuthSaltIsRefusedBeforeTheResponseIsComputed) {
+  for (const char* plugin : {"mysql_native_password", "caching_sha2_password"}) {
+    // Nine leaves every byte of the greeting where it was and the usable salt
+    // at the eight bytes of part one.
+    HandshakePeer peer(plugin, [](int fd) { HandshakePeer::WaitForClose(fd); }, 9);
+
+    MysqlConnection connection;
+    // The password has to be non-empty for the length to be consulted at all:
+    // an empty one returns an empty response before reaching the check.
+    EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, 0, "", "", ""),
+              MES_ERR_AUTH)
+        << plugin;
+    const std::string& error = connection.GetLastError();
+    EXPECT_NE(error.find("salt too short"), std::string::npos) << plugin << ": " << error;
+    EXPECT_NE(error.find(plugin), std::string::npos) << error;
+  }
 }
 
 TEST(MysqlConnection, FullAuthWithoutVerifiedTlsNamesBothRemedies) {
