@@ -473,6 +473,46 @@ TEST(CdcEngineNamesResolvedTest, FailedResolutionIsRetriedOnAByteIdenticalTableM
   EXPECT_EQ(capture.Count(), 2) << capture.LastMessage();
 }
 
+TEST(CdcEngineNamesResolvedTest, RetriedResolutionDoesNotWriteIntoMetadataQueuedEventsBorrow) {
+  // A queued ChangeEvent reads its column names out of the TableMetadata it was
+  // decoded against, so the retry above has to install a fresh object instead
+  // of writing into that one. An in-place write would change what the earlier
+  // event reports and, once a name outgrows its allocation, leave the views it
+  // holds pointing at freed storage.
+  CdcEngine engine;
+  MetadataFetcher fetcher;  // intentionally not Connect()ed
+  engine.SetMetadataFetcher(&fetcher);
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
+                                      200, BuildWriteRowsBody(42, 1));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                       300, BuildWriteRowsBody(42, 2));
+
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
+  // The retry lands while the first event is still queued.
+  MetadataFetcherTestAccess::ClearReconnectBackoff(&fetcher);
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(second_write.data(), second_write.size()), second_write.size());
+  ASSERT_EQ(engine.PendingEventCount(), 2u);
+
+  std::vector<ChangeEvent> events;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) events.push_back(std::move(event));
+  ASSERT_EQ(events.size(), 2u);
+  ASSERT_TRUE(events[0].table_metadata);
+  ASSERT_TRUE(events[1].table_metadata);
+  EXPECT_NE(events[0].table_metadata.get(), events[1].table_metadata.get());
+  // The first event still reads the storage of the registration it was decoded
+  // against, which its own shared_ptr is what keeps alive.
+  EXPECT_EQ(events[0].database.data(), events[0].table_metadata->database_name.data());
+  EXPECT_EQ(events[0].table.data(), events[0].table_metadata->table_name.data());
+  EXPECT_EQ(events[0].database, "testdb");
+  EXPECT_EQ(events[0].table, "users");
+}
+
 TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt) {
   // A DDL statement can rename a column while leaving both the column count and
   // the TABLE_MAP body unchanged, so a registry entry that outlived it would

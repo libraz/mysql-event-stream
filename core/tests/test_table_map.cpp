@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "binary_util.h"
@@ -1052,7 +1054,7 @@ TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
   for (uint64_t id = 1; id <= TableMapRegistry::kMaxEntries; ++id) {
     ASSERT_TRUE(add_table(id));
   }
-  ASSERT_NE(registry.MutableLookup(1), nullptr);  // Refresh the oldest entry.
+  ASSERT_NE(registry.Lookup(1), nullptr);  // Refresh the oldest entry.
 
   uint64_t evicted = UINT64_MAX;
   ASSERT_TRUE(add_table(TableMapRegistry::kMaxEntries + 1));
@@ -1268,18 +1270,108 @@ TEST(TableMapRegistryTest, ReplaceExisting) {
   EXPECT_EQ(registry.Size(), 1u);
 }
 
-TEST(TableMapRegistryTest, MutableLookupNotFound) {
+TEST(TableMapRegistryTest, ReplaceMetadataRejectsAnUnregisteredTableId) {
   TableMapRegistry registry;
-  EXPECT_EQ(registry.MutableLookup(999), nullptr);
+  EXPECT_FALSE(registry.ReplaceMetadata(999, TableMetadata{}));
+  EXPECT_EQ(registry.Size(), 0u);
 }
 
-TEST(TableMapRegistryTest, MutableLookupFound) {
+// A registration handed out through SharedLookup() outlives the entry from a
+// queued event's point of view, so installing a resolution that carries longer
+// column names must leave the shared object's own bytes alone. Longer names are
+// what makes the distinction observable: the replacement name here exceeds the
+// inline capacity of std::string while the registered one fits inside it, so an
+// in-place write is forced to reallocate and would leave the borrowed view
+// pointing at freed storage.
+TEST(TableMapRegistryTest, ReplacedMetadataLeavesAnAlreadySharedRegistrationUntouched) {
   TableMapRegistry registry;
   auto body = test::BuildTableMapBody(42, "db", "tbl");
+  // COLUMN_NAME optional metadata: one length-encoded name, "id".
+  body.insert(body.end(), {0x04, 0x03, 0x02, 'i', 'd'});
   ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size()));
-  auto* meta = registry.MutableLookup(42);
-  ASSERT_NE(meta, nullptr);
-  EXPECT_EQ(meta->table_name, "tbl");
+
+  const auto shared = registry.SharedLookup(42);
+  ASSERT_TRUE(shared);
+  ASSERT_EQ(shared->columns.size(), 1u);
+  ASSERT_EQ(shared->columns[0].name, "id");
+  const std::string_view borrowed(shared->columns[0].name);
+  const char* borrowed_data = borrowed.data();
+
+  static constexpr const char* kResolvedName = "a_column_name_longer_than_the_inline_buffer";
+  TableMetadata resolved = *shared;
+  resolved.columns[0].name = kResolvedName;
+  resolved.names_resolved = true;
+  ASSERT_TRUE(registry.ReplaceMetadata(42, std::move(resolved)));
+
+  // What the earlier registration handed out is unchanged, bytes and address.
+  EXPECT_EQ(shared->columns[0].name, "id");
+  EXPECT_EQ(shared->columns[0].name.data(), borrowed_data);
+  EXPECT_EQ(borrowed, "id");
+  EXPECT_FALSE(shared->names_resolved);
+  // Lookups from here on see the resolution, on a different object.
+  const TableMetadata* current = registry.Lookup(42);
+  ASSERT_NE(current, nullptr);
+  EXPECT_NE(current, shared.get());
+  EXPECT_EQ(current->columns[0].name, kResolvedName);
+  EXPECT_TRUE(current->names_resolved);
+}
+
+TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRawBody) {
+  // The replacement describes the body the entry was registered from, so that
+  // body must still be recognized as unchanged afterwards -- otherwise the next
+  // occurrence of the same TABLE_MAP would re-parse and discard the resolution.
+  TableMapRegistry registry;
+  auto body = test::BuildTableMapBody(42, "db", "tbl");
+  bool unchanged = true;
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), nullptr, &unchanged));
+  ASSERT_FALSE(unchanged);
+
+  TableMetadata resolved = *registry.Lookup(42);
+  resolved.names_resolved = true;
+  ASSERT_TRUE(registry.ReplaceMetadata(42, std::move(resolved)));
+
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), nullptr, &unchanged));
+  EXPECT_TRUE(unchanged);
+  ASSERT_NE(registry.Lookup(42), nullptr);
+  EXPECT_TRUE(registry.Lookup(42)->names_resolved);
+  EXPECT_EQ(registry.Size(), 1u);
+}
+
+TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRecency) {
+  // Installing a replacement reaches the entry, so it counts as a use: the
+  // entry must not remain the eviction candidate it was before.
+  TableMapRegistry registry;
+  const auto add_table = [&registry](uint64_t id, uint64_t* evicted) {
+    TableMapBuilder builder;
+    builder.WriteTableId(id);
+    builder.WriteFlags(0);
+    builder.WriteDatabaseName("db");
+    builder.WriteTableName("t");
+    builder.WriteColumnCount(1);
+    builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
+    builder.WriteMetadataBlock({});
+    builder.WriteNullBitmap({0x01});
+    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), evicted);
+  };
+
+  for (uint64_t id = 1; id <= TableMapRegistry::kMaxEntries; ++id) {
+    ASSERT_TRUE(add_table(id, nullptr));
+  }
+  // Built from scratch rather than copied out of the registry, so the
+  // replacement is the only thing that reaches the entry.
+  TableMetadata resolved;
+  resolved.table_id = 1;
+  resolved.database_name = "db";
+  resolved.table_name = "t";
+  resolved.columns.resize(1);
+  resolved.names_resolved = true;
+  ASSERT_TRUE(registry.ReplaceMetadata(1, std::move(resolved)));
+
+  uint64_t evicted = UINT64_MAX;
+  ASSERT_TRUE(add_table(TableMapRegistry::kMaxEntries + 1, &evicted));
+  EXPECT_EQ(evicted, 2u);
+  ASSERT_NE(registry.Lookup(1), nullptr);
+  EXPECT_TRUE(registry.Lookup(1)->names_resolved);
 }
 
 }  // namespace

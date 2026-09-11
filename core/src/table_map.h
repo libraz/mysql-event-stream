@@ -83,10 +83,25 @@ class TableMapRegistry {
   std::shared_ptr<const TableMetadata> SharedLookup(uint64_t table_id);
 
   /**
-   * @brief Look up mutable table metadata by table_id.
-   * @return Pointer to metadata, or nullptr if not found.
+   * @brief Install replacement metadata for an already-registered table.
+   *
+   * A queued ChangeEvent reads its column names out of the TableMetadata it was
+   * decoded against, holding it alive through the shared_ptr SharedLookup()
+   * returned. Metadata a registration has already handed out must therefore
+   * never be written in place: a resolution that only becomes available later
+   * installs a new object here instead, so what earlier events report -- and
+   * the views they hold into it -- stay as they were decoded.
+   *
+   * The entry keeps the raw TABLE_MAP body it was registered from, because the
+   * replacement describes that same body; only the metadata derived from it is
+   * exchanged. Like every other path that reaches an entry, this marks it as
+   * most recently used.
+   *
+   * @param table_id table_id of the registered table.
+   * @param metadata Metadata to install in place of the entry's current object.
+   * @return true when the table was registered and the metadata was installed.
    */
-  TableMetadata* MutableLookup(uint64_t table_id);
+  bool ReplaceMetadata(uint64_t table_id, TableMetadata metadata);
 
   /** @brief Clear all registered tables. */
   void Clear();

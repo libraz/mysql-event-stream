@@ -456,7 +456,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         break;
       }
       if (evicted_table_id != UINT64_MAX) blocked_table_ids_.erase(evicted_table_id);
-      auto* meta = table_registry_.MutableLookup(table_id);
+      const TableMetadata* meta = table_registry_.Lookup(table_id);
       if (meta) {
         // A byte-identical TABLE_MAP re-registers no new schema, so the work
         // below can be skipped -- unless a column name is still empty while a
@@ -470,36 +470,44 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
           break;
         }
         blocked_table_ids_.erase(table_id);
+        // Events that are already queued read their column names straight out
+        // of the registered TableMetadata, so the resolution below is written
+        // into a copy that then replaces the registry entry. Writing the names
+        // into the registered object would change what an event decoded earlier
+        // reports, and on reallocation would leave its views dangling.
+        TableMetadata resolved = *meta;
         bool needs_column_names =
-            metadata_fetcher_ && !meta->columns.empty() &&
-            std::any_of(meta->columns.begin(), meta->columns.end(),
+            metadata_fetcher_ && !resolved.columns.empty() &&
+            std::any_of(resolved.columns.begin(), resolved.columns.end(),
                         [](const ColumnMetadata& c) { return c.name.empty(); });
         bool signedness_from_metadata_conn = false;
         if (needs_column_names) {
-          auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
-                                                          meta->columns.size());
+          auto infos = metadata_fetcher_->FetchColumnInfo(
+              resolved.database_name, resolved.table_name, resolved.columns.size());
           // FetchColumnInfo returns an empty vector on any failure (connection
           // loss, lost SELECT privilege, column-count mismatch).
           signedness_from_metadata_conn = !infos.empty();
-          for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
-            meta->columns[i].name = infos[i].name;
+          for (size_t i = 0; i < infos.size() && i < resolved.columns.size(); i++) {
+            resolved.columns[i].name = infos[i].name;
             // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
             // default) is authoritative for the exact schema at this position.
             // Only fall back to the side-connection's signedness when the
             // binlog did not carry it (very old servers).
-            if (!meta->signedness_from_binlog) {
-              meta->columns[i].is_unsigned = infos[i].is_unsigned;
+            if (!resolved.signedness_from_binlog) {
+              resolved.columns[i].is_unsigned = infos[i].is_unsigned;
             }
           }
         }
         // A TABLE_MAP may carry names itself, or the metadata side-connection
         // may have supplied them above. The flag must describe the resulting
         // metadata, not whether a lookup was attempted.
-        meta->names_resolved = std::none_of(meta->columns.begin(), meta->columns.end(),
-                                            [](const ColumnMetadata& c) { return c.name.empty(); });
-        if (!meta->signedness_from_binlog && !signedness_from_metadata_conn) {
-          ReportUnknownSignedness(meta);
+        resolved.names_resolved =
+            std::none_of(resolved.columns.begin(), resolved.columns.end(),
+                         [](const ColumnMetadata& c) { return c.name.empty(); });
+        if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
+          ReportUnknownSignedness(&resolved);
         }
+        table_registry_.ReplaceMetadata(table_id, std::move(resolved));
       }
       break;
     }

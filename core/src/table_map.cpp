@@ -567,11 +567,14 @@ void TableMapRegistry::ForEach(
   }
 }
 
-TableMetadata* TableMapRegistry::MutableLookup(uint64_t table_id) {
+bool TableMapRegistry::ReplaceMetadata(uint64_t table_id, TableMetadata metadata) {
   auto it = entries_.find(table_id);
-  if (it == entries_.end()) return nullptr;
+  if (it == entries_.end()) return false;
+  // A new object, never an assignment through the existing one: the current
+  // object may still be shared with queued events that borrow its names.
+  it->second.metadata = std::make_shared<TableMetadata>(std::move(metadata));
   Touch(it);
-  return it->second.metadata.get();
+  return true;
 }
 
 }  // namespace mes
