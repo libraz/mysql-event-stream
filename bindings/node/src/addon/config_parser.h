@@ -6,7 +6,7 @@
 
 #include <mes.h>
 #include <napi.h>
-#include <openssl/crypto.h>
+#include <secure_cleanse.h>
 
 #include <string>
 
@@ -23,8 +23,8 @@ constexpr uint32_t kDefaultReadTimeoutS = 30;
  *  `password` is a staging copy of the replication credential, so it is wiped
  *  when this struct goes out of scope. The destructor is what makes that reach
  *  every exit path, including the validation errors that return as soon as a
- *  JS exception is scheduled, and OPENSSL_cleanse is a wipe the compiler may
- *  not drop as a dead store. `ssl_key` names a private key file rather than
+ *  JS exception is scheduled, and the shared wipe helper is one the compiler
+ *  may not drop as a dead store. `ssl_key` names a private key file rather than
  *  carrying key material, so it is left alone. The JS string the copy was taken
  *  from lives on the V8 heap and is not wipeable from here. */
 struct ConfigStrings {
@@ -39,7 +39,7 @@ struct ConfigStrings {
 
   ~ConfigStrings() {
     if (!password.empty()) {
-      OPENSSL_cleanse(password.data(), password.size());
+      mes::SecureWipe(password);
     }
   }
 };
