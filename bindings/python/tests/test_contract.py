@@ -31,9 +31,10 @@ from mysql_event_stream._contract import (
     RECONNECT_MAX_DELAY_MS,
     backoff_delay_ms,
 )
+from mysql_event_stream._options import validate_option
 from mysql_event_stream.client import BinlogClient, validate_poll_batch_size
 from mysql_event_stream.logging import set_log_callback
-from mysql_event_stream.stream import CdcStream, _validate_stream_option
+from mysql_event_stream.stream import CdcStream
 
 from .contract_fixture import load_binding_contract
 
@@ -134,12 +135,12 @@ class TestBindingContract:
 
         for name, (minimum, maximum) in expected.items():
             with pytest.raises(ValueError):
-                _validate_stream_option(name, minimum - 1)
-            _validate_stream_option(name, minimum)
+                validate_option(name, minimum - 1)
+            validate_option(name, minimum)
             if maximum is None:
                 continue
             with pytest.raises(ValueError):
-                _validate_stream_option(name, maximum + 1)
+                validate_option(name, maximum + 1)
 
     def test_enforces_the_contract_poll_batch_window(self) -> None:
         assert contract["pollBatch"]["defaultMaxEvents"] == POLL_BATCH_DEFAULT_MAX_EVENTS

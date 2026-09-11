@@ -11,9 +11,9 @@ from typing import Any, ParamSpec, TypeVar, cast
 
 from ._contract import (
     NON_RETRYABLE_ERROR_CODES,
-    OPTION_RANGES,
     backoff_delay_ms,
 )
+from ._options import validate_option
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
@@ -49,34 +49,6 @@ _FIELD_MAP = {
     "max_reconnect_attempts": "_max_reconnect_attempts",
     "on_metadata_error": "_on_metadata_error",
 }
-
-
-def _validate_stream_option(key: str, value: object) -> None:
-    """Validate a configuration value against the cross-binding contract."""
-    if key in OPTION_RANGES:
-        minimum, maximum = OPTION_RANGES[key]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"{key} must be an integer")
-        if value < minimum or (maximum is not None and value > maximum):
-            upper = "unbounded" if maximum is None else str(maximum)
-            raise ValueError(f"{key} must be between {minimum} and {upper}")
-        return
-    if key in {"host", "user", "password", "ssl_ca", "ssl_cert", "ssl_key"}:
-        if not isinstance(value, str):
-            raise TypeError(f"{key} must be a string")
-        return
-    if key in {"start_gtid", "start_binlog_file", "lib_path"}:
-        if value is not None and not isinstance(value, str):
-            raise TypeError(f"{key} must be a string or None")
-        return
-    if key.startswith(("include_", "exclude_")):
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise TypeError(f"{key} must be a list of strings")
-        return
-    if key == "allow_public_key_retrieval" and not isinstance(value, bool):
-        raise TypeError("allow_public_key_retrieval must be a bool")
-    if key == "on_metadata_error" and value is not None and not callable(value):
-        raise TypeError("on_metadata_error must be callable or None")
 
 
 class CdcStream:
@@ -201,7 +173,7 @@ class CdcStream:
         # Construction accepts exactly what configure() accepts: both paths
         # range-check against the same contract table.
         for key, attr in _FIELD_MAP.items():
-            _validate_stream_option(key, getattr(self, attr))
+            validate_option(key, getattr(self, attr))
         self._reconnect_attempts = 0
 
         self._client: BinlogClient | None = None
@@ -274,7 +246,7 @@ class CdcStream:
             attr = _FIELD_MAP.get(key)
             if attr is None:
                 raise TypeError(f"Unknown config key: {key!r}")
-            _validate_stream_option(key, value)
+            validate_option(key, value)
             setattr(self, attr, list(cast(list[str], value)) if isinstance(value, list) else value)
 
     async def _dispatch(self, func: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -494,8 +466,8 @@ class CdcStream:
         # in C, not an exception, so every dispatch has to settle first.
         await self._quiesce_native_calls()
         # Capture the checkpoint before the client goes away: callers persist it
-        # after leaving the iteration scope. This has to run once no poll is in
-        # flight, because the accessor takes the same lock a blocking poll holds.
+        # after leaving the iteration scope. Reading it after the dispatches have
+        # settled is what makes it cover everything the last poll delivered.
         self._cache_current_gtid()
         if self._client is not None:
             # close() internally calls stop() and disconnect()
