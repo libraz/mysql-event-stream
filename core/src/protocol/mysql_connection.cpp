@@ -4,7 +4,6 @@
 #include "protocol/mysql_connection.h"
 
 #include <openssl/bio.h>
-#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
@@ -16,6 +15,7 @@
 #include "protocol/mysql_auth.h"
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
+#include "secure_cleanse.h"
 #include "server_flavor.h"
 
 namespace mes::protocol {
@@ -532,7 +532,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           cleartext_payload.push_back(0);
 
           rc = SendPacket(cleartext_payload);
-          OPENSSL_cleanse(cleartext_payload.data(), cleartext_payload.size());
+          SecureWipe(cleartext_payload.data(), cleartext_payload.size());
           if (rc != MES_OK) {
             last_error_ = "Failed to send cleartext password";
             return MES_ERR_AUTH;
@@ -653,7 +653,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
 
           EVP_PKEY_CTX_free(ctx);
           EVP_PKEY_free(pkey);
-          OPENSSL_cleanse(xored.data(), xored.size());
+          SecureWipe(xored.data(), xored.size());
 
           if (encrypt_rc != MES_OK) {
             return encrypt_rc;

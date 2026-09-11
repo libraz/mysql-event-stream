@@ -3,8 +3,6 @@
 
 #include "client/binlog_client.h"
 
-#include <openssl/crypto.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -17,6 +15,7 @@
 #include "logger.h"
 #include "mariadb_event_parser.h"
 #include "protocol/mysql_query.h"
+#include "secure_cleanse.h"
 #include "state_machine.h"
 
 namespace mes {
@@ -131,7 +130,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   // hands the buffer back to the allocator immediately, so the wipe has to be
   // one the compiler may not treat as a dead store.
   if (!config_.password.empty()) {
-    OPENSSL_cleanse(config_.password.data(), config_.password.size());
+    SecureWipe(config_.password);
     config_.password.clear();
     config_.password.shrink_to_fit();
   }

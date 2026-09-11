@@ -3,13 +3,12 @@
 
 #include "client/metadata_fetcher.h"
 
-#include <openssl/crypto.h>
-
 #include <cstring>
 #include <string>
 
 #include "logger.h"
 #include "protocol/mysql_query.h"
+#include "secure_cleanse.h"
 
 namespace mes {
 
@@ -69,7 +68,7 @@ void MetadataFetcher::Disconnect() {
   // shrink_to_fit() below returns that buffer to the allocator right away,
   // which makes a plain fill a dead store the compiler may drop.
   if (!password_.empty()) {
-    OPENSSL_cleanse(password_.data(), password_.size());
+    SecureWipe(password_);
   }
   password_.clear();
   password_.shrink_to_fit();

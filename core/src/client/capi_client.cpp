@@ -6,13 +6,12 @@
  * @brief C ABI wrapper for BinlogClient
  */
 
-#include <openssl/crypto.h>
-
 #include <new>
 #include <string>
 
 #include "client/binlog_client.h"
 #include "mes.h"
+#include "secure_cleanse.h"
 
 struct mes_client {
   mes::BinlogClient client;
@@ -42,22 +41,6 @@ void ClearBoundaryError(mes_client_t* c) {
     c->boundary_error.clear();
   }
 }
-
-/**
- * @brief Wipe a secret-bearing std::string when it leaves scope.
- *
- * A staging copy built from the caller's `const char*` goes back to the
- * allocator as soon as the entry point returns, so the wipe must reach the
- * error returns too and must be one the compiler may not drop as a dead store.
- */
-struct SecureCleanseString {
-  std::string& value;
-  ~SecureCleanseString() {
-    if (!value.empty()) {
-      OPENSSL_cleanse(value.data(), value.size());
-    }
-  }
-};
 
 }  // namespace
 
@@ -91,7 +74,9 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   }
 
   mes::BinlogClientConfig cfg;
-  SecureCleanseString password_cleanse{cfg.password};
+  // Declared before the credential is assigned below, which is why the guard
+  // re-reads the string's bytes at scope exit rather than capturing them here.
+  mes::SecureCleanse password_cleanse{cfg.password};
   cfg.host = config->host != nullptr ? config->host : "127.0.0.1";
   cfg.port = config->port;
   cfg.user = config->user != nullptr ? config->user : "";

@@ -3,24 +3,16 @@
 
 #include "protocol/mysql_auth.h"
 
-#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
 #include <cstring>
 
+#include "secure_cleanse.h"
+
 namespace mes::protocol {
 
 namespace {
-
-// RAII helper: guarantees OPENSSL_cleanse of sensitive buffers on every exit
-// path (including early returns on SHA failures). Without this, intermediate
-// password-derived hashes could remain in stack memory after an error return.
-struct SecureCleanse {
-  void* buf;
-  size_t n;
-  ~SecureCleanse() { OPENSSL_cleanse(buf, n); }
-};
 
 struct DigestPart {
   const void* data;

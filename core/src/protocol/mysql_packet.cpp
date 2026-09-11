@@ -3,11 +3,10 @@
 
 #include "protocol/mysql_packet.h"
 
-#include <openssl/crypto.h>
-
 #include <cstring>
 
 #include "protocol/mysql_socket.h"
+#include "secure_cleanse.h"
 
 namespace mes::protocol {
 
@@ -24,8 +23,8 @@ void PacketBuffer::Clear() {
   if (!buf_.empty()) {
     // Wipe before the bytes become unreachable. Capacity is deliberately kept:
     // shrinking here would release the very allocation we just scrubbed to the
-    // allocator, and the wipe must not be elided, hence OPENSSL_cleanse.
-    OPENSSL_cleanse(buf_.data(), buf_.size());
+    // allocator.
+    SecureWipe(buf_.data(), buf_.size());
   }
   buf_.clear();
 }
