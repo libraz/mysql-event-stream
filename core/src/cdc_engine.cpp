@@ -89,6 +89,28 @@ bool IsSqlIdentifierChar(char ch) {
   return std::isalnum(uch) || ch == '_' || ch == '$';
 }
 
+/**
+ * @brief Report that a table's numeric signedness is not established.
+ *
+ * With signedness known from neither the binlog TABLE_MAP nor a metadata
+ * side-connection, every numeric column is decoded as signed, so an UNSIGNED
+ * value above the signed range of its width reads as a negative number. The
+ * report is made once per registered table definition, because the same
+ * TABLE_MAP precedes every ROWS event.
+ *
+ * @param meta Registry entry for the table; marked as reported.
+ */
+void ReportUnknownSignedness(TableMetadata* meta) {
+  if (meta->unknown_signedness_reported) return;
+  if (std::none_of(meta->columns.begin(), meta->columns.end(), IsNumericColumnType)) return;
+  meta->unknown_signedness_reported = true;
+  StructuredLog()
+      .Event("table_map_missing_signedness")
+      .Field("db", meta->database_name)
+      .Field("table", meta->table_name)
+      .Warn();
+}
+
 }  // namespace
 
 CdcEngine::~CdcEngine() { WarnIfIncludeFiltersMatchedNothing(); }
@@ -426,9 +448,14 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         break;
       }
       if (evicted_table_id != UINT64_MAX) blocked_table_ids_.erase(evicted_table_id);
-      if (unchanged) break;
       auto* meta = table_registry_.MutableLookup(table_id);
       if (meta) {
+        // A byte-identical TABLE_MAP re-registers no new schema, so the work
+        // below can be skipped -- unless a column name is still empty while a
+        // metadata side-connection is configured. The same TABLE_MAP precedes
+        // every ROWS event, so treating it as nothing to do would make a
+        // resolution that failed once fail for the rest of the binlog file.
+        if (unchanged && (metadata_fetcher_ == nullptr || meta->names_resolved)) break;
         NoteTableMapForIncludeFilters(*meta);
         if (!IsTableAllowed(meta->database_name, meta->table_name)) {
           blocked_table_ids_.insert(table_id);
@@ -439,11 +466,13 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             metadata_fetcher_ && !meta->columns.empty() &&
             std::any_of(meta->columns.begin(), meta->columns.end(),
                         [](const ColumnMetadata& c) { return c.name.empty(); });
+        bool signedness_from_metadata_conn = false;
         if (needs_column_names) {
           auto infos = metadata_fetcher_->FetchColumnInfo(meta->database_name, meta->table_name,
                                                           meta->columns.size());
           // FetchColumnInfo returns an empty vector on any failure (connection
           // loss, lost SELECT privilege, column-count mismatch).
+          signedness_from_metadata_conn = !infos.empty();
           for (size_t i = 0; i < infos.size() && i < meta->columns.size(); i++) {
             meta->columns[i].name = infos[i].name;
             // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
@@ -460,6 +489,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         // metadata, not whether a lookup was attempted.
         meta->names_resolved = std::none_of(meta->columns.begin(), meta->columns.end(),
                                             [](const ColumnMetadata& c) { return c.name.empty(); });
+        if (!meta->signedness_from_binlog && !signedness_from_metadata_conn) {
+          ReportUnknownSignedness(meta);
+        }
       }
       break;
     }
@@ -476,11 +508,17 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
       pending_source_sql_.reset();
       // A DDL statement (ALTER/RENAME/DROP/CREATE/TRUNCATE) may change a
-      // table's columns while preserving the column count, which the metadata
-      // cache's count guard cannot detect. Invalidate the whole metadata cache
-      // so the next row event re-fetches fresh column names and signedness.
-      if (metadata_fetcher_ != nullptr && IsDdlQueryEvent(body, body_len)) {
-        metadata_fetcher_->ClearCache();
+      // table's columns while preserving both the column count, which the
+      // metadata cache's count guard cannot detect, and the TABLE_MAP body,
+      // which carries no column names unless binlog_row_metadata is FULL. The
+      // registry goes with the metadata cache: keeping an entry would let the
+      // next TABLE_MAP be reported as unchanged and reuse names that describe
+      // the pre-DDL schema. The server re-sends a TABLE_MAP before every ROWS
+      // event, so dropping the registry costs a re-parse, not a decode.
+      if (IsDdlQueryEvent(body, body_len)) {
+        if (metadata_fetcher_ != nullptr) metadata_fetcher_->ClearCache();
+        table_registry_.Clear();
+        blocked_table_ids_.clear();
         StructuredLog().Event("metadata_cache_invalidated_on_ddl").Debug();
       }
       break;

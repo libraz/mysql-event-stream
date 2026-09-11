@@ -164,7 +164,12 @@ typedef enum {
  *   declared with a binary collation is MES_COL_BYTES and a BLOB column with a
  *   text collation is MES_COL_STRING.
  * - A BIGINT UNSIGNED, SET, or BIT value above INT64_MAX is MES_COL_STRING
- *   holding its exact decimal value, because int_val cannot represent it.
+ *   holding its exact decimal value, because int_val cannot represent it. This
+ *   needs the column's signedness, which comes from TABLE_MAP optional metadata
+ *   (binlog_row_metadata=MINIMAL or FULL) or from the metadata side-connection.
+ *   With neither, every numeric column is read as signed -- an UNSIGNED value
+ *   above the signed range of its width reads as a negative number -- and a
+ *   `table_map_missing_signedness` WARN is reported once per table.
  * - Every TIMESTAMP variant is MES_COL_STRING holding decimal Unix epoch
  *   seconds, carrying as many fractional digits as the column's declared
  *   precision.

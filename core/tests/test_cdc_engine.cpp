@@ -20,6 +20,16 @@
 #include "test_helpers.h"
 
 namespace mes {
+
+/** @brief Clears the backoff a failed metadata reconnect installed, so a test
+ *  can model the retry window having elapsed between two events. */
+class MetadataFetcherTestAccess {
+ public:
+  static void ClearReconnectBackoff(MetadataFetcher* fetcher) {
+    fetcher->next_reconnect_attempt_ = {};
+  }
+};
+
 namespace {
 
 using test::BuildDeleteRowsBody;
@@ -62,6 +72,51 @@ class ScopedErrorLogCapture {
   ScopedErrorLogCapture(const ScopedErrorLogCapture&) = delete;
   ScopedErrorLogCapture& operator=(const ScopedErrorLogCapture&) = delete;
 };
+
+const char* g_captured_event_name = nullptr;
+int g_captured_event_count = 0;
+std::string g_captured_event_message;
+
+void CaptureEventByName(mes_log_level_t, const char* message, void*) {
+  if (message == nullptr || g_captured_event_name == nullptr) return;
+  const std::string_view text(message);
+  if (text.find(g_captured_event_name) == std::string_view::npos) return;
+  ++g_captured_event_count;
+  g_captured_event_message = text;
+}
+
+// Counts the structured log records carrying one event name for the duration of
+// a scope, so a test can assert how often a condition was reported.
+class ScopedEventLogCapture {
+ public:
+  explicit ScopedEventLogCapture(const char* event_field) {
+    g_captured_event_name = event_field;
+    g_captured_event_count = 0;
+    g_captured_event_message.clear();
+    LogConfig::SetCallback(CaptureEventByName, MES_LOG_DEBUG, nullptr);
+  }
+  ~ScopedEventLogCapture() {
+    LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr);
+    g_captured_event_name = nullptr;
+  }
+
+  ScopedEventLogCapture(const ScopedEventLogCapture&) = delete;
+  ScopedEventLogCapture& operator=(const ScopedEventLogCapture&) = delete;
+
+  int Count() const { return g_captured_event_count; }
+  const std::string& LastMessage() const { return g_captured_event_message; }
+};
+
+// The TABLE_MAP body of BuildTableMapBody followed by the SIGNEDNESS optional
+// metadata field (type 1) for its single numeric column.
+std::vector<uint8_t> BuildTableMapBodyWithSignedness(uint64_t table_id, const std::string& db,
+                                                     const std::string& table, bool is_unsigned) {
+  std::vector<uint8_t> body = BuildTableMapBody(table_id, db, table);
+  // Field type, payload length, then the MSB-first bitmap over numeric columns.
+  const std::vector<uint8_t> signedness = {0x01, 0x01, is_unsigned ? uint8_t{0x80} : uint8_t{0x00}};
+  body.insert(body.end(), signedness.begin(), signedness.end());
+  return body;
+}
 
 std::vector<uint8_t> DecodeHexFixture(const char* hex) {
   std::vector<uint8_t> bytes;
@@ -364,6 +419,125 @@ TEST(CdcEngineNamesResolvedTest, FalseWhenFetcherCannotResolve) {
   ChangeEvent event;
   ASSERT_TRUE(engine.NextEvent(&event));
   EXPECT_FALSE(event.names_resolved);
+}
+
+TEST(CdcEngineNamesResolvedTest, FailedResolutionIsRetriedOnAByteIdenticalTableMap) {
+  // The same TABLE_MAP precedes every ROWS event, so a resolution that failed
+  // once must be attempted again when it arrives byte for byte again -- a
+  // momentary metadata-connection failure must not leave the table reporting
+  // positional column names for the rest of the binlog file.
+  CdcEngine engine;
+  MetadataFetcher fetcher;  // intentionally not Connect()ed
+  engine.SetMetadataFetcher(&fetcher);
+  // Each resolution attempt reaches the metadata connection, which fails and
+  // reports it, so the number of reports is the number of attempts.
+  ScopedEventLogCapture capture("event=metadata_reconnect_failed");
+
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  engine.Feed(table_map.data(), table_map.size());
+  ASSERT_EQ(capture.Count(), 1) << capture.LastMessage();
+
+  // The fetcher rate-limits reconnect attempts, so within the backoff window a
+  // second attempt would not reach the metadata connection at all.
+  MetadataFetcherTestAccess::ClearReconnectBackoff(&fetcher);
+  engine.Feed(table_map.data(), table_map.size());
+  EXPECT_EQ(capture.Count(), 2) << capture.LastMessage();
+}
+
+TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt) {
+  // A DDL statement can rename a column while leaving both the column count and
+  // the TABLE_MAP body unchanged, so a registry entry that outlived it would
+  // describe the pre-DDL schema. Nothing may be decoded from such an entry: the
+  // server re-sends a TABLE_MAP before every ROWS event, which is what
+  // repopulates the registry with the post-DDL schema.
+  CdcEngine engine;
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 1));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_FALSE(engine.IsError());
+
+  auto ddl = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+                        BuildQueryEventBody("testdb", "ALTER TABLE users RENAME COLUMN a TO b"));
+  engine.Feed(ddl.data(), ddl.size());
+
+  auto write_after = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 250,
+                                BuildWriteRowsBody(42, 2));
+  engine.Feed(write_after.data(), write_after.size());
+
+  EXPECT_FALSE(engine.NextEvent(&event));
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+}
+
+TEST(CdcEngineSignednessTest, UnavailableSignednessIsReportedOncePerTable) {
+  // Without SIGNEDNESS in the TABLE_MAP and without a metadata side-connection,
+  // every numeric column is decoded as signed, so an UNSIGNED value above the
+  // signed range of its width reads as negative. That has to be observable, and
+  // it has to be reported per table rather than per row event.
+  ScopedEventLogCapture capture("event=table_map_missing_signedness");
+  CdcEngine engine;
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 1));
+  for (int i = 0; i < 3; ++i) {
+    engine.Feed(table_map.data(), table_map.size());
+    engine.Feed(write.data(), write.size());
+  }
+  ASSERT_FALSE(engine.IsError());
+
+  EXPECT_EQ(capture.Count(), 1);
+  EXPECT_NE(capture.LastMessage().find("db=testdb"), std::string::npos) << capture.LastMessage();
+  EXPECT_NE(capture.LastMessage().find("table=users"), std::string::npos) << capture.LastMessage();
+}
+
+TEST(CdcEngineSignednessTest, ResolvedSignednessIsNotReported) {
+  // The TABLE_MAP carries the SIGNEDNESS optional metadata field, so signedness
+  // is known and there is nothing to report.
+  ScopedEventLogCapture capture("event=table_map_missing_signedness");
+  CdcEngine engine;
+  auto table_map =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                 BuildTableMapBodyWithSignedness(42, "testdb", "users", /*is_unsigned=*/true));
+  engine.Feed(table_map.data(), table_map.size());
+  ASSERT_FALSE(engine.IsError());
+
+  EXPECT_EQ(capture.Count(), 0) << capture.LastMessage();
+}
+
+TEST(CdcEngineChecksumTest, StreamWithChecksumsDisabledIsDecodedFromItsFormatDescription) {
+  // The FDE of a binlog_checksum=NONE stream ends with the algorithm byte and
+  // carries no trailer, and the post-header-length entry four bytes earlier can
+  // equal the CRC32 algorithm code for an ordinary event-type table. The engine
+  // must reframe the stream as unchecksummed instead of failing the first event
+  // against a checksum that is not there.
+  std::vector<uint8_t> fde_body(57 + 41, 0);
+  fde_body[fde_body.size() - kChecksumSize - 1] = kBinlogChecksumAlgCrc32;
+  fde_body[fde_body.size() - 1] = kBinlogChecksumAlgOff;
+
+  CdcEngine engine;
+  auto fde = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent),
+                                  1000, 60, fde_body);
+  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                        100, BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                    150, BuildWriteRowsBody(42, 7));
+  engine.Feed(fde.data(), fde.size());
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+  ASSERT_FALSE(engine.IsError()) << "error=" << engine.ErrorCode();
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 7);
 }
 
 TEST(CdcEngineUnknownEventTest, UnsupportedEventsFailWithoutAdvancingCheckpoint) {

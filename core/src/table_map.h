@@ -26,6 +26,18 @@
 namespace mes {
 
 /**
+ * @brief Whether a column receives a bit in the TABLE_MAP SIGNEDNESS bitmap.
+ *
+ * Mirrors MySQL's Field::has_signedness_information_type(), which decides this
+ * from the binlog column type: TYPED_ARRAY itself has no bit, even when its
+ * element type is numeric.
+ *
+ * @param column Column metadata parsed from a TABLE_MAP event.
+ * @return true when the column's declared type carries signedness.
+ */
+bool IsNumericColumnType(const ColumnMetadata& column);
+
+/**
  * @brief Parse a TABLE_MAP_EVENT body into a TableMetadata structure.
  * @param data Pointer to the event body (after the 19-byte header).
  * @param len Length of the event body (excluding checksum).

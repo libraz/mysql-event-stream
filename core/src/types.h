@@ -251,6 +251,9 @@ struct TableMetadata {
   /// or resolved via the metadata side-connection). Otherwise emitted events
   /// carry empty names for the unresolved columns.
   bool names_resolved = false;
+  /// Set once it has been reported that signedness is available from neither
+  /// source, so the report is made once per table instead of once per event.
+  bool unknown_signedness_reported = false;
 };
 
 /**

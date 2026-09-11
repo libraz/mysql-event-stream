@@ -169,10 +169,8 @@ enum class OptionalMetadataFieldType : uint8_t {
   kVectorDimensionality = 13,
 };
 
-// MySQL's Field::has_signedness_information_type() decides which TABLE_MAP
-// columns receive a SIGNEDNESS bit. This is deliberately based on the actual
-// binlog column type: TYPED_ARRAY itself has no bit, even when its element
-// type is numeric.
+}  // namespace
+
 bool IsNumericColumnType(const ColumnMetadata& column) {
   const uint8_t col_type = static_cast<uint8_t>(column.type);
   switch (col_type) {
@@ -191,6 +189,8 @@ bool IsNumericColumnType(const ColumnMetadata& column) {
       return false;
   }
 }
+
+namespace {
 
 // Apply a complete SIGNEDNESS bitmap to the relevant columns of `metadata`.
 // A truncated bitmap is malformed; do not claim that signedness is
