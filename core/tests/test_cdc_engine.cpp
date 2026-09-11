@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
+#include <zlib.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -1393,6 +1394,128 @@ TEST(CdcEngineTest, RowBodyShorterThanTableIdIsDecodeError) {
   EXPECT_TRUE(engine.IsError());
   EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
   EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+}
+
+// A MariaDB compressed column value: the method/length-size byte, the original
+// length big-endian, then a raw deflate stream. Built with a four-byte original
+// length so it matches the metadata the TABLE_MAP helper below writes.
+std::vector<uint8_t> BuildCompressedColumnValue(const std::string& input) {
+  std::vector<uint8_t> result;
+  result.push_back(static_cast<uint8_t>(0x80 | 0x08 | 4));  // zlib, raw stream, 4 length bytes
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    result.push_back(static_cast<uint8_t>(input.size() >> shift));
+  }
+
+  z_stream stream{};
+  if (deflateInit2(&stream, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) !=
+      Z_OK) {
+    return {};
+  }
+  const size_t payload_offset = result.size();
+  result.resize(payload_offset + compressBound(static_cast<uLong>(input.size())));
+  stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
+  stream.avail_in = static_cast<uInt>(input.size());
+  stream.next_out = result.data() + payload_offset;
+  stream.avail_out = static_cast<uInt>(result.size() - payload_offset);
+  const int deflate_result = deflate(&stream, Z_FINISH);
+  const size_t compressed_size = stream.total_out;
+  if (deflate_result != Z_STREAM_END || deflateEnd(&stream) != Z_OK) return {};
+  result.resize(payload_offset + compressed_size);
+  return result;
+}
+
+// TABLE_MAP body for a table of one MariaDB compressed BLOB column.
+std::vector<uint8_t> BuildCompressedBlobTableMapBody(uint64_t table_id, const std::string& db,
+                                                     const std::string& table) {
+  test::EventBuilder b;
+  b.WriteU48Le(table_id);
+  b.WriteU16Le(0);  // flags
+  b.WriteU8(static_cast<uint8_t>(db.size()));
+  b.WriteString(db);
+  b.WriteU8(0);
+  b.WriteU8(static_cast<uint8_t>(table.size()));
+  b.WriteString(table);
+  b.WriteU8(0);
+  b.WriteU8(1);                                                  // column_count
+  b.WriteU8(static_cast<uint8_t>(ColumnType::kBlobCompressed));  // column type
+  b.WriteU8(1);                                                  // metadata length
+  b.WriteU8(4);                                                  // four-byte length prefix
+  b.WriteU8(0x01);                                               // nullable bitmap
+  return b.Data();
+}
+
+// WRITE_ROWS_EVENT V2 body carrying one compressed BLOB value.
+std::vector<uint8_t> BuildCompressedBlobWriteRowsBody(uint64_t table_id,
+                                                      const std::vector<uint8_t>& value) {
+  test::EventBuilder b;
+  b.WriteU48Le(table_id);
+  b.WriteU16Le(0);  // flags
+  b.WriteU16Le(2);  // V2 var_header_len
+  b.WriteU8(1);     // column_count
+  b.WriteU8(0x01);  // columns_present
+  b.WriteU8(0x00);  // null bitmap
+  b.WriteU32Le(static_cast<uint32_t>(value.size()));
+  b.WriteBytes(value);
+  return b.Data();
+}
+
+// The queue's memory has to follow its byte budget, not its entry count: a
+// compressed column's wire length says nothing about how much it decodes to, so
+// a stream too small to fill the budget on the wire can hold many times the
+// budget once decoded.
+TEST(CdcEngineQueueBudgetTest, CompressedColumnExpansionStaysWithinTheQueueByteBudget) {
+  constexpr uint64_t kTableId = 7;
+  constexpr size_t kExpandedBytes = 64U * 1024U;
+  constexpr size_t kQueueBytes = 256U * 1024U;
+  constexpr size_t kRowEvents = 64;
+
+  const auto value = BuildCompressedColumnValue(std::string(kExpandedBytes, 'a'));
+  ASSERT_FALSE(value.empty());
+  ASSERT_LT(value.size() * 100, kExpandedBytes) << "the column must expand by at least 100x";
+
+  std::vector<uint8_t> stream =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+                 BuildCompressedBlobTableMapBody(kTableId, "mes_test", "compressed_blob"));
+  const auto rows_body = BuildCompressedBlobWriteRowsBody(kTableId, value);
+  for (size_t i = 0; i < kRowEvents; ++i) {
+    const auto row_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+                                      static_cast<uint32_t>(200 + i), rows_body);
+    stream.insert(stream.end(), row_event.begin(), row_event.end());
+  }
+  // Every wire byte of the whole stream still fits in the budget many times
+  // over, so nothing but the decoded size can push the queue past it.
+  ASSERT_LT(stream.size(), kQueueBytes);
+
+  CdcEngine engine;
+  engine.SetMaxQueueBytes(kQueueBytes);
+  ASSERT_EQ(engine.MaxQueueBytes(), kQueueBytes);
+  // The entry limit is left at its default, far above the events fed here, so
+  // the byte budget is the only thing that can apply backpressure.
+  ASSERT_GT(engine.MaxQueueSize(), kRowEvents);
+
+  const size_t consumed = engine.Feed(stream.data(), stream.size());
+  ASSERT_FALSE(engine.IsError());
+  EXPECT_LT(consumed, stream.size()) << "the byte budget should have stopped the feed";
+  EXPECT_LE(engine.QueuedBytes(), 2 * kQueueBytes);
+
+  // Recount the decoded payloads rather than trusting the accounting under
+  // test. The bound is the budget plus the one event Feed() pushes after its
+  // last capacity check, whose decode budget is itself capped by the same
+  // configured limit.
+  size_t resident_bytes = 0;
+  size_t queued_events = 0;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) {
+    ASSERT_EQ(event.after.columns.size(), 1u);
+    resident_bytes += event.after.columns[0].string_val.size();
+    ++queued_events;
+  }
+
+  EXPECT_LE(resident_bytes, kQueueBytes + kExpandedBytes);
+  EXPECT_LT(resident_bytes, 2 * kQueueBytes);
+  EXPECT_LT(queued_events, kRowEvents) << "the entry count must not be what bounded the queue";
+  EXPECT_GT(queued_events, 0u);
+  EXPECT_EQ(engine.QueuedBytes(), 0u);
 }
 
 }  // namespace

@@ -12,6 +12,7 @@
 #ifndef MES_CORE_SRC_TYPES_H_
 #define MES_CORE_SRC_TYPES_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
@@ -288,6 +289,57 @@ struct ChangeEvent {
   /// Keeps the TABLE_MAP names alive for the string_view fields in rows.
   std::shared_ptr<const TableMetadata> table_metadata;
 };
+
+/**
+ * @brief Bytes one queued entry charges to a queue's byte budget.
+ *
+ * The single definition of what a `max_queue_bytes` limit counts, shared by the
+ * client's wire-event queue (see client/event_queue.h) and the engine's decoded
+ * event queue (see cdc_engine.h): an entry is charged for every byte it keeps
+ * resident, both the payload it carries and the bookkeeping that travels with
+ * it. Charging both is what makes a queue's resident bytes bounded by its own
+ * configured budget rather than by a quantity the caller cannot size -- the
+ * number of distinct GTID source UUIDs in the replication history, or a
+ * compressed column's decoded-to-wire expansion ratio.
+ *
+ * Fixed per-entry structure -- the queue node and the entry struct itself -- is
+ * not charged here. It is proportional to the entry count, which every queue
+ * bounds separately.
+ */
+constexpr size_t QueuedEventCharge(size_t payload_bytes, size_t bookkeeping_bytes) {
+  return payload_bytes + bookkeeping_bytes;
+}
+
+/** @brief Bytes @p row keeps resident: its column array plus every payload in it. */
+inline size_t RowDataCharge(const RowData& row) {
+  size_t bytes = row.columns.size() * sizeof(ColumnValue);
+  for (const ColumnValue& column : row.columns) {
+    bytes += column.string_val.size();
+  }
+  return bytes;
+}
+
+/**
+ * @brief Bytes a queued ChangeEvent charges to the engine's queue byte budget.
+ *
+ * The decoded column payloads are the term that matters: a compressed column's
+ * on-wire length says nothing about its decoded size, so no entry count can
+ * bound them.
+ *
+ * Two deliberate approximations, both on the safe side of a memory bound:
+ *   - A payload shared between entries (the ANNOTATE_ROWS statement) is charged
+ *     to every entry that references it, so the total charge is an upper bound
+ *     on resident bytes rather than an exact count.
+ *   - The TABLE_MAP metadata behind @ref ChangeEvent::table_metadata is not
+ *     charged. One instance is shared by every event for that table id and its
+ *     residency is bounded by the table-map registry's own entry cap, not by
+ *     how many events are queued.
+ */
+inline size_t ChangeEventCharge(const ChangeEvent& event) {
+  return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
+                           event.database.size() + event.table.size() +
+                               event.position.binlog_file.size() + event.SourceSql().size());
+}
 
 }  // namespace mes
 

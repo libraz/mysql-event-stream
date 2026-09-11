@@ -104,6 +104,33 @@ class CdcEngine {
   /** @brief Get the effective event queue limit. */
   size_t MaxQueueSize() const;
 
+  /**
+   * @brief Set the byte budget for the decoded event queue. 0 restores the
+   *        MES_DEFAULT_QUEUE_BYTES default.
+   *
+   * An entry count alone cannot bound this queue's memory: a compressed column
+   * decodes to a size its on-wire length does not predict, so one event of a few
+   * kilobytes can materialize megabytes of column payload. The budget bounds the
+   * sum instead. Every queued event is charged ChangeEventCharge(), Feed() stops
+   * consuming input once the charge reaches the budget, and the per-event decode
+   * budget is capped by it as well, so:
+   *
+   *   resident queue bytes < max_queue_bytes + max(max_event_size, max_queue_bytes)
+   *
+   * The second term is the one event Feed() pushes atomically after the last
+   * capacity check: its decoded column payloads cannot exceed
+   * DecodeBudget::ForEventBody(body_bytes, max_queue_bytes), and its column
+   * array follows the wire body, which the parser caps at max_event_size.
+   * Nothing in that bound depends on a compressed column's expansion ratio.
+   */
+  void SetMaxQueueBytes(size_t max_queue_bytes);
+
+  /** @brief Get the effective event queue byte budget. */
+  size_t MaxQueueBytes() const;
+
+  /** @brief Bytes currently charged to the pending event queue. */
+  size_t QueuedBytes() const;
+
   /** @brief Check if the engine is in an error state (e.g., parse/decode error). */
   bool IsError() const;
 
@@ -159,6 +186,10 @@ class CdcEngine {
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
+  /** @brief Queue one decoded event, charging what it keeps resident. */
+  void EnqueueEvent(ChangeEvent&& event);
+  /** @brief Whether the queue has reached either configured limit. */
+  bool QueueAtCapacity() const;
   void LogRowDecodeFailure(const char* kind, const TableMetadata& meta);
   bool HasIncludeFilters() const;
   bool MatchesTableFilter(const std::unordered_set<std::string>& filters,
@@ -180,6 +211,11 @@ class CdcEngine {
   // ChangeEvent queue when a producer temporarily outpaces the consumer.
   // This matches the asynchronous client's event-count default.
   size_t max_queue_size_ = MES_DEFAULT_QUEUE_SIZE;
+  // The count above bounds entries; this bounds the bytes behind them, which an
+  // entry count cannot (see SetMaxQueueBytes()). Same default as the client's
+  // wire-event queue, so the two stages of one pipeline agree.
+  size_t max_queue_bytes_ = MES_DEFAULT_QUEUE_BYTES;
+  size_t queued_bytes_ = 0;
 
   // Scratch buffers reused across ProcessRowEvent calls to avoid a
   // per-event heap allocation in the hot decode path. clear() preserves

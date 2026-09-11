@@ -383,18 +383,21 @@ TEST(EventQueueTest, ChargesPayloadSizeRatherThanVectorCapacity) {
 TEST(EventQueueTest, EventAtMaxEventSizeFitsTheMinimumBudget) {
   // The budget a client is allowed to configure for a given max_event_size and
   // the charge the queue applies come from the same definition, so an event at
-  // the ceiling must be admitted rather than terminating the stream. The
-  // checkpoint attached by the reader must not eat into that budget.
+  // the ceiling must be admitted rather than terminating the stream -- together
+  // with the checkpoint the reader attaches to it, which the minimum budget
+  // reserves room for.
   constexpr size_t kMaxEventSize = 4096;
   mes::EventQueue q(100, mes::MinQueueBytesForEvent(kMaxEventSize));
 
+  const std::string checkpoint = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1000000";
   mes::QueuedEvent event;
   event.data.assign(kMaxEventSize + mes::kQueuedEventPrefixBytes, 0x7F);
   event.data_offset = mes::kQueuedEventPrefixBytes;
-  event.checkpoint_gtid = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1000000";
+  event.checkpoint_gtid = checkpoint;
 
   EXPECT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
-  EXPECT_EQ(q.QueuedBytes(), q.MaxBytes());
+  EXPECT_EQ(q.QueuedBytes(), kMaxEventSize + mes::kQueuedEventPrefixBytes + checkpoint.size());
+  EXPECT_LE(q.QueuedBytes(), q.MaxBytes());
 
   mes::QueuedEvent out;
   ASSERT_TRUE(q.Pop(&out));
@@ -402,22 +405,87 @@ TEST(EventQueueTest, EventAtMaxEventSizeFitsTheMinimumBudget) {
   EXPECT_EQ(q.QueuedBytes(), 0u);
 }
 
-TEST(EventQueueTest, CheckpointAndErrorTextAreNotChargedToTheBudget) {
-  mes::EventQueue q(100, 4);
+TEST(EventQueueTest, CheckpointAndErrorTextAreChargedToTheBudget) {
+  mes::EventQueue q(100, 1024);
 
   mes::QueuedEvent event;
   event.data = {1, 2, 3, 4};
   event.checkpoint_gtid = std::string(512, 'a');
   ASSERT_EQ(q.PushWithStatus(std::move(event)), mes::EventQueue::PushResult::kPushed);
-  EXPECT_EQ(q.QueuedBytes(), 4u);
+  EXPECT_EQ(q.QueuedBytes(), 4u + 512u);
 
-  // A terminal error sentinel carries no payload, so it can always reach the
-  // consumer however long its message is and however full the byte budget is.
+  // A terminal error sentinel carries no payload and is the consumer's only
+  // account of why the stream ended, so the byte budget does not gate it -- but
+  // its message is charged like any other resident byte, so the reported total
+  // stays an honest measure of what the queue holds.
   mes::QueuedEvent sentinel;
   sentinel.error = MES_ERR_STREAM;
   sentinel.error_message = std::string(4096, 'e');
   EXPECT_EQ(q.PushWithStatus(std::move(sentinel)), mes::EventQueue::PushResult::kPushed);
-  EXPECT_EQ(q.QueuedBytes(), 4u);
+  EXPECT_EQ(q.QueuedBytes(), 4u + 512u + 4096u);
+}
+
+// A GTID set as the server formats it: one 36-character UUID plus an interval
+// per source, comma separated. Its length follows how many distinct sources the
+// replication history has accumulated and has nothing to do with event size.
+std::string MakeWideGtidSet(size_t source_count) {
+  std::string set;
+  for (size_t i = 0; i < source_count; ++i) {
+    if (!set.empty()) set.push_back(',');
+    const std::string suffix = std::to_string(i);
+    set += "3e11fa47-71ca-11e1-9e33-";
+    set.append(12 - suffix.size(), '0');
+    set += suffix;
+    set += ":1-4294967296";
+  }
+  return set;
+}
+
+TEST(EventQueueTest, CheckpointBytesCannotCarryResidentMemoryPastTheBudget) {
+  // Entries that are tiny on the wire but carry a wide GTID set: the checkpoint
+  // outweighs the payload two hundred to one, so if it were excluded from the
+  // charge the entry count -- not the byte budget -- would decide how much
+  // memory the queue holds.
+  constexpr size_t kMaxEntries = 1000;
+  constexpr size_t kBudgetBytes = 256U * 1024U;
+  constexpr size_t kPayloadBytes = 64;
+  const std::string checkpoint = MakeWideGtidSet(256);
+  ASSERT_GT(checkpoint.size(), 100u * kPayloadBytes);
+  ASSERT_LT(kMaxEntries * kPayloadBytes, kBudgetBytes);  // payload alone never fills it
+
+  mes::EventQueue q(kMaxEntries, kBudgetBytes);
+  std::atomic<size_t> admitted{0};
+  std::thread producer([&]() {
+    for (size_t i = 0; i < kMaxEntries; ++i) {
+      mes::QueuedEvent event;
+      event.data.assign(kPayloadBytes, 0x11);
+      event.checkpoint_gtid = checkpoint;
+      if (!q.Push(std::move(event))) return;
+      admitted.fetch_add(1);
+    }
+  });
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  const size_t reported_bytes = q.QueuedBytes();
+  q.Close();
+  producer.join();
+
+  // Recount from the entries themselves rather than trusting the accounting
+  // under test: this is the memory the queue actually held.
+  size_t resident_bytes = 0;
+  size_t drained = 0;
+  mes::QueuedEvent out;
+  while (q.TryPop(&out)) {
+    resident_bytes += out.data.size() + out.checkpoint_gtid.size() + out.error_message.size();
+    ++drained;
+  }
+
+  EXPECT_LE(resident_bytes, kBudgetBytes);
+  EXPECT_EQ(reported_bytes, resident_bytes);
+  // The byte budget, not the entry count, is what stopped the producer.
+  EXPECT_LT(drained, kMaxEntries);
+  EXPECT_GT(drained, 0u);
+  EXPECT_EQ(drained, admitted.load());
 }
 
 TEST(EventQueueTest, ClearResetsByteChargeAndUnblocksProducer) {

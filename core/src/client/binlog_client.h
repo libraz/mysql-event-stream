@@ -182,17 +182,19 @@ class BinlogClient {
   uint32_t MaxEventSize() const;
 
   /**
-   * @brief Set/get the total payload byte budget for queued events.
+   * @brief Set/get the total byte budget for queued events.
    *
-   * StartStream() rejects a budget below MinQueueBytesForEvent(MaxEventSize()),
-   * so a configuration that survives start always admits an event at the
-   * ceiling.
+   * The budget covers every byte a queued event keeps resident: the wire buffer
+   * plus the per-event checkpoint and sentinel bookkeeping (see
+   * QueuedEventCharge()). StartStream() rejects a budget below
+   * MinQueueBytesForEvent(MaxEventSize()), so a configuration that survives
+   * start always admits an event at the ceiling together with its checkpoint.
    */
   void SetMaxQueueBytes(size_t max_queue_bytes);
   size_t MaxQueueBytes() const;
 
   /**
-   * @brief Payload bytes currently charged to the event queue.
+   * @brief Bytes currently charged to the event queue.
    *
    * Callable from a monitoring thread while the owner thread polls, starts or
    * restarts the stream: the queue pointer is read under queue_ptr_mutex_, the
@@ -246,9 +248,10 @@ class BinlogClient {
   // mid-setup. Stop() deliberately does not wait on it: waiting would reinstate
   // the very dependency on setup I/O that the split removes.
   std::atomic<bool> setup_in_progress_{false};
-  // Keep the default below the 48 MiB queue budget so a valid maximum-sized
-  // event can always enter the queue. Larger events remain an explicit opt-in
-  // together with a larger max_queue_bytes setting.
+  // Keep the default far enough below the 48 MiB queue budget that a valid
+  // maximum-sized event plus its checkpoint reserve can always enter the queue.
+  // Larger events remain an explicit opt-in together with a larger
+  // max_queue_bytes setting.
   uint32_t max_event_size_ = 32u * 1024u * 1024u;
   size_t max_queue_bytes_ = kDefaultEventQueueBytes;
 

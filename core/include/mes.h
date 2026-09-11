@@ -341,6 +341,15 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * consumer. Because the cap is rechecked per binlog event (not per row), a
  * single multi-row event may push the queue slightly past it.
  *
+ * @note An entry count cannot bound the queue's memory on its own, because a
+ * compressed column decodes to a size its on-wire length does not predict. The
+ * queue is therefore also bounded in bytes, at MES_DEFAULT_QUEUE_BYTES, counting
+ * every decoded column payload it holds; mes_feed() stops consuming input when
+ * either limit is reached. Resident bytes stay below that budget plus the one
+ * event pushed after the last check, whose decoded payloads the same budget caps.
+ * A stream of highly compressible BLOB/TEXT columns therefore reaches
+ * backpressure on bytes long before it reaches @p max_size entries.
+ *
  * @param engine Engine handle.
  * @param max_size Maximum queue size. 0 restores the bounded
  *        MES_DEFAULT_QUEUE_SIZE default.
@@ -526,7 +535,7 @@ typedef enum {
 
 /** @brief Default internal event queue size when max_queue_size is 0. */
 #define MES_DEFAULT_QUEUE_SIZE 10000u
-/** @brief Default total payload byte budget for the client event queue. */
+/** @brief Default total byte budget for an event queue, client and engine alike. */
 #define MES_DEFAULT_QUEUE_BYTES (48u * 1024u * 1024u)
 
 typedef struct {
@@ -770,25 +779,35 @@ MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* client, uint32_t
 MES_API uint32_t mes_client_get_max_event_size(mes_client_t* client);
 
 /**
- * @brief Set the total payload byte budget for the client event queue.
+ * @brief Set the total byte budget for the client event queue.
  *
  * The producer blocks when either max_queue_size events or this many charged
- * bytes are queued. Only the buffered wire payload is charged, not allocator
- * capacity and not the reader's checkpoint bookkeeping. 0 restores
- * MES_DEFAULT_QUEUE_BYTES. The budget must admit at least one event at the
- * normalized max event size (that size plus the one-byte packet prefix) when
- * mes_client_start() is called, otherwise start returns MES_ERR_INVALID_ARG.
+ * bytes are queued. The charge covers every byte an entry keeps resident: the
+ * buffered wire payload plus the committed GTID checkpoint the reader attaches
+ * to it, whose length grows with the number of distinct GTID source UUIDs in the
+ * replication history. Allocator capacity beyond a buffer's size is not charged.
+ * Charging the checkpoint is what keeps queue memory bounded by this budget
+ * rather than by UUID cardinality; the cost is that a source with a very wide
+ * GTID set reaches backpressure after fewer events than the payload sizes alone
+ * would suggest. 0 restores MES_DEFAULT_QUEUE_BYTES.
+ *
+ * The budget must admit at least one event at the normalized max event size
+ * (that size, plus the one-byte packet prefix, plus a one-MiB reserve for that
+ * event's checkpoint) when mes_client_start() is called, otherwise start returns
+ * MES_ERR_INVALID_ARG. Raising max_event_size to the 1 GiB hard cap therefore
+ * requires a budget of at least 1 GiB + 1 MiB + 1 byte.
  *
  * Call before mes_client_start().
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_client_set_max_queue_bytes(mes_client_t* client, size_t max_queue_bytes);
 
-/** @brief Get the configured total queue payload byte budget. */
+/** @brief Get the configured total queue byte budget. */
 MES_API size_t mes_client_get_max_queue_bytes(mes_client_t* client);
 
 /**
- * @brief Get the current charged payload bytes waiting in the event queue.
+ * @brief Get the bytes currently charged to the event queue: queued wire
+ *        payloads plus the checkpoint bookkeeping held with them.
  * @threadsafety May be sampled from a thread other than the owner thread,
  *               concurrently with the reader thread and with
  *               mes_client_start(), mes_client_poll() or mes_client_stop() on

@@ -192,11 +192,12 @@ mes_error_t BinlogClient::StartStream() {
     }
   }
 
-  // An event at the configured ceiling must always fit. Both sides of that
-  // promise come from MinQueueBytesForEvent(): the queue charges a buffer by
-  // the same rule this guard budgets for.
+  // An event at the configured ceiling, together with the checkpoint queued
+  // beside it, must always fit. Both sides of that promise come from
+  // MinQueueBytesForEvent(): the queue charges an entry through
+  // QueuedEventCharge(), the same rule this guard budgets for.
   if (max_queue_bytes_ < MinQueueBytesForEvent(max_event_size_)) {
-    SetLastError("max_queue_bytes is smaller than one max_event_size event");
+    SetLastError("max_queue_bytes is smaller than one max_event_size event plus its checkpoint");
     return MES_ERR_INVALID_ARG;
   }
 

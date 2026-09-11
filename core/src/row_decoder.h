@@ -47,6 +47,12 @@ constexpr size_t kMaxDecompressedColumnBytes = 64U * 1024U * 1024U;
  * columns clamp their expansion to what remains, so the peak — not merely the
  * final total — stays under @ref limit.
  *
+ * A caller that queues what it decodes passes its own queue byte budget as the
+ * ceiling, which is what ties this limit to the bound the queue publishes: the
+ * payload bytes one event can add to a queue charged through QueuedEventCharge()
+ * never exceed the budget that queue was configured with. CdcEngine does exactly
+ * that; a standalone decode keeps the @ref kMaxDecompressedColumnBytes default.
+ *
  * @p used is also the accounting hook: callers can read back exactly how many
  * bytes an event bought.
  */
@@ -59,15 +65,21 @@ struct DecodeBudget {
   /**
    * @brief Budget for an event body of @p body_bytes.
    *
-   * The floor is the single-field expansion cap, so one legitimately huge
-   * compressed column still decodes. Above that the budget follows the event
-   * size, because an uncompressed value can never exceed the bytes it was
-   * decoded from — an event that carries no compressed columns is thus never
-   * rejected, whatever ceiling the caller configured for event size.
+   * The floor is @p expansion_ceiling — how much decompression this caller is
+   * willing to hold for one event — so a legitimately huge compressed column
+   * still decodes. Above that the budget follows the event size, because an
+   * uncompressed value can never exceed the bytes it was decoded from — an event
+   * that carries no compressed columns is thus never rejected, whatever ceiling
+   * the caller configured for event size.
+   *
+   * @param body_bytes Wire size of the event body.
+   * @param expansion_ceiling Decompressed bytes allowed for this one event; a
+   *        queueing caller passes its queue byte budget so the two bounds agree.
    */
-  static DecodeBudget ForEventBody(size_t body_bytes) {
+  static DecodeBudget ForEventBody(size_t body_bytes,
+                                   size_t expansion_ceiling = kMaxDecompressedColumnBytes) {
     DecodeBudget budget;
-    if (body_bytes > budget.limit) budget.limit = body_bytes;
+    budget.limit = body_bytes > expansion_ceiling ? body_bytes : expansion_ceiling;
     return budget;
   }
 

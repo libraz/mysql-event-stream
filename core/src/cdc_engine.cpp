@@ -149,7 +149,7 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
   // call immediately instead of repeatedly processing the same event.
   while (total_consumed < len && !IsError()) {
     // Stop feeding if queue is full (backpressure)
-    if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
+    if (QueueAtCapacity()) {
       break;
     }
 
@@ -160,11 +160,13 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
     total_consumed += consumed;
 
     while (stream_parser_.HasEvent()) {
-      // Note: the queue size check is per binlog event, not per row.
+      // Note: both queue checks are per binlog event, not per row.
       // A single multi-row WRITE_ROWS/UPDATE_ROWS/DELETE_ROWS event may
-      // push all its rows before the limit is rechecked. The queue can
-      // temporarily exceed max_queue_size_ by (rows_per_event - 1) items.
-      if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) {
+      // push all its rows before the limits are rechecked. The queue can
+      // temporarily exceed max_queue_size_ by (rows_per_event - 1) items, and
+      // max_queue_bytes_ by that event's charge -- which its decode budget
+      // bounds, so the overshoot stays a function of the configured limits.
+      if (QueueAtCapacity()) {
         break;
       }
       const EventHeader& header = stream_parser_.CurrentHeader();
@@ -188,12 +190,38 @@ void CdcEngine::SetMaxQueueSize(size_t max_size) {
 
 size_t CdcEngine::MaxQueueSize() const { return max_queue_size_; }
 
+void CdcEngine::SetMaxQueueBytes(size_t max_queue_bytes) {
+  max_queue_bytes_ = max_queue_bytes == 0 ? MES_DEFAULT_QUEUE_BYTES : max_queue_bytes;
+}
+
+size_t CdcEngine::MaxQueueBytes() const { return max_queue_bytes_; }
+
+size_t CdcEngine::QueuedBytes() const { return queued_bytes_; }
+
+bool CdcEngine::QueueAtCapacity() const {
+  if (max_queue_size_ > 0 && event_queue_.size() >= max_queue_size_) return true;
+  return queued_bytes_ >= max_queue_bytes_;
+}
+
+void CdcEngine::EnqueueEvent(ChangeEvent&& event) {
+  // Charged before the move, while the event still owns its payloads, and
+  // released again by the same function in NextEvent().
+  queued_bytes_ += ChangeEventCharge(event);
+  event_queue_.push(std::move(event));
+}
+
 bool CdcEngine::NextEvent(ChangeEvent* event) {
   if (event_queue_.empty() || event == nullptr) {
     return false;
   }
+  // Recomputed rather than stored alongside the entry: nothing mutates a queued
+  // event, so this is the same charge EnqueueEvent() applied. The subtraction is
+  // floored regardless -- an underflow would wedge Feed() behind a queue that
+  // looks permanently full instead of failing visibly.
+  const size_t charge = ChangeEventCharge(event_queue_.front());
   *event = std::move(event_queue_.front());
   event_queue_.pop();
+  queued_bytes_ = charge < queued_bytes_ ? queued_bytes_ - charge : 0;
   return true;
 }
 
@@ -602,9 +630,16 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   bool is_update = (type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent) ||
                     type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEventV1));
 
+  // Cap what one event may materialize at the queue's own byte budget rather
+  // than at the decoder's standalone default, so the bytes a single event can
+  // add to the queue stay a function of the engine's configured limits. The cap
+  // is the whole budget, not what is left of it: a decode must not start failing
+  // because the consumer happens to be behind.
+  DecodeBudget budget = DecodeBudget::ForEventBody(body_len, max_queue_bytes_);
+
   if (is_write) {
     row_buf_.clear();
-    if (DecodeWriteRows(body, body_len, *meta, is_v2, &row_buf_)) {
+    if (DecodeWriteRows(body, body_len, *meta, is_v2, &row_buf_, &budget)) {
       for (auto& row : row_buf_) {
         ChangeEvent event;
         event.type = EventType::kInsert;
@@ -617,14 +652,14 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
-        event_queue_.push(std::move(event));
+        EnqueueEvent(std::move(event));
       }
     } else {
       LogRowDecodeFailure("write_rows", *meta);
     }
   } else if (is_update) {
     update_buf_.clear();
-    if (DecodeUpdateRows(body, body_len, *meta, is_v2, &update_buf_)) {
+    if (DecodeUpdateRows(body, body_len, *meta, is_v2, &update_buf_, &budget)) {
       for (auto& pair : update_buf_) {
         ChangeEvent event;
         event.type = EventType::kUpdate;
@@ -639,7 +674,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
-        event_queue_.push(std::move(event));
+        EnqueueEvent(std::move(event));
       }
     } else {
       LogRowDecodeFailure("update_rows", *meta);
@@ -647,7 +682,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   } else {
     // DELETE
     row_buf_.clear();
-    if (DecodeDeleteRows(body, body_len, *meta, is_v2, &row_buf_)) {
+    if (DecodeDeleteRows(body, body_len, *meta, is_v2, &row_buf_, &budget)) {
       for (auto& row : row_buf_) {
         ChangeEvent event;
         event.type = EventType::kDelete;
@@ -660,7 +695,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         event.position = position_;
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
-        event_queue_.push(std::move(event));
+        EnqueueEvent(std::move(event));
       }
     } else {
       LogRowDecodeFailure("delete_rows", *meta);

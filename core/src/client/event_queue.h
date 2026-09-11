@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "mes.h"
+#include "types.h"
 
 namespace mes {
 
@@ -24,27 +25,33 @@ constexpr size_t kDefaultEventQueueBytes = MES_DEFAULT_QUEUE_BYTES;
 constexpr size_t kQueuedEventPrefixBytes = 1;
 
 /**
- * @brief Bytes a queued buffer of @p buffer_bytes charges to the byte budget.
+ * @brief Bytes a queue budget reserves for one entry's bookkeeping.
  *
- * This is the single definition of what `max_queue_bytes` counts. Only the
- * buffered wire payload is charged. A queued event also carries a checkpoint
- * GTID set and, for a sentinel, an error message; those are reader-side
- * bookkeeping whose length grows with the number of source UUIDs rather than
- * with the event, so charging them would make the admissible event size depend
- * on a quantity no caller can size a budget for -- and would let an event
- * within max_event_size be refused by a budget that claims to accommodate it.
+ * A queued event carries, besides the wire buffer, the committed GTID
+ * checkpoint set it would promote and -- for a sentinel -- an error message.
+ * Those stay resident for exactly as long as the buffer does, so
+ * QueuedEventCharge() charges them; the budget that admits a maximum-sized
+ * event therefore has to cover them too, which is what this reserve is.
+ *
+ * A MySQL GTID set costs roughly 50 bytes per distinct source UUID, so the
+ * reserve covers a replication history of some twenty thousand sources -- far
+ * past any real topology -- while remaining negligible next to the default
+ * budget. A checkpoint larger still does not break the byte bound; it only
+ * crowds out queued events sooner.
  */
-constexpr size_t QueuedEventCharge(size_t buffer_bytes) { return buffer_bytes; }
+constexpr size_t kQueuedCheckpointReserveBytes = 1024U * 1024U;
 
 /**
  * @brief Smallest queue byte budget that always admits a wire event of
  *        @p max_event_size bytes.
  *
  * Derived from QueuedEventCharge() so BinlogClient's start-up guard and the
- * queue's admission test cannot drift apart.
+ * queue's admission test cannot drift apart, and it budgets for the same two
+ * terms the charge counts: the buffer including its packet prefix, plus
+ * @ref kQueuedCheckpointReserveBytes of bookkeeping.
  */
 constexpr size_t MinQueueBytesForEvent(size_t max_event_size) {
-  return QueuedEventCharge(max_event_size + kQueuedEventPrefixBytes);
+  return QueuedEventCharge(max_event_size + kQueuedEventPrefixBytes, kQueuedCheckpointReserveBytes);
 }
 
 // Note: this queue intentionally uses std::queue + mutex + condition
@@ -73,7 +80,10 @@ struct QueuedEvent {
   uint16_t server_error_code = 0;  ///< MySQL ERR packet code for an error sentinel
   std::string error_message;       ///< Detailed error text for an error sentinel
   bool is_heartbeat = false;       ///< true for silent heartbeats from the server
-  std::string checkpoint_gtid;     ///< Committed GTID promoted after consumer finishes this event
+  /// Committed GTID promoted after the consumer finishes this event. Its length
+  /// follows the number of distinct GTID source UUIDs, not the event, which is
+  /// why it is charged to the byte budget like the payload is.
+  std::string checkpoint_gtid;
 };
 
 /**
@@ -100,7 +110,16 @@ class EventQueue {
    */
   bool Push(QueuedEvent event);
 
-  /** Push with a reason when the queue cannot accept the event. */
+  /**
+   * @brief Push with a reason when the queue cannot accept the event.
+   *
+   * An event is admitted once the queue holds fewer than max_size entries and
+   * its QueuedEventCharge() fits in what is left of the byte budget; a single
+   * event whose charge exceeds the whole budget is refused as kEventTooLarge
+   * rather than blocking forever. A terminal error sentinel is exempt from the
+   * byte budget: it is the only way the consumer learns why the stream ended,
+   * so a full budget must not be able to swallow it.
+   */
   PushResult PushWithStatus(QueuedEvent event);
 
   /**
@@ -121,7 +140,13 @@ class EventQueue {
   /** @brief Current number of events in the queue (approximate under concurrency). */
   size_t Size() const;
 
-  /** @brief Current charged payload bytes in the queue (buffer size, not capacity). */
+  /**
+   * @brief Bytes currently charged to the queue: every resident byte of every
+   *        queued entry, buffer sizes rather than allocator capacities.
+   *
+   * Bounded by MaxBytes(), except that an admitted terminal sentinel's message
+   * may carry the total marginally past it.
+   */
   size_t QueuedBytes() const;
 
   /** @brief Configured queue byte budget. */
