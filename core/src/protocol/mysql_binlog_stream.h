@@ -40,6 +40,17 @@ struct BinlogStreamConfig {
   uint64_t binlog_position = kBinlogMagicOffset;
   std::vector<uint8_t> gtid_encoded;  ///< Binary-encoded GTID set
   uint16_t flags = 0;
+  /**
+   * @brief Whether the requested start position came from a GTID set.
+   *
+   * Set this on every GTID-based dump, including MariaDB's: MariaDB negotiates
+   * the position through @\@slave_connect_state and then issues a plain
+   * COM_BINLOG_DUMP, so neither the command byte nor the dump flags can express
+   * it. FetchEvent() needs it to tell a purged-GTID error apart from the other
+   * conditions the server reports under the same error code; leaving it false
+   * costs only the more specific diagnosis.
+   */
+  bool position_from_gtid = false;
 };
 
 /** @brief Build the COM_BINLOG_DUMP_GTID command payload for @p config. */
@@ -103,6 +114,12 @@ class BinlogStream {
    * may still have been resized and its contents are implementation-
    * defined (callers should treat it as scratch in that case).
    *
+   * MES_ERR_GTID_PURGED is returned only for a server error whose meaning is
+   * a purged GTID interval, which requires the dump to have been started from
+   * a GTID set (BinlogStreamConfig::position_from_gtid). On a file/position
+   * dump the same server error code carries an unrelated, recoverable
+   * condition, so it is reported as MES_ERR_STREAM.
+   *
    * @param sock    Socket handle used in Start()
    * @param buffer  Caller-owned scratch buffer reused across calls
    * @param result  Output: populated with event data or heartbeat flag
@@ -125,6 +142,16 @@ class BinlogStream {
    * @return MES_OK on success, MES_ERR_STREAM on failure
    */
   mes_error_t StartComBinlogDump(SocketHandle* sock, const BinlogStreamConfig& config);
+
+ private:
+  /**
+   * @brief Whether the dump in progress was started from a GTID set.
+   *
+   * Recorded by both start commands and read by FetchEvent(), which receives
+   * no configuration of its own. Written on the owner thread before the reader
+   * thread exists and not touched again while a dump is running.
+   */
+  bool position_from_gtid_ = false;
 };
 
 }  // namespace mes::protocol

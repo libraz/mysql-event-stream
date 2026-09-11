@@ -13,6 +13,7 @@
 #ifndef MES_PROTOCOL_MYSQL_CONNECTION_H_
 #define MES_PROTOCOL_MYSQL_CONNECTION_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -69,7 +70,8 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
  *
  * Thread safety: Not thread-safe. All methods must be called from a single
  * thread, except that the underlying socket's Shutdown() may be called from
- * any thread to interrupt blocking I/O.
+ * any thread to interrupt blocking I/O, and IsConnected()/HasSession() may be
+ * read from any thread so an owner blocked in I/O does not hide the state.
  */
 class MysqlConnection {
  public:
@@ -111,8 +113,25 @@ class MysqlConnection {
   /** @brief Send COM_QUIT and close the connection */
   void Disconnect();
 
-  /** @brief Check if the connection is established and authenticated */
+  /**
+   * @brief Check whether the authenticated transport is still usable.
+   *
+   * Liveness is read from the socket as well as from the session flag, because
+   * a failed query poisons the socket without going through Disconnect(): see
+   * ExecuteQuery() in protocol/mysql_query.h. Reporting connected on a
+   * poisoned descriptor would send a caller's reconnect logic past the one
+   * condition it exists to catch.
+   */
   bool IsConnected() const;
+
+  /**
+   * @brief Whether a session was established and not yet torn down.
+   *
+   * Stays true after the transport has become unusable, which is what
+   * distinguishes "needs teardown" from "usable" for callers that have to
+   * release a previous session before starting a new one.
+   */
+  bool HasSession() const;
 
   /** @brief Access the underlying socket for direct I/O */
   SocketHandle* Socket();
@@ -143,7 +162,9 @@ class MysqlConnection {
   SocketHandle socket_;
   ServerHandshake server_info_;
   std::string last_error_;
-  bool connected_ = false;
+  /// Set once authentication succeeds, cleared only by Disconnect(). Atomic
+  /// because IsConnected() is readable from a non-owner thread.
+  std::atomic<bool> connected_{false};
   uint8_t sequence_id_ = 0;
   uint32_t negotiated_caps_ = 0;
   ServerFlavor server_flavor_ = ServerFlavor::kMySQL;

@@ -159,7 +159,9 @@ void MysqlConnection::Disconnect() {
   socket_ = SocketHandle();
 }
 
-bool MysqlConnection::IsConnected() const { return connected_; }
+bool MysqlConnection::IsConnected() const { return connected_ && socket_.IsValid(); }
+
+bool MysqlConnection::HasSession() const { return connected_; }
 
 SocketHandle* MysqlConnection::Socket() { return &socket_; }
 

@@ -142,7 +142,13 @@ class BinlogClient {
   /** @brief Disconnect from MySQL server */
   void Disconnect();
 
-  /** @brief Check whether the transport is still usable. */
+  /**
+   * @brief Check whether the transport is still usable.
+   *
+   * False once anything has made the socket unusable, including a stream setup
+   * query that failed and poisoned it, not only an explicit Stop()/Disconnect()
+   * or a terminal reader error.
+   */
   bool IsConnected() const;
 
   /** @brief Check whether Poll() can still drain events or a terminal error. */

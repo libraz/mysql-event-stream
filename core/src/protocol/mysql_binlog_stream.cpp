@@ -27,6 +27,11 @@ constexpr uint8_t kComBinlogDumpGtid = 0x1E;
 /// Flag to indicate GTID-based positioning
 constexpr uint16_t kBinlogThroughGtid = 0x04;
 
+/// ER_SOURCE_FATAL_ERROR_READING_BINLOG: the server gave up on the dump.
+/// The code is shared between a purged GTID interval and several recoverable
+/// file/position conditions, so its meaning depends on how the dump started.
+constexpr uint16_t kErrFatalErrorReadingBinlog = 1236;
+
 }  // namespace
 
 std::vector<uint8_t> BuildComBinlogDumpGtidPayload(const BinlogStreamConfig& config) {
@@ -59,6 +64,7 @@ std::vector<uint8_t> BuildComBinlogDumpGtidPayload(const BinlogStreamConfig& con
 }
 
 mes_error_t BinlogStream::Start(SocketHandle* sock, const BinlogStreamConfig& config) {
+  position_from_gtid_ = config.position_from_gtid;
   std::vector<uint8_t> payload = BuildComBinlogDumpGtidPayload(config);
 
   // Send as a single command packet with sequence_id = 0
@@ -111,9 +117,15 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
         .Field("error_code", static_cast<uint64_t>(err_code))
         .Field("message", msg)
         .Error();
-    // ER_MASTER_FATAL_ERROR_READING_BINLOG is sent when the requested GTID
-    // interval has been purged. Reconnecting cannot recover that position.
-    return err_code == 1236 ? MES_ERR_GTID_PURGED : MES_ERR_STREAM;
+    // On a GTID dump this code means the requested interval has been purged,
+    // which reconnecting cannot recover. The same code on a file/position dump
+    // reports a stale offset or a missing log file instead -- recoverable by
+    // restarting from a valid offset -- so only the GTID case may claim the
+    // unrecoverable classification.
+    if (err_code == kErrFatalErrorReadingBinlog && position_from_gtid_) {
+      return MES_ERR_GTID_PURGED;
+    }
+    return MES_ERR_STREAM;
   }
 
   // EOF packet - stream ended
@@ -152,6 +164,10 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
 }
 
 mes_error_t BinlogStream::StartComBinlogDump(SocketHandle* sock, const BinlogStreamConfig& config) {
+  // MariaDB reaches its GTID dump through this command too, so the caller's
+  // flag is the only thing that distinguishes the two start modes here.
+  position_from_gtid_ = config.position_from_gtid;
+
   // Build COM_BINLOG_DUMP payload:
   //   [1] command byte (0x12)
   //   [4] binlog position (LE)

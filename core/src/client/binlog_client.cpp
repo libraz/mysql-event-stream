@@ -58,8 +58,10 @@ void BinlogClient::SetLastError(const std::string& msg) {
 }
 
 mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
-  // Tear down any previous stream first
-  if (conn_.IsConnected()) {
+  // Tear down any previous stream first. The predicate is the session, not its
+  // liveness: a transport that has already failed still leaves a reader thread,
+  // a queue and a descriptor to release.
+  if (conn_.HasSession()) {
     Disconnect();
   }
   // Reset stop flag after previous stream is fully torn down
@@ -526,6 +528,9 @@ mes_error_t BinlogClient::ResolveStartGtidMariaDB(const std::string* resume_chec
 mes_error_t BinlogClient::SendBinlogDumpMySQL(const StartState& state) {
   protocol::BinlogStreamConfig stream_config;
   stream_config.server_id = config_.server_id;
+  // The source reports a purged GTID interval and a stale file offset under one
+  // error code, so the stream needs the start mode to read a mid-dump failure.
+  stream_config.position_from_gtid = !state.from_file_position;
 
   if (state.from_file_position) {
     stream_config.binlog_filename = config_.binlog_file;
@@ -555,6 +560,9 @@ mes_error_t BinlogClient::SendBinlogDumpMariaDB(const StartState& state) {
   // mes_event_t.source_sql. MariaDB drops those events unless every dump
   // request -- GTID or file/position -- asks for them explicitly.
   stream_config.flags |= protocol::kBinlogSendAnnotateRows;
+  // Both MariaDB start modes issue COM_BINLOG_DUMP, so this flag is the only
+  // record of which one a mid-dump failure has to be read against.
+  stream_config.position_from_gtid = !state.from_file_position;
 
   if (state.from_file_position) {
     stream_config.binlog_filename = config_.binlog_file;
@@ -979,7 +987,13 @@ void BinlogClient::Disconnect() {
   StructuredLog().Event("mysql_disconnected").Info();
 }
 
-bool BinlogClient::IsConnected() const { return connected_.load(std::memory_order_acquire); }
+bool BinlogClient::IsConnected() const {
+  // Two independent ways to lose the transport, and neither implies the other:
+  // the reader clears the flag when the dump dies while the descriptor is still
+  // open, and a failed setup query poisons the descriptor without anything
+  // touching the flag. Reporting connected requires both to still hold.
+  return connected_.load(std::memory_order_acquire) && conn_.IsConnected();
+}
 
 bool BinlogClient::IsStreaming() const { return streaming_.load(std::memory_order_acquire); }
 

@@ -704,9 +704,14 @@ MES_API void mes_client_disconnect(mes_client_t* client);
 
 /** @brief Check whether the authenticated transport is still usable.
  *
- * Returns 0 after a terminal reader error, stop, or disconnect, even while a
- * queued terminal error remains available from mes_client_poll(). Use
+ * Returns 0 once anything has left the socket unusable: a terminal reader
+ * error, a stop, a disconnect, or a failed mes_client_start() whose server
+ * round trip broke the protocol state. It reports 0 even while a queued
+ * terminal error remains available from mes_client_poll(); use
  * mes_client_is_streaming() to decide whether Poll can still drain that state.
+ *
+ * A supervisor that reconnects on 0 therefore never retries mes_client_start()
+ * on a dead descriptor.
  *  @threadsafety Thread-safe.
  */
 MES_API int mes_client_is_connected(mes_client_t* client);

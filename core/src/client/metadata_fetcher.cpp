@@ -32,7 +32,10 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
                                      uint32_t ssl_mode, const std::string& ssl_ca,
                                      const std::string& ssl_cert, const std::string& ssl_key,
                                      bool allow_public_key_retrieval) {
-  if (conn_.IsConnected()) {
+  // A session that failed part-way still holds the caches and the credential
+  // this method is about to replace, so teardown keys off the session rather
+  // than off its liveness.
+  if (conn_.HasSession()) {
     Disconnect();
   }
 
