@@ -88,8 +88,10 @@ export type ServerFlavor = (typeof ServerFlavor)[keyof typeof ServerFlavor];
  * non-UTF-8 character set (e.g. latin1, sjis) is not transcoded; invalid byte
  * sequences are replaced with the Unicode replacement character (U+FFFD), so
  * such columns may be lossy. The binary/text distinction relies on TABLE_MAP
- * charset metadata; with `binlog_row_metadata=NO_LOG`, BLOB-family columns
- * conservatively remain `Uint8Array`.
+ * charset metadata; with `binlog_row_metadata=NO_LOG` it is absent, and both
+ * the character and the BLOB families conservatively remain `Uint8Array`
+ * because each text/binary pair shares one binlog type byte and bytes are then
+ * the only lossless reading.
  */
 export type ColumnValue = null | number | bigint | string | Uint8Array;
 
