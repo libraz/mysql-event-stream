@@ -209,8 +209,10 @@ class ClientConfig:
         ssl_key: Path to client private key file (empty to skip).
         max_queue_size: Maximum internal event queue size. 0 selects the
             default of 10000.
-        max_queue_bytes: Total queued payload byte budget. Defaults to 48 MiB;
-            0 restores that default.
+        max_queue_bytes: Total queue byte budget. Defaults to 48 MiB; 0 restores
+            that default. It charges each queued wire payload plus the GTID
+            checkpoint held with it, so a source with a wide GTID set applies
+            backpressure after fewer events.
         max_event_size: Maximum binlog event size accepted by the client and
             parser. Defaults to 32 MiB; 0 resolves to the 1 GiB hard cap.
             Raise max_queue_bytes when raising this limit.

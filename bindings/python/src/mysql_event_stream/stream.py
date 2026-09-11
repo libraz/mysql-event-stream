@@ -122,8 +122,10 @@ class CdcStream:
             ssl_cert: Path to client certificate file (empty to skip).
             ssl_key: Path to client private key file (empty to skip).
             max_queue_size: Maximum event queue size (0 = default 10000).
-            max_queue_bytes: Total queued payload byte budget (default 48 MiB;
-                0 restores the default).
+            max_queue_bytes: Total queue byte budget (default 48 MiB; 0 restores
+                the default). Charges each queued wire payload plus the GTID
+                checkpoint held with it, so a source with a wide GTID set
+                applies backpressure after fewer events.
             max_event_size: Maximum binlog event size accepted by the client
                 and parser (default 32 MiB; 0 = 1 GiB hard cap). Raise
                 max_queue_bytes when raising this limit.
@@ -224,7 +226,8 @@ class CdcStream:
             ssl_cert: Client certificate path.
             ssl_key: Client private-key path.
             max_queue_size: Internal client event-count limit (0 uses default).
-            max_queue_bytes: Internal client payload-byte limit (0 uses default).
+            max_queue_bytes: Internal client queue byte limit (0 uses default).
+                Charges wire payloads and their GTID checkpoints alike.
             max_event_size: Maximum accepted binlog event size in bytes.
             include_databases: Exact database-name include list.
             include_tables: Case-sensitive table-name include list; a trailing

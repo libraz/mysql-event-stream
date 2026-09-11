@@ -115,8 +115,10 @@ class BinlogClient:
             ssl_key: Path to client private key file (empty to skip).
             max_queue_size: Maximum internal event queue size. 0 selects the
                 default of 10000.
-            max_queue_bytes: Total queued payload byte budget. Defaults to
-                48 MiB; 0 restores that default.
+            max_queue_bytes: Total queue byte budget. Defaults to 48 MiB; 0
+                restores that default. It charges each queued wire payload plus
+                the GTID checkpoint held with it, so a source with a wide GTID
+                set applies backpressure after fewer events.
             max_event_size: Maximum binlog event size. Defaults to 32 MiB;
                 0 resolves to the 1 GiB hard cap. Raise max_queue_bytes when
                 raising this limit.
@@ -520,7 +522,10 @@ class BinlogClient:
 
     @property
     def queued_bytes(self) -> int:
-        """Return currently charged payload bytes waiting in the event queue."""
+        """Return the bytes charged to the event queue.
+
+        Counts each queued wire payload plus the GTID checkpoint held with it.
+        """
         with self._handle_lock:
             return (
                 0 if self._handle is None else int(self._lib.mes_client_queued_bytes(self._handle))
@@ -528,7 +533,10 @@ class BinlogClient:
 
     @property
     def max_queue_bytes(self) -> int:
-        """Return the configured event-queue payload budget in bytes."""
+        """Return the configured event-queue byte budget.
+
+        See ``max_queue_bytes`` on the constructor for what the budget charges.
+        """
         with self._handle_lock:
             return (
                 0
