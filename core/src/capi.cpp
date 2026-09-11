@@ -10,6 +10,7 @@
  * between internal C++ types and their C ABI equivalents.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -56,6 +57,80 @@ struct mes_engine : mes::MetadataFetcherOwner {
 static_assert(std::is_base_of<mes::MetadataFetcherOwner, mes_engine>::value,
               "metadata_fetcher must stay in a base class of mes_engine so it is destroyed "
               "after CdcEngine, which points at it");
+
+namespace {
+
+/**
+ * @brief Whether this platform has the pointer and size_t width the recorded
+ *        struct offsets below were taken on.
+ *
+ * The offsets are absolute byte positions, so they only describe the layout on
+ * the LP64 platforms the library supports. Guarding them keeps a hypothetical
+ * narrower target from failing the build on arithmetic it never promised.
+ */
+constexpr bool kRecordedLayoutApplies = sizeof(void*) == 8 && sizeof(size_t) == 8;
+
+/*
+ * mes_client_config_t and mes_poll_result_t are the two public structs a caller
+ * allocates rather than receives, so a binding reproduces their layout itself
+ * instead of asking the library for a size. The Python binding does so with a
+ * ctypes mirror it builds from these field positions.
+ *
+ * Every offset is therefore part of the published ABI. A field inserted,
+ * reordered, resized or removed shifts the ones after it, and a mirror built
+ * from the old positions then reads the wrong bytes -- silently, since ctypes
+ * computes its own layout and a total-size check alone cannot see a swap of two
+ * same-width fields. These assertions are what makes such a change fail here
+ * first: every mirror of the struct must be moved to the new positions in the
+ * same change, and the numbers below updated to match the new layout only once
+ * that is done.
+ */
+static_assert(!kRecordedLayoutApplies || sizeof(mes_client_config_t) == 120,
+              "the published layout of mes_client_config_t changed; move every binding mirror "
+              "before recording the new one");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, host) == 0, "host moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, port) == 8, "port moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, user) == 16, "user moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, password) == 24,
+              "password moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, server_id) == 32,
+              "server_id moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, start_gtid) == 40,
+              "start_gtid moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, connect_timeout_s) == 48,
+              "connect_timeout_s moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, read_timeout_s) == 52,
+              "read_timeout_s moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, ssl_mode) == 56,
+              "ssl_mode moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, ssl_ca) == 64,
+              "ssl_ca moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, ssl_cert) == 72,
+              "ssl_cert moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, ssl_key) == 80,
+              "ssl_key moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, max_queue_size) == 88,
+              "max_queue_size moved");
+static_assert(!kRecordedLayoutApplies ||
+                  offsetof(mes_client_config_t, allow_public_key_retrieval) == 96,
+              "allow_public_key_retrieval moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, start_position_mode) == 100,
+              "start_position_mode moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, binlog_file) == 104,
+              "binlog_file moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_client_config_t, binlog_position) == 112,
+              "binlog_position moved");
+
+static_assert(!kRecordedLayoutApplies || sizeof(mes_poll_result_t) == 32,
+              "the published layout of mes_poll_result_t changed; move every binding mirror "
+              "before recording the new one");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, error) == 0, "error moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, data) == 8, "data moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, size) == 16, "size moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, is_heartbeat) == 24,
+              "is_heartbeat moved");
+
+}  // namespace
 
 // Narrow a payload length to mes_column_t::str_len.
 //
@@ -445,8 +520,15 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   std::string ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
   std::string ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
   std::string ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";
-  auto rc = fetcher->Connect(host, config->port, user, password, config->connect_timeout_s,
-                             config->read_timeout_s, config->ssl_mode, ssl_ca, ssl_cert, ssl_key,
+  // Same resolution as mes_client_connect(): a zero field selects the default
+  // bound rather than an unbounded wait, so the metadata connection cannot be
+  // the one path on which a silent peer blocks TABLE_MAP processing forever.
+  const uint32_t connect_timeout_s =
+      config->connect_timeout_s != 0 ? config->connect_timeout_s : MES_DEFAULT_CONNECT_TIMEOUT_S;
+  const uint32_t read_timeout_s =
+      config->read_timeout_s != 0 ? config->read_timeout_s : MES_DEFAULT_READ_TIMEOUT_S;
+  auto rc = fetcher->Connect(host, config->port, user, password, connect_timeout_s, read_timeout_s,
+                             config->ssl_mode, ssl_ca, ssl_cert, ssl_key,
                              config->allow_public_key_retrieval != 0);
   if (rc != MES_OK) {
     return rc;

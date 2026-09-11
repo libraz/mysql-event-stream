@@ -9,15 +9,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "client/binlog_client.h"
 #include "client/metadata_fetcher.h"
 #include "event_header.h"
 #include "mes.h"
+#include "source_scan.h"
 #include "test_helpers.h"
 
 namespace mes {
@@ -61,6 +64,55 @@ TEST(CApi, VersionAndAbiAreExposed) {
                                std::to_string(MES_VERSION_PATCH);
   EXPECT_EQ(mes_version(), expected);
   EXPECT_EQ(mes_abi_version(), MES_ABI_VERSION);
+}
+
+// ---- Client configuration defaults ----
+
+// A zero timeout field means "unset", so the bound a zero-initialized C config
+// ends up with must be the one a direct C++ caller of BinlogClient gets. The
+// two values are declared separately -- the header names them for C callers,
+// BinlogClientConfig applies them -- so nothing but this assertion keeps one
+// from being raised without the other.
+TEST(CApi, DocumentedTimeoutDefaultsMatchTheClientDefaults) {
+  const mes::BinlogClientConfig defaults;
+  EXPECT_EQ(MES_DEFAULT_CONNECT_TIMEOUT_S, defaults.connect_timeout_s);
+  EXPECT_EQ(MES_DEFAULT_READ_TIMEOUT_S, defaults.read_timeout_s);
+}
+
+// Both C ABI entry points that accept mes_client_config_t must resolve a zero
+// timeout to that default before the value reaches the transport: an unresolved
+// zero disables the bound, and resolving it at one entry point only would give
+// one struct field two meanings. Whether the bound is in force is observable
+// only by waiting it out, so the property is asserted on the sources: the field
+// is read exactly twice per entry point, both times inside the fallback.
+TEST(CApi, NeitherEntryPointPassesAnUnresolvedTimeoutToTheTransport) {
+  // Assembled from fragments so this test is not a hit in its own scan.
+  const std::string field = std::string("config-") + ">";
+  const std::string macro = std::string("MES_DEFAULT_") + "CONNECT_TIMEOUT_S";
+  const std::string read_macro = std::string("MES_DEFAULT_") + "READ_TIMEOUT_S";
+  const struct {
+    std::string field;
+    std::string fallback;
+  } resolutions[] = {
+      {field + "connect_timeout_s", macro},
+      {field + "read_timeout_s", read_macro},
+  };
+
+  for (const char* relative : {"core/src/capi.cpp", "core/src/client/capi_client.cpp"}) {
+    const std::filesystem::path source = mes::source_scan::RepoRoot() / relative;
+    const std::string text = mes::source_scan::ReadCollapsed(source);
+    ASSERT_FALSE(text.empty()) << "unreadable: " << source;
+
+    for (const auto& resolution : resolutions) {
+      const std::string expression =
+          resolution.field + " != 0 ? " + resolution.field + " : " + resolution.fallback;
+      EXPECT_EQ(mes::source_scan::CountOccurrences(text, expression), 1)
+          << relative << " must resolve " << resolution.field << " through " << resolution.fallback;
+      EXPECT_EQ(mes::source_scan::CountOccurrences(text, resolution.field), 2)
+          << relative << " reads " << resolution.field << " outside its fallback, so a zero "
+          << "reaches the transport unresolved";
+    }
+  }
 }
 
 // ---- Engine lifecycle ----

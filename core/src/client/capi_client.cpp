@@ -91,8 +91,16 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   cfg.start_at_file_position = config->start_position_mode == MES_START_AT_POSITION;
   cfg.binlog_file = config->binlog_file != nullptr ? config->binlog_file : "";
   cfg.binlog_position = config->binlog_position;
-  cfg.connect_timeout_s = config->connect_timeout_s;
-  cfg.read_timeout_s = config->read_timeout_s;
+  // A zero timeout field means "unset" at this boundary, not "unbounded": the
+  // zero-initialized config the header documents as a supported construction
+  // must still bound every blocking read, otherwise a peer that completes the
+  // handshake and then goes silent holds the call forever. Both C ABI entry
+  // points that accept this struct resolve the two fields the same way, so one
+  // field cannot mean different things depending on which one was called.
+  cfg.connect_timeout_s =
+      config->connect_timeout_s != 0 ? config->connect_timeout_s : MES_DEFAULT_CONNECT_TIMEOUT_S;
+  cfg.read_timeout_s =
+      config->read_timeout_s != 0 ? config->read_timeout_s : MES_DEFAULT_READ_TIMEOUT_S;
   cfg.ssl_mode = config->ssl_mode;
   cfg.ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
   cfg.ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";

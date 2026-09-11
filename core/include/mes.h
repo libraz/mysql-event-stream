@@ -50,7 +50,8 @@ extern "C" {
 #define MES_VERSION_PATCH 1
 #define MES_ABI_VERSION 2
 
-/** @brief Human-readable library version (for example, "1.6.0"). */
+/** @brief Human-readable library version, composed from MES_VERSION_MAJOR,
+ *         MES_VERSION_MINOR and MES_VERSION_PATCH as "major.minor.patch". */
 MES_API const char* mes_version(void);
 /** @brief Integer ABI version required by language bindings. */
 MES_API uint32_t mes_abi_version(void);
@@ -443,6 +444,15 @@ MES_API size_t mes_sizeof_event(void);
  */
 MES_API size_t mes_sizeof_column(void);
 
+/* The two structs a caller owns rather than receives -- mes_client_config_t and
+ * mes_poll_result_t -- have no runtime helper, because a binding that got the
+ * layout wrong would already have corrupted memory by the time it could call
+ * one. Their size and field offsets are instead pinned by assertions the
+ * library compiles on every build, in core/src/capi.cpp, so inserting,
+ * reordering or resizing a field fails the core build. A binding mirroring
+ * either struct must reproduce the offsets recorded there, and move its mirror
+ * in the same change that moves them. */
+
 /* ---- Table filtering ---- */
 
 /**
@@ -537,13 +547,24 @@ typedef enum {
 #define MES_DEFAULT_QUEUE_SIZE 10000u
 /** @brief Default total byte budget for an event queue, client and engine alike. */
 #define MES_DEFAULT_QUEUE_BYTES (48u * 1024u * 1024u)
+/** @brief Connection timeout applied when connect_timeout_s is 0, in seconds. */
+#define MES_DEFAULT_CONNECT_TIMEOUT_S 10u
+/** @brief Socket read timeout applied when read_timeout_s is 0, in seconds. */
+#define MES_DEFAULT_READ_TIMEOUT_S 30u
 
 typedef struct {
   const char* host;
   uint16_t port;
   const char* user;
   const char* password;
-  uint32_t server_id; /**< Non-zero replica server ID required for binlog streaming. */
+  /** Replica server ID this connection registers with, which must be non-zero
+   *  and unique among every replica of the same source, including other
+   *  processes using this library. 1 is the conventional default and is the
+   *  value both language bindings use when the option is omitted, so two
+   *  such processes against one source collide: the source drops the older
+   *  registration, each side reconnects, and the stream alternates between
+   *  them indefinitely. Assign a distinct value per process. */
+  uint32_t server_id;
   /** Used exactly when start_position_mode is MES_START_AT_GTID.
    *  A MySQL entry naming a bare transaction number is widened for backward
    *  compatibility before it goes on the wire: "uuid:N" is sent as "uuid:1-N",
@@ -551,7 +572,13 @@ typedef struct {
    *  states an interval, such as "uuid:5-9", is sent as written, and "uuid:0"
    *  contributes nothing to the set. MariaDB GTIDs are sent verbatim. */
   const char* start_gtid;
+  /** Budget in seconds for establishing the connection, shared by every
+   *  address the host resolves to; 0 = use MES_DEFAULT_CONNECT_TIMEOUT_S. */
   uint32_t connect_timeout_s;
+  /** Seconds a single socket read may block, on the handshake and on the
+   *  binlog stream alike; 0 = use MES_DEFAULT_READ_TIMEOUT_S. No value
+   *  disables the bound, so a peer that completes the handshake and then goes
+   *  silent cannot block a call forever; pass a large timeout to wait longer. */
   uint32_t read_timeout_s;
   /* SSL/TLS options */
   mes_ssl_mode_t ssl_mode; /**< SSL connection mode; zero-initialized C configs disable TLS. */
@@ -638,7 +665,11 @@ MES_API mes_error_t mes_client_connect(mes_client_t* client, const mes_client_co
  *  reaps the previous reader before attempting a replacement. The underlying
  *  transport may no longer be usable, in which case it returns the setup
  *  error and the caller must reconnect before starting again. Calling this
- *  while mes_client_is_streaming() is nonzero is a no-op that returns MES_OK.
+ *  while the client is still streaming on a live transport is a no-op that
+ *  returns MES_OK. The liveness of the transport is checked first, so in the
+ *  drain window mes_client_is_streaming() documents -- streaming nonzero,
+ *  mes_client_is_connected() zero, the terminal error not yet polled -- this
+ *  returns MES_ERR_DISCONNECTED instead, and the caller must reconnect.
  *
  *  Startup spans several blocking round trips and does not hold the lifecycle
  *  lock across them, so mes_client_stop() interrupts it; the interrupted call
@@ -831,8 +862,8 @@ MES_API uint64_t mes_client_crc_errors(mes_client_t* client);
 /** @brief Enable metadata queries for column name resolution.
  *  Uses a separate MySQL connection with the same credentials. TABLE_MAP
  *  processing may synchronously execute SHOW COLUMNS; each network read is
- *  bounded by config->read_timeout_s (0 delegates to the operating system and
- *  can block indefinitely). A timeout leaves names unresolved for that event
+ *  bounded by config->read_timeout_s, or by MES_DEFAULT_READ_TIMEOUT_S when
+ *  that field is 0. A timeout leaves names unresolved for that event
  *  and the metadata connection is retried once with the same timeout. For
  *  schema-derived column names, configure binlog_row_metadata=FULL or grant
  *  SELECT to this same credential; otherwise consumers must check

@@ -164,6 +164,12 @@ class ScriptedMysqlPeer {
     return stalled_.load(std::memory_order_acquire);
   }
 
+  /** @brief Every COM_QUERY statement received so far, in order. */
+  std::vector<std::string> Queries() const {
+    std::lock_guard<std::mutex> lock(query_mutex_);
+    return queries_;
+  }
+
   /** @brief Every COM_BINLOG_DUMP[_GTID] payload received so far, in order. */
   std::vector<std::vector<uint8_t> > DumpRequests() const {
     std::lock_guard<std::mutex> lock(dump_mutex_);
@@ -228,6 +234,7 @@ class ScriptedMysqlPeer {
       if (command_byte != kComQuery) break;
 
       const std::string query(command.begin() + 1, command.end());
+      RecordQuery(query);
       // SHOW VARIABLES is issued only by Connect(); the first query that is not
       // one marks the start of stream setup.
       const bool is_validation_query = query.rfind("SHOW VARIABLES", 0) == 0;
@@ -253,6 +260,11 @@ class ScriptedMysqlPeer {
       }
     }
     close(peer);
+  }
+
+  void RecordQuery(const std::string& query) {
+    std::lock_guard<std::mutex> lock(query_mutex_);
+    queries_.push_back(query);
   }
 
   size_t RecordDumpRequest(const std::vector<uint8_t>& request) {
@@ -385,6 +397,8 @@ class ScriptedMysqlPeer {
   // Written by the peer thread, read by the test thread.
   mutable std::mutex dump_mutex_;
   std::vector<std::vector<uint8_t> > dump_requests_;
+  mutable std::mutex query_mutex_;
+  std::vector<std::string> queries_;
   std::thread thread_;
 };
 
@@ -841,6 +855,44 @@ TEST(BinlogClientLifecycle, EventAtMaxEventSizeSurvivesTheMinimumQueueBudget) {
 
   client.Stop();
   client.Disconnect();
+}
+
+/**
+ * @brief The timeout a C caller sets is the timeout the stream is configured
+ *        with, resolved at the C ABI boundary and nowhere else.
+ *
+ * The negotiated heartbeat period is half the read timeout, capped at three
+ * seconds, so a timeout below six seconds reaches the peer as the statement
+ * that configures it. That makes the resolved value observable on the wire:
+ * a boundary that dropped the caller's value, or that substituted the default
+ * for a non-zero one, would negotiate the capped period instead.
+ */
+TEST(BinlogClientLifecycle, CApiReadTimeoutReachesTheNegotiatedHeartbeat) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256));
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.host = "127.0.0.1";
+  config.port = peer.port();
+  config.user = "repl";
+  config.password = "repl";
+  config.server_id = 4242;
+  config.start_position_mode = MES_START_AT_GTID;
+  config.start_gtid = kConfiguredGtid;
+  config.connect_timeout_s = 2;
+  config.read_timeout_s = 2;
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+
+  const std::vector<std::string> queries = peer.Queries();
+  const std::string expected = "SET @master_heartbeat_period = 1000000000";
+  EXPECT_NE(std::find(queries.begin(), queries.end(), expected), queries.end())
+      << "the stream negotiated a heartbeat that is not half of the configured read timeout";
+
+  mes_client_stop(client);
+  mes_client_destroy(client);
 }
 
 #endif

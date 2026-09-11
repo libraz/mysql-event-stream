@@ -190,6 +190,22 @@ mes_destroy(engine);
 
 ## 設定
 
+### レプリカ識別子
+
+接続はいずれもレプリカとしてソースに登録され、その識別に `serverId` / `server_id` が使われます。この値は、同じソースに対する全レプリカ間で一意でなければなりません。本ライブラリを使う他のプロセスや、すでに接続されている実レプリカも含みます。
+
+両バインディングの既定値は `1` です。そのためこのオプションを省略したプロセスが 2 つあると衝突します。ソースは古い方の登録を切断し、切断された側が再接続して相手を追い出すため、ストリームが両者の間で交互に切り替わり続けます。プロセスごとに異なる値を割り当ててください。
+
+```typescript
+// Node.js
+const stream = new CdcStream({ host: "mysql.example.com", serverId: 1001 });
+```
+
+```python
+# Python
+stream = CdcStream(host="mysql.example.com", server_id=1002)
+```
+
 ### SSL/TLS
 
 ```typescript
@@ -264,7 +280,7 @@ engine.enable_metadata(
 )
 ```
 
-この認証情報には、ストリーム対象のテーブルへの `SELECT` 権限が必要です。有効化すると `TABLE_MAP` の処理中に `SHOW COLUMNS` が同期的に実行され、その待ち時間は `readTimeoutS` / `read_timeout_s` で制限されます。`0` は制限を OS に委ねるため、無制限にブロックしうる点に注意してください。タイムアウトしたイベントはカラム名が未解決のまま残り、接続は一度だけ再試行されます。解決できたものとして扱わず、イベントごとに `namesResolved` / `names_resolved` を確認してください。
+この認証情報には、ストリーム対象のテーブルへの `SELECT` 権限が必要です。有効化すると `TABLE_MAP` の処理中に `SHOW COLUMNS` が同期的に実行され、その待ち時間は `readTimeoutS` / `read_timeout_s` で制限され、この値が `0` のときはライブラリ既定の 30 秒が適用されます。タイムアウトしたイベントはカラム名が未解決のまま残り、接続は一度だけ再試行されます。解決できたものとして扱わず、イベントごとに `namesResolved` / `names_resolved` を確認してください。
 
 この接続が読むのは、デコード中の binlog 位置におけるスキーマではなく、サーバーの現在のスキーマです。カラム名を信頼できるのはストリームの先頭を追いかけている間だけで、古い位置から再生する場合は `binlog_row_metadata=FULL` を設定し、元の `TABLE_MAP` metadata を保持してください。
 

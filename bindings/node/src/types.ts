@@ -140,8 +140,25 @@ export interface ClientConfig {
   port?: number;
   user?: string;
   password?: string;
+  /**
+   * Replica server ID this connection registers with, which must be unique
+   * among every replica of the same source, including other processes using
+   * this library. Defaults to 1, so two processes that both omit it collide:
+   * the source drops the older registration, each side reconnects, and the
+   * stream alternates between them indefinitely. Assign a distinct value per
+   * process.
+   */
   serverId?: number;
-  /** Omitted snapshots the current server set; an empty string explicitly starts from an empty set. */
+  /**
+   * Omitted snapshots the current server set; an empty string explicitly starts from an empty set.
+   *
+   * A MySQL entry naming a bare transaction number is widened before it goes
+   * on the wire: `uuid:N` resumes from `uuid:1-N`, and the tagged form
+   * `uuid:tag:N` from `uuid:tag:1-N`, so transactions 1..N-1 are never
+   * delivered. An entry that already states an interval such as `uuid:5-9` is
+   * sent as written, `uuid:0` contributes nothing, and MariaDB GTIDs are sent
+   * verbatim.
+   */
   startGtid?: string;
   /** Binlog filename for an exact file/offset start. Requires startBinlogPosition. */
   startBinlogFile?: string;

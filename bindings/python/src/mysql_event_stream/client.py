@@ -98,9 +98,21 @@ class BinlogClient:
             port: MySQL port.
             user: MySQL user.
             password: MySQL password.
-            server_id: Unique replica server ID.
+            server_id: Replica server ID this connection registers with, which
+                must be unique among every replica of the same source,
+                including other processes using this library. Defaults to 1,
+                so two processes that both omit it collide: the source drops
+                the older registration, each side reconnects, and the stream
+                alternates between them indefinitely.
             start_gtid: GTID set to start from. ``None`` snapshots the current
                 server position; ``""`` explicitly starts from the empty set.
+                A MySQL entry naming a bare transaction number is widened
+                before it goes on the wire: ``uuid:N`` resumes from
+                ``uuid:1-N``, and the tagged form ``uuid:tag:N`` from
+                ``uuid:tag:1-N``, so transactions 1..N-1 are never delivered.
+                An entry that already states an interval such as ``uuid:5-9``
+                is sent as written, ``uuid:0`` contributes nothing, and
+                MariaDB GTIDs are sent verbatim.
             start_binlog_file: Binlog file for an exact file/offset start.
                 Requires ``start_binlog_position`` and cannot be combined with
                 ``start_gtid``.

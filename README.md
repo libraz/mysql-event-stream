@@ -189,6 +189,28 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 
 ## Configuration
 
+### Replica identity
+
+Every connection registers with the source as a replica, identified by
+`serverId` / `server_id`. The value must be unique among all replicas of that
+source, including other processes using this library and any real replica
+already attached to it.
+
+Both bindings default to `1`, so two processes that omit the option collide:
+the source drops the older registration, the dropped side reconnects and
+displaces the other, and the stream alternates between them indefinitely.
+Assign a distinct value per process.
+
+```typescript
+// Node.js
+const stream = new CdcStream({ host: "mysql.example.com", serverId: 1001 });
+```
+
+```python
+# Python
+stream = CdcStream(host="mysql.example.com", server_id=1002)
+```
+
 ### SSL/TLS
 
 ```typescript
@@ -274,8 +296,8 @@ engine.enable_metadata(
 
 The credentials need `SELECT` on the tables being streamed. `TABLE_MAP`
 processing then runs `SHOW COLUMNS` synchronously, bounded by
-`readTimeoutS` / `read_timeout_s` — `0` delegates the bound to the operating
-system and can block indefinitely. A timeout leaves that one event's names
+`readTimeoutS` / `read_timeout_s`, and by the library default of 30 seconds
+when that option is `0`. A timeout leaves that one event's names
 unresolved and the connection is retried once, so check `namesResolved` /
 `names_resolved` on every event rather than assuming resolution succeeded.
 

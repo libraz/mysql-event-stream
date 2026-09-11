@@ -85,6 +85,51 @@ inline int CountLinesContainingBoth(const std::filesystem::path& file, const std
   return hits;
 }
 
+/**
+ * @brief Whole file with every run of whitespace collapsed to one space.
+ *
+ * Lets a scan assert an expression that the formatter is free to wrap across
+ * lines, which a line-oriented count cannot see. Empty if @p file is unreadable,
+ * which every caller must distinguish from a file that simply lacks the shape.
+ */
+inline std::string ReadCollapsed(const std::filesystem::path& file) {
+  std::ifstream in(file);
+  if (!in.is_open()) {
+    return std::string();
+  }
+  std::string text;
+  std::string line;
+  const auto append_space = [&text] {
+    if (!text.empty() && text.back() != ' ') {
+      text.push_back(' ');
+    }
+  };
+  while (std::getline(in, line)) {
+    for (char c : line) {
+      if (c == ' ' || c == '\t' || c == '\r') {
+        append_space();
+        continue;
+      }
+      text.push_back(c);
+    }
+    append_space();
+  }
+  return text;
+}
+
+/** @brief Number of non-overlapping occurrences of @p needle in @p text. */
+inline int CountOccurrences(const std::string& text, const std::string& needle) {
+  if (needle.empty()) {
+    return 0;
+  }
+  int hits = 0;
+  for (size_t at = text.find(needle); at != std::string::npos;
+       at = text.find(needle, at + needle.size())) {
+    ++hits;
+  }
+  return hits;
+}
+
 }  // namespace mes::source_scan
 
 #endif  // MES_TESTS_SOURCE_SCAN_H_
