@@ -31,6 +31,7 @@
 #include <thread>
 #include <vector>
 
+#include "client/event_queue.h"
 #include "mes.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
@@ -521,13 +522,24 @@ TEST(E2EBinlogDML, ClientEventSizeLimitRejectsLargeBlobPacket) {
 
 TEST(E2EBinlogDML, ClientQueueByteBudgetBackpressuresLargeBlobBurst) {
   constexpr size_t kEventLimit = 200u * 1024u;
-  constexpr size_t kQueueBudget = 250u * 1024u;
-  e2e::ExecuteDML("DELETE FROM mes_test.large_data WHERE id BETWEEN 30 AND 37");
-  e2e::ScopedCleanup cleanup("DELETE FROM mes_test.large_data WHERE id BETWEEN 30 AND 37");
+  // The tightest budget the client accepts: it must admit one event at the
+  // configured ceiling together with the reserve for that event's checkpoint.
+  // Taking it from MinQueueBytesForEvent() rather than writing a number keeps
+  // this configuration legal by construction, and the tightest legal budget is
+  // also the one that reaches backpressure soonest, which is what this drives.
+  constexpr size_t kQueueBudget = mes::MinQueueBytesForEvent(kEventLimit);
+  // Enough rows that the burst outweighs the budget several times over, so the
+  // queue stops admitting events rather than merely holding all of them.
+  constexpr int kFirstId = 30;
+  constexpr int kLastId = 49;
+  const std::string id_range = "DELETE FROM mes_test.large_data WHERE id BETWEEN " +
+                               std::to_string(kFirstId) + " AND " + std::to_string(kLastId);
+  e2e::ExecuteDML(id_range);
+  e2e::ScopedCleanup cleanup(id_range);
 
   const std::string gtid = e2e::GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
-  for (int id = 30; id <= 37; ++id) {
+  for (int id = kFirstId; id <= kLastId; ++id) {
     ASSERT_EQ(e2e::ExecuteDML("INSERT INTO mes_test.large_data (id, big_blob) VALUES (" +
                               std::to_string(id) + ", UNHEX(REPEAT('43', 100000)))"),
               MES_OK);
@@ -554,13 +566,29 @@ TEST(E2EBinlogDML, ClientQueueByteBudgetBackpressuresLargeBlobBurst) {
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
 
-  size_t queued_bytes = 0;
-  for (int i = 0; i < 100 && queued_bytes < 100000; ++i) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    queued_bytes = mes_client_queued_bytes(client);
+  // Nothing polls, so the reader fills the queue until the budget refuses the
+  // next event. Saturation is reached once an event at the ceiling would no
+  // longer fit, which no single event can produce -- it takes the queue holding
+  // several at once, which is the state backpressure has to bound.
+  constexpr size_t kSaturated = kQueueBudget - kEventLimit;
+
+  // Sample until the charge stops moving rather than until it first crosses the
+  // threshold: the burst outweighs the budget, so an early sample can read a
+  // legal value on its way past one. The peak is what the budget promises to
+  // bound, so that is what is asserted -- a transient overshoot is a failure
+  // even if the charge settles back under the budget afterwards.
+  size_t peak_bytes = 0;
+  size_t settled_bytes = 0;
+  int stable_samples = 0;
+  for (int i = 0; i < 400 && stable_samples < 20; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    const size_t sample = mes_client_queued_bytes(client);
+    peak_bytes = std::max(peak_bytes, sample);
+    stable_samples = sample == settled_bytes ? stable_samples + 1 : 0;
+    settled_bytes = sample;
   }
-  EXPECT_GE(queued_bytes, 100000u);
-  EXPECT_LE(queued_bytes, kQueueBudget);
+  EXPECT_GT(settled_bytes, kSaturated) << "the queue never filled enough to apply backpressure";
+  EXPECT_LE(peak_bytes, kQueueBudget) << "queued bytes exceeded the configured budget";
 
   mes_client_stop(client);
   mes_client_disconnect(client);
