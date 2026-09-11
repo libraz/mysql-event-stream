@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "client/gtid_set.h"
+#include "client/transaction_gtid_tracker.h"
 #include "mariadb_event_parser.h"
 #include "protocol/mysql_auth.h"
 #include "protocol/mysql_connection.h"
@@ -53,6 +55,16 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   std::string annotation;
   mes::MariaDBEventParser::ExtractAnnotateRows(data, size, false, &annotation);
   mes::MariaDBEventParser::ExtractAnnotateRows(data, size, true, &annotation);
+
+  // The rest of the GTID family: the binary set a PREVIOUS_GTIDS event carries,
+  // its text form, and the tracker that drives both from whole events. A fresh
+  // tracker per input keeps the run reproducible from a single corpus file.
+  mes::GtidSet gtid_set;
+  mes::GtidSet::DecodeBinary(data, size, &gtid_set);
+  mes::GtidSet::Parse(std::string(reinterpret_cast<const char*>(data), size), &gtid_set);
+  mes::TransactionGtidTracker tracker;
+  tracker.Observe(data, size, false);
+  tracker.Observe(data, size, true);
   return 0;
 }
 
