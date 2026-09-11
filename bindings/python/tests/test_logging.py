@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -127,3 +131,88 @@ class TestSetLogCallback:
 
         assert not errors
         assert all(not worker.is_alive() for worker in workers)
+
+
+# Installs a handler, drives one real native log message through it and then
+# leaves both the handler and the engine in place, the way application code
+# that never unwinds its logging does. The verification hook is registered
+# before the package is imported, so it runs after the package's own hook
+# (atexit is LIFO) and observes the state a native reader thread would find.
+_EXIT_WITH_HANDLER_INSTALLED = """
+import atexit
+
+received = []
+
+
+def verify_detached_at_exit():
+    import mysql_event_stream.logging as logmod
+
+    assert logmod._active_handler is None, "handler still installed at interpreter exit"
+    delivered = len(received)
+    logmod._stable_callback(1, b"after shutdown", None)
+    assert len(received) == delivered, "trampoline still dispatched into Python"
+
+
+atexit.register(verify_detached_at_exit)
+
+import mysql_event_stream as mes
+
+mes.set_log_callback(lambda level, message: received.append(message), mes.LogLevel.DEBUG)
+
+event = bytearray(23)
+event[4] = 19  # TABLE_MAP_EVENT
+event[5:9] = (1).to_bytes(4, "little")
+event[9:13] = (1024 * 1024 * 1024).to_bytes(4, "little")
+
+engine = mes.CdcEngine()
+try:
+    engine.feed(bytes(event))
+except mes.ParseError:
+    pass
+
+assert received, "the native callback never reached Python"
+"""
+
+
+class TestShutdownDetach:
+    def teardown_method(self) -> None:
+        set_log_callback(None)
+
+    def test_detach_clears_every_configured_library(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = MagicMock()
+        second = MagicMock()
+        libraries = {"/tmp/libmes-first.dylib": first, "/tmp/libmes-second.dylib": second}
+        monkeypatch.setattr(logmod, "get_library", lambda path=None: libraries[path])
+        monkeypatch.setattr(logmod, "_configured_libraries", [])
+
+        for path in libraries:
+            set_log_callback(lambda level, message: None, lib_path=path)
+
+        logmod._detach_all()
+
+        for lib in libraries.values():
+            native_callback, _level, _userdata = lib.mes_set_log_callback.call_args[0]
+            assert native_callback is logmod._null_callback
+            assert not native_callback  # a NULL function pointer
+        assert logmod._active_handler is None
+        assert logmod._configured_libraries == []
+
+    def test_exit_with_handler_still_installed_is_clean(self, lib_path: str) -> None:
+        env = dict(os.environ)
+        env["MES_LIB_PATH"] = lib_path
+        package_root = str(Path(logmod.__file__).parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [package_root, *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", _EXIT_WITH_HANDLER_INSTALLED],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
