@@ -1303,35 +1303,20 @@ TEST(E2EProtocol, StopInterruptsPoll) {
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
   ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
-  // With the reader thread model, Poll() blocks on the event queue CV.
-  // To test Stop() interrupting Poll(), just start polling immediately
-  // in a background thread — the reader thread will drain initial events
-  // from the socket, and Poll() will block on the queue once drained.
-  std::atomic<bool> poll_returned{false};
-  auto start = std::chrono::steady_clock::now();
-  std::thread poll_thread([&]() {
-    // Keep polling until blocked or error
-    for (;;) {
-      auto r = mes_client_poll(client);
-      if (r.error != MES_OK) break;
-      if (r.data == nullptr) break;
-    }
-    poll_returned.store(true, std::memory_order_release);
-  });
+  // With the reader thread model Poll() blocks on the event queue, so the poller
+  // has to be parked in such a poll before stop runs -- a poll satisfied by the
+  // startup burst would return on its own and prove nothing about stop.
+  const StopUnblockObservation obs = ObserveStopUnblocksPoll(client);
 
-  // Give the poll thread time to start blocking on empty queue
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-  // Stop should interrupt the blocking poll
-  mes_client_stop(client);
-
-  // Wait for poll to return (should be fast after Stop)
-  poll_thread.join();
-  EXPECT_TRUE(poll_returned.load(std::memory_order_acquire));
-
-  auto elapsed = std::chrono::steady_clock::now() - start;
-  // Should complete well under the 30s read_timeout
-  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 10);
+  EXPECT_TRUE(obs.parked) << "Poller never settled into a blocking poll, so stop had nothing to "
+                             "interrupt and the measurement below means nothing";
+  EXPECT_GE(obs.unblock_ms, 0) << "The blocking poll never returned after stop was called";
+  if (obs.unblock_ms >= 0) {
+    // Far below the 30 s read timeout: stop must not wait for it.
+    EXPECT_LT(obs.unblock_ms, 2000) << "Stop did not interrupt the blocking poll promptly";
+    EXPECT_EQ(obs.blocked_poll_error, MES_ERR_DISCONNECTED)
+        << "The blocked poll returned for a reason other than the stop";
+  }
 
   mes_client_disconnect(client);
   mes_client_destroy(client);

@@ -215,6 +215,12 @@ TEST(E2EBuffer, EventsBufferedDuringConsumerSleep) {
   mes_destroy(engine);
 }
 
+// mes_client_stop() is the one entry point documented as callable from another
+// thread, and its stated purpose is to unblock a blocking mes_client_poll().
+// ObserveStopUnblocksPoll parks a poller in a poll the stream cannot satisfy on
+// its own and reports what the stop did to it, so the timing assertion covers
+// only the stop-to-return interval and a poll woken by anything other than the
+// stop fails rather than passes.
 TEST(E2EBuffer, StopUnblocksPoll) {
   auto gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty()) << "Could not get current GTID";
@@ -238,22 +244,16 @@ TEST(E2EBuffer, StopUnblocksPoll) {
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK);
   ASSERT_EQ(mes_client_start(client), MES_OK);
 
-  auto start = std::chrono::steady_clock::now();
+  const StopUnblockObservation obs = ObserveStopUnblocksPoll(client);
 
-  std::thread poller([&]() {
-    // This will block since no new events are being inserted
-    mes_client_poll(client);
-  });
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-  mes_client_stop(client);
-
-  poller.join();
-
-  auto elapsed = std::chrono::steady_clock::now() - start;
-  auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-  EXPECT_LT(elapsed_s, 5) << "Stop did not unblock poll quickly enough";
+  EXPECT_TRUE(obs.parked) << "Poller never settled into a blocking poll, so stop had nothing to "
+                             "unblock and the measurement below means nothing";
+  EXPECT_GE(obs.unblock_ms, 0) << "The blocking poll never returned after stop was called";
+  if (obs.unblock_ms >= 0) {
+    EXPECT_LT(obs.unblock_ms, 2000) << "Stop did not unblock the blocking poll promptly";
+    EXPECT_EQ(obs.blocked_poll_error, MES_ERR_DISCONNECTED)
+        << "The blocked poll returned for a reason other than the stop";
+  }
 
   mes_client_disconnect(client);
   mes_client_destroy(client);

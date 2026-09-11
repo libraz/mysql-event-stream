@@ -9,11 +9,14 @@
 #ifndef MES_TEST_E2E_HELPERS_H_
 #define MES_TEST_E2E_HELPERS_H_
 
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mes.h"
@@ -364,6 +367,87 @@ inline std::vector<CapturedEvent> FilterByTable(const std::vector<CapturedEvent>
     if (e.table == table) filtered.push_back(e);
   }
   return filtered;
+}
+
+/// @brief What a poll parked on an empty queue did when the client was stopped.
+struct StopUnblockObservation {
+  bool parked = false;          ///< The in-flight poll had not returned when stop was called.
+  long long unblock_ms = -1;    ///< Stop to that poll's return, -1 if it never returned.
+  int blocked_poll_error = -1;  ///< Error that poll reported, -1 if it never returned.
+};
+
+/// @brief Park a poller thread inside a blocking poll, then stop the client.
+///
+/// A single poll right after start proves nothing about stop: the stream's
+/// startup burst (format description, rotate, previous GTIDs) is queued
+/// unconditionally and satisfies it within milliseconds. So this polls in a loop
+/// until the stream has been quiet for @p quiet_ms, which leaves the poller in a
+/// poll it cannot leave on its own, and only then stops the client from this
+/// thread. The caller asserts on all three fields: a stop that never unblocked
+/// the poll, and a poll woken by a heartbeat or a late event rather than by the
+/// stop, both have to be distinguishable from the real claim.
+///
+/// The client is left stopped and the poller joined; the caller still owns
+/// disconnect and destroy.
+inline StopUnblockObservation ObserveStopUnblocksPoll(mes_client_t* client,
+                                                      long long quiet_ms = 500,
+                                                      long long deadline_ms = 3000) {
+  const auto now_ms = []() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
+
+  // False while the poller sits inside mes_client_poll(), true once that call
+  // has returned.
+  std::atomic<bool> poll_returned{false};
+  std::atomic<int> polls_returned{0};
+  std::atomic<long long> last_return_ms{now_ms()};
+  std::atomic<bool> stop_requested{false};
+  std::atomic<int> blocked_poll_error{-1};
+
+  std::thread poller([&]() {
+    for (;;) {
+      const bool began_before_stop = !stop_requested.load(std::memory_order_acquire);
+      poll_returned.store(false, std::memory_order_release);
+      mes_poll_result_t result = mes_client_poll(client);
+      poll_returned.store(true, std::memory_order_release);
+      last_return_ms.store(now_ms(), std::memory_order_release);
+      polls_returned.fetch_add(1, std::memory_order_acq_rel);
+      if (began_before_stop && stop_requested.load(std::memory_order_acquire)) {
+        blocked_poll_error.store(static_cast<int>(result.error), std::memory_order_release);
+      }
+      if (result.error != MES_OK) return;
+    }
+  });
+
+  StopUnblockObservation obs;
+  // The server's heartbeat period is seconds, so a quiet window of a few hundred
+  // milliseconds sits between heartbeats.
+  for (int i = 0; i < 400 && !obs.parked; i++) {  // up to ~4 s
+    obs.parked = polls_returned.load(std::memory_order_acquire) > 0 &&
+                 !poll_returned.load(std::memory_order_acquire) &&
+                 now_ms() - last_return_ms.load(std::memory_order_acquire) >= quiet_ms;
+    if (!obs.parked) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  stop_requested.store(true, std::memory_order_release);
+  const auto stop_called_at = std::chrono::steady_clock::now();
+  mes_client_stop(client);
+
+  for (long long waited = 0; waited < deadline_ms; waited += 5) {
+    if (blocked_poll_error.load(std::memory_order_acquire) >= 0) {
+      obs.unblock_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - stop_called_at)
+                           .count();
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  obs.blocked_poll_error = blocked_poll_error.load(std::memory_order_acquire);
+
+  poller.join();
+  return obs;
 }
 
 /// @brief RAII helper that executes a cleanup SQL statement on destruction.
