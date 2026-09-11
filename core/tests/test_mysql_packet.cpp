@@ -3,12 +3,26 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "protocol/mysql_packet.h"
+#include "protocol/mysql_socket.h"
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -398,6 +412,297 @@ TEST(ParseErrPacketPayloadTest, ErrPacketWithSqlStateNoMessage) {
   ParseErrPacketPayload(packet.data(), packet.size(), &code, &msg);
   EXPECT_EQ(code, 1u);
   EXPECT_TRUE(msg.empty());
+}
+
+// --- ReadPacket multi-packet reassembly ---
+
+#ifndef _WIN32
+
+/// Payload length that marks a packet as continued by the next one.
+constexpr size_t kMaxPacketPayload = 0xFFFFFF;
+
+// These tests leave the peer writing after the reader has given up, so a write
+// to a closed peer must report EPIPE instead of raising SIGPIPE and killing the
+// test binary. Linux needs the send flag; macOS/BSD use SO_NOSIGPIPE on the
+// accepted socket.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+/** @brief Write every byte of a buffer to a socket, looping over partial sends. */
+bool SendAll(int peer, const uint8_t* data, size_t len) {
+  size_t offset = 0;
+  while (offset < len) {
+    const ssize_t sent = send(peer, data + offset, len - offset, kSendFlags);
+    if (sent <= 0) return false;
+    offset += static_cast<size_t>(sent);
+  }
+  return true;
+}
+
+/** @brief Build a packet header: 3-byte LE payload length plus sequence ID. */
+std::vector<uint8_t> PacketHeader(size_t len, uint8_t sequence) {
+  return {static_cast<uint8_t>(len), static_cast<uint8_t>(len >> 8),
+          static_cast<uint8_t>(len >> 16), sequence};
+}
+
+/** @brief Send one MySQL wire packet: header followed by its payload. */
+bool SendWirePacket(int peer, uint8_t sequence, const uint8_t* payload, size_t len) {
+  const std::vector<uint8_t> header = PacketHeader(len, sequence);
+  if (!SendAll(peer, header.data(), header.size())) return false;
+  return len == 0 || SendAll(peer, payload, len);
+}
+
+bool SendWirePacket(int peer, uint8_t sequence, const std::vector<uint8_t>& payload) {
+  return SendWirePacket(peer, sequence, payload.data(), payload.size());
+}
+
+/**
+ * @brief Send a packet header one byte per write, pausing between bytes.
+ *
+ * The pause is what puts each header byte in its own recv() return: the reader
+ * is already blocked on the previous byte by the time the next one arrives.
+ */
+bool SendDribbledHeader(int peer, uint8_t sequence, size_t len) {
+  for (uint8_t byte : PacketHeader(len, sequence)) {
+    if (!SendAll(peer, &byte, 1)) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  return true;
+}
+
+/** @brief Deterministic byte pattern; @p seed distinguishes one region from another. */
+std::vector<uint8_t> PatternBytes(size_t len, uint8_t seed) {
+  std::vector<uint8_t> bytes(len);
+  for (size_t i = 0; i < len; ++i) {
+    bytes[i] = static_cast<uint8_t>((i * 31u) + seed);
+  }
+  return bytes;
+}
+
+/**
+ * @brief Loopback peer that writes scripted wire bytes to one accepted client.
+ *
+ * ReadPacket() is driven directly, so nothing is expected on the wire from the
+ * client and the peer starts writing as soon as the connection is accepted.
+ * Nagle is disabled so a byte-at-a-time script is not coalesced back into one
+ * segment before it reaches the reader.
+ */
+class PacketPeer {
+ public:
+  explicit PacketPeer(std::function<void(int)> respond) {
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    EXPECT_EQ(bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(listen(listener_, 1), 0);
+    socklen_t address_len = sizeof(address);
+    EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &address_len), 0);
+    port_ = ntohs(address.sin_port);
+
+    thread_ = std::thread([this, responder = std::move(respond)] {
+      const int peer = accept(listener_, nullptr, nullptr);
+      if (peer < 0) return;
+#if defined(SO_NOSIGPIPE)
+      const int nosigpipe = 1;
+      setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+      const int nodelay = 1;
+      setsockopt(peer, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+      responder(peer);
+      close(peer);
+    });
+  }
+
+  ~PacketPeer() {
+    if (thread_.joinable()) thread_.join();
+    if (listener_ >= 0) close(listener_);
+  }
+
+  PacketPeer(const PacketPeer&) = delete;
+  PacketPeer& operator=(const PacketPeer&) = delete;
+
+  uint16_t port() const { return port_; }
+
+ private:
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::thread thread_;
+};
+
+/**
+ * @brief Block until the reader closes, so the script's last packet stays unread.
+ *
+ * A peer that returned immediately would close the connection, and a reader
+ * that consumed one packet too many would then see EOF rather than the packet
+ * the assertions are about.
+ */
+void WaitForReaderClose(int peer) {
+  uint8_t byte = 0;
+  recv(peer, &byte, 1, 0);
+}
+
+#endif  // _WIN32
+
+TEST(ReadPacketTest, AZeroLengthContinuationEndsTheChainAndLeavesTheNextPacketUnread) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // The terminator of a maximum-length packet is allowed to carry no payload at
+  // all. Stopping at the full packet would leave the empty one in the socket and
+  // desynchronise every later read; consuming past it would swallow the next
+  // packet outright.
+  const std::vector<uint8_t> chained = PatternBytes(kMaxPacketPayload, 0x11);
+  const std::vector<uint8_t> following = PatternBytes(64, 0x77);
+  PacketPeer peer([&](int fd) {
+    if (!SendWirePacket(fd, 1, chained) || !SendWirePacket(fd, 2, {}) ||
+        !SendWirePacket(fd, 3, following)) {
+      return;
+    }
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> payload;
+  uint8_t sequence = 0;
+  ASSERT_EQ(ReadPacket(&socket, &payload, &sequence), MES_OK);
+  ASSERT_EQ(payload.size(), kMaxPacketPayload);
+  EXPECT_EQ(payload, chained);
+  // The empty packet supplied the last header that was read.
+  EXPECT_EQ(sequence, 2u);
+
+  ASSERT_EQ(ReadPacket(&socket, &payload, &sequence), MES_OK);
+  EXPECT_EQ(payload, following);
+  EXPECT_EQ(sequence, 3u);
+#endif
+}
+
+TEST(ReadPacketTest, APayloadAtTheMaximumIsCompletedByItsShortContinuation) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // The ordinary split: one full packet plus a remainder. The reassembled
+  // payload is the concatenation of both, with no header bytes in between.
+  const std::vector<uint8_t> chained = PatternBytes(kMaxPacketPayload, 0x11);
+  const std::vector<uint8_t> remainder = PatternBytes(10, 0xA0);
+  PacketPeer peer([&](int fd) {
+    if (!SendWirePacket(fd, 1, chained) || !SendWirePacket(fd, 2, remainder)) return;
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> payload;
+  uint8_t sequence = 0;
+  ASSERT_EQ(ReadPacket(&socket, &payload, &sequence), MES_OK);
+  ASSERT_EQ(payload.size(), kMaxPacketPayload + remainder.size());
+  EXPECT_TRUE(std::equal(chained.begin(), chained.end(), payload.begin()));
+  EXPECT_TRUE(std::equal(remainder.begin(), remainder.end(), payload.begin() + kMaxPacketPayload));
+  EXPECT_EQ(sequence, 2u);
+#endif
+}
+
+TEST(ReadPacketTest, TwoMaximumPacketsAccumulateBeforeTheShortContinuationEndsTheChain) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A payload past 32 MB chains three packets. Reassembly that handled only a
+  // single continuation would return the first two thirds and leave the rest in
+  // the socket.
+  const std::vector<uint8_t> chained = PatternBytes(kMaxPacketPayload * 2, 0x11);
+  const std::vector<uint8_t> remainder = PatternBytes(7, 0xC0);
+  PacketPeer peer([&](int fd) {
+    if (!SendWirePacket(fd, 1, chained.data(), kMaxPacketPayload) ||
+        !SendWirePacket(fd, 2, chained.data() + kMaxPacketPayload, kMaxPacketPayload) ||
+        !SendWirePacket(fd, 3, remainder)) {
+      return;
+    }
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> payload;
+  uint8_t sequence = 0;
+  ASSERT_EQ(ReadPacket(&socket, &payload, &sequence), MES_OK);
+  ASSERT_EQ(payload.size(), chained.size() + remainder.size());
+  EXPECT_TRUE(std::equal(chained.begin(), chained.end(), payload.begin()));
+  EXPECT_TRUE(std::equal(remainder.begin(), remainder.end(), payload.begin() + chained.size()));
+  EXPECT_EQ(sequence, 3u);
+#endif
+}
+
+TEST(ReadPacketTest, HeadersArrivingOneByteAtATimeFrameTheSamePayload) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A header is four bytes of a byte stream, not an atomic unit: a slow or
+  // heavily fragmenting peer can deliver each byte in its own recv() return,
+  // including the header of a continuation packet. Framing must not depend on
+  // where the stream happens to be broken.
+  const std::vector<uint8_t> chained = PatternBytes(kMaxPacketPayload, 0x33);
+  const std::vector<uint8_t> remainder = PatternBytes(5, 0x55);
+  PacketPeer peer([&](int fd) {
+    if (!SendDribbledHeader(fd, 1, kMaxPacketPayload) ||
+        !SendAll(fd, chained.data(), chained.size()) ||
+        !SendDribbledHeader(fd, 2, remainder.size()) ||
+        !SendAll(fd, remainder.data(), remainder.size())) {
+      return;
+    }
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> payload;
+  uint8_t sequence = 0;
+  ASSERT_EQ(ReadPacket(&socket, &payload, &sequence), MES_OK);
+  ASSERT_EQ(payload.size(), kMaxPacketPayload + remainder.size());
+  EXPECT_TRUE(std::equal(chained.begin(), chained.end(), payload.begin()));
+  EXPECT_TRUE(std::equal(remainder.begin(), remainder.end(), payload.begin() + kMaxPacketPayload));
+  EXPECT_EQ(sequence, 2u);
+#endif
+}
+
+TEST(ReadPacketTest, TheMaximumPayloadSizeBoundsTheWholeChainNotEachPacket) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // Every packet of a chain is within the per-packet maximum by construction, so
+  // a cap tested against the individual packet would never reject anything. The
+  // continuation here is small, yet it takes the reassembled payload past the
+  // caller's limit and must be refused rather than appended.
+  constexpr size_t kLimit = kMaxPacketPayload + 5;
+  const std::vector<uint8_t> chained = PatternBytes(kMaxPacketPayload, 0x11);
+  const std::vector<uint8_t> remainder = PatternBytes(10, 0xA0);
+  PacketPeer peer([&](int fd) {
+    if (!SendWirePacket(fd, 1, chained) || !SendWirePacket(fd, 2, remainder)) return;
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> payload;
+  uint8_t sequence = 0;
+  EXPECT_EQ(ReadPacket(&socket, &payload, &sequence, kLimit), MES_ERR_STREAM);
+  EXPECT_LE(payload.size(), kLimit);
+#endif
 }
 
 }  // namespace
