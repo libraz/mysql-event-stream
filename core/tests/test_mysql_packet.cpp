@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <thread>
@@ -23,6 +24,7 @@
 
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
+#include "source_scan.h"
 
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
@@ -547,6 +549,28 @@ void WaitForReaderClose(int peer) {
   recv(peer, &byte, 1, 0);
 }
 
+/**
+ * @brief Hold the script until the reader announces it has consumed what is sent.
+ *
+ * A read-ahead buffer can only be left in a known state if nothing beyond the
+ * bytes under test is in flight, so the peer has to wait for the reader rather
+ * than write the whole script up front.
+ */
+bool WaitForReaderRequest(int peer) {
+  uint8_t byte = 0;
+  return recv(peer, &byte, 1, 0) == 1;
+}
+
+/** @brief Tell a peer blocked in WaitForReaderRequest() to send the next region. */
+bool RequestNextRegion(SocketHandle* socket) {
+  const uint8_t byte = 0xA5;
+  return socket->WriteAll(&byte, 1) == MES_OK;
+}
+
+// Bigger than any plausible read-ahead staging buffer, so a read of this size
+// cannot be satisfied by a single staged recv() however the buffer is sized.
+constexpr size_t kBeyondReadAhead = 256u * 1024u;
+
 #endif  // _WIN32
 
 TEST(ReadPacketTest, AZeroLengthContinuationEndsTheChainAndLeavesTheNextPacketUnread) {
@@ -703,6 +727,182 @@ TEST(ReadPacketTest, TheMaximumPayloadSizeBoundsTheWholeChainNotEachPacket) {
   EXPECT_EQ(ReadPacket(&socket, &payload, &sequence, kLimit), MES_ERR_STREAM);
   EXPECT_LE(payload.size(), kLimit);
 #endif
+}
+
+// --- ReadExact read-ahead handling ---
+
+TEST(ReadExactTest, AReadLargerThanTheReadAheadBufferDeliversEveryByteInOrder) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A payload wider than the staging buffer is received in several pieces
+  // whichever way it reaches the caller's buffer, so the pieces have to be
+  // placed end to end: a read that returns the right byte count in the wrong
+  // order desynchronises every later read.
+  const std::vector<uint8_t> region = PatternBytes(kBeyondReadAhead, 0x2B);
+  PacketPeer peer([&](int fd) {
+    if (!SendAll(fd, region.data(), region.size())) return;
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  std::vector<uint8_t> received(region.size(), 0);
+  ASSERT_EQ(socket.ReadExact(received.data(), received.size()), MES_OK);
+  EXPECT_EQ(received, region);
+#endif
+}
+
+TEST(ReadExactTest, ALargeReadConsumesTheAlreadyBufferedBytesBeforeTheSocket) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A short read leaves the rest of what arrived with it staged in the
+  // read-ahead buffer. Those bytes precede everything still on the wire, so a
+  // following large read owes them first, in their original order, however it
+  // receives the remainder.
+  const std::vector<uint8_t> staged = PatternBytes(16, 0x40);
+  const std::vector<uint8_t> region = PatternBytes(kBeyondReadAhead, 0x91);
+  PacketPeer peer([&](int fd) {
+    if (!SendAll(fd, staged.data(), staged.size()) || !WaitForReaderRequest(fd)) return;
+    if (!SendAll(fd, region.data(), region.size())) return;
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  uint8_t first = 0;
+  ASSERT_EQ(socket.ReadExact(&first, 1), MES_OK);
+  EXPECT_EQ(first, staged.front());
+  ASSERT_TRUE(RequestNextRegion(&socket));
+
+  std::vector<uint8_t> received(staged.size() - 1 + region.size(), 0);
+  ASSERT_EQ(socket.ReadExact(received.data(), received.size()), MES_OK);
+  EXPECT_TRUE(std::equal(staged.begin() + 1, staged.end(), received.begin()));
+  EXPECT_TRUE(std::equal(region.begin(), region.end(), received.begin() + (staged.size() - 1)));
+#endif
+}
+
+TEST(ReadExactTest, OneReadCrossingTheReadAheadSizeInBothDirectionsStaysInOrder) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // Within a single read the remainder shrinks past the staging buffer's size:
+  // it starts staged, then exceeds the buffer, then falls back under it. The
+  // decision belongs to each iteration, so the tail region is as much a part of
+  // the read as the wide one before it.
+  const std::vector<uint8_t> staged = PatternBytes(16, 0x0C);
+  const std::vector<uint8_t> wide = PatternBytes(kBeyondReadAhead, 0x63);
+  const std::vector<uint8_t> tail = PatternBytes(1000, 0xD7);
+  PacketPeer peer([&](int fd) {
+    if (!SendAll(fd, staged.data(), staged.size()) || !WaitForReaderRequest(fd)) return;
+    if (!SendAll(fd, wide.data(), wide.size())) return;
+    // The reader is blocked on the wide region by the time the tail is sent, so
+    // the tail cannot be swallowed by the same recv() that took the last of it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    if (!SendAll(fd, tail.data(), tail.size())) return;
+    WaitForReaderClose(fd);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+
+  uint8_t first = 0;
+  ASSERT_EQ(socket.ReadExact(&first, 1), MES_OK);
+  EXPECT_EQ(first, staged.front());
+  ASSERT_TRUE(RequestNextRegion(&socket));
+
+  std::vector<uint8_t> expected(staged.begin() + 1, staged.end());
+  expected.insert(expected.end(), wide.begin(), wide.end());
+  expected.insert(expected.end(), tail.begin(), tail.end());
+
+  std::vector<uint8_t> received(expected.size(), 0);
+  ASSERT_EQ(socket.ReadExact(received.data(), received.size()), MES_OK);
+  EXPECT_EQ(received, expected);
+#endif
+}
+
+// --- ReadExact staging decision scope ---
+
+/**
+ * @brief The choice between staging a read and receiving it directly is per iteration.
+ *
+ * A read wider than the staging buffer belongs in the caller's buffer, and the
+ * remainder that decides it shrinks as the read progresses: a decision taken once
+ * on entry is wrong for every later iteration, and one taken on entry only is
+ * wrong for a read that starts by draining staged bytes. Neither mistake is
+ * observable from a test that drives the socket, because both routes deliver the
+ * same byte stream in the same order and SocketHandle exposes neither its
+ * descriptor nor its staging state — observing the destination of a recv() would
+ * mean widening that surface for the benefit of a test. Where the decision is
+ * written is observable, so that is what this asserts; the byte stream itself is
+ * pinned by ReadExactTest.
+ */
+TEST(ReadExactStagingDecisionTest, IsTakenInsideTheReadLoopRatherThanOnEntry) {
+  const std::filesystem::path source =
+      source_scan::RepoRoot() / "core" / "src" / "protocol" / "mysql_socket.cpp";
+  const std::string text = source_scan::ReadCollapsed(source);
+  ASSERT_FALSE(text.empty()) << "cannot read " << source;
+
+  const std::string decision = std::string("const bool read_") + "direct = ";
+  const std::string read_loop = std::string("while (total") + " < len) {";
+
+  // A renamed or restructured decision leaves nothing to compare positions
+  // against, which is a gap in the pin rather than a property that holds.
+  ASSERT_EQ(source_scan::CountOccurrences(text, decision), 1)
+      << decision << " is not written exactly once in " << source;
+  ASSERT_GT(source_scan::CountOccurrences(text, read_loop), 0)
+      << read_loop << " not found in " << source;
+
+  const size_t decision_at = text.find(decision);
+  ASSERT_NE(decision_at, std::string::npos) << decision << " not found in " << source;
+
+  // A decision taken on entry has no read loop open ahead of it, so a search
+  // bounded by the decision finds a loop only while the decision sits inside one.
+  EXPECT_NE(text.rfind(read_loop, decision_at), std::string::npos)
+      << "the staging decision is taken before the read loop is entered";
+}
+
+// --- TLS read SIGPIPE guard scope ---
+
+/**
+ * @brief SIGPIPE stays blocked for a whole TLS read, not one SSL_read at a time.
+ *
+ * SSL_read() can write to the socket, so a peer that has gone away turns a read
+ * into a SIGPIPE. The suppressor blocks the signal for its scope and drains only
+ * what was raised inside it, which is a correct guard however narrow its scope
+ * is: a guard rebuilt per iteration leaves SIGPIPE momentarily deliverable
+ * between two reads, and nothing a caller can observe distinguishes that window
+ * from the call being covered end to end. Only where the guard is declared does,
+ * which is what this asserts. The mask and pending-signal behaviour itself is a
+ * property of the suppressor, and it applies to the platforms where the signal
+ * exists, so a test driving a read cannot observe it on the others at all.
+ */
+TEST(TlsReadSigPipeGuardTest, IsEnteredOncePerCallRatherThanPerRead) {
+  const std::filesystem::path source =
+      source_scan::RepoRoot() / "core" / "src" / "protocol" / "mysql_socket.cpp";
+  const std::string text = source_scan::ReadCollapsed(source);
+  ASSERT_FALSE(text.empty()) << "cannot read " << source;
+
+  const std::string guard = std::string("ScopedSigPipeSuppressor ") + "sigpipe_guard;";
+  const std::string read_call = std::string("SSL_") + "read(ssl_,";
+  const std::string read_loop = std::string("while (total") + " < len) {";
+
+  const size_t read_at = text.find(read_call);
+  ASSERT_NE(read_at, std::string::npos) << read_call << " not found in " << source;
+  // The loop and the guard that cover the read are the last of each to open
+  // before it.
+  const size_t loop_at = text.rfind(read_loop, read_at);
+  ASSERT_NE(loop_at, std::string::npos) << read_loop << " not found before " << read_call;
+  const size_t guard_at = text.rfind(guard, read_at);
+  ASSERT_NE(guard_at, std::string::npos) << guard << " not found before " << read_call;
+
+  EXPECT_LT(guard_at, loop_at) << "the TLS read loop enters the SIGPIPE guard per iteration";
 }
 
 }  // namespace

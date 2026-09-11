@@ -38,17 +38,18 @@ namespace mes::protocol {
 namespace {
 
 #ifdef __linux__
-// Suppresses SIGPIPE for the calling thread across a TLS write.
+// Suppresses SIGPIPE for the calling thread across a TLS operation.
 //
-// OpenSSL's SSL_write() writes to the underlying socket without MSG_NOSIGNAL,
-// and SO_NOSIGPIPE does not exist on Linux, so a write to a peer that has closed
-// the connection would deliver SIGPIPE and terminate the process. Block SIGPIPE
-// for this thread for the duration of the write and drain any SIGPIPE the write
-// raised, without touching process-wide signal disposition or consuming a
-// SIGPIPE that was already pending before the write.
+// OpenSSL writes to the underlying socket without MSG_NOSIGNAL, and SO_NOSIGPIPE
+// does not exist on Linux, so an operation on a peer that has closed the
+// connection would deliver SIGPIPE and terminate the process. This is not a
+// write-only concern: SSL_read() sends on the socket as well, for renegotiation
+// and close_notify. Block SIGPIPE for this thread for the scope of the guard and
+// drain any SIGPIPE raised inside it, without touching process-wide signal
+// disposition or consuming a SIGPIPE that was already pending on entry.
 //
 // Other platforms do not need this: Windows has no SIGPIPE, and macOS/BSD apply
-// SO_NOSIGPIPE to the socket, which also covers SSL_write().
+// SO_NOSIGPIPE to the socket, which covers the OpenSSL entry points too.
 class ScopedSigPipeSuppressor {
  public:
   ScopedSigPipeSuppressor() {
@@ -72,7 +73,7 @@ class ScopedSigPipeSuppressor {
   ~ScopedSigPipeSuppressor() {
     if (!active_) return;
     if (!already_pending_) {
-      // Consume a SIGPIPE that our write raised while it was blocked.
+      // Consume a SIGPIPE raised inside this scope while it was blocked.
       sigset_t pipe_set;
       sigemptyset(&pipe_set);
       sigaddset(&pipe_set, SIGPIPE);
@@ -704,11 +705,20 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
         continue;
       }
 
+      // A remainder the read-ahead buffer could not hold in one piece is
+      // received straight into the caller's buffer: staging it would copy every
+      // byte twice and cap each recv() at the buffer size. Smaller remainders
+      // still fill the buffer, which is what lets packet framing read a header
+      // and its payload with a single recv().
+      const size_t remaining = len - total;
+      const bool read_direct = remaining > read_ahead_.size();
+      uint8_t* const dst = read_direct ? buf + total : read_ahead_.data();
+      const size_t want =
+          read_direct ? std::min(remaining, static_cast<size_t>(INT_MAX)) : read_ahead_.size();
 #ifdef _WIN32
-      const int n = recv(fd_.load(), reinterpret_cast<char*>(read_ahead_.data()),
-                         static_cast<int>(read_ahead_.size()), 0);
+      const int n = recv(fd_.load(), reinterpret_cast<char*>(dst), static_cast<int>(want), 0);
 #else
-      const int n = static_cast<int>(recv(fd_.load(), read_ahead_.data(), read_ahead_.size(), 0));
+      const int n = static_cast<int>(recv(fd_.load(), dst, want, 0));
 #endif
       if (n < 0) {
         if (errno == EINTR) continue;
@@ -723,6 +733,10 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
         StructuredLog().Event("socket_read_eof").Debug();
         return MES_ERR_STREAM;
       }
+      if (read_direct) {
+        total += static_cast<size_t>(n);
+        continue;
+      }
       read_ahead_begin_ = 0;
       read_ahead_end_ = static_cast<size_t>(n);
     }
@@ -731,8 +745,10 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
 
   const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
   const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
+  // One guard for the whole call rather than one per iteration, so SIGPIPE is
+  // never momentarily deliverable between two reads.
+  [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
   while (total < len) {
-    [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
     const int n = SSL_read(ssl_, buf + total,
                            static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
     if (n <= 0) {
