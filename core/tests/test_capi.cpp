@@ -488,6 +488,107 @@ TEST(CApi, MultipleEvents) {
   mes_destroy(engine);
 }
 
+// ---- Event storage reuse ----
+
+// A TABLE_MAP body for one nullable BLOB column with a 1-byte length prefix.
+// A blob payload reaches the C ABI as a pointer into engine-owned heap storage,
+// which an inline scalar column would not exercise.
+std::vector<uint8_t> BuildBlobTableMapBody(uint64_t table_id, const std::string& db,
+                                           const std::string& table) {
+  mes::test::EventBuilder b;
+  b.WriteU48Le(table_id);
+  b.WriteU16Le(0);  // flags
+  b.WriteU8(static_cast<uint8_t>(db.size()));
+  b.WriteString(db);
+  b.WriteU8(0);
+  b.WriteU8(static_cast<uint8_t>(table.size()));
+  b.WriteString(table);
+  b.WriteU8(0);
+  b.WriteU8(1);     // column_count
+  b.WriteU8(0xFC);  // BLOB
+  b.WriteU8(1);     // metadata length
+  b.WriteU8(1);     // pack_length
+  b.WriteU8(0x01);  // null bitmap: nullable
+  return b.Data();
+}
+
+// A WRITE_ROWS_EVENT V2 body for the single-BLOB schema above.
+std::vector<uint8_t> BuildBlobWriteRowsBody(uint64_t table_id,
+                                            const std::vector<uint8_t>& payload) {
+  mes::test::EventBuilder b;
+  b.WriteU48Le(table_id);
+  b.WriteU16Le(0);  // flags
+  b.WriteU16Le(2);  // V2 var_header_len
+  b.WriteU8(1);     // column_count
+  b.WriteU8(0x01);  // columns_present
+  b.WriteU8(0x00);  // null bitmap: value present
+  b.WriteU8(static_cast<uint8_t>(payload.size()));
+  b.WriteBytes(payload);
+  return b.Data();
+}
+
+// mes.h ends the lifetime of a returned event at the next
+// mes_feed()/mes_next_event()/mes_reset() call, and a binding is required to
+// copy out of it before then. That rule is a permission to invalidate, so
+// neither "the event still reads correctly afterwards" nor "the memory is gone"
+// is a property this ABI promises. What it does state is ownership: the header
+// calls this struct a read-only view into engine internals, and declares no
+// function that frees one, so an event cannot be a per-call allocation without
+// leaking. One view per engine is therefore the design and not an accident of
+// it, and that is what makes the copy obligation real rather than
+// precautionary -- a caller that retains the pointer silently reads whatever
+// event was decoded most recently instead of the one it fetched.
+TEST(CApi, RetainedEventPointerFollowsTheStreamInsteadOfKeepingItsOwnEvent) {
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  // Two rows of the same schema and payload length, differing only in their
+  // bytes, so what a retained pointer shows can be attributed to the refill.
+  const std::vector<uint8_t> first_payload(48, 0xA1);
+  const std::vector<uint8_t> second_payload(48, 0xB2);
+
+  auto tm = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                       BuildBlobTableMapBody(7, "heldb", "heldt"));
+  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildBlobWriteRowsBody(7, first_payload));
+  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                        BuildBlobWriteRowsBody(7, second_payload));
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, tm.data(), tm.size(), &consumed), MES_OK);
+  ASSERT_EQ(mes_feed(engine, wr1.data(), wr1.size(), &consumed), MES_OK);
+
+  const mes_event_t* retained = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &retained), MES_OK);
+  ASSERT_NE(retained, nullptr);
+  ASSERT_EQ(retained->after_count, 1u);
+  ASSERT_EQ(retained->after_columns[0].type, MES_COL_BYTES);
+  ASSERT_EQ(retained->after_columns[0].str_len, first_payload.size());
+  EXPECT_EQ(
+      std::memcmp(retained->after_columns[0].str_data, first_payload.data(), first_payload.size()),
+      0);
+  EXPECT_EQ(retained->timestamp, 1001u);
+
+  ASSERT_EQ(mes_feed(engine, wr2.data(), wr2.size(), &consumed), MES_OK);
+
+  const mes_event_t* second = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &second), MES_OK);
+
+  // One slot: the second fetch hands back the same struct the first one did.
+  EXPECT_EQ(second, retained);
+
+  // Read through the retained pointer only, as a binding that skipped the copy
+  // would. Every field it offers now describes the second row.
+  ASSERT_EQ(retained->after_count, 1u);
+  ASSERT_EQ(retained->after_columns[0].str_len, second_payload.size());
+  EXPECT_EQ(std::memcmp(retained->after_columns[0].str_data, second_payload.data(),
+                        second_payload.size()),
+            0);
+  EXPECT_EQ(retained->timestamp, 1002u);
+
+  mes_destroy(engine);
+}
+
 // --- ConvertColumn coverage tests ---
 
 TEST(CapiTest, FloatColumn) {
