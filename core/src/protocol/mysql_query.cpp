@@ -164,10 +164,24 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
 
   // Read first response packet
   std::vector<uint8_t> payload;
+  const uint8_t expected_seq_id = seq_id;
   rc = ReadPacket(sock, &payload, &seq_id);
   if (rc != MES_OK) {
     *error_msg = "Failed to read query response";
     return fail_after_response(rc);
+  }
+
+  // A response opens on the sequence id that follows the request's own, so a
+  // packet on any other sequence was not produced for this command. The case
+  // that matters is a replication packet left behind by an aborted binlog
+  // dump: it opens with the same 0x00 marker as a command-phase OK packet and
+  // would otherwise be accepted as an empty result set. Only the first
+  // response packet can be checked this way, because ReadPacket() reports the
+  // sequence id of the last header it consumed and a reassembled multi-packet
+  // payload therefore ends on a later one.
+  if (seq_id != expected_seq_id) {
+    *error_msg = "Query response arrived out of sequence";
+    return fail_after_response(MES_ERR_STREAM);
   }
 
   if (payload.empty()) {
@@ -203,6 +217,15 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     *error_msg = "Column count exceeds maximum (" + std::to_string(column_count) + ")";
     return fail_after_response(MES_ERR_STREAM);
   }
+  // A result set always declares at least one column; the no-result-set case is
+  // the OK packet handled above. Zero here means ReadLenEncInt could not decode
+  // the prefix -- a LOCAL INFILE request (0xFB) or a truncated multi-byte
+  // length -- and both return 0. Accepting it would declare an empty result set
+  // and then read every following packet as a zero-column row.
+  if (column_count == 0) {
+    *error_msg = "Malformed result set header (zero column count)";
+    return fail_after_response(MES_ERR_STREAM);
+  }
 
   // Read column definition packets. Retained column names share the byte
   // budget with row values: the caller holds both until the QueryResult dies.
@@ -213,6 +236,24 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     if (rc != MES_OK) {
       *error_msg = "Failed to read column definition";
       return fail_after_response(rc);
+    }
+    // The server may abandon the result set it has already announced. An ERR
+    // packet here carries the diagnostic the caller needs, and its 0xFF marker
+    // decodes as a length-encoded string just as readily as a real definition
+    // would, so the marker has to be inspected before the payload is parsed.
+    if (!payload.empty() && payload[0] == kPacketErr) {
+      ParseErrPacket(payload, error_msg);
+      return MES_ERR_VALIDATION;
+    }
+    // Anything else that is not a column definition leaves the remaining
+    // definitions unaccounted for, so packet boundaries can no longer be
+    // matched to result set positions. A definition opens with the length of
+    // its catalog identifier, never with 0xFE and never empty; the read above
+    // is capped well below the maximum payload length, so 0xFE here cannot be
+    // the leading byte of a long length-encoded string either.
+    if (payload.empty() || payload[0] == kPacketEOF) {
+      *error_msg = "Result set ended before all column definitions were sent";
+      return fail_after_response(MES_ERR_STREAM);
     }
     std::string column_name = ParseColumnName(payload);
     // Subtraction form: result_bytes never exceeds kMaxResultBytes, so the
@@ -231,6 +272,12 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
     if (rc != MES_OK) {
       *error_msg = "Failed to read intermediate EOF packet";
       return fail_after_response(rc);
+    }
+    // The server can replace the EOF that opens the row section with an ERR,
+    // which reports why the announced rows are not coming.
+    if (!payload.empty() && payload[0] == kPacketErr) {
+      ParseErrPacket(payload, error_msg);
+      return MES_ERR_VALIDATION;
     }
     // Verify it's actually an EOF packet (0xFE with < 9 bytes)
     if (payload.empty() || payload[0] != kPacketEOF || payload.size() >= 9) {

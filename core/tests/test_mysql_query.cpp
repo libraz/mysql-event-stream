@@ -115,6 +115,16 @@ class QueryPeer {
 /** @brief Minimal one-column definition packet naming the column "x". */
 const std::vector<uint8_t> kSingleColumnDefinition = {0, 0, 0, 0, 1, 'x'};
 
+/** @brief ERR packet payload: marker, error code, SQL state and message. */
+std::vector<uint8_t> ErrPacket(uint16_t error_code, const std::string& message) {
+  std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(error_code),
+                               static_cast<uint8_t>(error_code >> 8), '#'};
+  const std::string sql_state = "70100";
+  payload.insert(payload.end(), sql_state.begin(), sql_state.end());
+  payload.insert(payload.end(), message.begin(), message.end());
+  return payload;
+}
+
 #endif  // _WIN32
 
 TEST(QueryResultTest, ConstructionAndAccess) {
@@ -296,6 +306,90 @@ TEST(QueryExecutionTest, EmptyRowPacketsTerminateAfterABoundedCount) {
   std::string error;
   EXPECT_EQ(ExecuteQuery(&socket, "SELECT empty_packets", &result, &error), MES_ERR_STREAM);
   EXPECT_EQ(error, "Server sent only empty packets while reading result-set rows");
+  EXPECT_FALSE(socket.IsValid());
+#endif
+}
+
+TEST(QueryExecutionTest, ErrPacketInColumnDefinitionPositionReportsTheServerError) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // Two columns are announced, one definition arrives, and the server reports
+  // why the rest is not coming. The ERR marker parses as a length-encoded
+  // string, so a client that does not inspect it takes the packet for a column
+  // definition and then waits for a packet the server will never send.
+  QueryPeer peer([](int fd) {
+    if (!SendWirePacket(fd, 1, {2}) || !SendWirePacket(fd, 2, kSingleColumnDefinition) ||
+        !SendWirePacket(fd, 3, ErrPacket(1317, "Query execution was interrupted"))) {
+      return;
+    }
+    // Hold the connection open: an ERR ends the result set without ending the
+    // session, so the client must not need a closed socket to stop reading.
+    uint8_t byte = 0;
+    recv(fd, &byte, 1, 0);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+  QueryResult result;
+  std::string error;
+  EXPECT_EQ(ExecuteQuery(&socket, "SELECT interrupted", &result, &error), MES_ERR_VALIDATION);
+  EXPECT_EQ(error, "MySQL error 1317: Query execution was interrupted");
+  // The server ended the result set itself, so the connection stays in command
+  // phase and is not retired, matching an ERR in the first response position.
+  EXPECT_TRUE(socket.IsValid());
+#endif
+}
+
+TEST(QueryExecutionTest, AResultSetHeaderDeclaringNoColumnsIsRejected) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A LOCAL INFILE request decodes to a column count of zero, as does any
+  // truncated length prefix. Taken as an empty result set it would send the
+  // client on to read rows from a server that is answering something else.
+  QueryPeer peer([](int fd) {
+    if (!SendWirePacket(fd, 1, {0xFB, 'f', 'i', 'l', 'e'})) return;
+    uint8_t byte = 0;
+    recv(fd, &byte, 1, 0);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+  QueryResult result;
+  std::string error;
+  EXPECT_EQ(ExecuteQuery(&socket, "SELECT infile", &result, &error), MES_ERR_STREAM);
+  EXPECT_EQ(error, "Malformed result set header (zero column count)");
+  EXPECT_FALSE(socket.IsValid());
+#endif
+}
+
+TEST(QueryExecutionTest, AReplicationPacketLeftInTheSocketIsNotAQueryResponse) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // What a socket holds when a binlog dump was abandoned mid-stream: a
+  // replication packet whose leading byte is the same OK marker a command-phase
+  // response carries, on the sequence the dump had reached. Accepting it would
+  // report an empty result set for a query the server never saw.
+  QueryPeer peer([](int fd) {
+    std::vector<uint8_t> dump_packet{0x00};
+    dump_packet.resize(32, 0x5A);
+    if (!SendWirePacket(fd, 7, dump_packet)) return;
+    uint8_t byte = 0;
+    recv(fd, &byte, 1, 0);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+  QueryResult result;
+  std::string error;
+  EXPECT_EQ(ExecuteQuery(&socket, "SET @source_binlog_checksum='CRC32'", &result, &error),
+            MES_ERR_STREAM);
+  EXPECT_EQ(error, "Query response arrived out of sequence");
   EXPECT_FALSE(socket.IsValid());
 #endif
 }
