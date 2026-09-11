@@ -6,6 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
 import { MesErrorCode } from "../src/types.js";
 import {
+  buildColumnEvents,
+  Collation,
+  ColType,
+  type ColumnFixture,
+  lengthPrefixed,
+} from "./column-fixture.js";
+import {
   buildDeleteRowsBody,
   buildEvent,
   buildEventNoChecksum,
@@ -236,7 +243,80 @@ describe("CdcEngine", () => {
     expect(e2!.after!["0"]).toBe(20);
     expect(engine.nextEvent()).toBeNull();
   });
+
+  it("keeps a held event unchanged while later data is fed, decoded and reset", async () => {
+    engine = await CdcEngine.create();
+
+    // The native event a decode reads from is a single reusable slot pointing
+    // at engine-owned storage, so the object handed to a caller has to own its
+    // bytes outright. Binary and character payloads are both included: they
+    // reach JS as a Uint8Array and a string through separate conversion arms.
+    const heldBytes = new Uint8Array(64).fill(0xa1);
+    const heldText = "held".padEnd(64, "y");
+
+    engine.feed(buildHeldRowEvents(1, "held_db", "held_rows", heldBytes, heldText, 1000));
+    const held = engine.nextEvent();
+    expect(held).not.toBeNull();
+    expect(Array.from(held!.after!.payload as Uint8Array)).toEqual(Array.from(heldBytes));
+    expect(held!.after!.note).toBe(heldText);
+
+    // Unrelated rows of the same shape: a payload of identical length can take
+    // over the storage the held one used, which the held object must not follow.
+    const laterBytes = new Uint8Array(64).fill(0xb2);
+    const laterText = "later".padEnd(64, "z");
+    engine.feed(buildHeldRowEvents(2, "other_db", "other_rows", laterBytes, laterText, 2000));
+    const later = engine.nextEvent();
+    expect(Array.from(later!.after!.payload as Uint8Array)).toEqual(Array.from(laterBytes));
+
+    // A longer payload, so nothing about the held event's bytes surviving can
+    // rest on the following decode happening to allocate elsewhere.
+    const longBytes = new Uint8Array(512).fill(0xc3);
+    engine.feed(
+      buildHeldRowEvents(3, "third_db", "third_rows", longBytes, "third".padEnd(512, "w"), 3000),
+    );
+    expect(engine.nextEvent()).not.toBeNull();
+
+    engine.reset();
+
+    expect(held!.type).toBe("INSERT");
+    expect(held!.database).toBe("held_db");
+    expect(held!.table).toBe("held_rows");
+    expect(held!.timestamp).toBe(1000);
+    expect(held!.before).toBeNull();
+    expect(Array.from(held!.after!.payload as Uint8Array)).toEqual(Array.from(heldBytes));
+    expect(held!.after!.note).toBe(heldText);
+    expect(Object.keys(held!.after!)).toEqual(["payload", "note"]);
+    expect(held).not.toBe(later);
+  });
 });
+
+/** Build the TABLE_MAP + WRITE_ROWS pair for one binary and one text column. */
+function buildHeldRowEvents(
+  tableId: number,
+  db: string,
+  table: string,
+  payload: Uint8Array,
+  note: string,
+  timestamp: number,
+): Uint8Array {
+  const columns: ColumnFixture[] = [
+    {
+      type: ColType.Blob,
+      meta: [4],
+      collation: Collation.Binary,
+      value: lengthPrefixed(payload, 4),
+      name: "payload",
+    },
+    {
+      type: ColType.Blob,
+      meta: [4],
+      collation: Collation.Utf8mb4,
+      value: lengthPrefixed(new TextEncoder().encode(note), 4),
+      name: "note",
+    },
+  ];
+  return buildColumnEvents(tableId, db, table, columns, timestamp);
+}
 
 /** Call an engine method with a value its declared parameter type forbids. */
 function callWithArgument(engine: CdcEngine, method: string, argument: unknown): void {
