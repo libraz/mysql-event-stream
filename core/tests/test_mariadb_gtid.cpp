@@ -184,6 +184,26 @@ TEST(MariaDBGtidTest, ParseSetNullOutput) {
   EXPECT_NE(MES_OK, MariaDBGtid::ParseSet("0-1-42", nullptr));
 }
 
+TEST(MariaDBGtidTest, ParseSetTreatsOnlyTheEmptyStringAsTheEmptySet) {
+  // An omitted position is the empty set, and it clears whatever the output
+  // held. This half of the rule matters as much as the other: without it there
+  // is no way to say "start from the beginning".
+  std::vector<MariaDBGtid> empty{MariaDBGtid{7, 1, 10}};
+  ASSERT_EQ(MES_OK, MariaDBGtid::ParseSet("", &empty));
+  EXPECT_TRUE(empty.empty());
+
+  // Text that parses to no GTID at all is malformed, not the empty set. Seeding
+  // an empty domain high-water set from it asks the server for every binlog it
+  // still retains, so it must be rejected and must not touch the output.
+  for (const char* text : {",", ",,", " ", "  ", "\t", "\n", " , ", ", ,", ",\n,"}) {
+    std::vector<MariaDBGtid> gtids{MariaDBGtid{7, 1, 10}};
+    EXPECT_EQ(MES_ERR_INVALID_ARG, MariaDBGtid::ParseSet(text, &gtids))
+        << "input: '" << text << "'";
+    ASSERT_EQ(gtids.size(), 1u) << "input: '" << text << "'";
+    EXPECT_EQ(gtids[0].sequence_no, 10u) << "input: '" << text << "'";
+  }
+}
+
 // ===========================================================================
 // ToString
 // ===========================================================================

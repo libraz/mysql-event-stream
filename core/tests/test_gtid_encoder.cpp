@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "client/gtid_encoder.h"
@@ -12,6 +13,9 @@
 namespace {
 
 using mes::GtidEncoder;
+
+constexpr char kSid[] = "00000000-0000-0000-0000-000000000001";
+constexpr char kSid2[] = "00000000-0000-0000-0000-000000000002";
 
 uint64_t ReadInt64Le(const std::vector<uint8_t>& data, size_t offset) {
   uint64_t val = 0;
@@ -302,6 +306,123 @@ TEST(GtidSetTest, SubsetRequiresEveryTsidAndIntervalToBeCovered) {
   EXPECT_FALSE(subset.IsSubsetOf(wrong_tag));
 }
 
+// --- Wire layout against a fixed known answer ---
+
+TEST(GtidSetTest, UntaggedWireLayoutMatchesTheServerGtidSetEncoding) {
+  // The GTID set a replica sends in COM_BINLOG_DUMP_GTID, and that a
+  // PREVIOUS_GTIDS_EVENT carries, is: n_sids as 8 little-endian bytes, then per
+  // SID the 16 raw UUID bytes, n_intervals as 8 little-endian bytes, and one
+  // (start, end) pair of 8 little-endian bytes per interval with end exclusive.
+  // These bytes are written from that layout, not from this project's encoder,
+  // so both directions are checked against an answer neither side produced.
+  const std::vector<uint8_t> wire = {
+      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_sids = 2
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // SID 1
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_intervals = 1
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 1
+      0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 4 (exclusive)
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // SID 2
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_intervals = 2
+      0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 5
+      0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 8 (exclusive)
+      0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 9
+      0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 10 (exclusive)
+  };
+  const std::string text = std::string(kSid) + ":1-3," + kSid2 + ":5-7:9-9";
+
+  mes::GtidSet decoded;
+  ASSERT_TRUE(mes::GtidSet::DecodeBinary(wire.data(), wire.size(), &decoded));
+  EXPECT_EQ(decoded.ToString(), text);
+
+  mes::GtidSet parsed;
+  ASSERT_EQ(mes::GtidSet::Parse(text, &parsed), MES_OK);
+  std::vector<uint8_t> encoded;
+  ASSERT_EQ(parsed.EncodeBinary(&encoded), MES_OK);
+  EXPECT_EQ(encoded, wire);
+}
+
+// --- Parse input validation ---
+
+TEST(GtidSetTest, ParseTreatsOnlyAnEmptyStringAsTheEmptySet) {
+  // An empty set forwarded to the server requests every binlog it still
+  // retains, so only a genuinely empty position may produce one. Text holding
+  // nothing but separators or whitespace is a malformed position.
+  mes::GtidSet empty;
+  ASSERT_EQ(mes::GtidSet::Parse("", &empty), MES_OK);
+  EXPECT_EQ(empty.ToString(), "");
+
+  for (const char* text : {",", ",,", " ", "  ", "\t", "\n", "\r", " , ", ",\n,"}) {
+    mes::GtidSet set;
+    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
+  }
+}
+
+TEST(GtidSetTest, ParseRejectsEveryIntervalTokenThatIsNotABareDecimal) {
+  // strtoull would accept a sign or leading whitespace here and reinterpret a
+  // negative value modulo 2^64, so a malformed token must be rejected outright
+  // rather than turned into a plausible transaction number.
+  const char* const rejected_intervals[] = {
+      "+5",
+      "-5",
+      "5+",
+      "1-+9",
+      "1--9",
+      "1- 9",
+      "1 -9",
+      "5 6",
+      "0x5",
+      "5abc",
+      "abc",
+      " ",
+      "",
+      "9223372036854775807",            // INT64_MAX is out of range for a GNO.
+      "18446744073709551615",           // UINT64_MAX.
+      "18446744073709551616",           // One past UINT64_MAX.
+      "-18446744073709551615",          // Wraps to 1 under strtoull.
+      "1-18446744073709551615",         // UINT64_MAX as an interval end.
+      "1-18446744073709551616",         // One past UINT64_MAX.
+      "1--18446744073709551615",        // Wraps to 1 under strtoull.
+      "99999999999999999999999999999",  // Far past UINT64_MAX.
+  };
+  for (const char* intervals : rejected_intervals) {
+    const std::string text = std::string(kSid) + ":" + intervals;
+    mes::GtidSet set;
+    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
+  }
+}
+
+TEST(GtidSetTest, ParseKeepsEveryWellFormedFormAccepted) {
+  struct Case {
+    std::string text;
+    std::string canonical;
+  };
+  const std::string sid(kSid);
+  const std::string sid2(kSid2);
+  const Case cases[] = {
+      {sid + ":5", sid + ":5-5"},
+      {sid + ":1-3", sid + ":1-3"},
+      {sid + ":1-3:5-7", sid + ":1-3:5-7"},
+      {sid + ":MyTag:1-5", sid + ":mytag:1-5"},
+      {sid + ":_tag_2:7", sid + ":_tag_2:7-7"},
+      // MySQL reports gtid_executed with the separator followed by a newline.
+      {sid + ":1-3,\n" + sid2 + ":5-7", sid + ":1-3," + sid2 + ":5-7"},
+      {sid + ":1-3, " + sid2 + ":tag:5-7", sid + ":1-3," + sid2 + ":tag:5-7"},
+      {"  " + sid + ":1-3  ", sid + ":1-3"},
+      {sid + ":1-3,", sid + ":1-3"},
+      // The largest GNO the encoder accepts, as a single value and as a range.
+      {sid + ":9223372036854775805", sid + ":9223372036854775805-9223372036854775805"},
+      {sid + ":1-9223372036854775805", sid + ":1-9223372036854775805"},
+  };
+  for (const Case& test_case : cases) {
+    mes::GtidSet set;
+    ASSERT_EQ(mes::GtidSet::Parse(test_case.text, &set), MES_OK)
+        << "input: '" << test_case.text << "'";
+    EXPECT_EQ(set.ToString(), test_case.canonical) << "input: '" << test_case.text << "'";
+  }
+}
+
 // --- Error: null output pointer ---
 
 TEST(GtidEncoderTest, ErrorNullOutput) {
@@ -404,6 +525,51 @@ TEST(GtidEncoderTest, ConvertTaggedZeroIsDropped) {
 TEST(GtidEncoderTest, ConvertNoColon) {
   std::string gtid = "00000000-0000-0000-0000-000000000001";
   EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(gtid), gtid);
+}
+
+TEST(GtidEncoderTest, ConvertAppliesTheSameRulesToPaddedAndUnpaddedTokens) {
+  // Padding must not decide which rule applies. A single-entry request goes
+  // through a different path than a comma-separated one, so both are checked.
+  const std::string sid(kSid);
+  const std::string sid2(kSid2);
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(" " + sid + ":0 "), "");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange("\t" + sid + ":tag:0\n"), "");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(" " + sid + ":0 ," + sid2 + ":0"), "");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(" " + sid + ":5 "), sid + ":1-5");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange("\t" + sid + ":tag:5\n"), sid + ":tag:1-5");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(" " + sid + ":1-3 "), sid + ":1-3");
+  EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(" " + sid + ":0 , " + sid2 + ":5 "),
+            sid2 + ":1-5");
+}
+
+TEST(GtidEncoderTest, SeparatorsOnlyStartPositionIsRejectedNotReadAsTheEmptySet) {
+  // An empty set asks the server for every binlog it still retains, so a typo'd
+  // start position must fail instead of being normalized into one. An omitted
+  // option is the empty string and has to keep meaning "from the beginning".
+  std::vector<uint8_t> from_the_beginning;
+  ASSERT_EQ(GtidEncoder::Encode("", &from_the_beginning), MES_OK);
+  EXPECT_EQ(from_the_beginning.size(), 8u);
+
+  for (const char* text : {",", ",,", " ", "  ", "\t", "\n", " , ", ", ,", ",\n,"}) {
+    // The text reaches the parser unchanged, and the parser rejects it. Both
+    // passthrough routes are covered: a comma makes ConvertSingleGtidToRange
+    // hand the text back when no entry held a token, and without one the
+    // whitespace-only token comes back from NormalizeSingleSid instead.
+    const std::string converted = GtidEncoder::ConvertSingleGtidToRange(text);
+    EXPECT_EQ(converted, text) << "input: '" << text << "'";
+    std::vector<uint8_t> encoded;
+    EXPECT_EQ(GtidEncoder::Encode(converted.c_str(), &encoded), MES_ERR_INVALID_ARG)
+        << "input: '" << text << "'";
+  }
+
+  // A request naming only TSIDs with no transactions is a different statement:
+  // it denotes the empty set deliberately and still encodes as one.
+  std::vector<uint8_t> encoded;
+  const std::string all_zero = std::string(kSid) + ":0," + kSid2 + ":0";
+  ASSERT_EQ(GtidEncoder::ConvertSingleGtidToRange(all_zero), "");
+  ASSERT_EQ(GtidEncoder::Encode(GtidEncoder::ConvertSingleGtidToRange(all_zero).c_str(), &encoded),
+            MES_OK);
+  EXPECT_EQ(encoded.size(), 8u);
 }
 
 // --- Whitespace handling ---

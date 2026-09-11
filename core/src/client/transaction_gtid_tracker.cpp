@@ -229,6 +229,10 @@ bool TransactionGtidTracker::Reset(const std::string& initial_gtid_set, ServerFl
   if (flavor == ServerFlavor::kMariaDB) {
     std::vector<MariaDBGtid> parsed;
     if (MariaDBGtid::ParseSet(initial_gtid_set, &parsed) != MES_OK) return false;
+    // Yielding no GTID is only legitimate for a genuinely empty position. Text
+    // of separators or whitespace alone would otherwise seed an empty high-water
+    // set, which requests every binlog the server still retains.
+    if (parsed.empty() && !initial_gtid_set.empty()) return false;
     for (const auto& gtid : parsed) MergeMariaDBGtid(&mariadb_set_, gtid);
     return true;
   }

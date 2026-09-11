@@ -164,6 +164,40 @@ TEST(TransactionGtidTrackerTest, TaggedMySQLGtidCheckpointsAndResumesWithTaggedS
   EXPECT_EQ(encoded[7], 1u);  // tagged set format is encoded in both positions.
 }
 
+TEST(TransactionGtidTrackerTest, MalformedTaggedGtidIsRejectedWithoutMutatingState) {
+  TransactionGtidTracker tracker;
+  auto valid = BuildTaggedMySQLGtid(42, "analytics");
+  ASSERT_TRUE(tracker.Observe(valid.data(), valid.size(), false).empty());
+  const std::string received = std::string(kSid1) + ":analytics:42";
+  ASSERT_EQ(tracker.received_gtid(), received);
+
+  // Every truncation of the event, at every field boundary and between them.
+  for (size_t length = 0; length < valid.size(); ++length) {
+    EXPECT_TRUE(tracker.Observe(valid.data(), length, false).empty()) << "length: " << length;
+    EXPECT_EQ(tracker.received_gtid(), received) << "length: " << length;
+    EXPECT_TRUE(tracker.has_pending_gtid()) << "length: " << length;
+  }
+
+  // Structurally invalid bodies: a non-positive GNO, and tags that are empty,
+  // longer than the format allows, or built from disallowed characters.
+  const std::vector<std::vector<uint8_t>> invalid = {
+      BuildTaggedMySQLGtid(0, "analytics"), BuildTaggedMySQLGtid(42, ""),
+      BuildTaggedMySQLGtid(42, std::string(33, 'a')), BuildTaggedMySQLGtid(42, "9bad"),
+      BuildTaggedMySQLGtid(42, "bad-tag")};
+  for (size_t i = 0; i < invalid.size(); ++i) {
+    EXPECT_TRUE(tracker.Observe(invalid[i].data(), invalid[i].size(), false).empty())
+        << "case " << i;
+    EXPECT_EQ(tracker.received_gtid(), received) << "case " << i;
+    EXPECT_TRUE(tracker.has_pending_gtid()) << "case " << i;
+  }
+
+  // The rejected events left the pending GTID intact, so its commit boundary
+  // still produces the checkpoint the valid event earned.
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+  EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), false),
+            std::string(kSid1) + ":analytics:42-42");
+}
+
 TEST(TransactionGtidTrackerTest, TaggedPreviousGtidsMergesTaggedAndUntaggedTsids) {
   TransactionGtidTracker tracker;
   auto previous = BuildPreviousGtids(std::string(kSid1) + ":analytics:1-4," + kSid2 + ":2-3");
@@ -350,6 +384,23 @@ TEST(TransactionGtidTrackerTest, ResetRejectsInvalidInitialSets) {
   TransactionGtidTracker tracker;
   EXPECT_FALSE(tracker.Reset("not-a-gtid", ServerFlavor::kMySQL));
   EXPECT_FALSE(tracker.Reset("7-1-bad", ServerFlavor::kMariaDB));
+}
+
+TEST(TransactionGtidTrackerTest, ResetTreatsOnlyAnEmptyStringAsAnEmptyPosition) {
+  TransactionGtidTracker tracker;
+  // An empty position means "none established yet", and the well-formed sets of
+  // both flavours stay accepted.
+  EXPECT_TRUE(tracker.Reset("", ServerFlavor::kMySQL));
+  EXPECT_TRUE(tracker.Reset("", ServerFlavor::kMariaDB));
+  EXPECT_TRUE(tracker.Reset(std::string(kSid1) + ":1-2," + kSid2 + ":tag:7", ServerFlavor::kMySQL));
+  EXPECT_TRUE(tracker.Reset("7-1-10,9-2-20", ServerFlavor::kMariaDB));
+
+  // Text that parses to no GTID at all is a malformed position. Seeding an
+  // empty set from it would request every binlog the server still retains.
+  for (const char* text : {",", ",,", " ", "\t", "\n", " , "}) {
+    EXPECT_FALSE(tracker.Reset(text, ServerFlavor::kMySQL)) << "input: '" << text << "'";
+    EXPECT_FALSE(tracker.Reset(text, ServerFlavor::kMariaDB)) << "input: '" << text << "'";
+  }
 }
 
 TEST(TransactionGtidTrackerTest, CommitAtIntervalCapacityIsReportedAndKeepsTheGtidPending) {

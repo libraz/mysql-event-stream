@@ -110,12 +110,12 @@ mes_error_t MariaDBGtid::ParseSet(const std::string& gtid_set_str, std::vector<M
     return MES_ERR_NULL_ARG;
   }
 
-  std::string_view sv = Trim(std::string_view(gtid_set_str));
-
-  if (sv.empty()) {
+  if (gtid_set_str.empty()) {
     out->clear();
     return MES_OK;
   }
+
+  std::string_view sv = Trim(std::string_view(gtid_set_str));
 
   std::vector<MariaDBGtid> result;
 
@@ -143,6 +143,13 @@ mes_error_t MariaDBGtid::ParseSet(const std::string& gtid_set_str, std::vector<M
       return err;
     }
     result.push_back(gtid);
+  }
+
+  // Only a genuinely empty string denotes the empty set. Text of separators or
+  // whitespace alone is a malformed position: read as the empty set it would
+  // request every binlog the server still retains.
+  if (result.empty()) {
+    return MES_ERR_INVALID_ARG;
   }
 
   *out = std::move(result);

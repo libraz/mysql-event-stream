@@ -2,10 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
+#include <charconv>
 #include <climits>
 #include <cstdio>
-#include <cstdlib>
 
 #include "binary_util.h"
 #include "logger.h"
@@ -15,6 +14,11 @@ namespace {
 
 bool IsTagFirst(char ch) {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
+
+bool AllDigits(const std::string& text) {
+  return !text.empty() &&
+         std::all_of(text.begin(), text.end(), [](char ch) { return ch >= '0' && ch <= '9'; });
 }
 
 std::string Trim(const std::string& text) {
@@ -86,6 +90,11 @@ mes_error_t GtidSet::Parse(const std::string& text, GtidSet* out) {
     }
     if (target.empty()) return MES_ERR_INVALID_ARG;
   }
+
+  // Only a genuinely empty request denotes the empty set. Text holding nothing
+  // but separators or whitespace is malformed, and coercing it to the empty set
+  // would ask the server for every binlog it still retains.
+  if (parsed.sets_.empty() && !text.empty()) return MES_ERR_INVALID_ARG;
 
   for (auto& [tsid, intervals] : parsed.sets_) {
     (void)tsid;
@@ -290,16 +299,19 @@ mes_error_t GtidSet::ParseInterval(const std::string& text, Interval* out) {
   if (out == nullptr) return MES_ERR_NULL_ARG;
   const std::string value = Trim(text);
   const size_t dash = value.find('-');
+  // A transaction number is a bare decimal literal and nothing else. A sign or
+  // embedded whitespace would be accepted by strtoull, which also reinterprets
+  // a negative value modulo 2^64 -- turning malformed text into a plausible
+  // sequence number instead of an error.
   const auto parse_number = [](const std::string& number, uint64_t* value_out) {
-    if (number.empty()) return false;
-    char* end = nullptr;
-    errno = 0;
-    const unsigned long long value = std::strtoull(number.c_str(), &end, 10);
-    if (end == number.c_str() || *end != '\0' || errno == ERANGE || value == 0 ||
+    if (!AllDigits(number)) return false;
+    uint64_t value = 0;
+    const auto result = std::from_chars(number.data(), number.data() + number.size(), value);
+    if (result.ec != std::errc{} || result.ptr != number.data() + number.size() || value == 0 ||
         value >= INT64_MAX) {
       return false;
     }
-    *value_out = static_cast<uint64_t>(value);
+    *value_out = value;
     return true;
   };
   uint64_t start = 0;

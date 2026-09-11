@@ -44,6 +44,11 @@ struct MariaDBGtid {
 
   /**
    * @brief Parse a MariaDB GTID set (comma-separated GTIDs).
+   *
+   * An empty string is the empty set. Any other input must yield at least one
+   * GTID, so text of separators or whitespace alone is a parse failure rather
+   * than the empty set.
+   *
    * @param gtid_set_str GTID set string (e.g., "0-1-42,1-1-15").
    * @param[out] out Parsed GTIDs output.
    * @return MES_OK on success, MES_ERR_INVALID_ARG on parse failure.
