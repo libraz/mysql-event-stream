@@ -6,7 +6,7 @@ option(MES_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MES_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MES_ENABLE_COVERAGE "Enable code coverage" OFF)
 option(MES_ENABLE_FUZZ "Build libFuzzer harnesses (requires Clang)" OFF)
-option(MES_BUILD_FUZZ_SMOKE "Build deterministic fuzz corpus smoke runner" OFF)
+option(MES_BUILD_FUZZ_SMOKE "Replay the fuzz corpus as CTest cases" ON)
 option(MES_BUILD_BENCHMARKS "Build manual performance measurement harnesses" OFF)
 
 # OpenSSL (required for protocol layer)
@@ -207,7 +207,9 @@ if(MES_ENABLE_FUZZ)
   target_link_options(fuzz_protocol_parsers PRIVATE -fsanitize=fuzzer)
 endif()
 
-if(MES_BUILD_FUZZ_SMOKE)
+# Corpus replay runners. Built only alongside the test suite: a wheel or native
+# addon build sets BUILD_TESTING=OFF and has no use for them.
+if(MES_BUILD_FUZZ_SMOKE AND BUILD_TESTING)
   add_executable(fuzz_seed_smoke tests/fuzz/fuzz_feed.cpp)
   target_link_libraries(fuzz_seed_smoke PRIVATE mes-core)
   target_compile_definitions(fuzz_seed_smoke PRIVATE MES_FUZZ_STANDALONE)
@@ -253,4 +255,19 @@ endif()
 if(BUILD_TESTING)
   enable_testing()
   add_subdirectory(tests)
+
+  # One CTest case per checked-in corpus file, so no seed can stop being
+  # replayed. CONFIGURE_DEPENDS re-globs on build, making a newly added seed a
+  # new test case without a manual reconfigure.
+  if(MES_BUILD_FUZZ_SMOKE)
+    file(GLOB MES_FUZZ_CORPUS CONFIGURE_DEPENDS
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz/corpus/*)
+    foreach(corpus_file ${MES_FUZZ_CORPUS})
+      get_filename_component(corpus_name ${corpus_file} NAME)
+      add_test(NAME fuzz_seed_smoke.${corpus_name}
+        COMMAND fuzz_seed_smoke ${corpus_file})
+      add_test(NAME fuzz_protocol_smoke.${corpus_name}
+        COMMAND fuzz_protocol_smoke ${corpus_file})
+    endforeach()
+  endif()
 endif()
