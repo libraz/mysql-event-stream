@@ -150,6 +150,23 @@ TEST(EventHeaderTest, RejectsCrc32FormatDescriptionWithInvalidTrailer) {
             BinlogChecksumAlgorithm::kUnknown);
 }
 
+TEST(EventHeaderTest, DetectsOffFormatDescriptionWhenPostHeaderLengthLooksLikeCrc32) {
+  // An unchecksummed FDE carries the algorithm byte as its last byte and no
+  // trailer, so the byte four positions earlier is a post-header-length entry.
+  // A length of 1 there is an ordinary event-type length, not evidence of the
+  // CRC32 framing, and must not stop OFF from being detected: a stream with
+  // binlog_checksum=NONE would otherwise fail on its first event.
+  std::vector<uint8_t> event(kEventHeaderSize + 57 + 41, 0);
+  ASSERT_GE(event.size(), kEventHeaderSize + 57 + 1 + kChecksumSize);
+  BuildHeader(event.data(), 0, static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent), 1,
+              event.size(), 0, 0);
+  event[event.size() - kChecksumSize - 1] = kBinlogChecksumAlgCrc32;
+  event[event.size() - 1] = kBinlogChecksumAlgOff;
+
+  EXPECT_EQ(DetectFormatDescriptionChecksum(event.data(), event.size()),
+            BinlogChecksumAlgorithm::kOff);
+}
+
 TEST(EventHeaderTest, IsRowEventWriteV1) {
   EXPECT_TRUE(IsRowEvent(BinlogEventType::kWriteRowsEventV1));
   EXPECT_TRUE(IsRowEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEventV1)));

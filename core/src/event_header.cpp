@@ -107,8 +107,14 @@ BinlogChecksumAlgorithm DetectFormatDescriptionChecksum(const uint8_t* data, siz
     const size_t checksum_offset = len - kChecksumSize;
     const uint32_t computed = ComputeCRC32(data, checksum_offset);
     const uint32_t stored = binary::ReadU32Le(data + checksum_offset);
-    return computed == stored ? BinlogChecksumAlgorithm::kCrc32 : BinlogChecksumAlgorithm::kUnknown;
+    if (computed == stored) return BinlogChecksumAlgorithm::kCrc32;
   }
+  // In an event with no checksum trailer the byte tested above is the
+  // fourth-from-last entry of the post-header-length array, whose value depends
+  // on the server's event-type table and can be 1 by coincidence. The CRC32
+  // framing is therefore only established by its own verification; once that
+  // fails, the OFF framing -- algorithm byte last, no trailer -- is still a
+  // candidate and must be tested before reporting that neither holds.
   if (data[len - 1] == kBinlogChecksumAlgOff) {
     return BinlogChecksumAlgorithm::kOff;
   }
