@@ -671,6 +671,218 @@ TEST(TableMapTest, OptionalMetadataAbsentIsSafe) {
   EXPECT_TRUE(metadata.columns[0].name.empty());
 }
 
+/**
+ * @brief A TABLE_MAP with no optional metadata section at all resolves every
+ *        character-family and BLOB-family column to bytes.
+ *
+ * VARCHAR/VARBINARY and TEXT/BLOB each share a single binlog type byte, so the
+ * declared collation is the only discriminator between the two members of a
+ * pair. With no collation carried, bytes is the only lossless reading: it
+ * reproduces the payload exactly, whereas surfacing a binary key or hash as
+ * text would push it through a UTF-8 decoder and lose it irrecoverably. The
+ * two columns declared as text are therefore expected to come back as bytes
+ * alongside their binary counterparts -- the classification follows the
+ * missing collation, never the payload's content.
+ */
+TEST(TableMapTest, AbsentCharsetMetadataResolvesCharacterColumnsToBytes) {
+  TableMapBuilder builder;
+  builder.WriteTableId(90);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+
+  // (bin VARBINARY(100), txt VARCHAR(100), blb BLOB, txtblb TEXT). Each pair
+  // travels on one type byte: VARBINARY and VARCHAR both as MYSQL_TYPE_VARCHAR,
+  // BLOB and TEXT both as MYSQL_TYPE_BLOB.
+  builder.WriteColumnCount(4);
+  builder.WriteColumnTypes({
+      static_cast<uint8_t>(ColumnType::kVarchar),
+      static_cast<uint8_t>(ColumnType::kVarchar),
+      static_cast<uint8_t>(ColumnType::kBlob),
+      static_cast<uint8_t>(ColumnType::kBlob),
+  });
+  builder.WriteMetadataBlock({
+      0x64, 0x00,  // VARBINARY(100)
+      0x64, 0x00,  // VARCHAR(100)
+      0x02,        // BLOB pack_length 2
+      0x02,        // TEXT pack_length 2
+  });
+  builder.WriteNullBitmap({0x0F});
+  // Nothing follows the null bitmap, the shape a server emits with
+  // binlog_row_metadata=NO_LOG.
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), 4u);
+  for (size_t i = 0; i < metadata.columns.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_FALSE(metadata.columns[i].charset_known);
+  }
+
+  // A binary payload carrying an embedded NUL and a byte no UTF-8 decoder can
+  // represent. The classification is what is_binary pins below; at this layer
+  // the bytes are the same either way, so this payload is what makes getting
+  // the classification wrong consequential -- a column surfaced as text is one
+  // a binding hands to a UTF-8 decoder.
+  const std::string kBinaryPayload("\x00\xFF\x01", 3);
+  test::EventBuilder values;
+  values.WriteU8(static_cast<uint8_t>(kBinaryPayload.size()));
+  values.WriteString(kBinaryPayload);
+  values.WriteU8(2);  // VARCHAR 1-byte length prefix
+  values.WriteString("hi");
+  values.WriteU16Le(2);  // BLOB 2-byte length prefix
+  values.WriteBytes({0xFE, 0x00});
+  values.WriteU16Le(4);  // TEXT 2-byte length prefix
+  values.WriteString("text");
+
+  const std::vector<uint8_t> body = BuildWriteRowsBody(90, 4, values.Data());
+  std::vector<RowData> decoded;
+  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
+  ASSERT_EQ(decoded.size(), 1u);
+  ASSERT_EQ(decoded[0].columns.size(), 4u);
+
+  const std::string kExpected[] = {kBinaryPayload, "hi", std::string("\xFE\x00", 2), "text"};
+  const ColumnType kExpectedTypes[] = {ColumnType::kVarchar, ColumnType::kVarchar,
+                                       ColumnType::kBlob, ColumnType::kBlob};
+  for (size_t i = 0; i < decoded[0].columns.size(); ++i) {
+    SCOPED_TRACE(i);
+    const ColumnValue& column = decoded[0].columns[i];
+    ASSERT_FALSE(column.is_null);
+    EXPECT_EQ(column.type, kExpectedTypes[i]);
+    EXPECT_TRUE(column.is_binary);  // MES_COL_BYTES
+    EXPECT_EQ(column.string_val, kExpected[i]);
+  }
+}
+
+// (u8 TINYINT, u16 SMALLINT, u24 MEDIUMINT, u32 INT, u64 BIGINT), each declared
+// UNSIGNED in the table. All five are fixed-size, so the TABLE_MAP metadata
+// block stays empty.
+const std::vector<uint8_t> kUnsignedNumericColumnTypes = {
+    static_cast<uint8_t>(ColumnType::kTiny),     static_cast<uint8_t>(ColumnType::kShort),
+    static_cast<uint8_t>(ColumnType::kInt24),    static_cast<uint8_t>(ColumnType::kLong),
+    static_cast<uint8_t>(ColumnType::kLongLong),
+};
+
+// The unsigned values those five columns hold, each one above the signed range
+// of its width so that reading it as signed is observable. Asymmetric bit
+// patterns, so a byte-order error cannot pass as a sign error.
+constexpr uint8_t kUnsignedTinyValue = 0x80;                          // 128
+constexpr uint16_t kUnsignedShortValue = 0xFF00;                      // 65280
+constexpr uint32_t kUnsignedInt24Value = 0x800001;                    // 8388609
+constexpr uint32_t kUnsignedLongValue = 0xFFFFFF00;                   // 4294967040
+constexpr uint64_t kUnsignedLongLongValue = (uint64_t{1} << 63) | 1;  // 9223372036854775809
+
+std::vector<uint8_t> BuildUnsignedNumericRowValues() {
+  test::EventBuilder values;
+  values.WriteU8(kUnsignedTinyValue);
+  values.WriteU16Le(kUnsignedShortValue);
+  values.WriteU24Le(kUnsignedInt24Value);
+  values.WriteU32Le(kUnsignedLongValue);
+  values.WriteU64Le(kUnsignedLongLongValue);
+  return values.Data();
+}
+
+/**
+ * @brief A TABLE_MAP with no SIGNEDNESS field decodes every numeric column as
+ *        signed.
+ *
+ * Signedness reaches the decoder from the TABLE_MAP optional metadata or from
+ * the metadata side-connection; with neither, every numeric column is read as
+ * signed, so an UNSIGNED value above the signed range of its width reads as a
+ * negative number. The BIGINT column pins the second half of that rule: the
+ * exact-decimal string reserved for an unsigned value above INT64_MAX is only
+ * reachable when the column is known to be unsigned, so here the value stays an
+ * integer and wraps negative instead.
+ */
+TEST(TableMapTest, AbsentSignednessMetadataResolvesNumericColumnsToSigned) {
+  TableMapBuilder builder;
+  builder.WriteTableId(91);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(kUnsignedNumericColumnTypes.size());
+  builder.WriteColumnTypes(kUnsignedNumericColumnTypes);
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x1F});
+  // Nothing follows the null bitmap, so no SIGNEDNESS field.
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), kUnsignedNumericColumnTypes.size());
+  EXPECT_FALSE(metadata.signedness_from_binlog);
+  for (size_t i = 0; i < metadata.columns.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_FALSE(metadata.columns[i].is_unsigned);
+  }
+
+  const std::vector<uint8_t> body =
+      BuildWriteRowsBody(91, kUnsignedNumericColumnTypes.size(), BuildUnsignedNumericRowValues());
+  std::vector<RowData> decoded;
+  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
+  ASSERT_EQ(decoded.size(), 1u);
+  ASSERT_EQ(decoded[0].columns.size(), kUnsignedNumericColumnTypes.size());
+
+  // The signed reinterpretation of each wire value, at its own width.
+  const int64_t kExpected[] = {-128, -256, -8388607, -256, -9223372036854775807LL};
+  for (size_t i = 0; i < decoded[0].columns.size(); ++i) {
+    SCOPED_TRACE(i);
+    const ColumnValue& column = decoded[0].columns[i];
+    ASSERT_FALSE(column.is_null);
+    EXPECT_EQ(column.int_val, kExpected[i]);  // MES_COL_INT
+    // An empty buffer distinguishes the integer reading from the exact-decimal
+    // string an above-INT64_MAX unsigned value would have taken.
+    EXPECT_TRUE(column.string_val.empty()) << column.string_val;
+  }
+}
+
+/**
+ * @brief The same row bytes behind a TABLE_MAP that does carry SIGNEDNESS
+ *        resolve to their unsigned values.
+ *
+ * The contrast is what the fallback costs: identical wire bytes, and only the
+ * presence of the optional metadata field decides whether the BIGINT reads as
+ * its exact decimal value or wraps negative.
+ */
+TEST(TableMapTest, PresentSignednessMetadataResolvesNumericColumnsToUnsigned) {
+  TableMapBuilder builder;
+  builder.WriteTableId(92);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(kUnsignedNumericColumnTypes.size());
+  builder.WriteColumnTypes(kUnsignedNumericColumnTypes);
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap({0x1F});
+  // SIGNEDNESS (type 1), length 1, MSB-first bitmap over the five numeric
+  // columns: all unsigned.
+  builder.WriteRawBytes({0x01, 0x01, 0xF8});
+
+  TableMetadata metadata;
+  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  ASSERT_EQ(metadata.columns.size(), kUnsignedNumericColumnTypes.size());
+  EXPECT_TRUE(metadata.signedness_from_binlog);
+  for (size_t i = 0; i < metadata.columns.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_TRUE(metadata.columns[i].is_unsigned);
+  }
+
+  const std::vector<uint8_t> body =
+      BuildWriteRowsBody(92, kUnsignedNumericColumnTypes.size(), BuildUnsignedNumericRowValues());
+  std::vector<RowData> decoded;
+  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
+  ASSERT_EQ(decoded.size(), 1u);
+  ASSERT_EQ(decoded[0].columns.size(), kUnsignedNumericColumnTypes.size());
+
+  EXPECT_EQ(decoded[0].columns[0].int_val, kUnsignedTinyValue);
+  EXPECT_EQ(decoded[0].columns[1].int_val, kUnsignedShortValue);
+  EXPECT_EQ(decoded[0].columns[2].int_val, kUnsignedInt24Value);
+  EXPECT_EQ(decoded[0].columns[3].int_val, kUnsignedLongValue);
+  // Above INT64_MAX, so int_val cannot hold it and the exact decimal value is
+  // carried as text instead.
+  EXPECT_EQ(decoded[0].columns[4].string_val, "9223372036854775809");  // MES_COL_STRING
+  EXPECT_FALSE(decoded[0].columns[4].is_binary);
+}
+
 TEST(TableMapTest, RejectsMetadataLengthUint64Max) {
   TableMapBuilder builder;
   builder.WriteTableId(10);
