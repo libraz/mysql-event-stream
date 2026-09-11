@@ -11,7 +11,7 @@ Prerequisites:
     1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
     1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
         (same port 13308 / database mes_test; this example works unchanged against either)
-    2. Build libmes with client support:
+    2. Build libmes:
        cmake -B build-client
        cmake --build build-client --parallel
 
@@ -126,8 +126,8 @@ def find_lib_path() -> str:
 
     Checks in order:
     1. MES_LIB_PATH environment variable
-    2. build-client/core/ (client-enabled build)
-    3. build/core/ (standard build)
+    2. build-client/core/
+    3. build/core/
     """
     env_path = os.environ.get("MES_LIB_PATH")
     if env_path and Path(env_path).exists():
@@ -178,8 +178,11 @@ async def async_main(args: argparse.Namespace, lib_path: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stream MySQL CDC events via CdcStream")
     parser.add_argument("--table", type=str, default=None, help="Filter by table name")
+    # Left as None without the flag, which starts from the server's current
+    # position. An empty GTID set would instead ask for every binlog the server
+    # still retains.
     parser.add_argument(
-        "--gtid", type=str, default="", help="Start GTID (empty = current position)"
+        "--gtid", type=str, default=None, help="Start GTID (omitted = current position)"
     )
     parser.add_argument("--server-id", type=int, default=2, help="Replica server ID")
     args = parser.parse_args()

@@ -9,6 +9,7 @@ import pytest
 
 from mysql_event_stream._contract import NON_RETRYABLE_ERROR_CODES
 from mysql_event_stream._ffi import (
+    MES_ERR_DISCONNECTED,
     MES_ERR_GTID_PURGED,
     MES_ERR_GTID_TAGGED_UNSUPPORTED,
     MES_ERR_INVALID_ARG,
@@ -432,7 +433,7 @@ class TestReconnectAttempts:
 
         with (
             patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()),
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="immediate drop"),
         ):
             await stream.__anext__()
 
@@ -470,7 +471,7 @@ class TestReconnectAttempts:
         with (
             patch.object(CdcStream, "_reconnect", fake_reconnect),
             patch("asyncio.to_thread", side_effect=RuntimeError("connection lost")),
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="connection lost"),
         ):
             await stream.__anext__()
 
@@ -503,7 +504,7 @@ class TestReconnectAttempts:
         with (
             patch.object(CdcStream, "_reconnect", fake_reconnect),
             patch("asyncio.to_thread", side_effect=RuntimeError("connection lost")),
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="connection lost"),
         ):
             await stream.__anext__()
 
@@ -511,6 +512,40 @@ class TestReconnectAttempts:
         # Second failure: attempts=2, 2 > 2 false -> reconnect
         # Third failure: attempts=3, 3 > 2 true -> raise RuntimeError
         assert reconnect_count == 2
+
+    @pytest.mark.asyncio
+    async def test_exhausted_budget_raises_the_failure_with_its_code(self) -> None:
+        """The failure that exhausted the budget reaches the caller unchanged."""
+        stream = CdcStream.__new__(CdcStream)
+        stream._closed = False
+        stream._started = True
+        stream._max_reconnect_attempts = 1
+        stream._reconnect_attempts = 0
+        stream._backoff_task = None
+        stream._native_task = None
+
+        engine = MagicMock()
+        engine.next_event.return_value = None
+        stream._engine = engine
+        stream._client = MagicMock()
+
+        dropped = RuntimeError("stream dropped")
+        dropped.code = MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+
+        async def fake_reconnect(self: CdcStream) -> None:
+            self._client = MagicMock()
+            self._engine = engine
+
+        with (
+            patch.object(CdcStream, "_reconnect", fake_reconnect),
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()),
+            patch("asyncio.to_thread", side_effect=dropped),
+            pytest.raises(RuntimeError) as raised,
+        ):
+            await stream.__anext__()
+
+        assert raised.value is dropped
+        assert getattr(raised.value, "code", None) == MES_ERR_DISCONNECTED
 
     @pytest.mark.asyncio
     async def test_zero_reconnect_attempts_no_retry(self) -> None:
@@ -560,7 +595,7 @@ class TestReconnectAttempts:
 
         with (
             patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()),
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="immediate drop"),
         ):
             await stream.__anext__()
 
@@ -590,7 +625,7 @@ class TestReconnectAttempts:
         with (
             patch.object(stream, "_reconnect", reconnect),
             patch("asyncio.to_thread", side_effect=RuntimeError("poll drop")),
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="poll drop"),
         ):
             await stream.__anext__()
 
@@ -643,7 +678,7 @@ class TestRetryClassification:
         with (
             patch.object(CdcStream, "_start", new=AsyncMock(side_effect=error)) as start,
             patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()) as backoff,
-            pytest.raises(RuntimeError, match="Max reconnect attempts"),
+            pytest.raises(RuntimeError, match="transient stream error"),
         ):
             await stream.__anext__()
 

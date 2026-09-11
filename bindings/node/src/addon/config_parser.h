@@ -10,6 +10,8 @@
 
 #include <string>
 
+#include "mes_error_util.h"
+
 namespace mes_node {
 
 constexpr uint16_t kDefaultPort = 3306;
@@ -79,7 +81,7 @@ constexpr ConfigOption kConfigOptions[] = {
 };
 
 /** Reject every supplied option whose value is not of its declared type.
- *  Returns false and schedules a JS TypeError on the first mismatch.
+ *  Returns false and schedules a coded JS error on the first mismatch.
  *
  *  An undefined value means the option was not supplied and keeps its default;
  *  any other value must match, so a caller that passes the wrong type gets an
@@ -107,7 +109,8 @@ inline bool ValidateConfigTypes(Napi::Env env, Napi::Object config) {
         break;
     }
     if (!matches) {
-      Napi::TypeError::New(env, std::string(option.key) + " must be " + expected)
+      mes_node::MakeMesError(env, std::string(option.key) + " must be " + expected,
+                             MES_ERR_INVALID_ARG)
           .ThrowAsJavaScriptException();
       return false;
     }
@@ -138,7 +141,8 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
   if (port_v.IsNumber()) {
     uint32_t port = port_v.As<Napi::Number>().Uint32Value();
     if (port < 1 || port > 65535) {
-      Napi::RangeError::New(env, "port must be 1-65535").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "port must be 1-65535", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return false;
     }
     cfg.port = static_cast<uint16_t>(port);
@@ -184,7 +188,8 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
   if (ssl_mode_v.IsNumber()) {
     ssl_mode = ssl_mode_v.As<Napi::Number>().Uint32Value();
     if (ssl_mode > 4) {
-      Napi::TypeError::New(env, "sslMode must be 0-4").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "sslMode must be 0-4", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return false;
     }
   }

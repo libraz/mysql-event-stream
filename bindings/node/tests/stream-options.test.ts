@@ -8,7 +8,7 @@ import { CdcStream } from "../src/stream.js";
 import type { ClientConfig, StreamConfig } from "../src/types.js";
 import { MesErrorCode } from "../src/types.js";
 import { OPTION_TYPES, type OptionType } from "../src/validation.js";
-import { loadBindingContract } from "./contract-fixture.js";
+import { acceptedMinimum, companionOptions, loadBindingContract } from "./contract-fixture.js";
 
 const contract = loadBindingContract();
 
@@ -75,6 +75,18 @@ const DECLARED_TYPE_CASES = OPTION_ENTRIES.map(([key, type]) => ({
   key,
   sample: SAMPLE_VALUES.find((sample) => sample.satisfies === type),
 }));
+
+/**
+ * A configuration supplying one option with a value it accepts: the sample of
+ * its declared type raised to the minimum the option accepts once its
+ * companions are there, plus those companions.
+ */
+function acceptableConfig(key: string, value: unknown): Record<string, unknown> {
+  const minimum = acceptedMinimum(key);
+  const accepted =
+    minimum !== undefined && typeof value === "number" ? Math.max(value, minimum) : value;
+  return { ...companionOptions(key), [key]: accepted };
+}
 
 const RANGE_CASES = Object.entries(OPTION_RANGES).flatMap(([key, range]) => [
   { key, accepted: range.min, rejected: range.min - 1, edge: "minimum" },
@@ -144,7 +156,7 @@ describe("stream option validation", () => {
     for (const { key, sample } of DECLARED_TYPE_CASES) {
       for (const path of ENTRY_PATHS) {
         expect(
-          rejectionFrom(() => path.apply({ [key]: sample?.value })),
+          rejectionFrom(() => path.apply(acceptableConfig(key, sample?.value))),
           `${key} = ${sample?.label} via ${path.name}`,
         ).toBeNull();
       }
@@ -175,7 +187,7 @@ describe("stream option validation", () => {
     for (const { key, accepted, edge } of RANGE_CASES) {
       for (const path of ENTRY_PATHS) {
         expect(
-          rejectionFrom(() => path.apply({ [key]: accepted })),
+          rejectionFrom(() => path.apply(acceptableConfig(key, accepted))),
           `${key} at its ${edge} via ${path.name}`,
         ).toBeNull();
       }

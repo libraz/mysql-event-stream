@@ -108,6 +108,21 @@ export const CONDITIONAL_OPTION_MINIMUMS = {
   startBinlogPosition: { minimum: 4, companion: "startBinlogFile" },
 } as const satisfies Record<string, ConditionalMinimum>;
 
+/**
+ * Options that are supplied together or not at all. An offset without the file
+ * it points into names no position a server can start from, so it is refused
+ * rather than accepted and dropped. This is a different statement from the
+ * conditional floor above, which says what a supplied value must be once its
+ * companion is set rather than whether it may appear alone.
+ *
+ * Absence is how this surface leaves an option of a pair unset: a key that is
+ * missing or explicitly `undefined` was not supplied, and every other value
+ * was.
+ */
+export const REQUIRED_TOGETHER_OPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ["startBinlogFile", "startBinlogPosition"],
+];
+
 /** Accepted `maxEvents` window for a batched poll. */
 export const POLL_BATCH = {
   defaultMaxEvents: 64,

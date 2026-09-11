@@ -24,6 +24,15 @@ interface NativeClientForTest {
 }
 
 describe("BinlogClient", () => {
+  it("exports the client class unconditionally, with no build-capability flag", () => {
+    // OpenSSL is a required dependency of the core, so there is no build of
+    // this addon without the client. A flag saying otherwise would describe a
+    // configuration no supported build can produce.
+    const addon = loadNativeAddon<Record<string, unknown>>();
+    expect(typeof addon.BinlogClient).toBe("function");
+    expect(Object.keys(addon)).not.toContain("hasClient");
+  });
+
   it("rejects a zero server ID before connecting", () => {
     try {
       new BinlogClient({ host: "127.0.0.1", serverId: 0 });

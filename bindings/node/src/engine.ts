@@ -7,12 +7,6 @@ import { MesErrorCode } from "./types.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
-  /**
-   * Indicates whether the native addon was built with client (socket/SSL)
-   * support. Only relevant when instantiating `BinlogClient`; `CdcEngine`
-   * is always available regardless of this flag.
-   */
-  hasClient: boolean;
 }
 
 interface NativeEngine {
@@ -115,6 +109,11 @@ export class CdcEngine {
    * [header+checksum, 1 GiB]. Raise this when the server's
    * max_allowed_packet is raised to accommodate very large BLOB/JSON
    * payloads.
+   *
+   * `0` means "no limit" and resolves to the 1 GiB hard cap — it does not
+   * restore the 64 MiB default the way `0` restores the default queue size in
+   * {@link setMaxQueueSize}. Passing it removes the guard against a single
+   * oversized event from an untrusted server.
    */
   setMaxEventSize(maxEventSize: number): void {
     this.ensureNotDestroyed();

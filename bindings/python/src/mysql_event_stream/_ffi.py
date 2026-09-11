@@ -128,7 +128,8 @@ class MESPollResult(ctypes.Structure):
 _LIB_NAMES = ("libmes.dylib", "libmes.so", "mes.dll")
 
 # Development build directories, in the order every harness in the repository
-# prefers them: the client-enabled build first, then the default one.
+# prefers them. Both export the client entry points: OpenSSL is a required
+# dependency of the core, so no build of it omits them.
 _BUILD_DIRS = ("build-client", "build")
 
 

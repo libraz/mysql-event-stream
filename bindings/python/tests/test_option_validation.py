@@ -214,7 +214,9 @@ class TestValidOptionsStillReachTheNativeLayer:
             password="secret",
             server_id=4294967295,
             start_gtid=None,
-            start_binlog_file=None,
+            # The offset and its file are supplied together, as the contract
+            # requires; the file option carries no bound of its own.
+            start_binlog_file="binlog.000001",
             start_binlog_position=4294967295,
             connect_timeout_s=0,
             read_timeout_s=0,

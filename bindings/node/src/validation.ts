@@ -1,4 +1,10 @@
-import { OPTION_RANGES, POLL_BATCH, STREAM_DEFAULTS } from "./contract.js";
+import {
+  CONDITIONAL_OPTION_MINIMUMS,
+  OPTION_RANGES,
+  POLL_BATCH,
+  REQUIRED_TOGETHER_OPTIONS,
+  STREAM_DEFAULTS,
+} from "./contract.js";
 import type { StreamConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
 
@@ -9,7 +15,7 @@ export function invalidArgument(message: string): RangeError {
 }
 
 /** Build the error a wrongly-typed or unrecognized option raises. */
-function invalidType(message: string): TypeError {
+export function invalidType(message: string): TypeError {
   const error = new TypeError(message) as TypeError & { code: number };
   error.code = MesErrorCode.InvalidArg;
   return error;
@@ -102,9 +108,51 @@ function validateIntegerRange(key: string, value: number): void {
 }
 
 /**
+ * Reject a configuration that supplies one option of a required-together pair
+ * without the other.
+ *
+ * The constraint is over a pair, so no per-key check can express it: this runs
+ * once over the whole configuration an entry point produces.
+ *
+ * @param supplied Every option the configuration carries, unset keys included.
+ */
+function validateRequiredTogether(supplied: Record<string, unknown>): void {
+  for (const pair of REQUIRED_TOGETHER_OPTIONS) {
+    const missing = pair.filter((key) => supplied[key] === undefined);
+    if (missing.length === 0 || missing.length === pair.length) continue;
+    throw invalidArgument(
+      `${pair[0]} and ${pair[1]} are required together, and ${missing[0]} is unset`,
+    );
+  }
+}
+
+/**
+ * Apply the floors that hold only while a companion option is set.
+ *
+ * Also a whole-configuration check: the companion is another key, so the
+ * per-key range check cannot see it. Enforcing it here is what keeps a value
+ * this validator accepts from being refused later by the native layer.
+ *
+ * @param supplied Every option the configuration carries, unset keys included.
+ */
+function validateConditionalMinimums(supplied: Record<string, unknown>): void {
+  for (const [key, floor] of Object.entries(CONDITIONAL_OPTION_MINIMUMS)) {
+    if (supplied[floor.companion] === undefined) continue;
+    const value = supplied[key];
+    if (typeof value !== "number" || value >= floor.minimum) continue;
+    const { max } = OPTION_RANGES[key as keyof typeof OPTION_RANGES];
+    const upper = max === null ? "unbounded" : String(max);
+    throw invalidArgument(
+      `${key} must be ${floor.minimum} through ${upper} when ${floor.companion} is set, got ${value}`,
+    );
+  }
+}
+
+/**
  * Validate a supplied stream configuration in full: unrecognized keys, values
- * that do not match their declared type, and integers outside their accepted
- * range are all rejected here.
+ * that do not match their declared type, integers outside their accepted range,
+ * options of a pair supplied alone, and a value below the floor its companion
+ * brings into force are all rejected here.
  *
  * Every entry point into a stream's configuration runs this, so no key or value
  * can be refused by one of them and silently defaulted by another. A key whose
@@ -112,8 +160,14 @@ function validateIntegerRange(key: string, value: number): void {
  * error, because `undefined` is how this surface spells "unset".
  *
  * @param config Options exactly as supplied, before any default is filled in.
+ * @param base Configuration `config` overrides, when it is a partial update.
+ *   The checks that span two options hold over the configuration the update
+ *   produces, not over the keys the update happens to name.
  */
-export function validateStreamOptions(config: Partial<StreamConfig>): void {
+export function validateStreamOptions(
+  config: Partial<StreamConfig>,
+  base?: Partial<StreamConfig>,
+): void {
   if (config === null || typeof config !== "object") {
     throw invalidType("config must be an object");
   }
@@ -130,6 +184,9 @@ export function validateStreamOptions(config: Partial<StreamConfig>): void {
       validateIntegerRange(key, value as number);
     }
   }
+  const effective = { ...base, ...supplied } as Record<string, unknown>;
+  validateRequiredTogether(effective);
+  validateConditionalMinimums(effective);
 }
 
 /**

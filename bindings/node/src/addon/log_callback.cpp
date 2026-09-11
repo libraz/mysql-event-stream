@@ -10,6 +10,7 @@
 #include <string>
 
 #include "mes.h"
+#include "mes_error_util.h"
 
 namespace mes_node {
 
@@ -131,7 +132,8 @@ Napi::Value SetLogCallback(const Napi::CallbackInfo& info) {
     // matches, which is indistinguishable from never installing a handler.
     const int32_t raw = info[1].As<Napi::Number>().Int32Value();
     if (raw < MES_LOG_ERROR || raw > MES_LOG_DEBUG) {
-      Napi::RangeError::New(env, "log level must be an integer between 0 and 3")
+      mes_node::MakeMesError(env, "log level must be an integer between 0 and 3",
+                             MES_ERR_INVALID_ARG)
           .ThrowAsJavaScriptException();
       return env.Undefined();
     }
@@ -151,7 +153,7 @@ Napi::Value SetLogCallback(const Napi::CallbackInfo& info) {
   }
 
   if (!info[0].IsFunction()) {
-    Napi::TypeError::New(env, "setLogCallback expects a function or null")
+    mes_node::MakeMesError(env, "setLogCallback expects a function or null", MES_ERR_INVALID_ARG)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }

@@ -21,6 +21,13 @@ export interface ContractOption {
   fileOption?: { node: string; python: string };
 }
 
+/** A pair of options that are supplied together or not at all. */
+export interface ContractOptionPair {
+  canonical: [string, string];
+  node: [string, string];
+  python: [string, string];
+}
+
 export interface StartPosition {
   startGtid: string | null;
   startBinlogFile: string | null;
@@ -50,6 +57,12 @@ export interface BindingContract {
   iteration: { releaseContract: string };
   pollBatch: { defaultMaxEvents: number; minMaxEvents: number; maxMaxEvents: number };
   logLevel: { min: number; max: number; default: number };
+  requiredTogether: {
+    rule: string;
+    pairs: ContractOptionPair[];
+    unsetRule: string;
+    unsetValues: { node: Record<string, number>; python: Record<string, number> };
+  };
   options: ContractOption[];
 }
 
@@ -57,6 +70,43 @@ export interface BindingContract {
 export function loadBindingContract(): BindingContract {
   const path = new URL("../../../core/contracts/bindings.json", import.meta.url);
   return JSON.parse(readFileSync(path, "utf8")) as BindingContract;
+}
+
+/**
+ * Lowest value an option accepts once everything the contract pairs with it is
+ * supplied: the conditional floor, where one is stated, otherwise the range
+ * minimum.
+ *
+ * @param key Option as this surface spells it.
+ * @returns The accepted minimum, or `undefined` for an option with no range.
+ */
+export function acceptedMinimum(key: string): number | undefined {
+  const contract = loadBindingContract();
+  const option = contract.options.find((entry) => entry.node === key);
+  if (option === undefined || option.min === undefined) return undefined;
+  const paired = contract.requiredTogether.pairs.some((pair) => pair.node.includes(key));
+  return paired ? (option.minWhenFileSet ?? option.min) : option.min;
+}
+
+/**
+ * Options that have to accompany `key`, each with a value it accepts, so that
+ * probing one option is not refused over a pair constraint it is not about.
+ *
+ * @param key Option the caller is about to supply on its own.
+ * @returns The companions to supply with it, empty when it has none.
+ */
+export function companionOptions(key: string): Record<string, unknown> {
+  const contract = loadBindingContract();
+  const companions: Record<string, unknown> = {};
+  for (const pair of contract.requiredTogether.pairs) {
+    if (!pair.node.includes(key)) continue;
+    for (const companion of pair.node.filter((name) => name !== key)) {
+      const option = contract.options.find((entry) => entry.node === companion);
+      companions[companion] =
+        option?.type === "integer" ? acceptedMinimum(companion) : "binlog.000001";
+    }
+  }
+  return companions;
 }
 
 /**

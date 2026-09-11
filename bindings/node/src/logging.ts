@@ -3,7 +3,7 @@
 
 import { LOG_LEVEL_RANGE } from "./contract.js";
 import { loadNativeAddon } from "./native.js";
-import { invalidArgument } from "./validation.js";
+import { invalidArgument, invalidType } from "./validation.js";
 
 interface LogAddon {
   setLogCallback(callback: ((level: number, message: string) => void) | null, level: number): void;
@@ -65,7 +65,7 @@ export function setLogCallback(handler: LogHandler | null, level: LogLevel = Log
     return;
   }
   if (typeof handler !== "function") {
-    throw new TypeError("setLogCallback expects a function or null");
+    throw invalidType("setLogCallback expects a function or null");
   }
   addon.setLogCallback((lvl: number, message: string) => {
     // Logging must never alter stream control flow. In particular, an

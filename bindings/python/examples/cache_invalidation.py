@@ -62,7 +62,7 @@ Prerequisites:
     1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
     1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
         (same port 13308 / database mes_test; flavor auto-detected)
-    2. Build libmes with client support:
+    2. Build libmes:
        cmake -B build-client
        cmake --build build-client --parallel
     3. Create the tables (DDL above)
@@ -183,8 +183,8 @@ def find_lib_path() -> str:
 
     Checks in order:
     1. MES_LIB_PATH environment variable
-    2. build-client/core/ (client-enabled build)
-    3. build/core/ (standard build)
+    2. build-client/core/
+    3. build/core/
     """
     env_path = os.environ.get("MES_LIB_PATH")
     if env_path and Path(env_path).exists():
@@ -212,7 +212,6 @@ async def async_main(lib_path: str) -> None:
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
         server_id=3,
-        start_gtid="",
         lib_path=lib_path,
     ):
         if not running:

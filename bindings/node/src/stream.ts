@@ -5,7 +5,7 @@ import { BinlogClient } from "./client.js";
 import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";
 import type { ChangeEvent, StreamConfig } from "./types.js";
-import { validateStreamOptions, withStreamDefaults } from "./validation.js";
+import { invalidArgument, validateStreamOptions, withStreamDefaults } from "./validation.js";
 
 /** Concatenate two byte arrays into a new Uint8Array. */
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
@@ -73,13 +73,15 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
    * Override config properties before streaming starts.
    *
    * @param overrides Options to replace, validated exactly as the constructor
-   *   validates a whole config.
+   *   validates a whole config. Options that have to be supplied together are
+   *   judged against the configuration the update produces, so an override may
+   *   name one of them while the other stays as the constructor left it.
    */
   configure(overrides: Partial<StreamConfig>): void {
     if (this.iterator) {
-      throw new Error("Cannot configure after streaming has started");
+      throw invalidArgument("Cannot configure after streaming has started");
     }
-    validateStreamOptions(overrides);
+    validateStreamOptions(overrides, this.config);
     this.config = { ...this.config, ...overrides };
   }
 
@@ -89,7 +91,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
       return (async function* () {})();
     }
     if (this.iterator) {
-      throw new Error("CdcStream is already being iterated. Use a single for-await loop.");
+      throw invalidArgument("CdcStream is already being iterated. Use a single for-await loop.");
     }
     this.iterator = this.generate();
     return this.iterator;

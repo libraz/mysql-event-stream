@@ -13,7 +13,7 @@ from ._contract import (
     NON_RETRYABLE_ERROR_CODES,
     backoff_delay_ms,
 )
-from ._options import validate_option
+from ._options import validate_options
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
@@ -113,7 +113,11 @@ class CdcStream:
                 Requires ``start_binlog_position`` and cannot be combined with
                 ``start_gtid``.
             start_binlog_position: Binlog offset for an exact file/offset
-                start; must be at least 4.
+                start; 4 through UINT32_MAX, since the first event begins after
+                the file's 4-byte magic number. Requires
+                ``start_binlog_file``: an offset naming no file is refused
+                here rather than accepted and dropped. 0 is what a
+                configuration that requested no file/offset start carries.
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
             ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
@@ -173,9 +177,8 @@ class CdcStream:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._on_metadata_error = on_metadata_error
         # Construction accepts exactly what configure() accepts: both paths
-        # range-check against the same contract table.
-        for key, attr in _FIELD_MAP.items():
-            validate_option(key, getattr(self, attr))
+        # check the whole configuration against the same contract table.
+        validate_options({key: getattr(self, attr) for key, attr in _FIELD_MAP.items()})
         self._reconnect_attempts = 0
 
         self._client: BinlogClient | None = None
@@ -241,15 +244,21 @@ class CdcStream:
 
         Raises:
             RuntimeError: If streaming has already started.
+            TypeError: If a key is unrecognized or a value has the wrong type.
+            ValueError: If a value falls outside its accepted range, or leaves
+                one option of a required-together pair supplied alone.
         """
         if self._started:
             raise RuntimeError("Cannot configure after streaming has started")
 
+        # Validated before anything is applied, and against the configuration
+        # the overrides produce: an option that has to be supplied alongside
+        # another may be overridden on its own while that one stays as the
+        # constructor left it.
+        configured = {key: getattr(self, attr) for key, attr in _FIELD_MAP.items()}
+        validate_options(kwargs, base=configured)
         for key, value in kwargs.items():
-            attr = _FIELD_MAP.get(key)
-            if attr is None:
-                raise TypeError(f"Unknown config key: {key!r}")
-            validate_option(key, value)
+            attr = _FIELD_MAP[key]
             setattr(self, attr, list(cast(list[str], value)) if isinstance(value, list) else value)
 
     async def _dispatch(self, func: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -361,8 +370,10 @@ class CdcStream:
 
         Raises:
             StopAsyncIteration: If the stream was closed.
-            RuntimeError: If the retry budget is exhausted or an internal
-                invariant is violated.
+            Exception: The failure that ended the stream, re-raised as it was
+                received once the retry budget is exhausted, so its ``code``
+                still identifies the native error category.
+            RuntimeError: If an internal invariant is violated.
         """
         while not self._started:
             try:
@@ -608,9 +619,10 @@ class CdcStream:
         self._reconnect_attempts += 1
         if self._reconnect_attempts > self._max_reconnect_attempts:
             await self.close()
-            raise RuntimeError(
-                f"Max reconnect attempts ({self._max_reconnect_attempts}) exceeded"
-            ) from error
+            # Raised as it came, like the fail-fast branch above: the documented
+            # way to classify a stream failure is its ``code``, and a fresh
+            # exception describing the exhausted budget would carry none.
+            raise error
 
     async def _wait_for_backoff(self) -> None:
         """Wait for jittered backoff, interruptible by close()."""

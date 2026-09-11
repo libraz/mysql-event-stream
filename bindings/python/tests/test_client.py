@@ -64,6 +64,22 @@ def test_constructor_rejects_zero_server_id() -> None:
         BinlogClient(server_id=0)
 
 
+@patch("mysql_event_stream.client.get_library")
+@patch("mysql_event_stream.client.load_client_library", return_value=False)
+def test_missing_client_exports_names_the_loaded_library(
+    mock_load_client: MagicMock, mock_get_library: MagicMock
+) -> None:
+    """The diagnostic describes the library that was loaded.
+
+    Every supported build exports the client entry points, so the refusal must
+    point at the file that was resolved rather than at a build variant.
+    """
+    mock_get_library.return_value = MagicMock()
+    with pytest.raises(RuntimeError, match="does not export the mes_client entry points") as raised:
+        BinlogClient()
+    assert getattr(raised.value, "code", None) == MES_ERR_INVALID_ARG
+
+
 @patch("mysql_event_stream.client.load_client_library", return_value=True)
 @patch("mysql_event_stream.client.get_library")
 def test_poll_batch_copies_all_native_results(
@@ -418,9 +434,17 @@ class TestClientClose:
         mock_load.return_value = lib
 
         with pytest.raises(ValueError, match="cannot be combined"):
-            BinlogClient(start_gtid="uuid:1-1", start_binlog_file="binlog.000001").connect()
-        with pytest.raises(ValueError, match="4 through"):
-            BinlogClient(start_binlog_file="binlog.000001", start_binlog_position=3).connect()
+            BinlogClient(
+                start_gtid="uuid:1-1",
+                start_binlog_file="binlog.000001",
+                start_binlog_position=4,
+            ).connect()
+        with pytest.raises(ValueError, match="must name a binlog file"):
+            BinlogClient(start_binlog_file="", start_binlog_position=4).connect()
+        # Below the floor the companion file brings into force, refused at
+        # construction before a connection is attempted at all.
+        with pytest.raises(ValueError, match="start_binlog_position must be 4 through"):
+            BinlogClient(start_binlog_file="binlog.000001", start_binlog_position=3)
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")

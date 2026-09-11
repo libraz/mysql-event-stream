@@ -33,12 +33,14 @@ def _next_server_id() -> int:
 
 
 def _find_lib_path() -> str:
-    """Find the libmes shared library with client support.
+    """Find the libmes shared library.
 
-    Search order:
+    Search order, which is the order every harness in the repository prefers.
+    Both build directories export the client entry points -- OpenSSL is a
+    required dependency of the core, so no build of it omits them.
         1. MES_LIB_PATH environment variable
-        2. build-client directory (client-enabled build)
-        3. Regular build directory
+        2. build-client directory
+        3. build directory
 
     A library that cannot be resolved leaves nothing for the suite to stream
     with, so it aborts the tests instead of skipping them.

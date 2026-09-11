@@ -201,7 +201,10 @@ class ClientConfig:
         start_binlog_file: Binlog file for an exact file/offset start. Requires
             start_binlog_position and cannot be combined with start_gtid.
         start_binlog_position: Binlog offset for an exact file/offset start;
-            must be at least 4.
+            4 through UINT32_MAX, since the first event begins after the file's
+            4-byte magic number. Requires start_binlog_file: an offset naming
+            no file is refused rather than accepted and dropped. 0 is what a
+            configuration that requested no file/offset start carries.
         connect_timeout_s: Connection timeout in seconds.
         read_timeout_s: Read timeout in seconds.
         ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,

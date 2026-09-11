@@ -157,7 +157,6 @@ async function main(): Promise<void> {
     user: "root",
     password: "test_root_password",
     serverId: 97,
-    startGtid: "",
   });
 
   let running = true;

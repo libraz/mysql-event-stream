@@ -130,7 +130,22 @@
     "default": 1,
     "rule": "Installing a log handler with a level outside the documented mes_log_level_t range is an error, never a silently disabled callback."
   },
-  "optionsRule": "Every entry states the accepted range each binding must enforce for the option. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only. A selector may also state a tighter floor that holds only while the companion option it names is set: the stated range stays in force when that companion is unset, because the value a binding passes through then is the one that means no start position was requested. Naming a companion states when the floor applies and nothing more: it does not itself require the two options to be supplied together. The first binlog event begins after the file's 4-byte magic number, which is why an offset into a named file cannot be below 4.",
+  "requiredTogether": {
+    "rule": "Both options of a pair are supplied together or neither is, and the whole-config entry point that received them rejects a configuration supplying one alone: an offset without the file it points into names no position a server can start from, so a binding that accepted it would discard the offset and replicate from somewhere the caller never asked for. The refusal belongs to the entry points that see a whole configuration, because a per-key validator cannot see the companion. This is a different statement from the conditional floor an option entry may carry: the floor says what a supplied value must be once its companion is set, this says whether the option may appear alone at all.",
+    "pairs": [
+      {
+        "canonical": ["startBinlogFile", "startBinlogPosition"],
+        "node": ["startBinlogFile", "startBinlogPosition"],
+        "python": ["start_binlog_file", "start_binlog_position"]
+      }
+    ],
+    "unsetRule": "Whether an option counts as supplied is decided by the surface's own spelling of an absent option. A surface that can spell absence spells it that way and states nothing here (Node leaves the key out or sets it to undefined). A surface whose signature declares a plain integer cannot, so it states the value it passes when nothing was requested, and that value counts as unset: it is below the option's conditional floor and therefore never a position the option could have been asked to start from. The consequence is stated rather than hidden: a Python caller who passes that value explicitly is indistinguishable from one who passed nothing, so it is accepted there and refused on Node.",
+    "unsetValues": {
+      "node": {},
+      "python": { "start_binlog_position": 0 }
+    }
+  },
+  "optionsRule": "Every entry states the accepted range each binding must enforce for the option. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only. A selector may also state a tighter floor that holds only while the companion option it names is set: the stated range stays in force when that companion is unset, because the value a binding passes through then is the one that means no start position was requested. Naming a companion states when the floor applies and nothing more: whether the two options may appear alone is the sibling requiredTogether rule, not this one. The first binlog event begins after the file's 4-byte magic number, which is why an offset into a named file cannot be below 4.",
   "options": [
     {
       "canonical": "host",

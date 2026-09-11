@@ -17,7 +17,11 @@
  *
  * Usage:
  *   npx tsx examples/cdc-streaming.ts
- *   npx tsx examples/cdc-streaming.ts --gtid ""
+ *   npx tsx examples/cdc-streaming.ts --gtid "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-42"
+ *
+ *   Without --gtid the stream starts from the server's current position. A
+ *   supplied MySQL entry naming a bare transaction number is widened to an
+ *   interval, so `uuid:42` resumes from `uuid:1-42`.
  *
  * Example output:
  *   mysql-event-stream CDC Streaming Example
@@ -61,7 +65,7 @@ function printEvent(event: ChangeEvent): void {
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
-      gtid: { type: "string", default: "" },
+      gtid: { type: "string" },
     },
     strict: true,
   });
@@ -75,7 +79,10 @@ async function main(): Promise<void> {
     user: "root",
     password: "test_root_password",
     serverId: 99,
-    startGtid: values.gtid ?? "",
+    // Left unset without --gtid, which snapshots the server's current
+    // position. An empty GTID set would instead ask for every binlog the
+    // server still retains.
+    ...(values.gtid ? { startGtid: values.gtid } : {}),
     connectTimeoutS: 10,
     readTimeoutS: 30,
   });

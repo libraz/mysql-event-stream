@@ -8,8 +8,7 @@ import { MesErrorCode } from "./types.js";
 import { invalidArgument, validatePollBatchSize, validatePort } from "./validation.js";
 
 interface NativeAddon {
-  BinlogClient?: new () => NativeClient;
-  hasClient: boolean;
+  BinlogClient: new () => NativeClient;
 }
 
 interface NativeClient {
@@ -41,21 +40,11 @@ function destroyedError(): Error {
   return error;
 }
 
-function tagNativeValidationError(error: unknown): unknown {
-  if ((error instanceof TypeError || error instanceof RangeError) && !("code" in error)) {
-    Object.assign(error, { code: MesErrorCode.InvalidArg });
-  }
-  return error;
-}
-
 /** BinlogClient for connecting to MySQL and streaming binlog events. */
 export class BinlogClient {
   private client: NativeClient | null;
 
   constructor(config: ClientConfig) {
-    if (!addon.hasClient || !addon.BinlogClient) {
-      throw invalidArgument("BinlogClient native addon not loaded");
-    }
     validatePort(config.port);
     if (config.serverId !== undefined && config.serverId === 0) {
       throw invalidArgument("serverId must be non-zero");
@@ -68,7 +57,9 @@ export class BinlogClient {
       this.client.connect(config);
     } catch (e) {
       this.client.destroy();
-      throw tagNativeValidationError(e);
+      // Re-thrown as raised: every native refusal already carries the numeric
+      // code the stream's retry policy classifies on.
+      throw e;
     }
   }
 

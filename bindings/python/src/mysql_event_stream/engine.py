@@ -260,7 +260,11 @@ class CdcEngine:
         [header+checksum, 1 GiB].
 
         Args:
-            max_event_size: Desired ceiling in bytes.
+            max_event_size: Desired ceiling in bytes. 0 means "no limit" and
+                resolves to the 1 GiB hard cap; it does not restore the 64 MiB
+                default the way 0 restores the default queue size in
+                :meth:`set_max_queue_size`. Passing it removes the guard
+                against a single oversized event from an untrusted server.
 
         Raises:
             TypeError: If max_event_size is not an integer.
@@ -427,8 +431,7 @@ class CdcEngine:
         """Enable metadata queries for column name resolution.
 
         Uses a separate MySQL connection to fetch column names via
-        SHOW COLUMNS FROM. Requires the library to be built with
-        MySQL client support.
+        SHOW COLUMNS FROM.
 
         Args:
             host: MySQL host.

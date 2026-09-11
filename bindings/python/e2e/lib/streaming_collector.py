@@ -19,7 +19,9 @@ class StreamingCollector:
 
     Usage::
 
-        collector = StreamingCollector(lib_path, server_id=100)
+        collector = StreamingCollector(
+            lib_path, server_id=100, start_gtid=mysql.get_current_gtid()
+        )
         collector.start()
         try:
             mysql.insert("items", name="test", value=42)
@@ -38,7 +40,11 @@ class StreamingCollector:
         user: str = "root",
         password: str = "test_root_password",
         server_id: int = 100,
-        start_gtid: str = "",
+        # Required rather than defaulted: the empty GTID set is a valid value
+        # that asks the server for every binlog it still retains, so a caller
+        # that forgot to snapshot a position would collect an unbounded replay
+        # instead of the events its own fixture produced.
+        start_gtid: str,
     ) -> None:
         self._lib_path = lib_path
         self._host = host

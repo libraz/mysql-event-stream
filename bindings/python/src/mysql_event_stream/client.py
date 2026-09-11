@@ -117,7 +117,11 @@ class BinlogClient:
                 Requires ``start_binlog_position`` and cannot be combined with
                 ``start_gtid``.
             start_binlog_position: Binlog offset for an exact file/offset
-                start; must be at least 4.
+                start; 4 through UINT32_MAX, since the first event begins after
+                the file's 4-byte magic number. Requires
+                ``start_binlog_file``: an offset naming no file is refused
+                here rather than accepted and dropped. 0 is what a
+                configuration that requested no file/offset start carries.
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
             ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,
@@ -141,7 +145,8 @@ class BinlogClient:
         Raises:
             TypeError: If an option has the wrong type.
             ValueError: If an option falls outside its accepted range.
-            RuntimeError: If client support is not available.
+            RuntimeError: If the loaded library does not export the
+                ``mes_client`` entry points.
             OSError: If the shared library cannot be found.
         """
         resolved = (
@@ -201,9 +206,12 @@ class BinlogClient:
 
         self._lib = get_library(lib_path)
         if not load_client_library(self._lib):
+            # Every supported build of libmes exports these symbols, so the
+            # library that was loaded is not one of them -- typically an
+            # unrelated or outdated file selected by lib_path or MES_LIB_PATH.
             raise exception_for_rc(
                 MES_ERR_INVALID_ARG,
-                "BinlogClient is not available. Rebuild libmes with OpenSSL installed",
+                "The loaded libmes does not export the mes_client entry points",
             )
 
         self._config = resolved
@@ -245,15 +253,13 @@ class BinlogClient:
         if self._config.start_binlog_file is not None:
             if self._config.start_gtid is not None:
                 raise ValueError("start_binlog_file cannot be combined with start_gtid")
-            if (
-                not self._config.start_binlog_file
-                or self._config.start_binlog_position < 4
-                or self._config.start_binlog_position > 0xFFFFFFFF
-            ):
-                raise ValueError(
-                    "start_binlog_file and start_binlog_position "
-                    "(4 through UINT32_MAX) are required"
-                )
+            # The pair and the floor are enforced by __init__, against the
+            # contract's own numbers, for keyword arguments and a pre-built
+            # ClientConfig alike. Restating them here would be a second copy
+            # free to drift, so what is left is the file having to name
+            # something, which no option range can express.
+            if not self._config.start_binlog_file:
+                raise ValueError("start_binlog_file must name a binlog file")
         # Keep explicit references to encoded bytes so they are not
         # garbage-collected before the C call completes (matters on
         # non-CPython runtimes like PyPy).

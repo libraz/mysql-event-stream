@@ -49,7 +49,11 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
 EngineWrap::EngineWrap(const Napi::CallbackInfo& info)
     : Napi::ObjectWrap<EngineWrap>(info), engine_(mes_create()) {
   if (!engine_) {
-    Napi::Error::New(info.Env(), "Failed to create mes engine").ThrowAsJavaScriptException();
+    // Every throw on this surface carries a numeric code: the stream retry
+    // policy classifies a code-less error as retryable and would spend its
+    // whole reconnect budget on a permanent failure.
+    mes_node::MakeMesError(info.Env(), "Failed to create mes engine", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
   }
 }
 
@@ -69,7 +73,7 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1) {
-    Napi::TypeError::New(env, "Expected Buffer or Uint8Array argument")
+    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -81,7 +85,8 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   if (info[0].IsTypedArray()) {
     auto typed = info[0].As<Napi::TypedArray>();
     if (typed.TypedArrayType() != napi_uint8_array) {
-      Napi::TypeError::New(env, "Expected Buffer or Uint8Array").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "Expected Buffer or Uint8Array", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return Napi::Number::New(env, 0);
     }
     auto arr = info[0].As<Napi::Uint8Array>();
@@ -92,7 +97,7 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
     data = buf.Data();
     len = buf.Length();
   } else {
-    Napi::TypeError::New(env, "Expected Buffer or Uint8Array argument")
+    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -144,7 +149,10 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   constexpr size_t kEventTypeCount = sizeof(kEventTypeNames) / sizeof(kEventTypeNames[0]);
   int type_idx = static_cast<int>(event->type);
   if (type_idx < 0 || static_cast<size_t>(type_idx) >= kEventTypeCount) {
-    Napi::Error::New(env, "Unknown event type: " + std::to_string(type_idx))
+    // An event type outside mes_event_type_t means this addon and the core it
+    // is linked against disagree, which no reconnect can repair: report it as a
+    // decode failure so the retry policy treats it as permanent.
+    mes_node::MakeMesError(env, "Unknown event type: " + std::to_string(type_idx), MES_ERR_DECODE)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -252,13 +260,15 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1 || !info[0].IsNumber()) {
-    Napi::TypeError::New(env, "Expected number argument").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
 
   int64_t max_size = info[0].As<Napi::Number>().Int64Value();
   if (max_size < 0) {
-    Napi::TypeError::New(env, "maxQueueSize must be non-negative").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "maxQueueSize must be non-negative", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
   mes_error_t err = mes_set_max_queue_size(engine_, static_cast<size_t>(max_size));
@@ -277,13 +287,15 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsNumber()) {
-    Napi::TypeError::New(env, "Expected number argument").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
 
   int64_t raw = info[0].As<Napi::Number>().Int64Value();
   if (raw < 0 || raw > UINT32_MAX) {
-    Napi::RangeError::New(env, "maxEventSize must fit in uint32").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "maxEventSize must fit in uint32", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
   mes_error_t err = mes_set_max_event_size(engine_, static_cast<uint32_t>(raw));
@@ -311,7 +323,8 @@ void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsBoolean()) {
-    Napi::TypeError::New(env, "Expected boolean argument").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected boolean argument", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
   mes_error_t err = mes_set_checksum_enabled(engine_, info[0].As<Napi::Boolean>().Value() ? 1 : 0);
@@ -330,7 +343,8 @@ static std::vector<std::string> ExtractStringArray(Napi::Env env, const Napi::Va
   for (uint32_t i = 0; i < arr.Length(); i++) {
     Napi::Value item = arr[i];
     if (!item.IsString()) {
-      Napi::TypeError::New(env, "Array must contain only strings").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "Array must contain only strings", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return {};
     }
     result.push_back(item.As<Napi::String>().Utf8Value());
@@ -347,7 +361,8 @@ void EngineWrap::SetStringFilter(const Napi::CallbackInfo& info,
     return;
   }
   if (info.Length() < 1 || !info[0].IsArray()) {
-    Napi::TypeError::New(env, "Expected array of strings").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected array of strings", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
   auto strings = ExtractStringArray(env, info[0]);
@@ -390,7 +405,8 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1 || !info[0].IsObject()) {
-    Napi::TypeError::New(env, "Expected config object").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected config object", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return env.Undefined();
   }
 

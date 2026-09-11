@@ -142,6 +142,30 @@ describe("CdcStream", () => {
     expect(() => stream.configure({ unknown: true } as never)).toThrow("Unknown config key");
   });
 
+  it("codes every lifecycle refusal the stream raises", async () => {
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    // Taking the iterator marks the stream as started without running the
+    // generator body, which is what both refusals below react to.
+    stream[Symbol.asyncIterator]();
+
+    const refusals: Array<{ label: string; call: () => void }> = [
+      { label: "configure after start", call: () => stream.configure({ port: 3307 }) },
+      { label: "a second iteration", call: () => stream[Symbol.asyncIterator]() },
+    ];
+    for (const { label, call } of refusals) {
+      let thrown: unknown;
+      try {
+        call();
+      } catch (error) {
+        thrown = error;
+      }
+      const rejection = thrown as (Error & { code?: unknown }) | undefined;
+      expect(rejection, label).toBeDefined();
+      expect(rejection?.code, `${label} carries a code`).toBe(MesErrorCode.InvalidArg);
+    }
+    await stream.close();
+  });
+
   it("currentGtid should return empty string before streaming", () => {
     const stream = new CdcStream({ host: "127.0.0.1" });
     expect(stream.currentGtid).toBe("");

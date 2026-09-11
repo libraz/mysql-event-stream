@@ -12,8 +12,6 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   ClientWrap::Init(env, exports);
   mes_node::InitLogCallback(env, exports);
 
-  exports.Set("hasClient", Napi::Boolean::New(env, true));
-
   return exports;
 }
 

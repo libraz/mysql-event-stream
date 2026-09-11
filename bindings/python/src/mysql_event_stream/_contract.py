@@ -111,6 +111,23 @@ CONDITIONAL_OPTION_MINIMUMS: dict[str, ConditionalMinimum] = {
     "start_binlog_position": ConditionalMinimum(minimum=4, companion="start_binlog_file"),
 }
 
+#: Options that are supplied together or not at all. An offset without the file
+#: it points into names no position a server can start from, so it is refused
+#: rather than accepted and dropped. This is a different statement from
+#: :data:`CONDITIONAL_OPTION_MINIMUMS`, which says what a supplied value must be
+#: once its companion is set rather than whether it may appear alone.
+REQUIRED_TOGETHER_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("start_binlog_file", "start_binlog_position"),
+)
+
+#: What "not supplied" looks like for an option this surface cannot spell as
+#: absent. ``start_binlog_position`` is a plain integer here, so a
+#: zero-initialized configuration passes 0 -- below the conditional floor, and
+#: therefore never a position the offset could have been asked to start from.
+#: A caller who passes it explicitly is indistinguishable from one who passed
+#: nothing, which is why it counts as unset for the pair rule.
+UNSET_OPTION_VALUES: dict[str, int] = {"start_binlog_position": 0}
+
 # Accepted max_events window for a batched poll.
 POLL_BATCH_DEFAULT_MAX_EVENTS = 64
 POLL_BATCH_MIN_MAX_EVENTS = 1

@@ -12,14 +12,18 @@ import {
   OPTION_RANGES,
   POLL_BATCH,
   RECONNECT_POLICY,
+  REQUIRED_TOGETHER_OPTIONS,
   STREAM_DEFAULTS,
 } from "../src/contract.js";
 import { setLogCallback } from "../src/logging.js";
 import { CdcStream } from "../src/stream.js";
 import { MesErrorCode, type StreamConfig } from "../src/types.js";
-import { validatePollBatchSize, validateStreamOptions } from "../src/validation.js";
+import { OPTION_TYPES, validatePollBatchSize, validateStreamOptions } from "../src/validation.js";
 import {
+  acceptedMinimum,
   type ContractOption,
+  type ContractOptionPair,
+  companionOptions,
   loadBindingContract,
   loadHeaderFieldDoc,
   type StartPosition,
@@ -82,12 +86,17 @@ function captureStderr(body: () => void): string[] {
   return written;
 }
 
-/** Start-position offset the contract declares a conditional floor for. */
+/** Start-position offset, whose windows the contract states. */
 const startPosition = contract.options.find((option) => option.canonical === "startBinlogPosition");
+
+/** The offset and the file it points into, which the contract pairs. */
+const startPositionPair = contract.requiredTogether.pairs.find(
+  (pair) => pair.canonical[1] === "startBinlogPosition",
+);
 
 /**
  * How a supplied offset relates to the windows the contract states. Crossed
- * with the companion file option's two states and with both entry points that
+ * with the paired file option's two states and with both entry points that
  * accept the option, this enumerates the whole start-position surface instead
  * of sampling it.
  */
@@ -123,44 +132,40 @@ function positionFor(option: ContractOption, positionClass: PositionClass): numb
 }
 
 /**
- * Whether an entry point must refuse one combination.
+ * The rule that refuses a combination, or `null` if it is accepted.
  *
- * `options` is the shared option table, which range-checks each key on its own
- * and so never sees the companion; `client` is the native config parse, the
- * only place the conditional floor applies. An offset supplied without a file
- * is currently refused outright here while the Python surface accepts and
- * silently ignores it: the two surfaces disagree, and this predicate pins what
- * each one does today rather than stating what it should do.
+ * One predicate serves both entry points: the shared option table and the
+ * native config parse agree on every combination. Absence is the whole of this
+ * surface's unset spelling, so every value it is given is a supplied one --
+ * including the offset the contract records as the value the Python surface
+ * passes when nothing was requested, which is refused here and accepted there.
+ * The contract states that difference; neither surface treats a configuration
+ * that names a position any differently.
  */
-function rejects(
+function refusalReason(
   option: ContractOption,
   fileSet: boolean,
   position: number | undefined,
-  entryPoint: "options" | "client",
-): boolean {
+): "range" | "pair" | "floor" | null {
   if (
     position !== undefined &&
     (position < (option.min as number) || position > (option.max as number))
   ) {
-    return true;
+    return "range";
   }
-  if (entryPoint === "options") return false;
-  if (fileSet) {
-    // An omitted offset reaches the parse as unset, which is below the floor.
-    return (position ?? 0) < (option.minWhenFileSet as number);
+  if ((position !== undefined) !== fileSet) return "pair";
+  if (fileSet && position !== undefined && position < (option.minWhenFileSet as number)) {
+    return "floor";
   }
-  return position !== undefined;
+  return null;
 }
 
 /** Build the option subset one case supplies, leaving everything else unset. */
-function caseConfig(
-  option: ContractOption,
-  fileSet: boolean,
-  position: number | undefined,
-): Partial<StreamConfig> {
+function caseConfig(fileSet: boolean, position: number | undefined): Partial<StreamConfig> {
+  const [fileOption, offsetOption] = (startPositionPair as ContractOptionPair).node;
   const config: Record<string, unknown> = {};
-  if (fileSet) config[option.fileOption?.node as string] = "binlog.000001";
-  if (position !== undefined) config[option.node] = position;
+  if (fileSet) config[fileOption] = "binlog.000001";
+  if (position !== undefined) config[offsetOption] = position;
   return config as Partial<StreamConfig>;
 }
 
@@ -252,20 +257,30 @@ describe("binding contract", () => {
 
     for (const option of contract.options) {
       if (option.type !== "integer") continue;
-      const minimum = option.min as number;
-      expect(
-        () => validateStreamOptions({ [option.node]: minimum - 1 } as Partial<StreamConfig>),
-        `${option.node} below minimum`,
-      ).toThrow();
-      expect(
-        () => validateStreamOptions({ [option.node]: minimum } as Partial<StreamConfig>),
-        `${option.node} at minimum`,
-      ).not.toThrow();
+      // An option of a required-together pair cannot be probed on its own, and
+      // once its companion is there the floor the companion brings into force
+      // is what the accepted minimum becomes.
+      const companions = companionOptions(option.node);
+      const accepted = acceptedMinimum(option.node) as number;
+      const probe = (value: number) =>
+        validateStreamOptions({ ...companions, [option.node]: value });
+      expect(() => probe(accepted - 1), `${option.node} below its accepted minimum`).toThrow();
+      expect(() => probe(accepted), `${option.node} at its accepted minimum`).not.toThrow();
       if (option.max === null || option.max === undefined) continue;
-      expect(
-        () => validateStreamOptions({ [option.node]: option.max + 1 } as Partial<StreamConfig>),
-        `${option.node} above maximum`,
-      ).toThrow();
+      expect(() => probe(option.max + 1), `${option.node} above maximum`).toThrow();
+    }
+  });
+
+  it("mirrors the contract's required-together pairs", () => {
+    expect(REQUIRED_TOGETHER_OPTIONS).toEqual(
+      contract.requiredTogether.pairs.map((pair) => pair.node),
+    );
+    for (const pair of REQUIRED_TOGETHER_OPTIONS) {
+      for (const key of pair) {
+        // Recognized by this surface's option table, whether or not the shared
+        // table states a range for it.
+        expect(OPTION_TYPES, `${key} is a declared option`).toHaveProperty(key);
+      }
     }
   });
 
@@ -276,16 +291,25 @@ describe("binding contract", () => {
     expect(option.fileOption?.node, "companion option named for this surface").toBe(
       "startBinlogFile",
     );
-    // The floor is conditional, so the stated range keeps a lower minimum: a
-    // zero-initialized config carries 0 to mean no file/offset start was
-    // requested, and raising the stated minimum to the floor would refuse it.
-    expect(option.min).toBe(0);
+    // The floor is conditional, so the stated range keeps a lower minimum: the
+    // surface that cannot spell an absent offset passes a value inside that
+    // range to mean no file/offset start was requested.
     expect(option.min).toBeLessThan(option.minWhenFileSet as number);
 
     expect(CONDITIONAL_OPTION_MINIMUMS[option.node as "startBinlogPosition"]).toEqual({
       minimum: option.minWhenFileSet,
       companion: option.fileOption?.node,
     });
+  });
+
+  it("spells an unset start-position selector by absence alone", () => {
+    const option = startPosition as ContractOption;
+    // This surface can leave a key out, so the contract records no value for
+    // it: a selector materializes no default, and an explicit undefined is the
+    // same as saying nothing.
+    expect(contract.requiredTogether.unsetValues.node).toEqual({});
+    expect(STREAM_DEFAULTS).not.toHaveProperty(option.node);
+    expect(() => validateStreamOptions({ [option.node]: undefined })).not.toThrow();
   });
 
   it("documents the contract's start-position floor in the C ABI header", () => {
@@ -304,9 +328,9 @@ describe("binding contract", () => {
     expect(() => loadHeaderFieldDoc("no_such_field")).toThrow();
   });
 
-  it("applies the start-position floor exactly when the companion file is set", () => {
+  it("requires the offset and its file together at every entry point", () => {
     const option = startPosition as ContractOption;
-    const floor = option.minWhenFileSet as number;
+    const [fileOption, offsetOption] = (startPositionPair as ContractOptionPair).node;
     // No server listens here, so a config the native parse accepts fails at the
     // connection instead — which is how acceptance is observed.
     const unreachablePort = 19999;
@@ -314,16 +338,11 @@ describe("binding contract", () => {
     for (const fileSet of [false, true]) {
       for (const positionClass of POSITION_CLASSES) {
         const position = positionFor(option, positionClass);
-        const config = caseConfig(option, fileSet, position);
+        const config = caseConfig(fileSet, position);
         const label = `${positionClass}, file ${fileSet ? "set" : "unset"}`;
+        const reason = refusalReason(option, fileSet, position);
 
         const optionsCall = () => validateStreamOptions(config);
-        if (rejects(option, fileSet, position, "options")) {
-          expect(optionsCall, `shared options reject ${label}`).toThrow();
-        } else {
-          expect(optionsCall, `shared options accept ${label}`).not.toThrow();
-        }
-
         let thrown: unknown;
         try {
           new BinlogClient({ host: "127.0.0.1", port: unreachablePort, ...config }).destroy();
@@ -331,25 +350,33 @@ describe("binding contract", () => {
           thrown = error;
         }
         const code = (thrown as { code?: number } | undefined)?.code;
-        if (rejects(option, fileSet, position, "client")) {
-          expect(code, `client rejects ${label}`).toBe(MesErrorCode.InvalidArg);
-          // A refusal the floor itself decides names the option and the floor.
-          // The pair being required together, and the stated range, are other
-          // refusals with their own wording.
-          const floorDecided =
-            fileSet &&
-            position !== undefined &&
-            position >= (option.min as number) &&
-            position < floor;
-          if (floorDecided) {
-            const message = String((thrown as Error).message);
-            expect(message, `rejection cites the option for ${label}`).toContain(option.node);
-            expect(message, `rejection cites the floor for ${label}`).toContain(String(floor));
-          }
-        } else {
+
+        if (reason === null) {
+          expect(optionsCall, `shared options accept ${label}`).not.toThrow();
           expect(thrown, `client reaches the connection for ${label}`).toBeDefined();
           expect(code, `client accepts ${label}`).not.toBe(MesErrorCode.InvalidArg);
+          continue;
         }
+
+        expect(optionsCall, `shared options reject ${label}`).toThrow();
+        let stated = "";
+        try {
+          optionsCall();
+        } catch (error) {
+          stated = String((error as Error).message);
+        }
+        if (reason === "pair") {
+          // A refusal the pair decides names both options.
+          expect(stated, `rejection cites the file option for ${label}`).toContain(fileOption);
+          expect(stated, `rejection cites the offset option for ${label}`).toContain(offsetOption);
+        } else {
+          // A refusal a window decides names the option and the bound it
+          // crossed.
+          expect(stated, `rejection cites the option for ${label}`).toContain(offsetOption);
+          const bound = reason === "floor" ? option.minWhenFileSet : option.max;
+          expect(stated, `rejection cites the bound for ${label}`).toContain(String(bound));
+        }
+        expect(code, `client rejects ${label}`).toBe(MesErrorCode.InvalidArg);
       }
     }
   });

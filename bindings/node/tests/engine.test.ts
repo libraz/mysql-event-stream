@@ -1,6 +1,7 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
+import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
 import { MesErrorCode } from "../src/types.js";
@@ -234,5 +235,156 @@ describe("CdcEngine", () => {
     expect(e1!.after!["0"]).toBe(10);
     expect(e2!.after!["0"]).toBe(20);
     expect(engine.nextEvent()).toBeNull();
+  });
+});
+
+/** Call an engine method with a value its declared parameter type forbids. */
+function callWithArgument(engine: CdcEngine, method: string, argument: unknown): void {
+  const methods = engine as unknown as Record<string, (value: unknown) => unknown>;
+  methods[method](argument);
+}
+
+/** Engine methods that take an argument and can therefore refuse one. */
+const ARGUMENT_TAKING_METHODS = Object.getOwnPropertyNames(CdcEngine.prototype).filter((name) => {
+  if (name === "constructor") return false;
+  const member = (CdcEngine.prototype as unknown as Record<string, unknown>)[name];
+  return typeof member === "function" && member.length >= 1;
+});
+
+/**
+ * One refused argument per way an engine entry point can refuse one. The set of
+ * methods covered is compared against the class's own argument-taking methods
+ * below, so an entry point added without a coded rejection fails that check
+ * rather than going unexercised here.
+ */
+const REFUSED_ARGUMENTS: Array<{ method: string; argument: unknown; label: string }> = [
+  { method: "feed", argument: new Float64Array([1]), label: "a non-Uint8Array typed array" },
+  { method: "feed", argument: "0102", label: "a string" },
+  { method: "setMaxQueueSize", argument: "100", label: "a string" },
+  { method: "setMaxQueueSize", argument: -1, label: "a negative count" },
+  { method: "setMaxEventSize", argument: "100", label: "a string" },
+  { method: "setMaxEventSize", argument: 2 ** 32, label: "a size past uint32" },
+  { method: "setChecksumEnabled", argument: 1, label: "a number" },
+  { method: "setIncludeDatabases", argument: "mydb", label: "a bare string" },
+  { method: "setIncludeDatabases", argument: [1], label: "an array of non-strings" },
+  { method: "setIncludeTables", argument: "mydb.users", label: "a bare string" },
+  { method: "setIncludeTables", argument: [1], label: "an array of non-strings" },
+  { method: "setExcludeTables", argument: "mydb.users", label: "a bare string" },
+  { method: "setExcludeTables", argument: [1], label: "an array of non-strings" },
+  { method: "enableMetadata", argument: 42, label: "a non-object config" },
+  { method: "enableMetadata", argument: { port: "3306" }, label: "a wrongly-typed option" },
+];
+
+describe("CdcEngine error codes", () => {
+  let engine: CdcEngine;
+
+  afterEach(() => {
+    engine?.destroy();
+  });
+
+  it("refuses an argument with a numeric error code on every entry point", async () => {
+    for (const { method, argument, label } of REFUSED_ARGUMENTS) {
+      engine = await CdcEngine.create();
+      let thrown: unknown;
+      try {
+        callWithArgument(engine, method, argument);
+      } catch (error) {
+        thrown = error;
+      }
+      engine.destroy();
+
+      const rejection = thrown as (Error & { code?: unknown }) | undefined;
+      expect(rejection, `${method} refuses ${label}`).toBeDefined();
+      expect(rejection?.code, `${method} codes its refusal of ${label}`).toBe(
+        MesErrorCode.InvalidArg,
+      );
+      expect(rejection?.name, `${method} names its refusal of ${label}`).toBe("MesError");
+    }
+  });
+
+  it("covers every engine method that takes an argument", () => {
+    const covered = [...new Set(REFUSED_ARGUMENTS.map((refusal) => refusal.method))].sort();
+    expect(covered).toEqual([...ARGUMENT_TAKING_METHODS].sort());
+  });
+
+  it("codes a decoded event whose type the addon does not know", async () => {
+    engine = await CdcEngine.create();
+    // The engine cannot be driven to produce an unknown type through the wire
+    // format, so the value the addon branches on is what gets checked: the
+    // refusal must be a decode failure, which the retry policy treats as
+    // permanent, rather than an uncoded error it would retry.
+    const source = readFileSync(new URL("../src/addon/engine_wrap.cpp", import.meta.url), "utf8");
+    const throwSite = source.match(/"Unknown event type: " \+ std::to_string\(type_idx\),\s*(\w+)/);
+    expect(throwSite, "the addon reports an unknown event type").not.toBeNull();
+    expect((throwSite as RegExpMatchArray)[1]).toBe("MES_ERR_DECODE");
+  });
+
+  it("builds every addon error through the helper that attaches a code", () => {
+    const addonUrl = new URL("../src/addon/", import.meta.url);
+    // The one place a Napi error object is constructed; everywhere else goes
+    // through it, so no exit path can reach JavaScript without a code.
+    const helper = "mes_error_util.h";
+    const bare: string[] = [];
+    for (const entry of readdirSync(addonUrl)) {
+      if (entry === helper) continue;
+      const lines = readFileSync(new URL(entry, addonUrl), "utf8").split("\n");
+      lines.forEach((line, index) => {
+        if (/Napi::(?:Type|Range)?Error::New/.test(line)) bare.push(`${entry}:${index + 1}`);
+      });
+    }
+    expect(bare, `every throw is built by MakeMesError (see ${helper})`).toEqual([]);
+  });
+});
+
+/**
+ * Read the doc comment `src/engine.ts` attaches to a method, as one line.
+ *
+ * Parsed rather than restated: a hand-copied expectation would be one more
+ * copy free to drift. Every step that could stop matching throws instead of
+ * returning an empty result an assertion would pass over.
+ */
+function loadMethodDoc(method: string): string {
+  const lines = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8").split("\n");
+  // Anchored inside the class: the native interface above it declares the same
+  // method names without the doc comments a caller reads.
+  const classStart = lines.findIndex((line) => line.startsWith("export class CdcEngine"));
+  if (classStart < 0) throw new Error("engine.ts does not declare CdcEngine");
+  const offset = lines.slice(classStart).findIndex((line) => line.trim().startsWith(`${method}(`));
+  if (offset < 0) throw new Error(`CdcEngine does not declare ${method}`);
+  const declaration = classStart + offset;
+
+  const doc: string[] = [];
+  for (let index = declaration - 1; index >= 0; index--) {
+    const line = lines[index].trim();
+    if (!line.startsWith("*") && !line.startsWith("/**")) break;
+    doc.unshift(line.replace(/^\/\*\*|^\*\/|^\*/, "").trim());
+    if (line.startsWith("/**")) break;
+  }
+  const text = doc.join(" ").trim();
+  if (text === "") throw new Error(`engine.ts does not document ${method}`);
+  return text;
+}
+
+/** What a method's doc says about 0, up to the end of that sentence. */
+function zeroMeaning(method: string): string {
+  const stated = loadMethodDoc(method).match(/`0`[^.]*/);
+  expect(stated, `${method} documents the meaning of 0`).not.toBeNull();
+  return (stated as RegExpMatchArray)[0];
+}
+
+describe("CdcEngine size limits", () => {
+  // The two limits resolve 0 differently, so a reader who takes the meaning
+  // from the neighbouring setter raises the per-event ceiling to 1 GiB while
+  // expecting the 64 MiB default.
+  it("documents that 0 restores the default queue size", () => {
+    expect(zeroMeaning("setMaxQueueSize")).toContain("10,000");
+  });
+
+  it("documents that 0 resolves the event size to the hard cap", () => {
+    expect(zeroMeaning("setMaxEventSize")).toContain("1 GiB");
+  });
+
+  it("fails rather than passing over a doc it cannot read", () => {
+    expect(() => loadMethodDoc("noSuchMethod")).toThrow();
   });
 });

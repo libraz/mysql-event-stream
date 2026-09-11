@@ -1,6 +1,8 @@
 """Tests for CdcEngine - the Python wrapper around libmes."""
 
 import ctypes
+import inspect
+import re
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
@@ -538,3 +540,25 @@ class TestNativeErrorCodes:
         with pytest.raises(RuntimeError) as excinfo:
             engine.get_position()
         assert excinfo.value.code == MES_ERR_INVALID_ARG
+
+
+class TestSizeLimitDocumentation:
+    """Each size limit states what 0 means for itself.
+
+    The two limits resolve 0 differently, so a reader who takes the meaning
+    from the neighbouring setter raises the per-event ceiling to 1 GiB while
+    expecting the 64 MiB default.
+    """
+
+    @staticmethod
+    def _zero_meaning(method: Callable[..., object]) -> str:
+        """Return what the doc says about 0, up to the end of that sentence."""
+        stated = re.search(r"\b0\b[^.]*", inspect.getdoc(method) or "")
+        assert stated is not None, f"{method.__name__} documents the meaning of 0"
+        return stated.group(0)
+
+    def test_queue_size_zero_restores_the_default(self) -> None:
+        assert "10000" in self._zero_meaning(CdcEngine.set_max_queue_size)
+
+    def test_event_size_zero_resolves_to_the_hard_cap(self) -> None:
+        assert "1 GiB" in self._zero_meaning(CdcEngine.set_max_event_size)

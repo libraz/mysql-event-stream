@@ -11,7 +11,7 @@ Prerequisites:
     1a. Docker MySQL running:   cd e2e/docker && docker compose up -d
     1b. Or Docker MariaDB:      cd e2e/docker && docker compose -f docker-compose.mariadb.yml up -d
         (same port 13308 / database mes_test; flavor auto-detected)
-    2. Build libmes with client support:
+    2. Build libmes:
        cmake -B build-client
        cmake --build build-client --parallel
 
@@ -150,7 +150,6 @@ async def async_main(args: argparse.Namespace, lib_path: str) -> None:
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
         server_id=args.server_id,
-        start_gtid="",
         lib_path=lib_path,
     ) as stream:
         async for event in stream:

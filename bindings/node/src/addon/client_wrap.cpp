@@ -262,7 +262,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsObject()) {
-    Napi::TypeError::New(env, "Expected config object").ThrowAsJavaScriptException();
+    mes_node::MakeMesError(env, "Expected config object", MES_ERR_INVALID_ARG)
+        .ThrowAsJavaScriptException();
     return;
   }
 
@@ -298,20 +299,23 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Value binlog_position_v = config.Get("startBinlogPosition");
   if (!binlog_file_v.IsUndefined() || !binlog_position_v.IsUndefined()) {
     if (start_gtid_v.IsString()) {
-      Napi::TypeError::New(env, "startGtid and startBinlogFile cannot be combined")
+      mes_node::MakeMesError(env, "startGtid and startBinlogFile cannot be combined",
+                             MES_ERR_INVALID_ARG)
           .ThrowAsJavaScriptException();
       return;
     }
     if (!binlog_file_v.IsString() || !binlog_position_v.IsNumber()) {
-      Napi::TypeError::New(
-          env, "startBinlogFile (string) and startBinlogPosition (number) are required together")
+      mes_node::MakeMesError(
+          env, "startBinlogFile (string) and startBinlogPosition (number) are required together",
+          MES_ERR_INVALID_ARG)
           .ThrowAsJavaScriptException();
       return;
     }
     strings.binlog_file = binlog_file_v.As<Napi::String>().Utf8Value();
     const int64_t position = binlog_position_v.As<Napi::Number>().Int64Value();
     if (strings.binlog_file.empty() || position < 4 || position > UINT32_MAX) {
-      Napi::RangeError::New(env, "startBinlogPosition must be between 4 and UINT32_MAX")
+      mes_node::MakeMesError(env, "startBinlogPosition must be between 4 and UINT32_MAX",
+                             MES_ERR_INVALID_ARG)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -326,7 +330,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     // avoid silently truncating large values, then reject anything negative.
     int64_t max_queue_size = max_queue_size_v.As<Napi::Number>().Int64Value();
     if (max_queue_size < 0) {
-      Napi::RangeError::New(env, "maxQueueSize must be non-negative").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "maxQueueSize must be non-negative", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return;
     }
     c_config.max_queue_size = static_cast<size_t>(max_queue_size);
@@ -337,7 +342,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (max_event_size_v.IsNumber()) {
     int64_t raw = max_event_size_v.As<Napi::Number>().Int64Value();
     if (raw < 0 || raw > UINT32_MAX) {
-      Napi::RangeError::New(env, "maxEventSize must fit in uint32").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "maxEventSize must fit in uint32", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return;
     }
     max_event_size = static_cast<uint32_t>(raw);
@@ -354,7 +360,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (max_queue_bytes_v.IsNumber()) {
     int64_t raw = max_queue_bytes_v.As<Napi::Number>().Int64Value();
     if (raw < 0) {
-      Napi::RangeError::New(env, "maxQueueBytes must be non-negative").ThrowAsJavaScriptException();
+      mes_node::MakeMesError(env, "maxQueueBytes must be non-negative", MES_ERR_INVALID_ARG)
+          .ThrowAsJavaScriptException();
       return;
     }
     max_queue_bytes = static_cast<size_t>(raw);

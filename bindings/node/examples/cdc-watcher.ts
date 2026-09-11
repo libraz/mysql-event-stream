@@ -103,7 +103,6 @@ async function main(): Promise<void> {
     user: "root",
     password: "test_root_password",
     serverId: 98,
-    startGtid: "",
     connectTimeoutS: 10,
     readTimeoutS: 30,
   });
