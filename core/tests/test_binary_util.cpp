@@ -827,5 +827,88 @@ TEST(DecodeDecimalTest, AcceptsGroupsAtTheirMaximum) {
   }
 }
 
+/**
+ * @brief Encode @p digits the way MySQL's decimal2bin does.
+ *
+ * @p digits holds exactly @p precision characters with the decimal point
+ * implied before the last @p scale of them, which lets a wide column be stated
+ * as text instead of as thirty hand-computed bytes.
+ */
+std::vector<uint8_t> EncodeDecimal(uint8_t precision, uint8_t scale, const std::string& digits,
+                                   bool negative) {
+  static const int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+  const int intg = precision - scale;
+  std::vector<uint8_t> out;
+  size_t pos = 0;
+  const auto group = [&](int digit_count, int byte_count) {
+    uint32_t value = 0;
+    for (int i = 0; i < digit_count; ++i) {
+      value = value * 10 + static_cast<uint32_t>(digits[pos++] - '0');
+    }
+    for (int i = byte_count - 1; i >= 0; --i) {
+      out.push_back(static_cast<uint8_t>((value >> (8 * i)) & 0xFFu));
+    }
+  };
+
+  if (intg % 9 > 0) group(intg % 9, kDig2Bytes[intg % 9]);
+  for (int i = 0; i < intg / 9; ++i) group(9, 4);
+  for (int i = 0; i < scale / 9; ++i) group(9, 4);
+  if (scale % 9 > 0) group(scale % 9, kDig2Bytes[scale % 9]);
+
+  // Positive values carry the sign bit in the first byte; negative values are
+  // additionally stored complemented.
+  out[0] ^= 0x80;
+  if (negative) {
+    for (uint8_t& b : out) {
+      b ^= 0xFF;
+    }
+  }
+  return out;
+}
+
+TEST(DecodeDecimalTest, AllocationFollowsRenderedDigitsNotDeclaredPrecision) {
+  // The same value in a narrow and a wide column. Sizing the output from the
+  // declared precision instead of the digits produced would push the wide
+  // column's four characters onto the heap and leave the narrow column's
+  // inline, so a column definition -- not the data -- would decide whether a
+  // decoded value allocates.
+  const std::vector<uint8_t> narrow = EncodeDecimal(10, 2, std::string(7, '0') + "100", false);
+  const std::vector<uint8_t> wide = EncodeDecimal(30, 2, std::string(27, '0') + "100", false);
+
+  size_t consumed = 0;
+  const std::string narrow_value = DecodeDecimal(narrow.data(), narrow.size(), 10, 2, consumed);
+  ASSERT_EQ(narrow_value, "1.00");
+  ASSERT_EQ(consumed, narrow.size());
+  const std::string wide_value = DecodeDecimal(wide.data(), wide.size(), 30, 2, consumed);
+  ASSERT_EQ(wide_value, "1.00");
+  ASSERT_EQ(consumed, wide.size());
+
+  // A freshly constructed string holding the same characters states what the
+  // content alone needs, without naming this standard library's inline size.
+  const std::string fresh(wide_value.data(), wide_value.size());
+  EXPECT_EQ(wide_value.capacity(), fresh.capacity());
+  EXPECT_EQ(wide_value.capacity(), narrow_value.capacity());
+}
+
+TEST(DecodeDecimalTest, WidestColumnRendersEveryDigit) {
+  // DECIMAL(65,30) is the widest MySQL accepts: 35 integer digits across a
+  // partial group and three full ones, and 30 fractional digits across three
+  // full groups and a partial one.
+  const std::string intg_digits = "12345678901234567890123456789012345";
+  const std::string frac_digits = "123456789012345678901234567890";
+  ASSERT_EQ(intg_digits.size(), 35u);
+  ASSERT_EQ(frac_digits.size(), 30u);
+  const std::string expected = intg_digits + "." + frac_digits;
+
+  const std::vector<uint8_t> positive = EncodeDecimal(65, 30, intg_digits + frac_digits, false);
+  const std::vector<uint8_t> negative = EncodeDecimal(65, 30, intg_digits + frac_digits, true);
+
+  size_t consumed = 0;
+  EXPECT_EQ(DecodeDecimal(positive.data(), positive.size(), 65, 30, consumed), expected);
+  EXPECT_EQ(consumed, positive.size());
+  EXPECT_EQ(DecodeDecimal(negative.data(), negative.size(), 65, 30, consumed), "-" + expected);
+  EXPECT_EQ(consumed, negative.size());
+}
+
 }  // namespace
 }  // namespace mes::binary

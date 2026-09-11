@@ -108,15 +108,6 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   int frac0 = scale / 9;     // Full 4-byte groups in fractional part
   int frac_rem = scale % 9;  // Remaining digits in fractional part
 
-  // Upper bound for the decimal text: precision digits + optional sign +
-  // decimal point. Reserving up front avoids the one-or-two heap
-  // reallocations that otherwise occur as we append integer/fractional
-  // chunks, and makes the final insert(0,"-") O(1) because we still have
-  // slack at the front of the allocated buffer when std::string's growth
-  // policy leaves headroom (the insert itself stays O(N) in the worst case
-  // but is a single memmove rather than a full copy into a new buffer).
-  // +3 covers '-', '.', and a null terminator.
-
   int total_size = static_cast<int>(DecimalBinarySize(precision, scale));
 
   if (total_size == 0) {
@@ -137,8 +128,18 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   // DECIMAL(65, 30). 40 bytes gives comfortable headroom while keeping
   // the allocation on the stack and avoiding a heap round-trip per call.
   static constexpr size_t kDecimalStackBufferSize = 40;
+
+  // Room for the widest text a kDecimalStackBufferSize-byte encoding can
+  // render: a full four-byte group carries nine digits and no partial group
+  // does better per byte, plus an optional sign, the decimal point, and the
+  // single '0' a value with no integer digits still renders.
+  static constexpr size_t kDecimalTextBufferSize = kDecimalStackBufferSize / 4 * 9 + 3;
+
   std::array<uint8_t, kDecimalStackBufferSize> buf{};
-  if (static_cast<size_t>(total_size) > buf.size()) {
+  // The text bound is checked against `precision` rather than derived from the
+  // binary size, so the render below cannot overrun even if the two ever drift.
+  if (static_cast<size_t>(total_size) > buf.size() ||
+      static_cast<size_t>(precision) + 3 > kDecimalTextBufferSize) {
     // Defensive: beyond MySQL's max DECIMAL precision. Treat as malformed.
     bytes_consumed = 0;
     return "";
@@ -160,8 +161,20 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
   }
 
   const uint8_t* ptr = buf.data();
-  std::string result;
-  result.reserve(static_cast<size_t>(precision) + 3);
+
+  // Render into a stack buffer, the way the temporal types do, and build the
+  // string once from the characters actually produced. Appending to a string
+  // reserved from `precision` instead would make a value's heap allocation
+  // depend on the column's declared width rather than on its own digits, so
+  // the same "1.00" would allocate in a DECIMAL(30,2) column and not in a
+  // DECIMAL(10,2) one. Writing the sign first also removes the leading
+  // insert() the append form needed.
+  char text[kDecimalTextBufferSize];
+  char* out = text;
+  if (is_negative) {
+    *out++ = '-';
+  }
+  char* const digits_begin = out;
 
   // Every group is range-checked against the digit count it declares, the way
   // bin2decimal() does: a group that cannot hold its own digits is not
@@ -176,7 +189,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
       return "";
     }
     if (val != 0) {
-      result += std::to_string(val);
+      out = WritePaddedInt(out, static_cast<int>(val), 1);
     }
   }
 
@@ -187,22 +200,22 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
       bytes_consumed = 0;
       return "";
     }
-    if (result.empty()) {
+    if (out == digits_begin) {
       if (val != 0) {
-        result += std::to_string(val);
+        out = WritePaddedInt(out, static_cast<int>(val), 1);
       }
     } else {
-      AppendPaddedInt(result, static_cast<int>(val), 9);
+      out = WritePaddedInt(out, static_cast<int>(val), 9);
     }
   }
 
-  if (result.empty()) {
-    result = "0";
+  if (out == digits_begin) {
+    *out++ = '0';
   }
 
   // Fractional part
   if (scale > 0) {
-    result += ".";
+    *out++ = '.';
 
     for (int i = 0; i < frac0; i++) {
       uint32_t val = ReadDecimalGroup(ptr, 4);
@@ -210,7 +223,7 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
         bytes_consumed = 0;
         return "";
       }
-      AppendPaddedInt(result, static_cast<int>(val), 9);
+      out = WritePaddedInt(out, static_cast<int>(val), 9);
     }
 
     if (frac_rem > 0) {
@@ -219,18 +232,11 @@ std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precisi
         bytes_consumed = 0;
         return "";
       }
-      AppendPaddedInt(result, static_cast<int>(val), frac_rem);
+      out = WritePaddedInt(out, static_cast<int>(val), frac_rem);
     }
   }
 
-  if (is_negative) {
-    // Prefer insert(0, ...) over "-" + result: the latter allocates a new
-    // string and copies the entire body, whereas insert is a single
-    // memmove within the already-reserved buffer.
-    result.insert(result.begin(), '-');
-  }
-
-  return result;
+  return std::string(text, static_cast<size_t>(out - text));
 }
 
 uint32_t ReadVarLenPrefix(uint8_t pack_length, const uint8_t* data, size_t len,
