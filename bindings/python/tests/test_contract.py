@@ -77,6 +77,24 @@ POSITION_CLASSES = (
 
 _HEADER_WINDOW = re.compile(r"(\d+) through UINT32_MAX")
 
+#: Options the contract carries a default for that a surface deliberately does
+#: not accept, keyed by surface and stating why. An absence not listed here is a
+#: gap: the defaults test compares whole maps, so anything omitted from a
+#: constructor fails unless it is named below.
+DELIBERATELY_ABSENT_OPTIONS: dict[str, dict[str, str]] = {
+    "BinlogClient": {
+        # Reconnecting is the stream's own retry loop; the client is one
+        # connection the caller drives and reopens itself, so it carries no
+        # retry budget. The Node surfaces draw the same line -- the option sits
+        # on its stream configuration and not on its client one.
+        "max_reconnect_attempts": "reconnecting belongs to the stream, not to one connection",
+    },
+}
+
+#: Contract options that state the value a binding materializes when the option
+#: is omitted. Selectors without a default are range-checked only.
+DEFAULTED_OPTIONS = tuple(option for option in contract["options"] if "default" in option)
+
 
 def _start_position_of(stream: CdcStream) -> dict[str, Any]:
     """Reduce a stream to the canonical start-position triple."""
@@ -225,13 +243,20 @@ class TestBindingContract:
     @pytest.mark.parametrize("surface", [CdcStream, BinlogClient])
     def test_materializes_exactly_the_contract_shared_option_defaults(self, surface: type) -> None:
         parameters = inspect.signature(surface.__init__).parameters
-        for option in contract["options"]:
-            if "default" not in option:
-                continue
-            name = option["python"]
-            if name not in parameters:
-                continue
-            assert parameters[name].default == option["default"], name
+        absent = DELIBERATELY_ABSENT_OPTIONS.get(surface.__name__, {})
+        stated = {option["python"] for option in DEFAULTED_OPTIONS}
+        assert absent.keys() <= stated, "every excused absence names a contract option"
+
+        expected = {
+            option["python"]: option["default"]
+            for option in DEFAULTED_OPTIONS
+            if option["python"] not in absent
+        }
+        # Whole maps rather than one assertion per option, so an option this
+        # surface never accepted fails as a missing key instead of passing
+        # unexamined, and one excused above fails once it reappears.
+        materialized = {name: parameters[name].default for name in stated if name in parameters}
+        assert materialized == expected
 
     def test_enforces_the_contract_shared_option_ranges(self) -> None:
         expected = {
