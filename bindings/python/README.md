@@ -30,28 +30,55 @@ Platform wheels are available for:
 ```python
 from mysql_event_stream import CdcEngine
 
-engine = CdcEngine()
+# The engine holds native state, so scope it rather than waiting for the
+# garbage collector to release it.
+with CdcEngine() as engine:
+    # Only needed when a checksum=NONE byte stream starts after its FDE:
+    # engine.set_checksum_enabled(False)
 
-# Only needed when a checksum=NONE byte stream starts after its FDE:
-# engine.set_checksum_enabled(False)
+    # Feed raw binlog bytes. feed() stops early once the event queue is full,
+    # so drain the queue and re-feed the unconsumed tail instead of dropping it.
+    offset = 0
+    while offset < len(binlog_chunk):
+        consumed = engine.feed(binlog_chunk[offset:])
+        offset += consumed
 
-# Feed raw binlog bytes. feed() stops early once the event queue is full, so
-# drain the queue and re-feed the unconsumed tail instead of dropping it.
-offset = 0
-while offset < len(binlog_chunk):
-    consumed = engine.feed(binlog_chunk[offset:])
-    offset += consumed
+        while (event := engine.next_event()) is not None:
+            print(event.type, event.database, event.table)
+            print("before:", event.before)
+            print("after:", event.after)
 
-    while (event := engine.next_event()) is not None:
-        print(event.type, event.database, event.table)
-        print("before:", event.before)
-        print("after:", event.after)
-
-    if consumed == 0:
-        # Partial event at the tail: retain binlog_chunk[offset:] and prepend
-        # it to the next chunk.
-        break
+        if consumed == 0:
+            # Partial event at the tail: retain binlog_chunk[offset:] and
+            # prepend it to the next chunk.
+            break
 ```
+
+### Column names
+
+`binlog_row_metadata=FULL` puts column names in the `TABLE_MAP` event and needs
+nothing from the binding. Otherwise the names come from a separate connection
+that runs `SHOW COLUMNS`. `CdcStream` opens that connection from its own
+settings; an engine you feed yourself enables it explicitly.
+
+```python
+with CdcEngine() as engine:
+    engine.enable_metadata(
+        host="mysql.example.com",
+        user="replicator",
+        password="secret",
+        read_timeout_s=30,
+    )
+```
+
+The credentials need `SELECT` on the streamed tables. `TABLE_MAP` processing
+then runs `SHOW COLUMNS` synchronously, bounded by `read_timeout_s` — `0`
+delegates the bound to the operating system and can block indefinitely. A
+timeout leaves that one event's names unresolved and the connection is retried
+once, so check `names_resolved` on every event rather than assuming resolution
+succeeded. The connection reads the server's schema as it is now, not as it was
+at the binlog position being decoded; for replay from an older position, use
+`binlog_row_metadata=FULL` and keep the original `TABLE_MAP` metadata.
 
 ### Streaming from MySQL
 
@@ -147,11 +174,13 @@ handle. Calls to `poll()` are serialized by the binding.
 
 ## Table filtering
 
-`CdcStream(include_tables=["mydb.audit_*"])` and the lower-level engine
+`CdcStream(include_tables=["mydb.audit_*"])` and the lower-level engine table
 filters accept exact, case-sensitive `database.table` or bare table names. A
-trailing `*` is a prefix wildcard; other `*` characters are literal. If include
-filters see TABLE_MAP events but none matches, the configured native log
-callback receives one `include_filter_matched_nothing` WARN on reset or close.
+trailing `*` is a prefix wildcard; other `*` characters are literal. The
+database filter `include_databases` has no wildcard form and compares the name
+byte for byte, so list every database you want. If include filters see
+TABLE_MAP events but none matches, the configured native log callback receives
+one `include_filter_matched_nothing` WARN on reset or close.
 
 ## Thread Safety
 
@@ -167,17 +196,32 @@ Iteration and connection lifecycle operations should be owned by one task.
 `BinlogClient.stop()` is callable from another thread, and it is what unblocks a
 pending `poll()`.
 
+## Exports
+
+| Export | Description |
+|--------|-------------|
+| `CdcEngine` | Low-level binlog byte parser |
+| `BinlogClient` | MySQL binlog replication client |
+| `CdcStream` | High-level async iterator (recommended) |
+| `ClientConfig`, `SslMode` | Connection settings and TLS mode |
+| `ChangeEvent`, `EventType`, `BinlogPosition`, `PollResult` | Event and poll payload types |
+| `ServerFlavor` | Detected server flavor, as returned by `client.flavor` |
+| `LogLevel`, `set_log_callback` | Structured logging API |
+| `MesErrorCode` | Stable native error-code enum |
+| `ParseError`, `DecodeError`, `ChecksumError` | Malformed binlog input |
+| `ColumnType`, `ColumnValue` | Deprecated legacy helpers. No API returns them — `ChangeEvent` exposes columns as a plain dict — and they have no Node counterpart |
+
 ## Features
 
 - **Native performance** — C++ core with ctypes FFI
-- **Zero native dependencies** — No libmysqlclient required; only OpenSSL
+- **Self-contained** — No libmysqlclient required; OpenSSL and zlib are statically linked into the wheel
 - **Streaming** — Process events incrementally as bytes arrive
 - **MySQL 8.4+** — Supports LTS and Innovation releases
 - **MariaDB 10.11+** — Auto-detects flavor and handles MariaDB binlog protocol (GTID events type 162, ANNOTATE_ROWS SQL in `ChangeEvent.source_sql`, slave capability negotiation)
 - **GTID support** — Native BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** — Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** — Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
-- **Column names** — Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
+- **Column names** — Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`; `CdcStream` opens that connection itself, `CdcEngine` takes it from `enable_metadata()`
 - **SSL/TLS** — Full SSL/TLS support for secure MySQL connections
 - **Backpressure** — Internal reader thread with bounded event queue (default 10,000)
 - **Auto-reconnection** — Automatic reconnection with jittered linear backoff on connection loss

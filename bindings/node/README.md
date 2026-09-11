@@ -21,13 +21,14 @@ Native N-API binding for the mysql-event-stream CDC engine (MySQL 8.4+ and Maria
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
 - OpenSSL development libraries
+- zlib development libraries
 
 ```bash
 # macOS
-brew install cmake openssl
+brew install cmake openssl zlib
 
 # Ubuntu / Debian
-sudo apt install cmake build-essential libssl-dev pkg-config
+sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 ```
 
 ### Build
@@ -67,7 +68,7 @@ src/
   types.ts            # Public type definitions
 ```
 
-The native addon statically links the C++ core (protocol layer, CDC engine, BinlogClient) and OpenSSL. The TypeScript layer provides typed wrappers and the `CdcStream` async iterator.
+The native addon statically links the C++ core (protocol layer, CDC engine, BinlogClient) together with OpenSSL and zlib. The TypeScript layer provides typed wrappers and the `CdcStream` async iterator.
 
 ## Lifecycle
 
@@ -135,7 +136,7 @@ The `prepack` script swaps `README.md` with `README.npm.md` so npm shows user-fa
 | `CdcEngine` | Low-level binlog byte parser |
 | `BinlogClient` | MySQL binlog replication client |
 | `CdcStream` | High-level async iterator (recommended) |
-| `LogLevel`, `setLogCallback` | Structured logging API |
+| `LogLevel`, `setLogCallback`, `LogHandler` | Structured logging API and its handler type |
 | `MesErrorCode` | Stable native error-code enum |
 | `ServerFlavor`, `SslMode` | Server and TLS enums |
 | `ChangeEvent`, `ClientConfig`, `ColumnValue`, `EventType`, `PollResult`, `StreamConfig` | Public TypeScript types |

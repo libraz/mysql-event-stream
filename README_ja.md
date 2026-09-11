@@ -179,7 +179,7 @@ mes_destroy(engine);
 - **GTID サポート** - GTID ベースのレプリケーションに対応した BinlogClient (MySQL / MariaDB 両形式)
 - **行レベルイベント** - INSERT / UPDATE / DELETE の変更前後のカラム値を完全に取得
 - **VECTOR 型** - MySQL 9.0+ の VECTOR カラムをネイティブサポート（生バイト列としてデコード）
-- **カラム名解決** - `binlog_row_metadata=FULL` または `SELECT` 権限を持つメタデータ接続による自動カラム名解決
+- **カラム名解決** - `binlog_row_metadata=FULL` または `SELECT` 権限を持つメタデータ接続による自動カラム名解決。メタデータ接続は `CdcStream` が自前で開き、`CdcEngine` では明示的な呼び出しで有効化する
 - **辞書形式** - 行データを `Record<string, unknown>` / `dict[str, Any]` で直感的にアクセス
 - **SSL/TLS** - MySQL 接続の SSL/TLS 暗号化に対応
 - **自動再接続** - 接続断時に jitter 付きリニアバックオフで自動再接続
@@ -238,6 +238,36 @@ native client が対応する MySQL 認証プラグインは `caching_sha2_passw
 入った場合は、上記 2 つの対処を明示した認証エラーになります。公開鍵取得の opt-in は
 その鍵自体が未認証であるため、検証付き TLS のほうを推奨します。
 
+### カラム名
+
+`binlog_row_metadata=FULL` であれば `TABLE_MAP` イベントにカラム名が載るため、他に何も必要ありません。設定していない場合は `SHOW COLUMNS` を実行する別接続からカラム名を取得しますが、その接続の開き方はクラスによって異なります。`CdcStream` はストリーム自身の接続設定を使って開くため、追加の呼び出しは不要です。`CdcEngine` は開きません。エンジンにバイト列を投入する側が、明示的に接続を有効化します。
+
+```typescript
+// Node.js
+const engine = new CdcEngine();
+engine.enableMetadata({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  readTimeoutS: 30,
+});
+```
+
+```python
+# Python
+engine = CdcEngine()
+engine.enable_metadata(
+    host="mysql.example.com",
+    user="replicator",
+    password="secret",
+    read_timeout_s=30,
+)
+```
+
+この認証情報には、ストリーム対象のテーブルへの `SELECT` 権限が必要です。有効化すると `TABLE_MAP` の処理中に `SHOW COLUMNS` が同期的に実行され、その待ち時間は `readTimeoutS` / `read_timeout_s` で制限されます。`0` は制限を OS に委ねるため、無制限にブロックしうる点に注意してください。タイムアウトしたイベントはカラム名が未解決のまま残り、接続は一度だけ再試行されます。解決できたものとして扱わず、イベントごとに `namesResolved` / `names_resolved` を確認してください。
+
+この接続が読むのは、デコード中の binlog 位置におけるスキーマではなく、サーバーの現在のスキーマです。カラム名を信頼できるのはストリームの先頭を追いかけている間だけで、古い位置から再生する場合は `binlog_row_metadata=FULL` を設定し、元の `TABLE_MAP` metadata を保持してください。
+
 ### テーブルフィルタリング
 
 ```typescript
@@ -258,12 +288,7 @@ stream = CdcStream(
 )
 ```
 
-フィルタは大文字小文字を区別します。`database.table` またはテーブル名だけの完全一致に加え、
-末尾の `*` を prefix ワイルドカードとして使えます（例: `mydb.audit_*`）。それ以外の位置の
-`*` はリテラルです。include フィルタを設定し、TABLE_MAP を受信したにもかかわらず一件も
-一致しなければ、reset または stream close 時に log callback へ
-`include_filter_matched_nothing` WARN が一度だけ配送されます。MySQL の識別子の大文字小文字規則は
-サーバープラットフォームで異なるため、送信元サーバーが出力する名前を使ってください。
+フィルタは大文字小文字を区別します。テーブルフィルタ（`includeTables` / `include_tables` と `excludeTables` / `exclude_tables`）は `database.table` またはテーブル名だけの完全一致に加え、末尾の `*` を prefix ワイルドカードとして使えます（例: `mydb.audit_*`）。それ以外の位置の `*` はリテラルです。一方、データベースフィルタ `includeDatabases` / `include_databases` はデータベース名をバイト単位で完全一致で比較し、ワイルドカードはありません。`shard_*` はその名前のデータベースだけに一致するため、対象のデータベースは列挙してください。include フィルタを設定し、TABLE_MAP を受信したにもかかわらず一件も一致しなければ、reset または stream close 時に log callback へ `include_filter_matched_nothing` WARN が一度だけ配送されます。MySQL の識別子の大文字小文字規則はサーバープラットフォームで異なるため、送信元サーバーが出力する名前を使ってください。
 
 ### 流量制御
 
@@ -314,6 +339,47 @@ const stream = new CdcStream({
 });
 ```
 
+### checkpoint からの再開
+
+checkpoint を渡さずに開始したストリームは、サーバーの現在位置から読み始めます。プロセスが停止していた間の変更はすべて飛ばされます。前回の続きから読むには、ストリームからコミット済みの GTID を取得し、次回の開始位置として渡してください。
+
+```typescript
+// Node.js
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  startGtid: loadCheckpoint(),  // 省略するとサーバーの現在位置から開始
+});
+
+try {
+  for await (const event of stream) {
+    await handle(event);
+    saveCheckpoint(stream.currentGtid);
+  }
+} finally {
+  await stream.close();
+}
+```
+
+```python
+# Python
+async def run():
+    async with CdcStream(
+        host="mysql.example.com",
+        user="replicator",
+        password="secret",
+        start_gtid=load_checkpoint(),  # 省略するとサーバーの現在位置から開始
+    ) as stream:
+        async for event in stream:
+            await handle(event)
+            save_checkpoint(stream.current_gtid)
+```
+
+`currentGtid` / `current_gtid` は読み取り側が最後にコミットした checkpoint です。ストリームを閉じたスコープを抜けても値は残るため、ループの後で一度だけ保存する形でも構いません。配送は at-least-once です。再接続後に同じイベントがもう一度届くことがあるため、checkpoint の保存は自分の処理が成功した後に行い、その処理は冪等にしてください。
+
+`BinlogClient` にも同じ名前で同じ組み合わせがあります。サーバー側でパージ済みの GTID を要求した場合は、黙って先頭から読み直すのではなくコード 405 で失敗します。スナップショットを取り直す合図として扱ってください。
+
 ## エラーコード
 
 ネイティブ側のエラーには安定した数値の `mes_error_t` コードが付きます。Node では
@@ -326,11 +392,14 @@ const stream = new CdcStream({
 | 1–2 | API 引数が不正 | 設定を直す。再試行しない |
 | 100–101 | パースまたはチェックサム失敗 | 入力を調べたうえで reset / 再接続 |
 | 200–202 | 行デコード失敗 | 同じ入力での再試行は無意味 |
-| 301 | キューのバイト数・件数の上限超過 | 上限値を引き上げる。同じ入力での再試行は無意味 |
+| 301（イベントキュー） | クライアントのイベントキューのバイト数・件数の上限超過 | `maxQueueBytes` / `max_queue_bytes` を引き上げる。同じ入力での再試行は無意味 |
+| 301（クエリ結果） | クライアントが実行するサーバークエリ（設定検証、GTID 取得、カラムメタデータ）の結果が 100,000 行または 64 MiB を超過 | 上限はビルド時定数で変更不可。接続も閉じられるため、再接続してから実行し直す |
 | 400–401 | 接続または認証の失敗 | 一時的な接続失敗のみ再試行。401 は認証情報を修正 |
 | 402 | サーバー設定の検証失敗 | サーバー設定を直す。再試行しない |
-| 403–404 | ストリームの切断 | 保存済みの checkpoint から再接続 |
+| 403–404 | ストリームの切断 | 保存済みの checkpoint から再接続（[checkpoint からの再開](#checkpoint-からの再開)） |
 | 405 | 要求した GTID がパージ済み | 復旧点・スナップショットを取り直す。再試行しない |
+
+`MesErrorCode` には、エラーとして呼び出し側に届かない値がさらに 5 つあります。`NoEvent`（300）はネイティブ層がキューの空を報告するための値で、両バインディングは `nextEvent()` / `next_event()` の `null` / `None` に変換します。`Internal`（99）、`Decode`（200）、`DecodeColumn`（201）、`GtidTaggedUnsupported`（406）は ABI の互換性のために残してある値で、現在のコアに発生元はありません。行デコードの失敗は `DecodeRow`（202）として報告されます。
 
 C ABI の `mes_error_string()` は、数値コードに対応する正式な短い説明を返します。
 

@@ -178,7 +178,7 @@ Each `ChangeEvent` contains the event type, database/table name, binlog position
 - **GTID support** - Native BinlogClient with GTID-based replication (both MySQL and MariaDB formats)
 - **Row-level events** - Full before/after column values for INSERT, UPDATE, DELETE
 - **VECTOR type** - Native support for MySQL 9.0+ VECTOR columns (decoded as raw bytes)
-- **Column Names** - Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
+- **Column Names** - Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`; `CdcStream` opens that connection itself, `CdcEngine` takes it from an explicit call
 - **Dict-based** - Row data as `Record<string, unknown>` / `dict[str, Any]` for intuitive access
 - **SSL/TLS** - Full SSL/TLS support for secure MySQL connections
 - **Auto-reconnection** - Automatic reconnection with jittered linear backoff on connection loss
@@ -241,6 +241,49 @@ password. Full authentication under those modes without
 remedies. Verified TLS is the recommended one, because the public-key retrieval
 opt-in trusts a key that has not itself been authenticated.
 
+### Column names
+
+With `binlog_row_metadata=FULL` the server puts column names in the
+`TABLE_MAP` event and nothing else is needed. Otherwise the names come from a
+separate connection that runs `SHOW COLUMNS`, and each surface opens it
+differently. `CdcStream` opens it from the stream's own connection settings, so
+a stream needs no extra call. `CdcEngine` does not: a caller feeding bytes to an
+engine enables the connection explicitly.
+
+```typescript
+// Node.js
+const engine = new CdcEngine();
+engine.enableMetadata({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  readTimeoutS: 30,
+});
+```
+
+```python
+# Python
+engine = CdcEngine()
+engine.enable_metadata(
+    host="mysql.example.com",
+    user="replicator",
+    password="secret",
+    read_timeout_s=30,
+)
+```
+
+The credentials need `SELECT` on the tables being streamed. `TABLE_MAP`
+processing then runs `SHOW COLUMNS` synchronously, bounded by
+`readTimeoutS` / `read_timeout_s` — `0` delegates the bound to the operating
+system and can block indefinitely. A timeout leaves that one event's names
+unresolved and the connection is retried once, so check `namesResolved` /
+`names_resolved` on every event rather than assuming resolution succeeded.
+
+The connection reads the server's schema as it is now, not as it was at the
+binlog position being decoded. Names are authoritative only while consuming at
+the current head; for replay from an older position, use
+`binlog_row_metadata=FULL` and keep the original `TABLE_MAP` metadata.
+
 ### Table Filtering
 
 ```typescript
@@ -261,13 +304,18 @@ stream = CdcStream(
 )
 ```
 
-Filters are case-sensitive. Use an exact `database.table` or bare table name;
-a trailing `*` is also supported as a prefix wildcard (for example,
-`mydb.audit_*` or `orders_*`). A `*` anywhere else is literal. MySQL identifier
-case rules can differ by server platform, so use names emitted by the source
-server. If configured include filters see TABLE_MAP events but match none, the
-log callback receives one `include_filter_matched_nothing` WARN at reset or
-stream close.
+Filters are case-sensitive. The table filters — `includeTables` /
+`include_tables` and `excludeTables` / `exclude_tables` — take an exact
+`database.table` or bare table name, and a trailing `*` is also supported as a
+prefix wildcard (for example, `mydb.audit_*` or `orders_*`). A `*` anywhere else
+is literal. The database filter `includeDatabases` / `include_databases`
+compares the database name byte for byte and has no wildcard form, so
+`shard_*` matches a database of exactly that name and nothing else; list every
+database you want instead. MySQL
+identifier case rules can differ by server platform, so use names emitted by the
+source server. If configured include filters see TABLE_MAP events but match
+none, the log callback receives one `include_filter_matched_nothing` WARN at
+reset or stream close.
 
 ### Backpressure Control
 
@@ -321,6 +369,56 @@ const stream = new CdcStream({
 });
 ```
 
+### Resuming from a checkpoint
+
+A stream started without a checkpoint begins at the server's current position,
+so every change committed while the process was down is skipped. To pick up
+where the last run stopped, read the committed GTID from the stream and pass it
+back as the start position on the next run.
+
+```typescript
+// Node.js
+const stream = new CdcStream({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  startGtid: loadCheckpoint(),  // omit to start at the server's current position
+});
+
+try {
+  for await (const event of stream) {
+    await handle(event);
+    saveCheckpoint(stream.currentGtid);
+  }
+} finally {
+  await stream.close();
+}
+```
+
+```python
+# Python
+async def run():
+    async with CdcStream(
+        host="mysql.example.com",
+        user="replicator",
+        password="secret",
+        start_gtid=load_checkpoint(),  # omit to start at the server's current position
+    ) as stream:
+        async for event in stream:
+            await handle(event)
+            save_checkpoint(stream.current_gtid)
+```
+
+`currentGtid` / `current_gtid` is the last checkpoint the reader committed, and
+it survives the scope that closed the stream, so the value can also be persisted
+once after the loop. Delivery is at-least-once: an event can be redelivered
+after a reconnect, so persist a checkpoint only once your own processing of that
+event has succeeded, and make that processing idempotent.
+
+`BinlogClient` carries the same pair under the same names. A GTID the server has
+already purged fails with code 405 rather than silently restarting from the
+head, so treat that as a signal to take a fresh snapshot.
+
 ## Error codes
 
 Native errors expose a stable numeric `mes_error_t` code. Node errors carry it
@@ -333,11 +431,20 @@ retry decisions.
 | 1–2 | Invalid API argument | Fix configuration; do not retry |
 | 100–101 | Parse or checksum failure | Reset/reconnect only after diagnosing the input |
 | 200–202 | Row decode failure | Do not retry unchanged input |
-| 301 | Queue byte/event budget exceeded | Increase the configured limit; do not retry unchanged input |
+| 301 (event queue) | Client event queue byte or event budget exceeded | Raise `maxQueueBytes` / `max_queue_bytes`; do not retry unchanged input |
+| 301 (query result) | A server query the client runs — configuration validation, GTID lookup, or column metadata — retained more than 100,000 rows or 64 MiB | The caps are compile-time constants with no configuration knob, and the failure closes the connection; reconnect before querying again |
 | 400–401 | Connection or authentication failure | Retry only transient connection failures; fix credentials for 401 |
 | 402 | Server configuration validation failure | Fix the server configuration; do not retry |
-| 403–404 | Stream transport ended | Reconnect from the persisted checkpoint |
+| 403–404 | Stream transport ended | Reconnect from the persisted checkpoint (see [Resuming from a checkpoint](#resuming-from-a-checkpoint)) |
 | 405 | Requested GTID was purged | Choose a new recovery/snapshot point; do not retry |
+
+Five further values are exported on `MesErrorCode` and reach no caller as an
+error. `NoEvent` (300) is how the native layer reports an empty queue; both
+bindings translate it to `null` / `None` from `nextEvent()` / `next_event()`.
+`Internal` (99), `Decode` (200), `DecodeColumn` (201) and
+`GtidTaggedUnsupported` (406) are retained for ABI stability and have no
+producer in the current core — a row decode failure is reported as `DecodeRow`
+(202).
 
 The C ABI `mes_error_string()` returns the canonical short description for a
 numeric code.

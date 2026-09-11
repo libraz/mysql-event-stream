@@ -112,9 +112,73 @@ engine.setExcludeTables(["mydb.audit_log"]);
 
 Table filters are case-sensitive. Use an exact `database.table` or bare table
 name, or a trailing-`*` prefix such as `mydb.audit_*`. A `*` elsewhere is
-literal. If include filters see TABLE_MAP events but match none, the configured
+literal. `setIncludeDatabases` has no wildcard form: it compares the database
+name byte for byte, so list every database you want rather than reaching for a
+prefix. If include filters see TABLE_MAP events but match none, the configured
 log callback receives one `include_filter_matched_nothing` WARN when the engine
 is reset or destroyed.
+
+### Column names
+
+`binlog_row_metadata=FULL` puts column names in the `TABLE_MAP` event and needs
+nothing from the binding. Otherwise the names come from a separate connection
+that runs `SHOW COLUMNS`. `CdcStream` opens that connection from its own
+config; an engine you feed yourself enables it explicitly.
+
+```typescript
+const engine = new CdcEngine();
+engine.enableMetadata({
+  host: "mysql.example.com",
+  user: "replicator",
+  password: "secret",
+  readTimeoutS: 30,
+});
+```
+
+The credentials need `SELECT` on the streamed tables. `TABLE_MAP` processing
+then runs `SHOW COLUMNS` synchronously, bounded by `readTimeoutS` -- `0`
+delegates the bound to the operating system and can block indefinitely. A
+timeout leaves that one event's names unresolved and the connection is retried
+once, so check `namesResolved` on every event rather than assuming resolution
+succeeded. The connection reads the server's schema as it is now, not as it was
+at the binlog position being decoded; for replay from an older position, use
+`binlog_row_metadata=FULL` and keep the original `TABLE_MAP` metadata.
+
+## Lifecycle
+
+`new BinlogClient(config)` connects and validates the server configuration
+immediately, so a bad host or a rejected credential is thrown by the
+constructor rather than surfacing on the first poll. Call `start()` before
+polling, then `poll()` for one event or `pollBatch()` for one event plus
+whatever else is already queued, and `destroy()` when finished. `destroy()` is
+idempotent.
+
+```typescript
+import { BinlogClient } from "@libraz/mysql-event-stream";
+
+const client = new BinlogClient({
+  host: "127.0.0.1",
+  user: "replicator",
+  password: "secret",
+});
+
+client.start();
+try {
+  const result = await client.poll();
+  // A heartbeat is a healthy silent interval, not an event: data is null.
+  if (!result.isHeartbeat && result.data !== null) {
+    feedToEngine(result.data);
+  }
+} finally {
+  client.destroy();
+}
+```
+
+Only one `poll()` may be in flight at a time, and it blocks until an event
+arrives or the stream stops. Cancel a pending one with `BinlogClient.stop()`
+before changing connection lifecycle state. `CdcStream` owns this whole
+sequence and `await stream.close()` is its corresponding idempotent cleanup, so
+use the client directly only when you own the event loop it runs on.
 
 ## Thread Safety
 
@@ -152,13 +216,13 @@ streams, set `UV_THREADPOOL_SIZE` before Node starts, for example
 
 ## Features
 
-- **Native performance** -- C++ core with N-API binding, >100k events/sec
+- **Native performance** -- C++ core with N-API binding. Core decode throughput is recorded above 100k row events/sec in [the measurement baseline](https://github.com/libraz/mysql-event-stream/blob/main/core/benchmarks/BASELINE.md); the addon's own marshalling cost is not in that figure and has no published measurement, so read it as the core's rate rather than the package's
 - **No libmysqlclient** -- MySQL / MariaDB wire protocol implemented directly; OpenSSL and ZLIB are bundled
 - **Streaming** -- Process events incrementally as bytes arrive
 - **MySQL 8.4+ and MariaDB 10.11+** -- Auto-detects server flavor and negotiates the appropriate binlog protocol
 - **GTID support** -- BinlogClient with GTID-based replication (MySQL `uuid:gno` and MariaDB `domain-server-seq` formats)
 - **Row-level events** -- Full before/after column values for INSERT, UPDATE, DELETE
-- **Column names** -- Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`
+- **Column names** -- Automatic resolution with `binlog_row_metadata=FULL` or a metadata connection that has `SELECT`; `CdcStream` opens that connection itself, `CdcEngine` takes it from `enableMetadata()`
 - **SSL/TLS** -- Secure MySQL connections with certificate verification
 - **Backpressure** -- Internal reader thread with bounded event queue (default 10,000)
 - **Auto-reconnection** -- Jittered linear backoff on connection loss (default 10 attempts)
