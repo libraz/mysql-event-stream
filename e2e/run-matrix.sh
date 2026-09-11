@@ -110,20 +110,21 @@ if [[ "$RUN_CPP" == true && ! -d "$BUILD_DIR" ]]; then
 fi
 
 if [[ "$RUN_NODE" == true && ! -f "$NODE_DIR/build/Release/mes-node.node" ]]; then
-    echo "WARNING: Node.js native addon not found. Skipping Node.js E2E tests."
+    echo "ERROR: Node.js E2E requires the native addon, not found at $NODE_DIR/build/Release/mes-node.node"
     echo "Build with: cd bindings/node && yarn install && yarn build"
-    RUN_NODE=false
+    exit 1
 fi
 
 if [[ "$RUN_PYTHON" == true ]]; then
     if [[ ! -f "$LIB_PATH" ]]; then
-        echo "WARNING: libmes shared library not found at $LIB_PATH. Skipping Python E2E tests."
+        echo "ERROR: Python E2E requires the libmes shared library, not found at $LIB_PATH"
         echo "Build with: cmake -B build && cmake --build build --parallel"
-        RUN_PYTHON=false
-    elif [[ ! -x "$PYTEST" ]] && ! command -v "$PYTEST" >/dev/null 2>&1; then
-        echo "WARNING: pytest not found ($PYTEST). Skipping Python E2E tests."
+        exit 1
+    fi
+    if [[ ! -x "$PYTEST" ]] && ! command -v "$PYTEST" >/dev/null 2>&1; then
+        echo "ERROR: Python E2E requires pytest, not found ($PYTEST)"
         echo "Set up with: cd bindings/python && rye sync"
-        RUN_PYTHON=false
+        exit 1
     fi
 fi
 
