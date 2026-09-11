@@ -3,6 +3,7 @@
 import ctypes
 import inspect
 import re
+import struct
 from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 
@@ -235,6 +236,151 @@ class TestMultipleEvents:
             assert e2.after is not None
             assert e2.after["0"] == 20
             assert engine.next_event() is None
+
+
+def _u48_le(value: int) -> bytes:
+    """Encode a 48-bit little-endian table id."""
+    return struct.pack("<I", value & 0xFFFFFFFF) + struct.pack("<H", (value >> 32) & 0xFFFF)
+
+
+def _packed_int(value: int) -> bytes:
+    """Encode a MySQL length-encoded integer."""
+    if value < 251:
+        return bytes([value])
+    if value <= 0xFFFF:
+        return b"\xfc" + struct.pack("<H", value)
+    raise ValueError(f"packed integer beyond fixture range: {value}")
+
+
+# Collation ids: the binary collation makes a character-family column bytes,
+# utf8mb4_0900_ai_ci makes it text.
+_COLLATION_BINARY = 63
+_COLLATION_UTF8MB4 = 255
+
+# Optional metadata field types, matching MySQL's Optional_metadata_field_type.
+_FIELD_COLUMN_CHARSET = 3
+_FIELD_COLUMN_NAME = 4
+
+
+def _build_payload_table_map_body(table_id: int, db: str, table_name: str) -> bytes:
+    """Build a TABLE_MAP_EVENT body for one BLOB and one TEXT column.
+
+    Both columns carry a four-byte length prefix. The binary one reaches the
+    binding as bytes and the text one as a string, so a single row exercises
+    both payload conversion arms over engine-owned heap storage.
+    """
+    parts = bytearray()
+    parts.extend(_u48_le(table_id))
+    parts.extend(b"\x00\x00")  # flags
+    parts.append(len(db))
+    parts.extend(db.encode("ascii"))
+    parts.append(0)
+    parts.append(len(table_name))
+    parts.extend(table_name.encode("ascii"))
+    parts.append(0)
+    parts.extend(_packed_int(2))  # column_count
+    parts.extend(b"\xfc\xfc")  # two BLOB columns
+    metadata = bytes([4, 4])  # pack_length = 4 for each
+    parts.extend(_packed_int(len(metadata)))
+    parts.extend(metadata)
+    parts.append(0xFF)  # null bitmap: both nullable
+
+    charsets = _packed_int(_COLLATION_BINARY) + _packed_int(_COLLATION_UTF8MB4)
+    parts.append(_FIELD_COLUMN_CHARSET)
+    parts.extend(_packed_int(len(charsets)))
+    parts.extend(charsets)
+
+    names = b""
+    for name in (b"payload", b"note"):
+        names += _packed_int(len(name)) + name
+    parts.append(_FIELD_COLUMN_NAME)
+    parts.extend(_packed_int(len(names)))
+    parts.extend(names)
+    return bytes(parts)
+
+
+def _build_payload_write_rows_body(table_id: int, payload: bytes, note: str) -> bytes:
+    """Build a WRITE_ROWS_EVENT V2 body for the BLOB/TEXT schema above."""
+    note_bytes = note.encode("utf-8")
+    parts = bytearray()
+    parts.extend(_u48_le(table_id))
+    parts.extend(b"\x00\x00")  # flags
+    parts.extend(struct.pack("<H", 2))  # var_header_len (V2)
+    parts.extend(_packed_int(2))  # column_count
+    parts.append(0x03)  # columns_present: both
+    parts.append(0x00)  # null bitmap: both present
+    parts.extend(struct.pack("<I", len(payload)))
+    parts.extend(payload)
+    parts.extend(struct.pack("<I", len(note_bytes)))
+    parts.extend(note_bytes)
+    return bytes(parts)
+
+
+def _build_payload_row_events(
+    table_id: int, db: str, table_name: str, payload: bytes, note: str, timestamp: int
+) -> bytes:
+    """Build the TABLE_MAP + WRITE_ROWS pair that decodes to one INSERT."""
+    return build_event(19, timestamp, _build_payload_table_map_body(table_id, db, table_name)) + (
+        build_event(30, timestamp, _build_payload_write_rows_body(table_id, payload, note))
+    )
+
+
+class TestHeldEvent:
+    def test_held_event_is_unaffected_by_later_feeds_decodes_and_reset(self, lib_path: str) -> None:
+        """A returned event owns its data, independent of the engine's storage.
+
+        The C ABI hands out one reusable event struct pointing at engine-owned
+        payload storage, so a ChangeEvent the binding has already returned must
+        keep every field it was built with however much the engine goes on to
+        do.
+        """
+        held_payload = b"\xa1" * 64
+        held_note = "held" + "y" * 60
+
+        with CdcEngine(lib_path=lib_path) as engine:
+            engine.feed(
+                _build_payload_row_events(1, "held_db", "held_rows", held_payload, held_note, 1000)
+            )
+            held = engine.next_event()
+            assert held is not None
+            assert held.after is not None
+            assert held.after["payload"] == held_payload
+            assert held.after["note"] == held_note
+
+            # Unrelated rows of the same shape: a payload of identical length
+            # can take over the storage the held one used.
+            later_payload = b"\xb2" * 64
+            engine.feed(
+                _build_payload_row_events(
+                    2, "other_db", "other_rows", later_payload, "later" + "z" * 59, 2000
+                )
+            )
+            later = engine.next_event()
+            assert later is not None
+            assert later.after is not None
+            assert later.after["payload"] == later_payload
+
+            # A longer payload, so nothing about the held event's bytes
+            # surviving can rest on the next decode allocating elsewhere.
+            engine.feed(
+                _build_payload_row_events(
+                    3, "third_db", "third_rows", b"\xc3" * 512, "third" + "w" * 507, 3000
+                )
+            )
+            assert engine.next_event() is not None
+
+            engine.reset()
+
+            assert held.after["payload"] == held_payload
+            assert held.after["note"] == held_note
+            assert isinstance(held.after["payload"], bytes)
+            assert isinstance(held.after["note"], str)
+            assert held.type is EventType.INSERT
+            assert held.database == "held_db"
+            assert held.table == "held_rows"
+            assert held.timestamp == 1000
+            assert held.before is None
+            assert list(held.after) == ["payload", "note"]
 
 
 def _make_string_column(data: bytes, col_name: bytes | None = None) -> MESColumn:
