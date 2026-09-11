@@ -82,13 +82,15 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
 
       bytes_needed_ = current_header_.event_length;
 
-      // Reserve the full event size up front so the subsequent
-      // buffer_.insert() calls append in amortized O(1) instead of
-      // triggering geometric reallocation. Zero-copy ring-buffer redesign
-      // is out of scope; reserving is a targeted micro-optimization that
-      // eliminates the observed O(N^2) behavior for large BLOB events.
-      if (bytes_needed_ > buffer_.capacity()) {
-        buffer_.reserve(bytes_needed_);
+      // Reserve ahead of the body so the subsequent buffer_.insert() calls
+      // append in amortized O(1) instead of reallocating per chunk, which is
+      // what produced the observed O(N^2) behavior for large BLOB events.
+      // The reserve follows the declared event length only up to
+      // kMaxEagerReserve; past that, the vector's geometric growth sizes the
+      // buffer from the bytes that have actually arrived.
+      const size_t eager_reserve = std::min(bytes_needed_, kMaxEagerReserve);
+      if (eager_reserve > buffer_.capacity()) {
+        buffer_.reserve(eager_reserve);
       }
 
       if (buffer_.size() >= bytes_needed_) {

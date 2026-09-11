@@ -145,6 +145,17 @@ class EventStreamParser {
   // allocation for the remainder of a long-lived stream.
   static constexpr size_t kRetainedBufferLimit = 8u * 1024u * 1024u;
 
+  // Ceiling on the buffer reserve made from a freshly parsed event header.
+  // The declared event length is wire data bounded only by max_event_size_
+  // (up to kAbsoluteMaxEventSize), so committing it before any body byte has
+  // arrived lets a peer that sends a header and then stalls pin that much
+  // memory, and makes the request large enough to fail outright — which ends
+  // the process rather than returning an error, because this library is
+  // compiled without exceptions. Above this bound the buffer grows
+  // geometrically from the bytes that actually arrive, which keeps appends
+  // amortized O(1) without trusting the declared length.
+  static constexpr size_t kMaxEagerReserve = 1u * 1024u * 1024u;
+
   /// Auto-detect the checksum algorithm from a buffered FORMAT_DESCRIPTION
   /// event and update has_checksum_ accordingly.
   void DetectChecksumFromFde();

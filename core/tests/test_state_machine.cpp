@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ struct EventStreamParserTestAccess {
   }
 
   static size_t RetainedBufferLimit() { return EventStreamParser::kRetainedBufferLimit; }
+
+  static size_t MaxEagerReserve() { return EventStreamParser::kMaxEagerReserve; }
 };
 
 namespace {
@@ -283,6 +286,72 @@ TEST(StateMachineTest, ResetAlwaysReleasesRetainedBuffer) {
   parser.Reset();
   EXPECT_EQ(EventStreamParserTestAccess::BufferCapacity(parser), 0u);
   EXPECT_EQ(parser.GetState(), ParserState::kWaitingHeader);
+}
+
+// A 19-byte header that declares @p event_length but carries no body bytes.
+std::vector<uint8_t> BuildHeaderDeclaring(uint32_t event_length) {
+  test::EventBuilder b;
+  b.WriteU32Le(0);  // timestamp
+  b.WriteU8(30);    // type_code
+  b.WriteU32Le(1);  // server_id
+  b.WriteU32Le(event_length);
+  b.WriteU32Le(0);  // next_position
+  b.WriteU16Le(0);  // flags
+  return b.Data();
+}
+
+TEST(StateMachineTest, HeaderDeclaringHugeEventDoesNotCommitTheAllocation) {
+  EventStreamParser parser;
+  ASSERT_GT(parser.MaxEventSize(), EventStreamParserTestAccess::MaxEagerReserve());
+
+  // Right at the accepted ceiling, so the header passes validation and the
+  // parser waits for a body that never arrives.
+  auto header = BuildHeaderDeclaring(parser.MaxEventSize());
+  ASSERT_EQ(parser.Feed(header.data(), header.size()), header.size());
+  ASSERT_EQ(parser.GetState(), ParserState::kWaitingBody);
+
+  // The reserve is bounded rather than removed: it still covers the appends
+  // that follow, it just stops scaling with the declared length.
+  const size_t capacity = EventStreamParserTestAccess::BufferCapacity(parser);
+  EXPECT_GE(capacity, EventStreamParserTestAccess::MaxEagerReserve());
+  EXPECT_LE(capacity, EventStreamParserTestAccess::MaxEagerReserve());
+}
+
+TEST(StateMachineTest, HeaderBeyondTheCeilingFailsWithoutAllocating) {
+  EventStreamParser parser;
+  parser.SetMaxEventSize(4096);
+
+  auto header = BuildHeaderDeclaring(parser.MaxEventSize() + 1);
+  EXPECT_EQ(parser.Feed(header.data(), header.size()), header.size());
+  EXPECT_EQ(parser.GetState(), ParserState::kError);
+  EXPECT_EQ(parser.ErrorCode(), MES_ERR_PARSE);
+  EXPECT_FALSE(parser.HasEvent());
+  EXPECT_LE(EventStreamParserTestAccess::BufferCapacity(parser),
+            EventStreamParserTestAccess::MaxEagerReserve());
+}
+
+TEST(StateMachineTest, EventLargerThanTheEagerReserveStillAssembles) {
+  // The buffer now grows from the bytes that arrive rather than from the
+  // declared length, so an event well past the reserve bound must still
+  // reassemble byte for byte across chunk boundaries.
+  const size_t payload_size = EventStreamParserTestAccess::MaxEagerReserve() * 3;
+  std::vector<uint8_t> body(payload_size, 0xC3);
+  for (size_t i = 0; i < body.size(); i += 4096) {
+    body[i] = static_cast<uint8_t>(i / 4096);
+  }
+  auto event = BuildEvent(30, body);
+
+  EventStreamParser parser;
+  const size_t chunk = 7919;  // deliberately not a divisor of the event size
+  size_t offset = 0;
+  while (offset < event.size()) {
+    const size_t len = std::min(chunk, event.size() - offset);
+    offset += parser.Feed(event.data() + offset, len);
+  }
+
+  ASSERT_TRUE(parser.HasEvent());
+  ASSERT_EQ(parser.RawSize(), event.size());
+  EXPECT_EQ(std::memcmp(parser.RawData(), event.data(), event.size()), 0);
 }
 
 TEST(StateMachineTest, FeedNullData) {
