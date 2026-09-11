@@ -90,6 +90,10 @@ struct PollResult {
  *   BinlogClient client;
  *   client.Connect(config);
  *   client.StartStream();
+ *   // The reader thread already verified every queued event's CRC32, so the
+ *   // engine frames the trailer without computing it a second time.
+ *   engine.SetChecksumEnabled(client.ChecksumEnabled());
+ *   engine.SetTrailerPreVerified(true);
  *   while (client.IsStreaming()) {
  *     auto result = client.Poll();
  *     if (result.data) engine.Feed(result.data, result.size);

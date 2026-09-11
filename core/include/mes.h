@@ -417,15 +417,17 @@ MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
 /**
  * @brief Set whether fed events carry a trailing 4-byte CRC32 checksum.
  *
+ * This is a framing switch: it decides whether the last four bytes of a fed
+ * event are a trailer rather than body data. It is not a way to skip trailer
+ * validation, and 0 on a stream that does carry trailers silently corrupts
+ * the last bytes of every event, so it must match the stream.
+ *
  * Defaults to enabled (1), matching MySQL's default binlog_checksum=CRC32.
  * Set to 0 when feeding raw bytes from a stream produced with
  * binlog_checksum=NONE (e.g. MariaDB's historical default) when the stream
  * does not start with a FORMAT_DESCRIPTION_EVENT. When the fed stream
  * contains an FDE, the engine auto-detects the algorithm and this setting
  * is overridden.
- *
- * Misframing the checksum silently corrupts the last bytes of every event,
- * so this must match the stream.
  *
  * @param engine Engine handle.
  * @param enabled Non-zero to treat events as checksummed; 0 otherwise.
@@ -811,7 +813,12 @@ MES_API const char* mes_client_current_gtid(mes_client_t* client);
  *
  * Call after mes_client_start(). Pass the result to
  * mes_set_checksum_enabled() on a raw engine consuming this client's poll
- * results. FORMAT_DESCRIPTION_EVENT can subsequently update both layers.
+ * results, so the engine frames the trailer the way the wire does.
+ * FORMAT_DESCRIPTION_EVENT can subsequently update both layers.
+ *
+ * The client verifies each event's trailer on its reader thread and an engine
+ * fed those bytes verifies it again, so a checksummed event polled through
+ * this ABI is checksummed twice.
  *
  * @return 1 for CRC32, 0 for checksum=NONE or a NULL client.
  * @threadsafety Thread-safe.

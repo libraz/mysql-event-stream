@@ -185,6 +185,12 @@ void EventStreamParser::SetChecksumEnabled(bool enabled) {
 
 bool EventStreamParser::ChecksumEnabled() const { return has_checksum_; }
 
+void EventStreamParser::SetTrailerPreVerified(bool pre_verified) {
+  trailer_pre_verified_ = pre_verified;
+}
+
+bool EventStreamParser::TrailerPreVerified() const { return trailer_pre_verified_; }
+
 mes_error_t EventStreamParser::ErrorCode() const { return error_code_; }
 
 void EventStreamParser::DetectChecksumFromFde() {
@@ -202,10 +208,14 @@ void EventStreamParser::DetectChecksumFromFde() {
   }
 }
 
-bool EventStreamParser::VerifyChecksum() const {
+bool EventStreamParser::VerifyChecksum() {
+  // Checked before the framing flag: the point of the producer's guarantee is
+  // that no CRC32 pass happens here at all.
+  if (trailer_pre_verified_) return true;
   if (!current_has_checksum_) return true;
   if (buffer_.size() < kEventHeaderSize + kChecksumSize) return false;
   const size_t data_length = buffer_.size() - kChecksumSize;
+  ++crc32_passes_;
   const uint32_t computed = ComputeCRC32(buffer_.data(), data_length);
   const uint32_t stored = binary::ReadU32Le(buffer_.data() + data_length);
   return computed == stored;
@@ -219,6 +229,7 @@ void EventStreamParser::DetectArtificialRotateChecksum() {
     return;
   }
   const size_t data_length = buffer_.size() - kChecksumSize;
+  ++crc32_passes_;
   const uint32_t computed = ComputeCRC32(buffer_.data(), data_length);
   const uint32_t stored = binary::ReadU32Le(buffer_.data() + data_length);
   // Additive only: never re-derive current_has_checksum_ from has_checksum_

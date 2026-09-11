@@ -394,6 +394,10 @@ uint32_t CdcEngine::MaxEventSize() const { return stream_parser_.MaxEventSize();
 
 void CdcEngine::SetChecksumEnabled(bool enabled) { stream_parser_.SetChecksumEnabled(enabled); }
 
+void CdcEngine::SetTrailerPreVerified(bool pre_verified) {
+  stream_parser_.SetTrailerPreVerified(pre_verified);
+}
+
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
   // Advance the resume position to next_position so events emitted by this
   // call carry the offset to resume from after consuming them. The pre-event

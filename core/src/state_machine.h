@@ -121,6 +121,13 @@ class EventStreamParser {
   /**
    * @brief Set whether events carry a trailing 4-byte CRC32 checksum.
    *
+   * This is a framing switch and nothing else: it decides whether the last
+   * four bytes of an event are a trailer to be excluded from the body, and
+   * what the minimum acceptable event length is. It is never a way to skip
+   * trailer validation -- misframing silently truncates or corrupts the last
+   * column, so it must match the stream. Use SetTrailerPreVerified() to say
+   * that something upstream has already validated the trailer.
+   *
    * Defaults to true (MySQL's default). Set to false for streams produced
    * with binlog_checksum=NONE (e.g. MariaDB's historical default) when
    * feeding raw bytes without a FORMAT_DESCRIPTION_EVENT. When an FDE is
@@ -134,6 +141,29 @@ class EventStreamParser {
 
   /** @brief Whether the parser currently treats events as checksummed. */
   bool ChecksumEnabled() const;
+
+  /**
+   * @brief Declare that fed events have already had their trailer validated.
+   *
+   * Set this when the bytes come from a producer that verified the CRC32
+   * itself, as BinlogClient's reader thread does for every event it queues.
+   * The parser then frames the trailer exactly as before but does not
+   * recompute the CRC32, so an event's checksum is computed once across the
+   * pipeline instead of once per layer. A mismatch the producer would have
+   * rejected is consequently not reported here.
+   *
+   * Orthogonal to SetChecksumEnabled(): this changes validation only, that
+   * one changes framing only, and neither is a substitute for the other.
+   *
+   * One CRC32 remains shared with the producer: on a binlog_checksum=NONE
+   * stream, the synthetic ROTATE that opens a dump still carries a trailer,
+   * and identifying it is a framing decision the parser has to make from the
+   * bytes. That is one event per dump, not one per event.
+   */
+  void SetTrailerPreVerified(bool pre_verified);
+
+  /** @brief Whether fed events are treated as already validated upstream. */
+  bool TrailerPreVerified() const;
 
   /** @brief Specific parser failure, including MES_ERR_CHECKSUM. */
   mes_error_t ErrorCode() const;
@@ -161,7 +191,7 @@ class EventStreamParser {
   void DetectChecksumFromFde();
 
   /// Validate the trailing checksum of the complete buffered event.
-  bool VerifyChecksum() const;
+  bool VerifyChecksum();
 
   /// Detect the checksummed synthetic ROTATE emitted before an FDE. Additive
   /// only: it may turn the buffered event's checksum framing on, never off.
@@ -174,6 +204,12 @@ class EventStreamParser {
   uint32_t max_event_size_ = kDefaultMaxEventSize;
   bool has_checksum_ = true;
   bool current_has_checksum_ = true;
+  bool trailer_pre_verified_ = false;
+  // Number of CRC32 passes this parser has made over event bytes. Sharing the
+  // producer's verification is only worth configuring if it is observable that
+  // the work is not repeated, and the count is the work itself rather than a
+  // proxy for it.
+  uint64_t crc32_passes_ = 0;
   mes_error_t error_code_ = MES_OK;
 };
 

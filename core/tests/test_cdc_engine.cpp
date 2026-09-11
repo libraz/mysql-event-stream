@@ -327,6 +327,32 @@ TEST(CdcEngineChecksumTest, CorruptedCrcReturnsChecksumErrorWithoutAdvancingPosi
   EXPECT_FALSE(engine.HasEvents());
 }
 
+TEST(CdcEngineChecksumTest, PreVerifiedTrailerIsFramedWithoutBeingRevalidated) {
+  // Fed from a producer that verified the trailer itself -- BinlogClient's
+  // reader thread does -- the engine still frames the trailer out of the body
+  // but no longer recomputes the CRC32, so it cannot fail an event on a
+  // trailer it did not check.
+  CdcEngine engine;
+  engine.SetTrailerPreVerified(true);
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                          BuildWriteRowsBody(42, 4242));
+  write[write.size() - kChecksumSize] ^= 0xFF;
+
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_OK);
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.type, EventType::kInsert);
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 4242);
+  EXPECT_EQ(engine.CurrentPosition().offset, 150u);
+}
+
 TEST(CdcEngineChecksumTest, ChecksumNoneArtificialRotateDoesNotPolluteFilename) {
   CdcEngine engine;
   engine.SetChecksumEnabled(false);

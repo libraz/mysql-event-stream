@@ -22,6 +22,8 @@ struct EventStreamParserTestAccess {
   static size_t RetainedBufferLimit() { return EventStreamParser::kRetainedBufferLimit; }
 
   static size_t MaxEagerReserve() { return EventStreamParser::kMaxEagerReserve; }
+
+  static uint64_t Crc32Passes(const EventStreamParser& parser) { return parser.crc32_passes_; }
 };
 
 namespace {
@@ -781,6 +783,121 @@ TEST(StateMachineChecksumTest, ArtificialRotateDetectionDoesNotReframeTheEventBe
   parser.CurrentBody(&body_ptr, &body_len);
   EXPECT_EQ(body_len, body.size());
   EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
+}
+
+// --- Sharing a producer's trailer verification ---
+
+// An event whose trailer bytes do not match its contents: the parser rejects
+// it when it validates the trailer itself, and is expected to accept it when
+// told the producer already did.
+std::vector<uint8_t> BuildEventWithBrokenTrailer(uint8_t type_code,
+                                                 const std::vector<uint8_t>& body) {
+  auto event = test::BuildEvent(type_code, 1000, 0, body);
+  event[event.size() - kChecksumSize] ^= 0xFF;
+  return event;
+}
+
+TEST(StateMachineChecksumTest, PreVerifiedTrailerCostsNoChecksumPass) {
+  const std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04, 0x05};
+  auto event = test::BuildEvent(30, 1000, 0, body);
+
+  EventStreamParser verifying;
+  ASSERT_EQ(verifying.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(verifying.HasEvent());
+  // The count has to move for its absence below to mean anything.
+  ASSERT_EQ(EventStreamParserTestAccess::Crc32Passes(verifying), 1u);
+
+  EventStreamParser sharing;
+  sharing.SetTrailerPreVerified(true);
+  ASSERT_EQ(sharing.Feed(event.data(), event.size()), event.size());
+  ASSERT_TRUE(sharing.HasEvent());
+  EXPECT_EQ(EventStreamParserTestAccess::Crc32Passes(sharing), 0u);
+
+  // Framing is untouched: the trailer is still excluded from the body.
+  const uint8_t* body_ptr = nullptr;
+  size_t body_len = 0;
+  sharing.CurrentBody(&body_ptr, &body_len);
+  EXPECT_EQ(body_len, body.size());
+  EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body);
+}
+
+TEST(StateMachineChecksumTest, PreVerifiedTrailerIsNotValidatedAgain) {
+  auto event = BuildEventWithBrokenTrailer(30, {0x01, 0x02, 0x03, 0x04, 0x05});
+
+  EventStreamParser verifying;
+  ASSERT_EQ(verifying.Feed(event.data(), event.size()), event.size());
+  ASSERT_EQ(verifying.GetState(), ParserState::kError);
+  ASSERT_EQ(verifying.ErrorCode(), MES_ERR_CHECKSUM);
+
+  EventStreamParser sharing;
+  sharing.SetTrailerPreVerified(true);
+  ASSERT_EQ(sharing.Feed(event.data(), event.size()), event.size());
+  EXPECT_TRUE(sharing.HasEvent());
+  EXPECT_EQ(sharing.ErrorCode(), MES_OK);
+  EXPECT_EQ(EventStreamParserTestAccess::Crc32Passes(sharing), 0u);
+}
+
+TEST(StateMachineChecksumTest, FramingAndVerificationAreSeparateSwitches) {
+  // Neither switch may reach into the other's behaviour. Across the four
+  // combinations, the framed body length follows SetChecksumEnabled() alone
+  // and whether a broken trailer is rejected follows SetTrailerPreVerified()
+  // alone, so no single flag can silently trade one for the other.
+  const std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04, 0x05};
+  auto event = BuildEventWithBrokenTrailer(30, body);
+
+  struct Combination {
+    bool checksum_framing;
+    bool pre_verified;
+    size_t expected_body_len;
+    bool expect_rejected;
+  };
+  // With framing off the trailer bytes are body, so the body is four longer.
+  const std::vector<Combination> combinations = {
+      {true, false, body.size(), true},
+      {true, true, body.size(), false},
+      {false, false, body.size() + kChecksumSize, false},
+      {false, true, body.size() + kChecksumSize, false},
+  };
+
+  for (const auto& c : combinations) {
+    EventStreamParser parser;
+    parser.SetChecksumEnabled(c.checksum_framing);
+    parser.SetTrailerPreVerified(c.pre_verified);
+    const std::string what = std::string("framing=") + (c.checksum_framing ? "on" : "off") +
+                             " pre_verified=" + (c.pre_verified ? "on" : "off");
+
+    ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size()) << what;
+    if (c.expect_rejected) {
+      EXPECT_EQ(parser.GetState(), ParserState::kError) << what;
+      EXPECT_EQ(parser.ErrorCode(), MES_ERR_CHECKSUM) << what;
+      continue;
+    }
+    ASSERT_TRUE(parser.HasEvent()) << what;
+    const uint8_t* body_ptr = nullptr;
+    size_t body_len = 0;
+    parser.CurrentBody(&body_ptr, &body_len);
+    EXPECT_EQ(body_len, c.expected_body_len) << what;
+  }
+}
+
+TEST(StateMachineChecksumTest, PreVerifiedTrailerStillFramesEveryEventInAStream) {
+  // The flag is per-parser, not per-event: a whole stream keeps its framing.
+  const std::vector<uint8_t> body = {0xAA, 0xBB, 0xCC};
+  EventStreamParser parser;
+  parser.SetTrailerPreVerified(true);
+
+  for (uint32_t i = 0; i < 3; ++i) {
+    auto event = BuildEventWithBrokenTrailer(30, body);
+    ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size()) << "event " << i;
+    ASSERT_TRUE(parser.HasEvent()) << "event " << i;
+    const uint8_t* body_ptr = nullptr;
+    size_t body_len = 0;
+    parser.CurrentBody(&body_ptr, &body_len);
+    EXPECT_EQ(body_len, body.size()) << "event " << i;
+    EXPECT_EQ(std::vector<uint8_t>(body_ptr, body_ptr + body_len), body) << "event " << i;
+    parser.Advance();
+  }
+  EXPECT_EQ(EventStreamParserTestAccess::Crc32Passes(parser), 0u);
 }
 
 }  // namespace

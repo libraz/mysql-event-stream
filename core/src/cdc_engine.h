@@ -181,12 +181,25 @@ class CdcEngine {
   /**
    * @brief Set whether fed events carry a trailing 4-byte CRC32 checksum.
    *
-   * Defaults to true. Set to false when feeding raw bytes from a stream
-   * produced with binlog_checksum=NONE and no FORMAT_DESCRIPTION_EVENT.
-   * If the stream contains an FDE, the checksum algorithm is auto-detected
-   * and this setting is overridden.
+   * A framing switch only -- it decides whether the last four bytes belong to
+   * the body -- and never a way to skip trailer validation. Defaults to true.
+   * Set to false when feeding raw bytes from a stream produced with
+   * binlog_checksum=NONE and no FORMAT_DESCRIPTION_EVENT. If the stream
+   * contains an FDE, the checksum algorithm is auto-detected and this setting
+   * is overridden.
    */
   void SetChecksumEnabled(bool enabled);
+
+  /**
+   * @brief Declare that fed events have already had their trailer validated.
+   *
+   * Set this when feeding bytes straight from BinlogClient::Poll(): the
+   * client's reader thread verifies every event's CRC32 before queueing it,
+   * so recomputing it here is a second pass over the same bytes. Validation
+   * only -- the trailer is still framed out of the body exactly as before.
+   * See EventStreamParser::SetTrailerPreVerified() for what stays shared.
+   */
+  void SetTrailerPreVerified(bool pre_verified);
 
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
