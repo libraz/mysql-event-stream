@@ -84,8 +84,9 @@ enum class EventType : uint8_t {
  *
  * @note `string_val` holds both textual (e.g. VARCHAR, DECIMAL) and
  *       binary payloads. `is_binary` records which interpretation applies;
- *       TABLE_MAP charset metadata distinguishes text BLOB columns from
- *       binary BLOB columns. std::string is used
+ *       TABLE_MAP charset metadata distinguishes text from binary for every
+ *       character-family and BLOB-family column alike, and a column whose
+ *       charset is unknown is treated as binary. std::string is used
  *       uniformly as the backing container because its storage layout
  *       is byte-addressable and permits embedded NULs, so it is a
  *       strict superset of what a std::vector<uint8_t> would offer.

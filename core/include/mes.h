@@ -134,8 +134,11 @@ typedef enum {
  *
  * TABLE_MAP charset metadata determines the distinction for character and
  * BLOB-family columns. If a server omits that metadata (for example with
- * binlog_row_metadata=NO_LOG), BLOB-family values remain MES_COL_BYTES as a
- * conservative fallback. JSON and geometry values are always MES_COL_BYTES.
+ * binlog_row_metadata=NO_LOG), both families fall back to MES_COL_BYTES: each
+ * text/binary pair shares one binlog type byte, so without the collation the
+ * two are indistinguishable and bytes is the only lossless reading. Setting
+ * binlog_row_metadata to MINIMAL or FULL restores MES_COL_STRING for the
+ * character families. JSON and geometry values are always MES_COL_BYTES.
  *
  * Two column families sit off that path. ENUM and SET travel on the wire as
  * MYSQL_TYPE_STRING but are excluded from the DEFAULT_CHARSET and
