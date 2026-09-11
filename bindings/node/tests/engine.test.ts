@@ -88,7 +88,8 @@ describe("CdcEngine", () => {
   it("keeps prototype-like column names as own data properties", async () => {
     engine = await CdcEngine.create();
 
-    for (const [index, columnName] of ["__proto__", "constructor", "prototype"].entries()) {
+    const names = ["__proto__", "constructor", "prototype", "toString"];
+    for (const [index, columnName] of names.entries()) {
       const tableId = index + 10;
       const tm = buildEvent(
         TABLE_MAP_EVENT,
@@ -103,7 +104,68 @@ describe("CdcEngine", () => {
       expect(Object.hasOwn(row, columnName)).toBe(true);
       expect(row?.[columnName]).toBe(40 + index);
       expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+      // A data property, not the accessor these names reach on
+      // Object.prototype: a column value must never arrive as a getter, and
+      // "__proto__" must not have gone through the prototype setter.
+      const descriptor = Object.getOwnPropertyDescriptor(row ?? {}, columnName);
+      expect(descriptor).toEqual({
+        value: 40 + index,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
+  });
+
+  it("gives every column of a row a writable, enumerable, configurable data property", async () => {
+    engine = await CdcEngine.create();
+
+    const columns: ColumnFixture[] = [
+      { type: ColType.Long, value: new Uint8Array([7, 0, 0, 0]), name: "id" },
+      {
+        type: ColType.Blob,
+        meta: [4],
+        collation: Collation.Utf8mb4,
+        value: lengthPrefixed(new TextEncoder().encode("ok"), 4),
+        name: "label",
+      },
+      { type: ColType.Long, value: null, name: "absent" },
+    ];
+    engine.feed(buildColumnEvents(20, "testdb", "wide", columns));
+
+    const row = engine.nextEvent()?.after;
+    expect(row).not.toBeNull();
+    expect(Object.keys(row!)).toEqual(["id", "label", "absent"]);
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    for (const [name, value] of [
+      ["id", 7],
+      ["label", "ok"],
+      ["absent", null],
+    ] as const) {
+      expect(Object.getOwnPropertyDescriptor(row!, name)).toEqual({
+        value,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  });
+
+  it("leaves the later column in place when two columns resolve to one key", async () => {
+    engine = await CdcEngine.create();
+
+    // An unnamed column keys on its index, which a named column is free to
+    // spell. The row carries one property per distinct key, holding the value
+    // of the last column that resolved to it.
+    const columns: ColumnFixture[] = [
+      { type: ColType.Long, value: new Uint8Array([1, 0, 0, 0]) },
+      { type: ColType.Long, value: new Uint8Array([2, 0, 0, 0]), name: "0" },
+    ];
+    engine.feed(buildColumnEvents(21, "testdb", "collide", columns));
+
+    const row = engine.nextEvent()?.after;
+    expect(Object.keys(row!)).toEqual(["0"]);
+    expect(row?.["0"]).toBe(2);
   });
 
   it("should parse checksum=NONE events after an explicit override", async () => {

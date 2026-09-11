@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "addon_constants.h"
 #include "config_parser.h"
@@ -23,24 +24,25 @@ void ThrowDestroyed(Napi::Env env) {
 }  // namespace
 
 Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
-  Napi::Function func =
-      DefineClass(env, "CdcEngine",
-                  {
-                      InstanceMethod<&EngineWrap::Feed>("feed"),
-                      InstanceMethod<&EngineWrap::NextEvent>("nextEvent"),
-                      InstanceMethod<&EngineWrap::HasEvents>("hasEvents"),
-                      InstanceMethod<&EngineWrap::GetPosition>("getPosition"),
-                      InstanceMethod<&EngineWrap::Reset>("reset"),
-                      InstanceMethod<&EngineWrap::SetMaxQueueSize>("setMaxQueueSize"),
-                      InstanceMethod<&EngineWrap::SetMaxEventSize>("setMaxEventSize"),
-                      InstanceMethod<&EngineWrap::GetMaxEventSize>("getMaxEventSize"),
-                      InstanceMethod<&EngineWrap::SetChecksumEnabled>("setChecksumEnabled"),
-                      InstanceMethod<&EngineWrap::SetIncludeDatabases>("setIncludeDatabases"),
-                      InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
-                      InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
-                      InstanceMethod<&EngineWrap::Destroy>("destroy"),
-                      InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
-                  });
+  Napi::Function func = DefineClass(
+      env, "CdcEngine",
+      {
+          InstanceMethod<&EngineWrap::Feed>("feed"),
+          InstanceMethod<&EngineWrap::NextEvent>("nextEvent"),
+          InstanceMethod<&EngineWrap::HasEvents>("hasEvents"),
+          InstanceMethod<&EngineWrap::GetPosition>("getPosition"),
+          InstanceMethod<&EngineWrap::Reset>("reset"),
+          InstanceMethod<&EngineWrap::SetMaxQueueSize>("setMaxQueueSize"),
+          InstanceMethod<&EngineWrap::SetMaxEventSize>("setMaxEventSize"),
+          InstanceMethod<&EngineWrap::GetMaxEventSize>("getMaxEventSize"),
+          InstanceMethod<&EngineWrap::SetChecksumEnabled>("setChecksumEnabled"),
+          InstanceMethod<&EngineWrap::SetIncludeDatabases>("setIncludeDatabases"),
+          InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
+          InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
+          InstanceMethod<&EngineWrap::Destroy>("destroy"),
+          InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
+          InstanceAccessor<&EngineWrap::GetSourceSqlConversions>("sourceSqlConversions"),
+      });
 
   exports.Set("CdcEngine", func);
   return exports;
@@ -188,7 +190,7 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
     pos.Set("offset", Napi::Number::New(env, static_cast<double>(evt_offset)));
   }
   obj.Set("position", pos);
-  obj.Set("sourceSql", Napi::String::New(env, event->source_sql ? event->source_sql : ""));
+  obj.Set("sourceSql", GetSourceSql(env, event->source_sql));
 
   // namesResolved: false when column names could not be resolved for this
   // event's table, so all column keys fall back to numeric indices.
@@ -432,6 +434,9 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
 Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count) {
   Napi::Object record = Napi::Object::New(env);
 
+  std::vector<Napi::PropertyDescriptor> props;
+  props.reserve(count);
+
   for (uint32_t i = 0; i < count; i++) {
     const mes_column_t& col = cols[i];
 
@@ -493,16 +498,45 @@ Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uin
         break;
     }
 
-    // Define an own data property instead of performing ordinary [[Set]].
-    // In particular, "__proto__" must remain a legal column key rather than
-    // invoking Object.prototype.__proto__ and changing this row's prototype.
-    record.DefineProperty(Napi::PropertyDescriptor::Value(
+    props.push_back(Napi::PropertyDescriptor::Value(
         key, val,
         static_cast<napi_property_attributes>(napi_writable | napi_enumerable |
                                               napi_configurable)));
   }
 
+  // Define own data properties instead of performing ordinary [[Set]]. In
+  // particular, "__proto__" must remain a legal column key rather than
+  // invoking Object.prototype.__proto__ and changing this row's prototype.
+  // The descriptors are applied in order, so two columns resolving to the same
+  // key leave the later one's value in place, as one call per column did.
+  record.DefineProperties(props);
+
   return record;
+}
+
+Napi::String EngineWrap::GetSourceSql(Napi::Env env, const char* source_sql) {
+  if (source_sql == nullptr || source_sql[0] == '\0') {
+    return Napi::String::New(env, "");
+  }
+
+  const size_t sql_size = std::strlen(source_sql);
+  if (source_sql_cache_.address == source_sql && source_sql_cache_.bytes.size() == sql_size &&
+      std::memcmp(source_sql_cache_.bytes.data(), source_sql, sql_size) == 0) {
+    return source_sql_cache_.holder.Value().Get("value").As<Napi::String>();
+  }
+
+  Napi::String value = Napi::String::New(env, source_sql, sql_size);
+  Napi::Object holder = Napi::Object::New(env);
+  holder.Set("value", value);
+  source_sql_cache_.address = source_sql;
+  source_sql_cache_.bytes.assign(source_sql, sql_size);
+  source_sql_cache_.holder = Napi::Persistent(holder);
+  source_sql_conversions_++;
+  return value;
+}
+
+Napi::Value EngineWrap::GetSourceSqlConversions(const Napi::CallbackInfo& info) {
+  return Napi::Number::New(info.Env(), static_cast<double>(source_sql_conversions_));
 }
 
 Napi::String EngineWrap::GetColumnKey(Napi::Env env, const mes_column_t& col, uint32_t index) {
