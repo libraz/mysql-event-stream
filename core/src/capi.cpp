@@ -10,6 +10,8 @@
  * between internal C++ types and their C ABI equivalents.
  */
 
+#include <openssl/crypto.h>
+
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -22,6 +24,26 @@
 #include "logger.h"
 #include "mes.h"
 #include "types.h"
+
+namespace {
+
+/**
+ * @brief Wipes a credential staged at the C ABI boundary on every exit path.
+ *
+ * A staging copy built from the caller's `const char*` goes back to the
+ * allocator as soon as the entry point returns, so the wipe must reach the
+ * error returns too and must be one the compiler may not drop as a dead store.
+ */
+struct SecureCleanseString {
+  std::string& value;
+  ~SecureCleanseString() {
+    if (!value.empty()) {
+      OPENSSL_cleanse(value.data(), value.size());
+    }
+  }
+};
+
+}  // namespace
 
 namespace mes {
 
@@ -437,6 +459,10 @@ MES_API mes_error_t mes_engine_set_metadata_conn(mes_engine_t* engine,
   std::string host = config->host != nullptr ? config->host : "127.0.0.1";
   std::string user = config->user != nullptr ? config->user : "";
   std::string password = config->password != nullptr ? config->password : "";
+  // MetadataFetcher keeps its own copy for reconnection and scrubs that one on
+  // Disconnect(); this staging copy is wiped when the function returns, by
+  // either path, so the secret is not left readable in freed memory.
+  SecureCleanseString password_cleanse{password};
   std::string ssl_ca = config->ssl_ca != nullptr ? config->ssl_ca : "";
   std::string ssl_cert = config->ssl_cert != nullptr ? config->ssl_cert : "";
   std::string ssl_key = config->ssl_key != nullptr ? config->ssl_key : "";

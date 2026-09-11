@@ -31,6 +31,8 @@ struct ColumnInfo {
   bool is_unsigned = false;
 };
 
+class MetadataFetcherTestAccess;
+
 /**
  * @brief Fetches and caches column metadata from MySQL
  *
@@ -90,6 +92,8 @@ class MetadataFetcher {
   void ClearCache();
 
  private:
+  friend class MetadataFetcherTestAccess;
+
   protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::vector<ColumnInfo>>> cache_;
   // Server-side SQL failures (for example missing SELECT privilege) are

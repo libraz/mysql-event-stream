@@ -3,7 +3,8 @@
 
 #include "client/metadata_fetcher.h"
 
-#include <algorithm>
+#include <openssl/crypto.h>
+
 #include <cstring>
 #include <string>
 
@@ -64,9 +65,11 @@ void MetadataFetcher::Disconnect() {
   // Disconnect() so FetchColumnInfo() can reconnect once on connection loss
   // (the retry path uses conn_.Disconnect(), not this method, so it stays
   // available there). At final teardown, overwrite the backing bytes before
-  // releasing them so the secret does not linger in freed heap memory.
+  // releasing them so the secret does not linger in freed heap memory. The
+  // shrink_to_fit() below returns that buffer to the allocator right away,
+  // which makes a plain fill a dead store the compiler may drop.
   if (!password_.empty()) {
-    std::fill(password_.begin(), password_.end(), '\0');
+    OPENSSL_cleanse(password_.data(), password_.size());
   }
   password_.clear();
   password_.shrink_to_fit();

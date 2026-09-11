@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "client/metadata_fetcher.h"
 #include "event_header.h"
 #include "mes.h"
 #include "test_helpers.h"
@@ -18,6 +19,14 @@ namespace mes {
 // Defined in capi.cpp. Not part of the public C ABI: it is the only way to put
 // an engine into the "metadata enabled" shape without a live MySQL server.
 void CapiInstallUnconnectedMetadataFetcher(mes_engine_t* engine);
+
+/** @brief Reads the credential a MetadataFetcher retains for reconnection. */
+class MetadataFetcherTestAccess {
+ public:
+  static const std::string& RetainedPassword(const MetadataFetcher& fetcher) {
+    return fetcher.password_;
+  }
+};
 }  // namespace mes
 
 namespace {
@@ -85,6 +94,19 @@ TEST(CApi, MetadataConnectionRejectsInvalidSslModeBeforeConnecting) {
   config.ssl_mode = static_cast<mes_ssl_mode_t>(99);
   EXPECT_EQ(mes_engine_set_metadata_conn(engine, &config), MES_ERR_INVALID_ARG);
   mes_destroy(engine);
+}
+
+TEST(CApi, MetadataFetcherReleasesItsRetainedPasswordOnDisconnect) {
+  mes::MetadataFetcher fetcher;
+  // Nothing listens on loopback port 1, so Connect() fails, but only after
+  // retaining the parameters its single reconnect attempt needs.
+  EXPECT_NE(fetcher.Connect("127.0.0.1", 1, "repl", "cleartext-secret", 1, 1), MES_OK);
+  EXPECT_EQ(mes::MetadataFetcherTestAccess::RetainedPassword(fetcher), "cleartext-secret");
+
+  // Disconnect is the end of the reconnect window, so nothing may keep holding
+  // the plaintext credential afterwards.
+  fetcher.Disconnect();
+  EXPECT_TRUE(mes::MetadataFetcherTestAccess::RetainedPassword(fetcher).empty());
 }
 
 TEST(CApi, ClientRejectsZeroServerIdBeforeConnecting) {
