@@ -5,33 +5,7 @@ import { BinlogClient } from "./client.js";
 import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";
 import type { ChangeEvent, StreamConfig } from "./types.js";
-import { invalidArgument, validateStreamOptions, withStreamDefaults } from "./validation.js";
-
-const STREAM_CONFIG_KEYS = new Set<keyof StreamConfig>([
-  "host",
-  "port",
-  "user",
-  "password",
-  "serverId",
-  "startGtid",
-  "startBinlogFile",
-  "startBinlogPosition",
-  "connectTimeoutS",
-  "readTimeoutS",
-  "sslMode",
-  "sslCa",
-  "sslCert",
-  "sslKey",
-  "allowPublicKeyRetrieval",
-  "maxQueueSize",
-  "maxQueueBytes",
-  "maxEventSize",
-  "includeDatabases",
-  "includeTables",
-  "excludeTables",
-  "maxReconnectAttempts",
-  "onMetadataError",
-]);
+import { validateStreamOptions, withStreamDefaults } from "./validation.js";
 
 /** Concatenate two byte arrays into a new Uint8Array. */
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
@@ -79,6 +53,12 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   // a `for await` loop that exits with `break`.
   private lastGtid = "";
 
+  /**
+   * @param config Stream options. Unrecognized keys and values that do not
+   *   match their documented type are rejected here rather than at first
+   *   iteration, so a typo cannot leave the stream running on a default the
+   *   caller never asked for.
+   */
   constructor(config: StreamConfig) {
     validateStreamOptions(config);
     Object.defineProperty(this, "config", {
@@ -89,17 +69,17 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     });
   }
 
-  /** Override config properties before streaming starts. */
+  /**
+   * Override config properties before streaming starts.
+   *
+   * @param overrides Options to replace, validated exactly as the constructor
+   *   validates a whole config.
+   */
   configure(overrides: Partial<StreamConfig>): void {
     if (this.iterator) {
       throw new Error("Cannot configure after streaming has started");
     }
     validateStreamOptions(overrides);
-    for (const key of Object.keys(overrides)) {
-      if (!STREAM_CONFIG_KEYS.has(key as keyof StreamConfig)) {
-        throw invalidArgument(`Unknown config key: ${key}`);
-      }
-    }
     this.config = { ...this.config, ...overrides };
   }
 

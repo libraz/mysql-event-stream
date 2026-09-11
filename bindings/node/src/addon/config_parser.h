@@ -44,14 +44,90 @@ struct ConfigStrings {
   }
 };
 
+/** Runtime type a config option's value must have, as declared for that option
+ *  in core/contracts/bindings.json. */
+enum class ConfigValueType { kString, kNumber, kBoolean };
+
+struct ConfigOption {
+  const char* key;
+  ConfigValueType type;
+};
+
+/** Every option a client config may carry, with the type its value must have.
+ *  Options the calling wrapper parses itself are listed too: a wrongly-typed
+ *  value has to be rejected before reaching a check that reads it as absent and
+ *  substitutes the documented default. */
+constexpr ConfigOption kConfigOptions[] = {
+    {"host", ConfigValueType::kString},
+    {"user", ConfigValueType::kString},
+    {"password", ConfigValueType::kString},
+    {"startGtid", ConfigValueType::kString},
+    {"startBinlogFile", ConfigValueType::kString},
+    {"sslCa", ConfigValueType::kString},
+    {"sslCert", ConfigValueType::kString},
+    {"sslKey", ConfigValueType::kString},
+    {"port", ConfigValueType::kNumber},
+    {"serverId", ConfigValueType::kNumber},
+    {"startBinlogPosition", ConfigValueType::kNumber},
+    {"connectTimeoutS", ConfigValueType::kNumber},
+    {"readTimeoutS", ConfigValueType::kNumber},
+    {"sslMode", ConfigValueType::kNumber},
+    {"maxQueueSize", ConfigValueType::kNumber},
+    {"maxQueueBytes", ConfigValueType::kNumber},
+    {"maxEventSize", ConfigValueType::kNumber},
+    {"allowPublicKeyRetrieval", ConfigValueType::kBoolean},
+};
+
+/** Reject every supplied option whose value is not of its declared type.
+ *  Returns false and schedules a JS TypeError on the first mismatch.
+ *
+ *  An undefined value means the option was not supplied and keeps its default;
+ *  any other value must match, so a caller that passes the wrong type gets an
+ *  error naming the option instead of a silently defaulted connection. The scan
+ *  runs once per connect, not per event. */
+inline bool ValidateConfigTypes(Napi::Env env, Napi::Object config) {
+  for (const ConfigOption& option : kConfigOptions) {
+    Napi::Value value = config.Get(option.key);
+    if (value.IsUndefined()) continue;
+
+    bool matches = false;
+    const char* expected = "";
+    switch (option.type) {
+      case ConfigValueType::kString:
+        matches = value.IsString();
+        expected = "a string";
+        break;
+      case ConfigValueType::kNumber:
+        matches = value.IsNumber();
+        expected = "a number";
+        break;
+      case ConfigValueType::kBoolean:
+        matches = value.IsBoolean();
+        expected = "a boolean";
+        break;
+    }
+    if (!matches) {
+      Napi::TypeError::New(env, std::string(option.key) + " must be " + expected)
+          .ThrowAsJavaScriptException();
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Parse common client config fields from a JS object into a C config struct.
  *  Returns false and schedules a JS exception on validation errors.
  *  Note: Uses a single Get() per key — undefined keys return
  *  env.Undefined(), which fails the subsequent IsString()/IsNumber() check,
  *  matching the intent of the previous Has() + Get() pattern while halving
- *  N-API round-trips. */
+ *  N-API round-trips. Types are checked up front by ValidateConfigTypes, so a
+ *  failing IsString()/IsNumber() here means the option was not supplied. */
 inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_config_t& cfg,
                               ConfigStrings& strings) {
+  if (!ValidateConfigTypes(env, config)) {
+    return false;
+  }
+
   Napi::Value host_v = config.Get("host");
   if (host_v.IsString()) {
     strings.host = host_v.As<Napi::String>().Utf8Value();
@@ -105,10 +181,6 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
 
   uint32_t ssl_mode = MES_SSL_PREFERRED;
   Napi::Value ssl_mode_v = config.Get("sslMode");
-  if (!ssl_mode_v.IsUndefined() && !ssl_mode_v.IsNumber()) {
-    Napi::TypeError::New(env, "sslMode must be a number from 0 to 4").ThrowAsJavaScriptException();
-    return false;
-  }
   if (ssl_mode_v.IsNumber()) {
     ssl_mode = ssl_mode_v.As<Napi::Number>().Uint32Value();
     if (ssl_mode > 4) {
