@@ -6,6 +6,7 @@
 
 #include <mes.h>
 #include <napi.h>
+#include <openssl/crypto.h>
 
 #include <string>
 
@@ -17,7 +18,15 @@ constexpr uint32_t kDefaultConnectTimeoutS = 10;
 constexpr uint32_t kDefaultReadTimeoutS = 30;
 
 /** Holds std::string values whose lifetime must outlive the mes_client_config_t
- *  that references them via c_str() pointers. */
+ *  that references them via c_str() pointers.
+ *
+ *  `password` is a staging copy of the replication credential, so it is wiped
+ *  when this struct goes out of scope. The destructor is what makes that reach
+ *  every exit path, including the validation errors that return as soon as a
+ *  JS exception is scheduled, and OPENSSL_cleanse is a wipe the compiler may
+ *  not drop as a dead store. `ssl_key` names a private key file rather than
+ *  carrying key material, so it is left alone. The JS string the copy was taken
+ *  from lives on the V8 heap and is not wipeable from here. */
 struct ConfigStrings {
   std::string host = "127.0.0.1";
   std::string user = "root";
@@ -27,6 +36,12 @@ struct ConfigStrings {
   std::string ssl_ca;
   std::string ssl_cert;
   std::string ssl_key;
+
+  ~ConfigStrings() {
+    if (!password.empty()) {
+      OPENSSL_cleanse(password.data(), password.size());
+    }
+  }
 };
 
 /** Parse common client config fields from a JS object into a C config struct.

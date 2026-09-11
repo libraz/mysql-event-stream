@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { BinlogClient } from "../src/client.js";
 import { loadNativeAddon } from "../src/native.js";
-import { MesErrorCode } from "../src/types.js";
+import { MesErrorCode, type SslMode } from "../src/types.js";
 
 interface NativeClientForTest {
   poll(): Promise<unknown>;
@@ -41,6 +41,38 @@ describe("BinlogClient", () => {
     // Constructor connection is part of the Node lifecycle contract. With no
     // server on this port it must fail during construction, not at start().
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999 })).toThrow();
+  });
+
+  it("keeps the password out of both addon config paths", () => {
+    // The addon stages the credential in a C++ string for the C ABI and wipes
+    // that copy when it goes out of scope. Freed memory is not observable from
+    // JS; what is observable is that both ways out of config parsing still
+    // behave — the failed connect and the validation rejection that returns
+    // before the C ABI is reached — and that neither surfaces the password.
+    const password = "staged-secret-not-for-errors";
+
+    let connectError: unknown;
+    try {
+      new BinlogClient({ host: "127.0.0.1", port: 19999, password });
+    } catch (error) {
+      connectError = error;
+    }
+    expect(connectError).toBeDefined();
+    expect(String((connectError as Error).message)).not.toContain(password);
+
+    let rejectionError: unknown;
+    try {
+      new BinlogClient({
+        host: "127.0.0.1",
+        port: 19999,
+        password,
+        sslMode: 99 as unknown as SslMode,
+      });
+    } catch (error) {
+      rejectionError = error;
+    }
+    expect(rejectionError).toMatchObject({ code: MesErrorCode.InvalidArg });
+    expect(String((rejectionError as Error).message)).not.toContain(password);
   });
 
   it("reads every getter through the native client", () => {
