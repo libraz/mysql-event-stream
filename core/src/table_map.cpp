@@ -12,9 +12,6 @@ namespace mes {
 
 namespace {
 
-// Maximum column count for safety.
-constexpr size_t kMaxColumns = 4096;
-
 struct MetadataValue {
   uint32_t value = 0;
   size_t consumed = 0;
@@ -233,7 +230,7 @@ bool ApplyColumnNames(const uint8_t* data, size_t value_len, TableMetadata* meta
     if (pos >= value_len) return false;
 
     size_t packed_bytes = 0;
-    uint64_t name_len = binary::ReadPackedInt(data + pos, value_len - pos, packed_bytes);
+    uint64_t name_len = binary::ReadBinlogLength(data + pos, value_len - pos, packed_bytes);
     if (packed_bytes == 0 || packed_bytes > value_len - pos) return false;
     pos += packed_bytes;
     if (name_len > value_len - pos) return false;
@@ -289,7 +286,7 @@ bool IsCharacterColumnType(const ColumnMetadata& column) {
 bool ReadPackedField(const uint8_t* data, size_t len, size_t* offset, uint32_t* value) {
   if (*offset >= len) return false;
   size_t packed_bytes = 0;
-  const uint64_t packed = binary::ReadPackedInt(data + *offset, len - *offset, packed_bytes);
+  const uint64_t packed = binary::ReadBinlogLength(data + *offset, len - *offset, packed_bytes);
   if (packed_bytes == 0 || packed_bytes > len - *offset || packed > UINT32_MAX) return false;
   *offset += packed_bytes;
   *value = static_cast<uint32_t>(packed);
@@ -347,7 +344,7 @@ bool ParseOptionalMetadata(const uint8_t* data, size_t offset, size_t len,
     if (offset >= len) return false;
 
     size_t packed_bytes = 0;
-    uint64_t field_len = binary::ReadPackedInt(data + offset, len - offset, packed_bytes);
+    uint64_t field_len = binary::ReadBinlogLength(data + offset, len - offset, packed_bytes);
     if (packed_bytes == 0 || packed_bytes > len - offset) return false;
     offset += packed_bytes;
     if (field_len > len - offset) return false;
@@ -425,7 +422,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // column_count: packed integer
   if (offset >= len) return false;
   size_t packed_bytes = 0;
-  uint64_t column_count = binary::ReadPackedInt(data + offset, len - offset, packed_bytes);
+  uint64_t column_count = binary::ReadBinlogLength(data + offset, len - offset, packed_bytes);
   if (packed_bytes == 0 || packed_bytes > len - offset) return false;
   offset += packed_bytes;
 
@@ -434,7 +431,7 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // a corrupt or truncated event. Rejecting here also simplifies the
   // downstream allocation math (null bitmap bytes = 0 would pass the
   // size check trivially and then cause a zero-length decode loop).
-  if (column_count == 0 || column_count > kMaxColumns) {
+  if (column_count == 0 || column_count > binary::kMaxTableColumns) {
     return false;
   }
 
@@ -447,7 +444,8 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   // metadata_length: packed integer
   if (offset >= len) return false;
   size_t meta_packed_bytes = 0;
-  uint64_t metadata_length = binary::ReadPackedInt(data + offset, len - offset, meta_packed_bytes);
+  uint64_t metadata_length =
+      binary::ReadBinlogLength(data + offset, len - offset, meta_packed_bytes);
   if (meta_packed_bytes == 0 || meta_packed_bytes > len - offset) return false;
   offset += meta_packed_bytes;
 

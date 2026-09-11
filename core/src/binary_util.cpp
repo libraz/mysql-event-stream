@@ -45,6 +45,9 @@ inline size_t DecimalBinarySize(uint8_t precision, uint8_t scale) {
   return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 + kDig2Bytes[frac_rem]);
 }
 
+// First byte of a packed integer that stands for NULL instead of a value.
+static constexpr uint8_t kPackedIntNull = 0xFB;
+
 uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
   bytes_consumed = 0;
   if (len < 1) return 0;
@@ -56,8 +59,7 @@ uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) 
     return static_cast<uint64_t>(first);
   }
 
-  if (first == 251) {
-    // NULL marker
+  if (first == kPackedIntNull) {
     bytes_consumed = 1;
     return 0;
   }
@@ -78,6 +80,14 @@ uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) 
   if (len < 9) return 0;
   bytes_consumed = 9;
   return ReadU64Le(data + 1);
+}
+
+uint64_t ReadBinlogLength(const uint8_t* data, size_t len, size_t& bytes_consumed) {
+  if (len >= 1 && data[0] == kPackedIntNull) {
+    bytes_consumed = 0;
+    return 0;
+  }
+  return ReadPackedInt(data, len, bytes_consumed);
 }
 
 std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision, uint8_t scale,

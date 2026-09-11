@@ -151,6 +151,11 @@ inline void AppendPaddedInt(std::string& out, int value, int width) {
  * - 253: next 3 bytes (little-endian)
  * - 254: next 8 bytes (little-endian)
  *
+ * Reporting 0 for the NULL marker is only correct where NULL is a legal value
+ * of the field being read, such as a result-set row value. Binlog structures
+ * carry no nullable length, count or index field, so those parsers must read
+ * through @ref ReadBinlogLength instead of accepting the substituted 0.
+ *
  * @param data Pointer to the packed integer data
  * @param len Available bytes in data buffer
  * @param bytes_consumed Set to the number of bytes consumed:
@@ -161,6 +166,28 @@ inline void AppendPaddedInt(std::string& out, int value, int width) {
  * @return The decoded integer value (0 on error or NULL, check bytes_consumed)
  */
 [[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
+
+/**
+ * @brief Read a length, count or index field from binlog wire bytes
+ *
+ * The sole decoder for packed-integer length fields in binlog event bodies:
+ * TABLE_MAP's column_count and metadata_length, its optional-metadata field
+ * lengths, the column names and charset indices inside them, and a
+ * ROWS_EVENT's column_count.
+ *
+ * None of those fields is nullable, so the packed-integer NULL marker 0xFB is
+ * malformed input rather than the value 0. It is reported as a read failure:
+ * substituting 0 would turn a corrupt event into an apparently well-formed one
+ * with an empty field, and the zero-length field would then shift every
+ * following offset.
+ *
+ * @param data Pointer to the packed integer data
+ * @param len Available bytes in data buffer
+ * @param bytes_consumed Set to the number of bytes consumed, or 0 when the
+ *   field is truncated or carries the NULL marker
+ * @return The decoded value, or 0 when @p bytes_consumed is 0
+ */
+[[nodiscard]] uint64_t ReadBinlogLength(const uint8_t* data, size_t len, size_t& bytes_consumed);
 
 // --- Column count limit ---
 
