@@ -11,6 +11,7 @@ asserted, such as the start-position mode in ``test_client.py``.
 
 from __future__ import annotations
 
+import ctypes
 from enum import Enum
 from typing import NamedTuple
 
@@ -20,7 +21,7 @@ from mysql_event_stream import _ffi
 from mysql_event_stream.logging import LogLevel
 from mysql_event_stream.types import EventType, MesErrorCode, ServerFlavor, SslMode
 
-from .abi_fixture import load_abi_enums, load_abi_int_macros
+from .abi_fixture import load_abi_enums, load_abi_int_macros, load_abi_struct_layout
 
 abi_enums = load_abi_enums()
 abi_macros = load_abi_int_macros()
@@ -132,3 +133,35 @@ def test_ffi_declares_no_constant_the_header_does_not() -> None:
     assert mirrored, "no MES_* integer constants found in the FFI layer"
     assert sorted(name for name in mirrored if name not in declared) == []
     assert mirrored == {name: declared[name] for name in mirrored}
+
+
+# The two structs a caller allocates rather than receives, and the mirror of each.
+_MIRRORED_STRUCTS = {
+    "mes_client_config_t": _ffi.MESClientConfig,
+    "mes_poll_result_t": _ffi.MESPollResult,
+}
+
+
+def test_ffi_mirrors_the_struct_layout_the_core_publishes() -> None:
+    """Each mirrored struct reproduces the size and every field offset the core records.
+
+    A total-size check alone cannot see two same-width fields swapped, and that
+    is the failure that corrupts silently: ctypes computes its own layout, so a
+    mirror whose fields are in the wrong order still reports the right size and
+    then reads the wrong bytes out of every result.
+    """
+    sizes, offsets = load_abi_struct_layout()
+    assert sizes, "no struct size assertions found in the core"
+
+    for c_name, mirror in _MIRRORED_STRUCTS.items():
+        recorded = offsets.get(c_name)
+        assert recorded, f"the core records no field offsets for {c_name}"
+        assert ctypes.sizeof(mirror) == sizes[c_name], (
+            f"{mirror.__name__} is {ctypes.sizeof(mirror)} bytes where the core "
+            f"publishes {c_name} as {sizes[c_name]}"
+        )
+        mirrored = {name: getattr(mirror, name).offset for name, _type in mirror._fields_}
+        assert mirrored == recorded, (
+            f"{mirror.__name__} does not lay its fields out where the core publishes "
+            f"{c_name}'s; every mirror must move in the same change as the struct"
+        )

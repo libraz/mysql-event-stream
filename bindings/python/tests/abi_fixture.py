@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_HEADER_PATH = Path(__file__).resolve().parent.parent.parent.parent / "core" / "include" / "mes.h"
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_HEADER_PATH = _REPO_ROOT / "core" / "include" / "mes.h"
+_LAYOUT_PATH = _REPO_ROOT / "core" / "src" / "capi.cpp"
+
+# Only the public structs are of interest; the same assertions also compare
+# sizeof(size_t) and similar, which are not part of any mirror.
+_STRUCT_SIZE = re.compile(r"sizeof\((mes_\w+_t)\)\s*==\s*(\d+)")
+_STRUCT_OFFSET = re.compile(r"offsetof\((mes_\w+_t),\s*(\w+)\)\s*==\s*(\d+)")
 
 _ENUM_OPEN = re.compile(r"^typedef\s+enum")
 _ENUM_CLOSE = re.compile(r"^}\s*(\w+)\s*;")
@@ -55,3 +62,24 @@ def load_abi_int_macros() -> dict[str, int]:
         if found is not None:
             macros[found.group(1)] = int(found.group(2))
     return macros
+
+
+def load_abi_struct_layout() -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+    """Parse the published layout the core records for the structs a caller allocates.
+
+    Those structs have no runtime ``sizeof`` helper, because a mirror that got
+    the layout wrong would already have corrupted memory by the time it could
+    call one. The core pins their size and every field offset with compile-time
+    assertions instead, and a mirror has to reproduce exactly those positions.
+    Reading the numbers from the core rather than restating them is what keeps
+    this side from drifting into agreement with itself.
+
+    Returns:
+        The recorded size of each struct, and each struct's field offsets.
+    """
+    source = _LAYOUT_PATH.read_text(encoding="utf-8")
+    sizes = {m.group(1): int(m.group(2)) for m in _STRUCT_SIZE.finditer(source)}
+    offsets: dict[str, dict[str, int]] = {}
+    for match in _STRUCT_OFFSET.finditer(source):
+        offsets.setdefault(match.group(1), {})[match.group(2)] = int(match.group(3))
+    return sizes, offsets

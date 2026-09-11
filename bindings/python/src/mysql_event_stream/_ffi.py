@@ -274,20 +274,26 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
             f"libmes={expected_column}. ABI incompatibility detected."
         )
 
-    # mes_client_config_t has no C-side sizeof helper; validate the known
-    # 64-bit layout directly (7 pointers + uint16 w/pad + 4x uint32 +
-    # enum + pointer + uint64 = 120). On 32-bit platforms the size differs and
-    # the layout is exercised at call time instead.
+    # The two structs a caller allocates rather than receives have no C-side
+    # sizeof helper, because a mirror that got the layout wrong would already
+    # have corrupted memory by the time it could call one. The library instead
+    # pins their size and every field offset with assertions it compiles on
+    # every build, so these numbers are checked on both sides of the boundary
+    # rather than only here. Both are LP64 layouts; on a narrower platform the
+    # sizes differ and the layout is exercised at call time instead.
     import struct as _struct
 
     if _struct.calcsize("P") == 8:
-        expected_config = 120
-        config_size = ctypes.sizeof(MESClientConfig)
-        if config_size != expected_config:
-            raise RuntimeError(
-                f"MESClientConfig size mismatch: got {config_size}, "
-                f"expected {expected_config}. ABI incompatibility detected."
-            )
+        for name, mirror, expected in (
+            ("MESClientConfig", MESClientConfig, 120),
+            ("MESPollResult", MESPollResult, 32),
+        ):
+            actual = ctypes.sizeof(mirror)
+            if actual != expected:
+                raise RuntimeError(
+                    f"{name} size mismatch: got {actual}, expected {expected}. "
+                    "ABI incompatibility detected."
+                )
 
 
 def load_library(lib_path: str | None = None) -> ctypes.CDLL:
