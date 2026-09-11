@@ -217,6 +217,31 @@ struct BinlogPosition {
 };
 
 /**
+ * @brief Resume coordinates carried by an emitted ChangeEvent.
+ *
+ * The filename is held by shared pointer because every event decoded from one
+ * binlog file resumes from the same filename: giving each row its own copy
+ * charges the filename length per row. One copy is made per rotation and shared
+ * by every event that follows it. Use BinlogFile() to read it.
+ */
+struct EventPosition {
+  std::shared_ptr<const std::string> binlog_file;
+  /// Offset to resume from after consuming the event this position describes.
+  uint64_t offset = 0;
+
+  /**
+   * @brief The binlog filename, or an empty string when none is known yet.
+   *
+   * The returned reference is valid for as long as this position (or any other
+   * position sharing the same filename) is alive.
+   */
+  const std::string& BinlogFile() const {
+    static const std::string kNoBinlogFile;
+    return binlog_file ? *binlog_file : kNoBinlogFile;
+  }
+};
+
+/**
  * @brief Metadata for a single column from TABLE_MAP event
  */
 struct ColumnMetadata {
@@ -261,12 +286,17 @@ struct TableMetadata {
  */
 struct ChangeEvent {
   EventType type = EventType::kInsert;
-  std::string database;
-  std::string table;
+  /// Database name, borrowed from @ref table_metadata like the column names in
+  /// @ref before / @ref after are. The view always spans a whole owning
+  /// std::string, so its data() is NUL-terminated; a subrange view would break
+  /// the C ABI's NUL-terminated `const char*`.
+  std::string_view database;
+  /// Table name, borrowed from @ref table_metadata; see @ref database.
+  std::string_view table;
   RowData before;  ///< Populated for UPDATE and DELETE
   RowData after;   ///< Populated for INSERT and UPDATE
   uint32_t timestamp = 0;
-  BinlogPosition position;
+  EventPosition position;
   /// Original MariaDB SQL from the preceding ANNOTATE_ROWS event; null when the
   /// event carried none. Held by shared pointer because one ANNOTATE_ROWS
   /// annotates every row of the ROWS event that follows it: giving each row its
@@ -330,10 +360,11 @@ inline size_t RowDataCharge(const RowData& row) {
  * bound them.
  *
  * Two deliberate approximations, both on the safe side of a memory bound:
- *   - A payload shared between entries (the ANNOTATE_ROWS statement) is charged
- *     to every entry that references it, so the total charge is an upper bound
- *     on resident bytes rather than an exact count.
- *   - The TABLE_MAP metadata behind @ref ChangeEvent::table_metadata is not
+ *   - A payload shared between entries -- the ANNOTATE_ROWS statement, the
+ *     database and table names, the binlog filename -- is charged to every
+ *     entry that references it, so the total charge is an upper bound on
+ *     resident bytes rather than an exact count.
+ *   - The column metadata behind @ref ChangeEvent::table_metadata is not
  *     charged. One instance is shared by every event for that table id and its
  *     residency is bounded by the table-map registry's own entry cap, not by
  *     how many events are queued.
@@ -341,7 +372,7 @@ inline size_t RowDataCharge(const RowData& row) {
 inline size_t ChangeEventCharge(const ChangeEvent& event) {
   return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
                            event.database.size() + event.table.size() +
-                               event.position.binlog_file.size() + event.SourceSql().size());
+                               event.position.BinlogFile().size() + event.SourceSql().size());
 }
 
 }  // namespace mes

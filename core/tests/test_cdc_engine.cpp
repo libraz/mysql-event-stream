@@ -9,6 +9,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "binary_util.h"
@@ -665,6 +666,93 @@ TEST(CdcEngineTest, QueuedEventRetainsSharedTableMetadataAcrossRotate) {
   ASSERT_EQ(event.after.columns.size(), 1u);
   EXPECT_EQ(event.after.columns[0].name, "id");
   EXPECT_EQ(event.after.columns[0].name.data(), event.table_metadata->columns[0].name.data());
+}
+
+// The database and table names a ChangeEvent exposes are the TABLE_MAP's own
+// storage, kept alive through table_metadata exactly as the column names in its
+// rows are, so no row of the event holds a copy of them. Each view spans a whole
+// owning string, which is what lets the C ABI hand out its data() as a
+// NUL-terminated pointer.
+TEST(CdcEngineTest, EventNamesBorrowTheTableMetadataStorageForEveryRow) {
+  CdcEngine engine;
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                BuildWriteRowsBodyMultiRow(42, {1, 2, 3}));
+
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  ASSERT_EQ(engine.PendingEventCount(), 3u);
+
+  std::vector<ChangeEvent> events;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) events.push_back(std::move(event));
+  ASSERT_EQ(events.size(), 3u);
+
+  for (const ChangeEvent& row_event : events) {
+    ASSERT_TRUE(row_event.table_metadata);
+    EXPECT_EQ(row_event.database, "testdb");
+    EXPECT_EQ(row_event.table, "users");
+    // The metadata the event itself holds owns the bytes the views read.
+    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->database_name.data());
+    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table_name.data());
+    // A whole-string view, so the byte one past its end is the owner's
+    // terminator and data() is a valid const char*.
+    ASSERT_EQ(row_event.database.size(), row_event.table_metadata->database_name.size());
+    ASSERT_EQ(row_event.table.size(), row_event.table_metadata->table_name.size());
+    EXPECT_EQ(row_event.database.data()[row_event.database.size()], '\0');
+    EXPECT_EQ(row_event.table.data()[row_event.table.size()], '\0');
+    // One registration behind every row of the event, not one per row.
+    EXPECT_EQ(row_event.database.data(), events.front().database.data());
+    EXPECT_EQ(row_event.table.data(), events.front().table.data());
+  }
+}
+
+// A queued event's names stay readable for the whole documented event lifetime,
+// which outlasts the registry entry they came from: a ROTATE clears the registry
+// and a re-registered table_id gets fresh storage, so each event has to hold the
+// registration it was decoded against rather than whatever the registry holds
+// when it is finally drained.
+TEST(CdcEngineTest, QueuedEventNamesOutliveTheRegistryEntryTheyBorrow) {
+  CdcEngine engine;
+  const auto first_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
+                                      200, BuildWriteRowsBody(42, 1));
+  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1002, 300,
+                                 BuildRotateBody(4, "mysql-bin.000002"));
+  // The same table_id after the rotation, naming a different table.
+  const auto second_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1003,
+                                     400, BuildTableMapBody(42, "otherdb", "other_table"));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1004,
+                                       500, BuildWriteRowsBody(42, 2));
+
+  std::vector<uint8_t> stream;
+  for (const std::vector<uint8_t>* part :
+       {&first_map, &first_write, &rotate, &second_map, &second_write}) {
+    stream.insert(stream.end(), part->begin(), part->end());
+  }
+  ASSERT_EQ(engine.Feed(stream.data(), stream.size()), stream.size());
+  ASSERT_FALSE(engine.IsError());
+  ASSERT_EQ(engine.PendingEventCount(), 2u);
+
+  std::vector<ChangeEvent> events;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) events.push_back(std::move(event));
+  ASSERT_EQ(events.size(), 2u);
+
+  EXPECT_EQ(events[0].database, "testdb");
+  EXPECT_EQ(events[0].table, "users");
+  EXPECT_EQ(events[1].database, "otherdb");
+  EXPECT_EQ(events[1].table, "other_table");
+  EXPECT_NE(events[0].database.data(), events[1].database.data());
+  for (const ChangeEvent& row_event : events) {
+    ASSERT_TRUE(row_event.table_metadata);
+    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->database_name.data());
+    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table_name.data());
+    EXPECT_EQ(row_event.database.data()[row_event.database.size()], '\0');
+    EXPECT_EQ(row_event.table.data()[row_event.table.size()], '\0');
+  }
 }
 
 TEST(CdcEngineTest, UpdateEvent) {
@@ -1743,6 +1831,192 @@ TEST(CdcEngineQueueBudgetTest, CompressedColumnExpansionStaysWithinTheQueueByteB
   EXPECT_LT(queued_events, kRowEvents) << "the entry count must not be what bounded the queue";
   EXPECT_GT(queued_events, 0u);
   EXPECT_EQ(engine.QueuedBytes(), 0u);
+}
+
+// ---- Resume position ----
+
+// A filename and an offset the assertions below can compare against exactly,
+// plus a registration for table_id 1 so a row event can be decoded from it.
+constexpr const char* kPrimedBinlogFile = "mysql-bin.000042";
+constexpr uint32_t kPrimedOffset = 100;
+
+void PrimeResumePosition(CdcEngine* engine) {
+  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1000, 50,
+                                 BuildRotateBody(4, kPrimedBinlogFile));
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    kPrimedOffset, BuildTableMapBody(1, "db", "t"));
+  ASSERT_EQ(engine->Feed(rotate.data(), rotate.size()), rotate.size());
+  ASSERT_EQ(engine->Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_FALSE(engine->IsError());
+  ASSERT_EQ(engine->CurrentPosition().binlog_file, kPrimedBinlogFile);
+  ASSERT_EQ(engine->CurrentPosition().offset, kPrimedOffset);
+}
+
+// Every event that fails to decode must leave the resume position exactly where
+// it was, filename included, so a reconnect re-reads the offending event. A
+// position that advanced past it makes a reconnect skip the rows it carried.
+TEST(CdcEngineResumePositionTest, AFailedEventLeavesTheResumePositionExactlyWhereItWas) {
+  struct FailingEvent {
+    const char* name;
+    uint8_t type_code;
+    std::vector<uint8_t> body;
+    mes_error_t error;
+    /// Fragment of the structured log record that identifies the branch which
+    /// rejected the event, so a case cannot pass on some other failure.
+    const char* log_marker;
+  };
+
+  std::vector<uint8_t> truncated_rows = BuildWriteRowsBody(1, 42);
+  truncated_rows.pop_back();
+
+  const std::vector<FailingEvent> cases = {
+      {"table map shorter than its table_id",
+       static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       {0x02, 0x00, 0x00},
+       MES_ERR_PARSE,
+       "event=table_map_parse_failed reason=body_too_short"},
+      {"table map carrying nothing but a table_id",
+       static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       {0x02, 0x00, 0x00, 0x00, 0x00, 0x00},
+       MES_ERR_PARSE,
+       "event=table_map_parse_failed table_id=2 body_length=6"},
+      {"truncated row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+       truncated_rows, MES_ERR_DECODE_ROW, "event=row_decode_failed kind=write_rows"},
+      {"row event for an unregistered table",
+       static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), BuildWriteRowsBody(9, 42),
+       MES_ERR_DECODE_ROW, "event=rows_event_no_table_map table_id=9"},
+      {"row event shorter than its table_id",
+       static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+       {0x00, 0x00, 0x00},
+       MES_ERR_DECODE_ROW,
+       "event=row_decode_failed kind=row_event_header reason=body_too_short"},
+      {"annotate rows without a statement",
+       static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+       {},
+       MES_ERR_PARSE,
+       "event=mariadb_annotate_rows_parse_failed"},
+      {"rotate shorter than its position field",
+       static_cast<uint8_t>(BinlogEventType::kRotateEvent),
+       {0x00, 0x00, 0x00, 0x00},
+       MES_ERR_PARSE,
+       "event=rotate_event_parse_failed"},
+      {"unsupported event type",
+       static_cast<uint8_t>(BinlogEventType::kIncidentEvent),
+       {0x01, 0x02, 0x03, 0x04},
+       MES_ERR_PARSE,
+       "event=unsupported_binlog_event type_code=26"},
+      {"unknown event type",
+       99,
+       {0x01, 0x02, 0x03, 0x04},
+       MES_ERR_PARSE,
+       "event=unknown_binlog_event type_code=99"},
+  };
+
+  for (const FailingEvent& failing_case : cases) {
+    SCOPED_TRACE(failing_case.name);
+    CdcEngine engine;
+    PrimeResumePosition(&engine);
+
+    // A next_position far from the primed offset, so an advance shows up as an
+    // exact value rather than as an off-by-one.
+    const auto failing = BuildEvent(failing_case.type_code, 1001, 900, failing_case.body);
+    ScopedEventLogCapture capture(failing_case.log_marker);
+    engine.Feed(failing.data(), failing.size());
+
+    ASSERT_TRUE(engine.IsError());
+    EXPECT_EQ(engine.ErrorCode(), failing_case.error);
+    EXPECT_GE(capture.Count(), 1) << "the intended branch did not report the failure";
+    EXPECT_EQ(engine.CurrentPosition().offset, kPrimedOffset);
+    EXPECT_EQ(engine.CurrentPosition().binlog_file, kPrimedBinlogFile);
+  }
+}
+
+// Every event that decodes advances the resume position to its own
+// next_position and touches nothing else, so a reconnect resumes after it
+// instead of re-delivering the rows it carried.
+TEST(CdcEngineResumePositionTest, ASucceedingEventAdvancesTheResumePositionToItsNextPosition) {
+  struct SucceedingEvent {
+    const char* name;
+    uint8_t type_code;
+    std::vector<uint8_t> body;
+    uint32_t next_position;
+  };
+
+  const std::string annotated_sql = "INSERT INTO t VALUES (1)";
+  // Ordered so the events that need the table_id 1 registration run before the
+  // DDL statement that drops it.
+  const std::vector<SucceedingEvent> cases = {
+      {"single-row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+       BuildWriteRowsBody(1, 42), 200},
+      {"annotate rows", static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+       std::vector<uint8_t>(annotated_sql.begin(), annotated_sql.end()), 300},
+      {"multi-row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+       BuildWriteRowsBodyMultiRow(1, {1, 2, 3}), 400},
+      {"control event", static_cast<uint8_t>(BinlogEventType::kXidEvent), {}, 500},
+      {"non-DDL query", static_cast<uint8_t>(BinlogEventType::kQueryEvent),
+       BuildQueryEventBody("db", "BEGIN"), 600},
+      {"DDL query", static_cast<uint8_t>(BinlogEventType::kQueryEvent),
+       BuildQueryEventBody("db", "ALTER TABLE t ADD c INT"), 700},
+      {"table map", static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       BuildTableMapBody(2, "db", "t2"), 800},
+  };
+
+  CdcEngine engine;
+  PrimeResumePosition(&engine);
+  for (const SucceedingEvent& succeeding_case : cases) {
+    SCOPED_TRACE(succeeding_case.name);
+    const auto event = BuildEvent(succeeding_case.type_code, 1001, succeeding_case.next_position,
+                                  succeeding_case.body);
+    ASSERT_EQ(engine.Feed(event.data(), event.size()), event.size());
+    ASSERT_FALSE(engine.IsError());
+    EXPECT_EQ(engine.CurrentPosition().offset, succeeding_case.next_position);
+    // Only a ROTATE event carries a filename, so nothing here may change it.
+    EXPECT_EQ(engine.CurrentPosition().binlog_file, kPrimedBinlogFile);
+  }
+}
+
+// A ROTATE resumes from the coordinates in its body, which is the one event
+// whose resume position is not its header's next_position.
+TEST(CdcEngineResumePositionTest, RotateTakesTheFileAndOffsetFromItsBodyNotItsNextPosition) {
+  CdcEngine engine;
+  PrimeResumePosition(&engine);
+
+  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1001, 9999,
+                                 BuildRotateBody(1234, "mysql-bin.000077"));
+  ASSERT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
+  ASSERT_FALSE(engine.IsError());
+  EXPECT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000077");
+  EXPECT_EQ(engine.CurrentPosition().offset, 1234u);
+}
+
+// Every row of one event resumes from the same coordinates: that event's
+// next_position, in the file that applied when it was decoded. The filename is
+// one copy shared by the rows rather than one copy per row, and a rotation that
+// happens before the rows are drained must not retarget them.
+TEST(CdcEngineResumePositionTest, EveryRowOfAnEventSharesOneCopyOfItsResumePosition) {
+  CdcEngine engine;
+  PrimeResumePosition(&engine);
+
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 500,
+                                BuildWriteRowsBodyMultiRow(1, {1, 2, 3}));
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  ASSERT_EQ(engine.PendingEventCount(), 3u);
+
+  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1002, 600,
+                                 BuildRotateBody(4, "mysql-bin.000043"));
+  ASSERT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
+  ASSERT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000043");
+
+  std::vector<ChangeEvent> events;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) events.push_back(std::move(event));
+  ASSERT_EQ(events.size(), 3u);
+
+  for (const ChangeEvent& row_event : events) {
+    EXPECT_EQ(row_event.position.offset, 500u);
+    EXPECT_EQ(row_event.position.BinlogFile(), kPrimedBinlogFile);
+    EXPECT_EQ(&row_event.position.BinlogFile(), &events.front().position.BinlogFile());
+  }
 }
 
 }  // namespace

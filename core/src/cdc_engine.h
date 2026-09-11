@@ -196,6 +196,15 @@ class CdcEngine {
   /** @brief Whether the queue has reached either configured limit. */
   bool QueueAtCapacity() const;
   void LogRowDecodeFailure(const char* kind, const TableMetadata& meta);
+  /**
+   * @brief Set the resume filename, refreshing the copy emitted events share.
+   *
+   * The sole writer of the current position's filename, so the copy shared with
+   * emitted events cannot name a different file than CurrentPosition() reports.
+   */
+  void SetResumeBinlogFile(std::string binlog_file);
+  /** @brief Resume coordinates to stamp on the events decoded from an event. */
+  EventPosition CurrentEventPosition() const;
   bool HasIncludeFilters() const;
   bool MatchesTableFilter(const std::unordered_set<std::string>& filters,
                           const std::string& database, const std::string& table) const;
@@ -207,6 +216,10 @@ class CdcEngine {
   EventStreamParser stream_parser_;
   TableMapRegistry table_registry_;
   BinlogPosition position_;
+  // The resume filename of position_, shared by every ChangeEvent decoded while
+  // it applies, so the filename is copied once per rotation rather than once per
+  // row. Null until a ROTATE event supplies a filename.
+  std::shared_ptr<const std::string> position_binlog_file_;
   // Shared with every ChangeEvent decoded from the ROWS event this annotates,
   // so an ANNOTATE_ROWS statement is stored once per event rather than once
   // per row. Null when no annotation is in effect.

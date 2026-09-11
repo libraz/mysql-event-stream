@@ -332,6 +332,60 @@ TEST(CApi, SourceSqlIsNulTerminatedForAnnotatedAndPlainEvents) {
   mes_destroy(engine);
 }
 
+// mes_event_t.database, .table and .binlog_file are never-NULL, NUL-terminated
+// pointers into engine-owned storage, valid until the next
+// mes_feed/mes_next_event/mes_reset. They borrow the TABLE_MAP registration and
+// the active binlog filename instead of copying them, so that lifetime has to
+// hold after the stream has moved past both.
+TEST(CApi, EventStringsStayNulTerminatedAfterTheStreamDropsWhatTheyName) {
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                             BuildTableMapBody(1, "testdb", "users"));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                             BuildWriteRowsBody(1, 42));
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, tm_event.data(), tm_event.size(), &consumed), MES_OK);
+  ASSERT_EQ(mes_feed(engine, wr_event.data(), wr_event.size(), &consumed), MES_OK);
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event->database, nullptr);
+  ASSERT_NE(event->table, nullptr);
+  EXPECT_STREQ(event->database, "testdb");
+  EXPECT_STREQ(event->table, "users");
+  // No ROTATE has been seen, so the filename is the documented empty string --
+  // still a pointer that can be read rather than NULL.
+  ASSERT_NE(event->binlog_file, nullptr);
+  EXPECT_STREQ(event->binlog_file, "");
+
+  // Queue a second row, then rotate: the ROTATE replaces the filename and
+  // clears the registry that owns the names, both before the row is fetched.
+  auto wr2_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                              BuildWriteRowsBody(1, 43));
+  auto rotate_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1003, 400,
+                                 BuildRotateBody(4, "mysql-bin.000009"));
+  ASSERT_EQ(mes_feed(engine, wr2_event.data(), wr2_event.size(), &consumed), MES_OK);
+  ASSERT_EQ(mes_feed(engine, rotate_event.data(), rotate_event.size(), &consumed), MES_OK);
+
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  ASSERT_NE(event->database, nullptr);
+  ASSERT_NE(event->table, nullptr);
+  EXPECT_STREQ(event->database, "testdb");
+  EXPECT_STREQ(event->table, "users");
+  // No length travels with these pointers, so only the terminator bounds them.
+  EXPECT_EQ(std::strlen(event->database), std::strlen("testdb"));
+  EXPECT_EQ(std::strlen(event->table), std::strlen("users"));
+  // The row was decoded before the rotation, so it still resumes in the file
+  // that applied then -- which for this row is still no file at all.
+  EXPECT_STREQ(event->binlog_file, "");
+  EXPECT_EQ(event->binlog_offset, 300u);
+
+  mes_destroy(engine);
+}
+
 // ---- UPDATE flow ----
 
 TEST(CApi, UpdateEvent) {

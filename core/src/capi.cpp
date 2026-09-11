@@ -15,6 +15,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -149,13 +150,22 @@ static uint32_t ClampPayloadLength(size_t size) {
   return static_cast<uint32_t>(size);
 }
 
+// Expose a borrowed name as the NUL-terminated, never-NULL `const char*` the
+// mes.h string fields promise ("" when unknown).
+//
+// Every view the engine puts in these fields spans a whole owning std::string,
+// whose data() is NUL-terminated, so no copy is needed to terminate it. An
+// empty view carries no storage to read a terminator from and is answered with
+// a literal instead.
+static const char* BorrowedCStr(std::string_view name) { return name.empty() ? "" : name.data(); }
+
 // Convert a single internal ColumnValue to its C ABI representation.
 static mes_column_t ConvertColumn(const mes::ColumnValue& col) {
   mes_column_t c{};
   // Set col_name before the is_null early return. The mes.h contract states
   // col_name is never NULL ("" if unknown), so it must be set for all columns
   // including NULL-valued ones.
-  c.col_name = col.name.empty() ? "" : col.name.data();
+  c.col_name = BorrowedCStr(col.name);
   if (col.is_null) {
     c.type = MES_COL_NULL;
     return c;
@@ -394,14 +404,14 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
   // Populate the C event struct
   mes_event_t& ce = engine->c_event;
   ce.type = ConvertEventType(engine->current_event.type);
-  ce.database = engine->current_event.database.c_str();
-  ce.table = engine->current_event.table.c_str();
+  ce.database = BorrowedCStr(engine->current_event.database);
+  ce.table = BorrowedCStr(engine->current_event.table);
   ce.before_columns = engine->before_cols.empty() ? nullptr : engine->before_cols.data();
   ce.before_count = static_cast<uint32_t>(engine->before_cols.size());
   ce.after_columns = engine->after_cols.empty() ? nullptr : engine->after_cols.data();
   ce.after_count = static_cast<uint32_t>(engine->after_cols.size());
   ce.timestamp = engine->current_event.timestamp;
-  ce.binlog_file = engine->current_event.position.binlog_file.c_str();
+  ce.binlog_file = engine->current_event.position.BinlogFile().c_str();
   ce.binlog_offset = engine->current_event.position.offset;
   ce.names_resolved = engine->current_event.names_resolved ? 1 : 0;
   ce.source_sql = engine->current_event.SourceSql().c_str();

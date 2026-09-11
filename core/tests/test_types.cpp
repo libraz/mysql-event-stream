@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+#include <string>
+
 #include "types.h"
 
 namespace mes {
@@ -219,7 +222,7 @@ TEST(ChangeEventTest, InsertEvent) {
   event.database = "mydb";
   event.table = "users";
   event.timestamp = 1700000000;
-  event.position.binlog_file = "binlog.000001";
+  event.position.binlog_file = std::make_shared<const std::string>("binlog.000001");
   event.position.offset = 100;
 
   event.after.columns.push_back(ColumnValue::Int(ColumnType::kLong, 1));

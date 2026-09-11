@@ -256,6 +256,7 @@ void CdcEngine::Reset() {
   stream_parser_.Reset();
   table_registry_.Clear();
   position_ = BinlogPosition{};
+  position_binlog_file_.reset();
   pending_source_sql_.reset();
   blocked_table_ids_.clear();
   ResetIncludeFilterMatchState();
@@ -396,9 +397,12 @@ void CdcEngine::SetChecksumEnabled(bool enabled) { stream_parser_.SetChecksumEna
 void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
   // Advance the resume position to next_position so events emitted by this
   // call carry the offset to resume from after consuming them. The pre-event
-  // position is saved so it can be restored if processing fails to decode,
+  // offset is saved so it can be restored if processing fails to decode,
   // ensuring a reconnect re-reads the offending event rather than skipping it.
-  const BinlogPosition saved_position = position_;
+  // The filename needs no saving: SetResumeBinlogFile() is reached only from
+  // the ROTATE case after its body parsed, which leaves no error to roll back,
+  // so restoring the offset restores the whole position.
+  const uint64_t saved_offset = position_.offset;
   if (header.next_position > 0) {
     position_.offset = header.next_position;
   }
@@ -530,7 +534,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         // Empty filenames appear in artificial ROTATE events. They carry an
         // updated offset but must not erase the last usable resume filename.
         if (!rot.new_log_file.empty()) {
-          position_.binlog_file = std::move(rot.new_log_file);
+          SetResumeBinlogFile(std::move(rot.new_log_file));
         }
         position_.offset = rot.position;
         // A new binlog file reassigns table_ids and re-sends TABLE_MAP events
@@ -630,8 +634,17 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
   // If this event failed to decode, restore the pre-event position so the
   // recorded resume offset does not advance past the offending event.
   if (last_error_ != MES_OK) {
-    position_ = saved_position;
+    position_.offset = saved_offset;
   }
+}
+
+void CdcEngine::SetResumeBinlogFile(std::string binlog_file) {
+  position_.binlog_file = std::move(binlog_file);
+  position_binlog_file_ = std::make_shared<const std::string>(position_.binlog_file);
+}
+
+EventPosition CdcEngine::CurrentEventPosition() const {
+  return EventPosition{position_binlog_file_, position_.offset};
 }
 
 void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
@@ -687,7 +700,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.after, *meta);
         event.table_metadata = meta;
         event.timestamp = header.timestamp;
-        event.position = position_;
+        event.position = CurrentEventPosition();
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         EnqueueEvent(std::move(event));
@@ -709,7 +722,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.after, *meta);
         event.table_metadata = meta;
         event.timestamp = header.timestamp;
-        event.position = position_;
+        event.position = CurrentEventPosition();
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         EnqueueEvent(std::move(event));
@@ -730,7 +743,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
         AttachColumnNames(event.before, *meta);
         event.table_metadata = meta;
         event.timestamp = header.timestamp;
-        event.position = position_;
+        event.position = CurrentEventPosition();
         event.source_sql = pending_source_sql_;
         event.names_resolved = meta->names_resolved;
         EnqueueEvent(std::move(event));
