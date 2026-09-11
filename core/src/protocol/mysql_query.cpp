@@ -190,6 +190,12 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   }
 
   // Result set: first packet contains column_count as len-enc-int
+  //
+  // This bound is deliberately independent of binary::kMaxTableColumns: that
+  // one caps the columns a binlog table may declare, this one caps the columns
+  // a COM_QUERY result set may return. They coincide only because both derive
+  // from MySQL's field limit, so sharing a constant would make raising either
+  // ceiling silently raise the other.
   static constexpr uint64_t kMaxColumnCount = 4096;
   size_t pos = 0;
   uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
