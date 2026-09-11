@@ -65,12 +65,20 @@ configure:
 build: configure
 	cmake --build $(BUILD_DIR) --parallel
 
+# CTest reports success when a selection matches no test at all, so every run
+# below first asks -N how many tests the same selection picks up and stops when
+# the answer is none. $(1) is the build directory, $(2) the selection flags.
+require_tests = ctest --test-dir $(1) -N $(2) | grep -qE 'Total Tests: [1-9]' \
+	|| { echo "No tests matched: ctest --test-dir $(1) $(2)"; exit 1; }
+
 test: build
+	@$(call require_tests,$(BUILD_DIR),)
 	ctest --test-dir $(BUILD_DIR) --output-on-failure --parallel
 
 test-tsan:
 	cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DMES_ENABLE_TSAN=ON $(CMAKE_OPTIONS)
 	cmake --build build-tsan --parallel
+	@$(call require_tests,build-tsan,-E "E2E")
 	ctest --test-dir build-tsan --output-on-failure --parallel -E "E2E"
 
 BENCH_DIR    := build-bench
@@ -150,7 +158,7 @@ node-fix:
 # Python Binding
 # ============================================================================
 
-py-test:
+py-test: build
 	cd bindings/python && rye run pytest
 
 py-lint:
@@ -176,7 +184,8 @@ lint: format-check node-check py-lint py-typecheck
 # ============================================================================
 
 e2e:
-	cd e2e && pytest
+	cd bindings/python && rye run pytest e2e/tests -v --timeout=120
 
 e2e-cpp: build
+	@$(call require_tests,$(BUILD_DIR),-R "E2E")
 	ctest --test-dir $(BUILD_DIR) -R "E2E" --output-on-failure --timeout 60
