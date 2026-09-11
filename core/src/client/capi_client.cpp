@@ -6,6 +6,7 @@
  * @brief C ABI wrapper for BinlogClient
  */
 
+#include <mutex>
 #include <new>
 #include <string>
 
@@ -21,8 +22,19 @@ struct mes_client {
    * record itself, and mes_client_last_error() is documented to describe every
    * failed call. Cleared at the start of each connect attempt so a stale
    * rejection cannot be mistaken for the outcome of a later one.
+   *
+   * Written by entry points documented single-owner but read by
+   * mes_client_last_error(), which any thread may call at any moment, so both
+   * go through boundary_error_mutex.
    */
   std::string boundary_error;
+  /**
+   * Stable buffer mes_client_last_error() copies boundary_error into, so the
+   * pointer it hands out is not the one a writer may resize. Mirrors what
+   * BinlogClient does for its own message; protected by boundary_error_mutex.
+   */
+  std::string boundary_error_snapshot;
+  std::mutex boundary_error_mutex;
 };
 
 namespace {
@@ -31,15 +43,20 @@ namespace {
  * @brief Drop a stale boundary rejection before an entry point records its own.
  *
  * mes_client_last_error() describes the call that most recently failed, so a
- * rejection decided here must not outlive it. Only the owner thread reaches
- * this: every entry point that can produce a message is documented
- * single-owner, and mes_client_stop() -- the one callable from another thread --
- * does not touch this field.
+ * rejection decided here must not outlive it. Taken under
+ * boundary_error_mutex, which every writer of the field and every reader of it
+ * also take, so a reader on another thread sees either the stale message whole
+ * or none -- never storage mid-resize.
  */
 void ClearBoundaryError(mes_client_t* c) {
-  if (!c->boundary_error.empty()) {
-    c->boundary_error.clear();
-  }
+  std::lock_guard<std::mutex> lock(c->boundary_error_mutex);
+  c->boundary_error.clear();
+}
+
+/** @brief Record why this boundary refused the call, under the field's mutex. */
+void SetBoundaryError(mes_client_t* c, const char* message) {
+  std::lock_guard<std::mutex> lock(c->boundary_error_mutex);
+  c->boundary_error = message;
 }
 
 }  // namespace
@@ -56,7 +73,7 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   }
   ClearBoundaryError(c);
   if (config == nullptr) {
-    c->boundary_error = "config must not be NULL";
+    SetBoundaryError(c, "config must not be NULL");
     return MES_ERR_NULL_ARG;
   }
 
@@ -69,7 +86,7 @@ MES_API mes_error_t mes_client_connect(mes_client_t* c, const mes_client_config_
   if (config->start_position_mode != MES_START_AT_CURRENT &&
       config->start_position_mode != MES_START_AT_GTID &&
       config->start_position_mode != MES_START_AT_POSITION) {
-    c->boundary_error = "start_position_mode must be current, gtid or position";
+    SetBoundaryError(c, "start_position_mode must be current, gtid or position");
     return MES_ERR_INVALID_ARG;
   }
 
@@ -144,11 +161,11 @@ MES_API mes_error_t mes_client_poll_batch(mes_client_t* c, mes_poll_result_t* re
   if (c == nullptr) return MES_ERR_NULL_ARG;
   ClearBoundaryError(c);
   if (results == nullptr || result_count == nullptr) {
-    c->boundary_error = "results and result_count must not be NULL";
+    SetBoundaryError(c, "results and result_count must not be NULL");
     return MES_ERR_NULL_ARG;
   }
   if (capacity == 0) {
-    c->boundary_error = "capacity must be at least 1";
+    SetBoundaryError(c, "capacity must be at least 1");
     return MES_ERR_INVALID_ARG;
   }
 
@@ -197,9 +214,19 @@ MES_API const char* mes_client_last_error(mes_client_t* c) {
   if (c == nullptr) {
     return "";
   }
-  if (!c->boundary_error.empty()) {
-    return c->boundary_error.c_str();
+  {
+    // Snapshot under boundary_error_mutex so the returned c_str() is not
+    // invalidated by an entry point resizing boundary_error, and so the
+    // pointer is valid until the next mes_client_last_error() call on this
+    // client whichever branch produced it.
+    std::lock_guard<std::mutex> lock(c->boundary_error_mutex);
+    if (!c->boundary_error.empty()) {
+      c->boundary_error_snapshot = c->boundary_error;
+      return c->boundary_error_snapshot.c_str();
+    }
   }
+  // The boundary lock is released before delegating: BinlogClient serialises
+  // its own message on its own mutex, and the two are never held at once.
   return c->client.GetLastError();
 }
 

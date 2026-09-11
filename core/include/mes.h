@@ -774,13 +774,22 @@ MES_API int mes_client_is_streaming(mes_client_t* client);
 MES_API mes_server_flavor_t mes_client_flavor(mes_client_t* client);
 
 /** @brief Get last error message. Returns empty string if no error.
- *  @threadsafety Single-owner thread. The streaming client's own message is
- *                read under a lock, but a configuration rejected at this
- *                boundary before the client was reached is recorded outside
- *                one, by the entry point that rejected it -- so a call from
- *                another thread races any entry point in progress. The
- *                returned pointer is valid until the next mes_client_* call on
- *                the same client.
+ *
+ *  The message describes the call that most recently failed, whether the
+ *  streaming client produced it or the configuration was rejected at this
+ *  boundary before the client was reached.
+ *  @note The returned pointer is valid until the next call to
+ *        mes_client_last_error() on the same client instance, at which point
+ *        the underlying buffer may be overwritten. Callers must copy the
+ *        result (e.g. via strdup or std::string) if they need it to persist
+ *        beyond the next call.
+ *  @threadsafety May be called from any thread, including while another thread
+ *                is inside mes_client_poll() or mes_client_poll_batch() on the
+ *                same client: the read is serialised internally, so no caller
+ *                has to add a lock to make the call. The buffer behind the
+ *                returned pointer is shared by every caller, though, so the
+ *                "until the next call" note above counts calls from all
+ *                threads, not just the calling one.
  */
 MES_API const char* mes_client_last_error(mes_client_t* client);
 

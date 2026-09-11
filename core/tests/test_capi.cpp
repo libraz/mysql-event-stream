@@ -1260,6 +1260,71 @@ TEST(CApi, ClientLastErrorDescribesTheCallThatFailedMostRecently) {
   mes_client_destroy(client);
 }
 
+// A binding exposes mes_client_last_error() as a property readable at any
+// moment, so the pointer it returns has to outlive a write to the store behind
+// it -- the same guarantee whichever branch produced the message. Observed
+// without concurrency: a later entry point overwrites the store in place, and a
+// read through the earlier pointer must still find what that call handed out.
+TEST(CApi, ClientLastErrorPointerSurvivesALaterWriteToItsStore) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  // Longest boundary rejection first, then a shorter one, so the second write
+  // reuses the first one's capacity: the stale pointer stays inside live
+  // storage and the assertion turns on content rather than on what reading
+  // released memory happens to yield.
+  mes_client_config_t config{};
+  config.server_id = 1;
+  config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  const char* boundary_message = mes_client_last_error(client);
+  ASSERT_STREQ(boundary_message, "start_position_mode must be current, gtid or position");
+
+  ASSERT_EQ(mes_client_connect(client, nullptr), MES_ERR_NULL_ARG);
+  EXPECT_STREQ(boundary_message, "start_position_mode must be current, gtid or position");
+  EXPECT_STREQ(mes_client_last_error(client), "config must not be NULL");
+
+  // Same property on the branch that delegates to the streaming client: the
+  // message is replaced by a later rejection, the pointer is not.
+  ASSERT_EQ(mes_client_start(client), MES_ERR_DISCONNECTED);
+  const char* client_message = mes_client_last_error(client);
+  ASSERT_STREQ(client_message, "Not connected");
+
+  config = {};
+  config.server_id = 0;
+  ASSERT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+  EXPECT_STREQ(client_message, "Not connected");
+  EXPECT_STREQ(mes_client_last_error(client), "server_id must be non-zero");
+  mes_client_destroy(client);
+}
+
+// The header documents one buffer per message store rather than per-caller
+// storage, and counts "until the next call" across all threads. Without this,
+// the documented caveat would be stricter than the code and a binding author
+// would copy strings to escape a hazard that did not exist.
+TEST(CApi, ClientLastErrorSharesOneBufferAcrossThreads) {
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.server_id = 1;
+  config.start_position_mode = static_cast<mes_start_position_mode_t>(99);
+  ASSERT_EQ(mes_client_connect(client, &config), MES_ERR_INVALID_ARG);
+
+  const char* here = mes_client_last_error(client);
+  ASSERT_STRNE(here, "");
+
+  // Joined rather than overlapped: what is under test is where the second call
+  // writes, which does not require the two calls to be concurrent.
+  const char* there = nullptr;
+  std::thread other([&] { there = mes_client_last_error(client); });
+  other.join();
+
+  EXPECT_EQ(there, here);
+  EXPECT_STREQ(here, "start_position_mode must be current, gtid or position");
+  mes_client_destroy(client);
+}
+
 // ---- Client entry-point inventory ----
 
 /**
