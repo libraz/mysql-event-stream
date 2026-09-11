@@ -629,6 +629,16 @@ void BinlogClient::ReaderLoop() {
     ~CloseQueueOnExit() { queue->Close(); }
   } close_queue{event_queue_.get()};
 
+  // Leaving a dump behind leaves the socket holding however many replication
+  // packets the server had already sent, and the protocol has no command that
+  // ends a dump, so those bytes can never be matched to a later response.
+  // Retiring the socket is what makes conn_.IsConnected() -- the liveness
+  // StartStream() consults -- report that, instead of letting the next
+  // COM_QUERY read a replication packet as its own response. It runs before the
+  // error sentinel is queued, so a consumer acting on that error can never
+  // observe the transport as still usable.
+  const auto retire_transport = [this] { conn_.Socket()->Poison(); };
+
   StructuredLog().Event("binlog_reader_started").Debug();
   while (!stop_requested_.load(std::memory_order_acquire)) {
     protocol::BinlogEventPacket event_pkt;
@@ -642,6 +652,14 @@ void BinlogClient::ReaderLoop() {
 
     if (rc != MES_OK) {
       connected_.store(false, std::memory_order_release);
+      // A dump the server itself terminated leaves the session in command
+      // phase, which is what makes a replacement stream over the same transport
+      // possible. Every other failure -- a read that never completed, a packet
+      // past the size cap, an unexpected status byte -- gives up while the
+      // server may still be streaming.
+      if (!event_pkt.dump_ended_by_server) {
+        retire_transport();
+      }
       // Push error sentinel so Poll() can surface the error. If the push fails
       // the queue was closed concurrently (shutdown race); the specific code
       // would otherwise be lost, so record it for diagnostics.
@@ -729,6 +747,7 @@ void BinlogClient::ReaderLoop() {
         // the push fails (queue closed during shutdown) the code is lost from
         // the queue, so record it for diagnostics.
         connected_.store(false, std::memory_order_release);
+        retire_transport();
         QueuedEvent crc_err;
         crc_err.error = MES_ERR_CHECKSUM;
         crc_err.error_message = "CRC32 checksum mismatch";
@@ -768,6 +787,7 @@ void BinlogClient::ReaderLoop() {
           .Field("max_queue_bytes", static_cast<uint64_t>(max_queue_bytes_))
           .Error();
       connected_.store(false, std::memory_order_release);
+      retire_transport();
       QueuedEvent budget_error;
       budget_error.error = MES_ERR_QUEUE_FULL;
       budget_error.error_message = "Binlog event exceeds max_queue_bytes";

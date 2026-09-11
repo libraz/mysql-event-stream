@@ -73,6 +73,16 @@ struct BinlogEventPacket {
   bool is_heartbeat = false;       ///< True if this is a heartbeat event
   uint16_t server_error_code = 0;  ///< MySQL ERR packet code, if one was received
   std::string error_message;       ///< Detailed stream failure description
+  /**
+   * @brief Whether the server closed the dump with a terminal packet.
+   *
+   * True for the ERR and EOF packets a source uses to end a dump: everything
+   * it sent has been consumed and the session is back in command phase, so the
+   * transport survives and a replacement stream can be started over it. False
+   * on every other failure, where the dump is left while the server may still
+   * be streaming and no command can drain the packets already in flight.
+   */
+  bool dump_ended_by_server = false;
 };
 
 /** Packet payload cap for an event, including the replication OK prefix. */

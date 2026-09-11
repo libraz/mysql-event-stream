@@ -84,6 +84,7 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   result->is_heartbeat = false;
   result->server_error_code = 0;
   result->error_message.clear();
+  result->dump_ended_by_server = false;
 
   uint8_t seq_id = 0;
   // The replication packet contains a one-byte OK marker before the event.
@@ -112,6 +113,9 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
     result->server_error_code = err_code;
     result->error_message = "MySQL server error " + std::to_string(err_code);
     if (!msg.empty()) result->error_message += ": " + msg;
+    // The ERR is the last packet of the dump, so the session returns to command
+    // phase with nothing of the dump left unread.
+    result->dump_ended_by_server = true;
     StructuredLog()
         .Event("binlog_stream_server_error")
         .Field("error_code", static_cast<uint64_t>(err_code))
@@ -131,6 +135,7 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
   // EOF packet - stream ended
   if (status_byte == 0xFE) {
     result->error_message = "Binlog stream ended (EOF packet)";
+    result->dump_ended_by_server = true;
     StructuredLog().Event("binlog_stream_eof").Warn();
     return MES_ERR_DISCONNECTED;
   }

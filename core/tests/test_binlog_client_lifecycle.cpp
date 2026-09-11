@@ -119,6 +119,11 @@ class ScriptedMysqlPeer {
     /// client in when the dump dies but the session survives, which is what
     /// makes a restart possible without reconnecting.
     kStreamThenServerError,
+    /// Report binlog_checksum=CRC32, then stream `stream_event` -- whose
+    /// trailer does not match its bytes -- followed by more events. A source
+    /// never learns that a client stopped reading, so the dump keeps arriving
+    /// after the client has given up on it.
+    kStreamCorruptedEventThenKeepStreaming,
   };
 
   /// ER_SERVER_SHUTDOWN: ends a dump without implying anything about the
@@ -225,6 +230,18 @@ class ScriptedMysqlPeer {
           SendPacket(peer, 3, BuildStreamError(dump_error));
           continue;
         }
+        if (mode == Mode::kStreamCorruptedEventThenKeepStreaming) {
+          std::vector<uint8_t> packet{0x00};  // replication OK marker
+          packet.insert(packet.end(), stream_event.begin(), stream_event.end());
+          // Three events go out back to back, so the two after the one the
+          // client rejects are left unread in the socket. Then back to serving
+          // commands: a client that keeps using this connection gets those
+          // replication packets as its query responses.
+          for (uint8_t sequence = 1; sequence <= 3; ++sequence) {
+            if (!SendPacket(peer, sequence, packet)) break;
+          }
+          continue;
+        }
         std::vector<uint8_t> packet{0x00};  // replication OK marker
         packet.insert(packet.end(), stream_event.begin(), stream_event.end());
         SendPacket(peer, 1, packet);
@@ -256,7 +273,7 @@ class ScriptedMysqlPeer {
       } else if (query.rfind("SET ", 0) == 0) {
         SendPacket(peer, 1, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00});
       } else {
-        SendSingleValueRow(peer, SelectResponse(query));
+        SendSingleValueRow(peer, SelectResponse(mode, query));
       }
     }
     close(peer);
@@ -291,10 +308,14 @@ class ScriptedMysqlPeer {
     recv(peer, &byte, 1, 0);
   }
 
-  static std::string SelectResponse(const std::string& query) {
+  static std::string SelectResponse(Mode mode, const std::string& query) {
     // binlog_checksum=NONE keeps the reader from expecting a CRC32 trailer on
     // the synthetic event; an empty purged set skips the preflight comparison.
-    if (query.find("binlog_checksum") != std::string::npos) return "NONE";
+    // The corrupted-event script needs the opposite: the trailer is only read,
+    // and only found wrong, when the source reports CRC32.
+    if (query.find("binlog_checksum") != std::string::npos) {
+      return mode == Mode::kStreamCorruptedEventThenKeepStreaming ? "CRC32" : "NONE";
+    }
     return "";
   }
 
@@ -754,6 +775,39 @@ TEST(BinlogClientLifecycle, FatalDumpErrorIsUnrecoverableOnlyForAGtidStart) {
     client.Stop();
     client.Disconnect();
   }
+}
+
+/**
+ * @brief A reader that abandons a live dump retires the transport with it.
+ *
+ * A corrupt event stops the reader while the source is still streaming, and
+ * the packets already in flight can never be matched to a command's response:
+ * every one of them opens with the same marker byte as a command-phase OK
+ * packet. The consequence that matters is the next start -- refused, rather
+ * than issuing COM_QUERY into the middle of a replication stream.
+ */
+TEST(BinlogClientLifecycle, AReaderThatAbandonsALiveDumpRefusesTheNextStart) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamCorruptedEventThenKeepStreaming,
+                         MakeWireEvent(256));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(client.IsConnected());
+
+  const PollResult corrupted = client.Poll();
+  EXPECT_EQ(corrupted.error, MES_ERR_CHECKSUM) << client.GetLastError();
+  EXPECT_FALSE(client.IsStreaming());
+  EXPECT_FALSE(BinlogClientTestAccess::TransportUsable(client))
+      << "a socket still holding unread replication packets is reported as usable";
+  EXPECT_FALSE(client.IsConnected());
+
+  const size_t queries_before_restart = peer.Queries().size();
+  EXPECT_EQ(client.StartStream(), MES_ERR_DISCONNECTED) << client.GetLastError();
+  // The refusal has to come before the wire: a setup query sent here would be
+  // answered by whatever the dump still had in flight.
+  EXPECT_EQ(peer.Queries().size(), queries_before_restart);
+
+  client.Disconnect();
 }
 
 TEST(BinlogClientLifecycle, RestartDoesNotPublishABatchCheckpointFromThePreviousStream) {
