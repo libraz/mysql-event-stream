@@ -39,9 +39,17 @@ def _find_lib_path() -> str:
         1. MES_LIB_PATH environment variable
         2. build-client directory (client-enabled build)
         3. Regular build directory
+
+    A library that cannot be resolved leaves nothing for the suite to stream
+    with, so it aborts the tests instead of skipping them.
     """
     env_path = os.environ.get("MES_LIB_PATH")
-    if env_path and Path(env_path).exists():
+    if env_path:
+        if not Path(env_path).exists():
+            pytest.fail(
+                f"MES_LIB_PATH is set to {env_path}, which does not exist.",
+                pytrace=False,
+            )
         return env_path
 
     project_root = Path(__file__).parent.parent.parent.parent
@@ -55,8 +63,12 @@ def _find_lib_path() -> str:
     if build_path.exists():
         return str(build_path)
 
-    pytest.skip("libmes not found; install OpenSSL and rebuild first")
-    return ""  # unreachable, but keeps mypy happy
+    pytest.fail(
+        f"libmes not found at {build_path}. Build it with "
+        "'cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel', "
+        "or set MES_LIB_PATH to an existing library.",
+        pytrace=False,
+    )
 
 
 @pytest.fixture(scope="session")
