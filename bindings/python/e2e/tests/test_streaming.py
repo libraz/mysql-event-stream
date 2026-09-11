@@ -6,6 +6,7 @@ the regular INSERT/UPDATE/DELETE tests (which also use streaming).
 
 from __future__ import annotations
 
+import ctypes
 import os
 import threading
 import time
@@ -16,7 +17,20 @@ from conftest import MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from lib.mysql_client import MysqlClient
 
 from mysql_event_stream import CdcEngine, LogLevel, set_log_callback
+from mysql_event_stream._ffi import get_library
 from mysql_event_stream.client import BinlogClient
+
+
+def _loaded_image_id(lib: ctypes.CDLL) -> int | None:
+    """Identify the loaded library image behind a ctypes handle.
+
+    Two handles opened from the same path are distinct Python objects that share
+    one loaded image, while handles opened from two different paths are separate
+    images with separate process-wide state. Object identity therefore cannot
+    answer which handles reach the same native globals, but the address a symbol
+    resolves to can.
+    """
+    return ctypes.cast(lib.mes_set_log_callback, ctypes.c_void_p).value
 
 
 @pytest.mark.streaming
@@ -95,7 +109,14 @@ class TestBinlogClient:
 
         is_mariadb = os.environ.get("DB_FLAVOR") == "mariadb"
         ca_path = Path(__file__).resolve().parents[4] / "e2e" / "docker" / "certs" / "ca.pem"
-        set_log_callback(handler, LogLevel.DEBUG)
+        # The log callback is process-wide per loaded library, so the handler is
+        # only reachable from the stream if it was installed in the very library
+        # the client runs on. Both halves are therefore pinned to one path: the
+        # default resolution searches package-adjacent locations first and can
+        # land on a different libmes than an explicit path, and a handler sitting
+        # in another image is simply never called.
+        handler_lib = get_library(lib_path)
+        set_log_callback(handler, LogLevel.DEBUG, lib_path=lib_path)
         try:
             with BinlogClient(
                 host=MYSQL_HOST,
@@ -108,11 +129,15 @@ class TestBinlogClient:
                 ssl_ca="" if is_mariadb else str(ca_path),
                 lib_path=lib_path,
             ) as client:
+                assert _loaded_image_id(handler_lib) == _loaded_image_id(client._lib), (
+                    "the log handler was installed in a different libmes image "
+                    "than the one the client streams through"
+                )
                 client.connect()
                 client.start()
                 assert callback_seen.wait(10), "native reader thread did not emit startup log"
         finally:
-            set_log_callback(None)
+            set_log_callback(None, lib_path=lib_path)
 
         assert callback_thread_ids and callback_thread_ids[0] != main_thread_id
 
