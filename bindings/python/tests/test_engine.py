@@ -13,6 +13,7 @@ from mysql_event_stream._ffi import (
     MES_COL_STRING,
     MES_ERR_AUTH,
     MES_ERR_INVALID_ARG,
+    MES_OK,
     MESColumn,
     MESEvent,
 )
@@ -67,6 +68,42 @@ class TestFeed:
             pytest.raises(ValueError, match="non-negative"),
         ):
             engine.set_max_queue_size(-1)
+
+    @pytest.mark.parametrize("value", ["10000", 1.5, True, None])
+    def test_wrong_typed_max_queue_size_rejected(self, lib_path: str, value: object) -> None:
+        """A bool would otherwise pass as a queue of one event."""
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(TypeError, match="max_size must be an integer"),
+        ):
+            engine.set_max_queue_size(value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("value", ["32768", 1.5, True, None])
+    def test_wrong_typed_max_event_size_rejected(self, lib_path: str, value: object) -> None:
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(TypeError, match="max_event_size must be an integer"),
+        ):
+            engine.set_max_event_size(value)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("setter", "option"),
+        [
+            ("set_include_databases", "include_databases"),
+            ("set_include_tables", "include_tables"),
+            ("set_exclude_tables", "exclude_tables"),
+        ],
+    )
+    @pytest.mark.parametrize("value", ["db", [1], None, ("db",)])
+    def test_wrong_typed_filter_list_rejected(
+        self, lib_path: str, setter: str, option: str, value: object
+    ) -> None:
+        """A bare string would otherwise be encoded one character per filter."""
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(TypeError, match=f"{option} must be a list of strings"),
+        ):
+            getattr(engine, setter)(value)
 
     def test_checksum_none_override(self, lib_path: str) -> None:
         with CdcEngine(lib_path=lib_path) as engine:
@@ -243,6 +280,26 @@ class TestConvertEvent:
             _convert_event(raw)
         assert error.value.code == 100
 
+    def test_undecodable_identifiers_substitute_instead_of_losing_the_event(self) -> None:
+        """next_event() either returns an event or raises with a C ABI code.
+
+        The identifiers are server-supplied bytes, so a byte UTF-8 rejects must
+        not turn a delivered event into an uncoded UnicodeDecodeError: the
+        consumer would lose the change and have nothing to classify.
+        """
+        raw = MESEvent()
+        raw.type = 0
+        raw.database = b"db\xff"
+        raw.table = b"tbl\xfe"
+        raw.binlog_file = b"binlog.\xfd0001"
+        raw.binlog_offset = 4
+
+        event = _convert_event(raw)
+        assert event.database == "db�"
+        assert event.table == "tbl�"
+        assert event.position.file == "binlog.�0001"
+        assert event.position.offset == 4
+
     def test_source_sql_is_exposed(self) -> None:
         raw = MESEvent()
         raw.type = 0
@@ -398,6 +455,32 @@ def test_column_name_cache_is_reused_across_rows() -> None:
     cached_name = cache[b"id"]
     assert _convert_columns(arr, 1, cache) == {"id": 7}
     assert cache[b"id"] is cached_name
+
+
+class TestPositionTextIsNeverFatal:
+    """A binlog filename the server sends must not raise on the way out."""
+
+    def test_undecodable_binlog_filename_substitutes(self) -> None:
+        lib = MagicMock()
+        lib.mes_create.return_value = 0xBEEF
+        lib.mes_get_position.return_value = MES_OK
+
+        def fake_get_position(
+            _handle: object,
+            file_ptr: object,
+            offset: object,
+        ) -> int:
+            ctypes.cast(file_ptr, ctypes.POINTER(ctypes.c_char_p))[0] = b"binlog.\xff0007"
+            ctypes.cast(offset, ctypes.POINTER(ctypes.c_uint64))[0] = 154
+            return MES_OK
+
+        lib.mes_get_position.side_effect = fake_get_position
+        with patch("mysql_event_stream.engine.get_library", return_value=lib):
+            engine = CdcEngine()
+        position = engine.get_position()
+        assert position.file == "binlog.�0007"
+        assert position.offset == 154
+        engine.close()
 
 
 class TestNativeErrorCodes:

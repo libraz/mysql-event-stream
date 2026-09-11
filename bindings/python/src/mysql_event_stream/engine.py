@@ -25,6 +25,7 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
+from ._options import validate_option, validate_options
 from .types import BinlogPosition, ChangeEvent, EventType, exception_for_rc
 
 # ctypes' ``from_buffer`` deliberately rejects immutable bytes. CPython does
@@ -220,7 +221,7 @@ class CdcEngine:
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_get_position")
 
-        file_str = file_ptr.value.decode("utf-8") if file_ptr.value else ""
+        file_str = file_ptr.value.decode("utf-8", errors="replace") if file_ptr.value else ""
         return BinlogPosition(file=file_str, offset=offset.value)
 
     def set_max_queue_size(self, max_size: int) -> None:
@@ -236,10 +237,13 @@ class CdcEngine:
                 without limit.
 
         Raises:
+            TypeError: If max_size is not an integer.
             ValueError: If max_size is negative.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
+        if isinstance(max_size, bool) or not isinstance(max_size, int):
+            raise TypeError(f"max_size must be an integer, got {type(max_size).__name__}")
         if max_size < 0:
             raise ValueError(f"max_size must be non-negative, got {max_size}")
         rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
@@ -259,9 +263,15 @@ class CdcEngine:
             max_event_size: Desired ceiling in bytes.
 
         Raises:
+            TypeError: If max_event_size is not an integer.
+            ValueError: If max_event_size does not fit in uint32.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
+        if isinstance(max_event_size, bool) or not isinstance(max_event_size, int):
+            raise TypeError(
+                f"max_event_size must be an integer, got {type(max_event_size).__name__}"
+            )
         if max_event_size < 0 or max_event_size > 0xFFFFFFFF:
             raise ValueError(f"max_event_size must fit in uint32, got {max_event_size}")
         rc = self._lib.mes_set_max_event_size(self._handle, max_event_size)
@@ -315,6 +325,7 @@ class CdcEngine:
         func: Any,
         names: list[str],
         func_name: str,
+        option: str,
     ) -> None:
         """Call a C string-array filter function.
 
@@ -322,11 +333,17 @@ class CdcEngine:
             func: The ctypes function to call.
             names: List of filter strings.
             func_name: Function name for error messages.
+            option: Public option name the list belongs to, for validation.
 
         Raises:
+            TypeError: If names is not a list of strings.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
+        # Rejected here rather than during the encode below, where a non-string
+        # entry surfaces as an AttributeError naming neither the option nor the
+        # offending value.
+        validate_option(option, names)
         arr = (ctypes.c_char_p * len(names))(*(n.encode("utf-8") for n in names))
         rc = func(self._handle, arr, len(names))
         if rc != MES_OK:
@@ -342,10 +359,14 @@ class CdcEngine:
             databases: List of database names.
 
         Raises:
+            TypeError: If databases is not a list of strings.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._set_string_filter(
-            self._lib.mes_set_include_databases, databases, "mes_set_include_databases"
+            self._lib.mes_set_include_databases,
+            databases,
+            "mes_set_include_databases",
+            "include_databases",
         )
 
     def set_include_tables(self, tables: list[str]) -> None:
@@ -361,9 +382,12 @@ class CdcEngine:
             tables: List of table names.
 
         Raises:
+            TypeError: If tables is not a list of strings.
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._set_string_filter(self._lib.mes_set_include_tables, tables, "mes_set_include_tables")
+        self._set_string_filter(
+            self._lib.mes_set_include_tables, tables, "mes_set_include_tables", "include_tables"
+        )
 
     def set_exclude_tables(self, tables: list[str]) -> None:
         """Set table exclude filter.
@@ -377,9 +401,12 @@ class CdcEngine:
             tables: List of table names.
 
         Raises:
+            TypeError: If tables is not a list of strings.
             RuntimeError: If the engine is closed or the call fails.
         """
-        self._set_string_filter(self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables")
+        self._set_string_filter(
+            self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables", "exclude_tables"
+        )
 
     def enable_metadata(
         self,
@@ -420,12 +447,32 @@ class CdcEngine:
                 without TLS. MITM-sensitive; prefer verified TLS.
 
         Raises:
+            TypeError: If an option has the wrong type.
+            ValueError: If an option falls outside its accepted range.
             RuntimeError: If the engine is closed, client API is unavailable,
                 or the metadata connection fails.
         """
         self._check_open()
-        if not (1 <= port <= 65535):
-            raise ValueError(f"port must be 1-65535, got {port}")
+        # Rejected here rather than at the ctypes boundary: the shared contract
+        # fixes the type and range of every one of these options, and a value
+        # that violates either would otherwise reach the C ABI as an argument
+        # error or a wrapped-around fixed-width integer.
+        validate_options(
+            {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "server_id": server_id,
+                "connect_timeout_s": connect_timeout_s,
+                "read_timeout_s": read_timeout_s,
+                "ssl_mode": ssl_mode,
+                "ssl_ca": ssl_ca,
+                "ssl_cert": ssl_cert,
+                "ssl_key": ssl_key,
+                "allow_public_key_retrieval": allow_public_key_retrieval,
+            }
+        )
         if not self._client_lib_loaded:
             if not load_client_library(self._lib):
                 raise exception_for_rc(
@@ -480,10 +527,10 @@ def _convert_columns(
             if name is None:
                 if len(name_cache) >= 8192:
                     name_cache.clear()
-                name = raw_name.decode("utf-8")
+                name = raw_name.decode("utf-8", errors="replace")
                 name_cache[raw_name] = name
         else:
-            name = raw_name.decode("utf-8") if raw_name else ""
+            name = raw_name.decode("utf-8", errors="replace") if raw_name else ""
         key = name if name else str(i)
 
         # Ordered by how often each type turns up in a row: temporal, decimal
@@ -555,9 +602,13 @@ def _convert_event(raw: MESEvent, name_cache: dict[bytes, str] | None = None) ->
     if raw.after_count > 0 and raw.after_columns:  # same guard pattern as above
         after = _convert_columns(raw.after_columns, raw.after_count, name_cache)
 
-    db = raw.database.decode("utf-8") if raw.database else ""
-    table = raw.table.decode("utf-8") if raw.table else ""
-    binlog_file = raw.binlog_file.decode("utf-8") if raw.binlog_file else ""
+    # Identifiers and positions arrive as server-supplied bytes. A byte the
+    # server's charset allows but UTF-8 does not must not cost the caller the
+    # whole event, so every one of them substitutes instead of raising -- the
+    # same substitution the Node binding performs.
+    db = raw.database.decode("utf-8", errors="replace") if raw.database else ""
+    table = raw.table.decode("utf-8", errors="replace") if raw.table else ""
+    binlog_file = raw.binlog_file.decode("utf-8", errors="replace") if raw.binlog_file else ""
     source_sql = raw.source_sql.decode("utf-8", errors="replace") if raw.source_sql else ""
 
     return ChangeEvent(

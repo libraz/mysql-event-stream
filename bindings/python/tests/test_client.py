@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -527,3 +528,262 @@ class TestClosePollRace:
         assert not destroy_during_read.is_set()
         lib.mes_client_destroy.assert_called_once()
         assert client._handle is None
+
+
+def _parked_poll(lib: MagicMock, release: threading.Event, entered: threading.Event) -> None:
+    """Make mes_client_poll() block like the real blocking C call.
+
+    The fake returns only once ``release`` is set, which is what a stop request
+    does on the real client. Anything that waits for the poll to finish on its
+    own therefore waits for the timeout, and a test asserting promptness fails
+    instead of hanging.
+    """
+
+    def fake_poll(_handle: object) -> MagicMock:
+        entered.set()
+        release.wait(timeout=5)
+        result = MagicMock()
+        result.error = 0
+        result.is_heartbeat = False
+        result.size = 0
+        result.data = None
+        return result
+
+    lib.mes_client_poll.side_effect = fake_poll
+
+
+class TestNonOwnerCallsDoNotQueueBehindAPoll:
+    """stop(), disconnect() and the observers must not wait out a blocking poll.
+
+    mes_client_stop() is the one C ABI entry point callable from another thread,
+    and it exists to end a blocking poll. Waiting for such a poll to return on
+    its own -- while holding a lock a stop request needs, or before issuing the
+    stop at all -- is what these tests reject.
+    """
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_disconnect_stops_the_poll_instead_of_waiting_for_it(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        mock_load.return_value = lib
+
+        poll_entered = threading.Event()
+        release_poll = threading.Event()
+        native_calls: list[str] = []
+        _parked_poll(lib, release_poll, poll_entered)
+
+        def fake_stop(_handle: object) -> None:
+            native_calls.append("stop")
+            release_poll.set()
+
+        lib.mes_client_stop.side_effect = fake_stop
+        lib.mes_client_disconnect.side_effect = lambda _handle: native_calls.append("disconnect")
+
+        client = BinlogClient()
+        poller = threading.Thread(target=client.poll)
+        poller.start()
+        assert poll_entered.wait(timeout=5)
+
+        returned = threading.Event()
+
+        def disconnect_and_signal() -> None:
+            client.disconnect()
+            returned.set()
+
+        disconnector = threading.Thread(target=disconnect_and_signal)
+        disconnector.start()
+        assert returned.wait(timeout=2), "disconnect() waited for the poll to end on its own"
+        assert native_calls == ["stop", "disconnect"]
+
+        poller.join(timeout=5)
+        disconnector.join(timeout=5)
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_stop_is_not_queued_behind_a_disconnect_waiting_on_a_poll(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        """A stop request stays reachable for the whole duration of any call.
+
+        The stop here deliberately does not end the parked poll, so disconnect()
+        is still waiting for it when the second stop request arrives: the point
+        is that no lock disconnect() holds while waiting can delay that request.
+        """
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        mock_load.return_value = lib
+
+        poll_entered = threading.Event()
+        release_poll = threading.Event()
+        _parked_poll(lib, release_poll, poll_entered)
+
+        client = BinlogClient()
+        poller = threading.Thread(target=client.poll)
+        poller.start()
+        assert poll_entered.wait(timeout=5)
+
+        disconnect_started = threading.Event()
+
+        def disconnect_and_wait() -> None:
+            disconnect_started.set()
+            client.disconnect()
+
+        disconnector = threading.Thread(target=disconnect_and_wait)
+        disconnector.start()
+        assert disconnect_started.wait(timeout=5)
+        # Give the disconnect its chance to park on the lock a poll holds.
+        time.sleep(0.05)
+
+        stopped = threading.Event()
+
+        def stop_and_signal() -> None:
+            client.stop()
+            stopped.set()
+
+        stopper = threading.Thread(target=stop_and_signal)
+        stopper.start()
+        assert stopped.wait(timeout=1), "stop() was blocked by a disconnect awaiting a poll"
+
+        release_poll.set()
+        poller.join(timeout=5)
+        disconnector.join(timeout=5)
+        stopper.join(timeout=5)
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_observers_read_through_while_a_poll_is_parked(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_is_connected.return_value = 1
+        lib.mes_client_is_streaming.return_value = 1
+        lib.mes_client_checksum_enabled.return_value = 1
+        lib.mes_client_queued_bytes.return_value = 42
+        lib.mes_client_get_max_queue_bytes.return_value = 4096
+        lib.mes_client_get_max_event_size.return_value = 8192
+        lib.mes_client_crc_errors.return_value = 3
+        lib.mes_client_current_gtid.return_value = b"uuid:1-9"
+        lib.mes_client_last_error.return_value = b"reader stalled"
+        lib.mes_client_flavor.return_value = ServerFlavor.MARIADB
+        mock_load.return_value = lib
+
+        poll_entered = threading.Event()
+        release_poll = threading.Event()
+        _parked_poll(lib, release_poll, poll_entered)
+
+        client = BinlogClient()
+        poller = threading.Thread(target=client.poll)
+        poller.start()
+        assert poll_entered.wait(timeout=5)
+
+        readings: dict[str, object] = {}
+        read_all_done = threading.Event()
+
+        def read_every_observer() -> None:
+            readings["is_connected"] = client.is_connected
+            readings["is_streaming"] = client.is_streaming
+            readings["checksum_enabled"] = client.checksum_enabled
+            readings["queued_bytes"] = client.queued_bytes
+            readings["max_queue_bytes"] = client.max_queue_bytes
+            readings["max_event_size"] = client.max_event_size
+            readings["crc_errors"] = client.crc_errors
+            readings["current_gtid"] = client.current_gtid
+            readings["last_error"] = client.last_error
+            readings["flavor"] = client.flavor
+            read_all_done.set()
+
+        reader = threading.Thread(target=read_every_observer)
+        reader.start()
+        assert read_all_done.wait(timeout=2), "an observer queued behind the in-flight poll"
+        assert readings == {
+            "is_connected": True,
+            "is_streaming": True,
+            "checksum_enabled": True,
+            "queued_bytes": 42,
+            "max_queue_bytes": 4096,
+            "max_event_size": 8192,
+            "crc_errors": 3,
+            "current_gtid": "uuid:1-9",
+            "last_error": "reader stalled",
+            "flavor": ServerFlavor.MARIADB,
+        }
+
+        release_poll.set()
+        poller.join(timeout=5)
+        reader.join(timeout=5)
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_observers_report_a_closed_client_without_touching_the_handle(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        client.close()
+
+        assert client.is_connected is False
+        assert client.is_streaming is False
+        assert client.checksum_enabled is False
+        assert client.queued_bytes == 0
+        assert client.max_queue_bytes == 0
+        assert client.max_event_size == 0
+        assert client.crc_errors == 0
+        assert client.current_gtid == ""
+        assert client.last_error == ""
+        assert client.flavor is ServerFlavor.MYSQL
+        lib.mes_client_is_connected.assert_not_called()
+        lib.mes_client_current_gtid.assert_not_called()
+        lib.mes_client_last_error.assert_not_called()
+
+
+class TestServerSuppliedTextIsNeverFatal:
+    """An undecodable byte from the server costs a character, not the call."""
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_undecodable_gtid_and_error_text_substitute(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_client_current_gtid.return_value = b"uuid:1-2\xff"
+        lib.mes_client_last_error.return_value = b"lost \xff connection"
+        mock_load.return_value = lib
+
+        client = BinlogClient()
+        assert client.current_gtid == "uuid:1-2�"
+        assert client.last_error == "lost � connection"
+        client.close()
+
+    @patch("mysql_event_stream.client.load_client_library", return_value=True)
+    @patch("mysql_event_stream.client.get_library")
+    def test_a_poll_failure_carries_undecodable_error_text_as_its_message(
+        self, mock_load: MagicMock, mock_load_client: MagicMock
+    ) -> None:
+        """A UnicodeDecodeError here would replace a coded failure with an uncoded one."""
+        lib = MagicMock()
+        lib.mes_client_create.return_value = 0xDEAD
+        lib.mes_error_string.return_value = b"stream error"
+        lib.mes_client_last_error.return_value = b"server said \xfe"
+        mock_load.return_value = lib
+
+        result = MagicMock()
+        result.error = MES_ERR_STREAM
+        lib.mes_client_poll.return_value = result
+
+        client = BinlogClient()
+        with pytest.raises(RuntimeError) as excinfo:
+            client.poll()
+        assert excinfo.value.code == MES_ERR_STREAM  # type: ignore[attr-defined]
+        assert "server said �" in str(excinfo.value)
+        client.close()

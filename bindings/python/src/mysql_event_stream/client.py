@@ -18,6 +18,7 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
+from ._options import validate_option, validate_options
 from .types import ClientConfig, PollResult, ServerFlavor, exception_for_rc
 
 
@@ -124,28 +125,15 @@ class BinlogClient:
             lib_path: Explicit path to libmes shared library.
 
         Raises:
+            TypeError: If an option has the wrong type.
+            ValueError: If an option falls outside its accepted range.
             RuntimeError: If client support is not available.
             OSError: If the shared library cannot be found.
         """
-        if config is None and not (1 <= port <= 65535):
-            raise ValueError(f"port must be 1-65535, got {port}")
-        if config is not None and not (1 <= config.port <= 65535):
-            raise ValueError(f"port must be 1-65535, got {config.port}")
-        server_id = config.server_id if config is not None else server_id
-        if server_id == 0:
-            raise ValueError("server_id must be non-zero")
-
-        self._lib = get_library(lib_path)
-        if not load_client_library(self._lib):
-            raise exception_for_rc(
-                MES_ERR_INVALID_ARG,
-                "BinlogClient is not available. Rebuild libmes with OpenSSL installed",
-            )
-
-        if config is not None:
-            self._config = config
-        else:
-            self._config = ClientConfig(
+        resolved = (
+            config
+            if config is not None
+            else ClientConfig(
                 host=host,
                 port=port,
                 user=user,
@@ -165,17 +153,57 @@ class BinlogClient:
                 max_event_size=max_event_size,
                 allow_public_key_retrieval=allow_public_key_retrieval,
             )
-        # Serializes every native handle use against close()/destroy(). poll()
-        # holds this lock for the duration of the blocking C call (and result
-        # copy), so close() can wait for an in-flight call before destroying
-        # the handle. RLock is required because error handling snapshots the
-        # native error string while the original call still holds the lock.
+        )
+        # Validate through the resolved configuration rather than the keyword
+        # arguments, so a pre-built ClientConfig is held to the same contract.
+        # This runs before the library is loaded: an option that cannot reach
+        # the C ABI intact is rejected here, not at connect() time as a ctypes
+        # argument error or a wrapped-around fixed-width integer.
+        validate_option("lib_path", lib_path)
+        if resolved.server_id == 0:
+            raise ValueError("server_id must be non-zero")
+        validate_options(
+            {
+                "host": resolved.host,
+                "port": resolved.port,
+                "user": resolved.user,
+                "password": resolved.password,
+                "server_id": resolved.server_id,
+                "start_gtid": resolved.start_gtid,
+                "start_binlog_file": resolved.start_binlog_file,
+                "start_binlog_position": resolved.start_binlog_position,
+                "connect_timeout_s": resolved.connect_timeout_s,
+                "read_timeout_s": resolved.read_timeout_s,
+                "ssl_mode": resolved.ssl_mode,
+                "ssl_ca": resolved.ssl_ca,
+                "ssl_cert": resolved.ssl_cert,
+                "ssl_key": resolved.ssl_key,
+                "max_queue_size": resolved.max_queue_size,
+                "max_queue_bytes": resolved.max_queue_bytes,
+                "max_event_size": resolved.max_event_size,
+                "allow_public_key_retrieval": resolved.allow_public_key_retrieval,
+            }
+        )
+
+        self._lib = get_library(lib_path)
+        if not load_client_library(self._lib):
+            raise exception_for_rc(
+                MES_ERR_INVALID_ARG,
+                "BinlogClient is not available. Rebuild libmes with OpenSSL installed",
+            )
+
+        self._config = resolved
+        # Serializes the owner-thread native calls against each other and
+        # against the destroy in close(). poll() holds this lock for the
+        # duration of the blocking C call (and the result copy), so close() can
+        # wait for an in-flight call before destroying the handle.
         self._poll_lock = threading.RLock()
-        # Serializes operations that can stop, disconnect, or destroy the
-        # handle. It lets close() issue the thread-safe stop request before
-        # waiting on _poll_lock, while preventing a concurrent stop() from
-        # using a handle after close() has destroyed it.
-        self._lifecycle_lock = threading.Lock()
+        # Guards the handle reference and serializes the entry points the C ABI
+        # allows from a non-owner thread: mes_client_stop() and the observers.
+        # It is deliberately not _poll_lock, which a blocking poll holds for its
+        # whole duration -- neither a stop request nor an observer read may queue
+        # behind one. Where both are needed they are taken in this order.
+        self._handle_lock = threading.Lock()
 
         # Holds a terminal poll error observed mid-batch until the next poll
         # call; see poll_batch().
@@ -277,7 +305,7 @@ class BinlogClient:
 
             rc = self._lib.mes_client_connect(self._handle, ctypes.byref(config))
             if rc != MES_OK:
-                error_msg = self._get_last_error()
+                error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
                 error = ConnectionError(f"{base_msg}: {error_msg}")
                 # Stable native error category used by the stream retry policy.
@@ -294,7 +322,7 @@ class BinlogClient:
             self._check_open()
             rc = self._lib.mes_client_start(self._handle)
             if rc != MES_OK:
-                error_msg = self._get_last_error()
+                error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
                 error = RuntimeError(f"{base_msg}: {error_msg}")
                 # Stable native error category used by the stream retry policy.
@@ -320,7 +348,7 @@ class BinlogClient:
                 raise latched
             result = self._lib.mes_client_poll(self._handle)
             if result.error != MES_OK:
-                error_msg = self._get_last_error()
+                error_msg = self.last_error
                 base_msg = _error_message(self._lib, result.error)
                 # Map checksum/decode/parse codes to the same typed exceptions
                 # the CdcEngine raises, so consumers get consistent types
@@ -369,7 +397,7 @@ class BinlogClient:
             for index in range(count.value):
                 result = raw_results[index]
                 if result.error != MES_OK:
-                    error_msg = self._get_last_error()
+                    error_msg = self.last_error
                     base_msg = _error_message(self._lib, result.error)
                     terminal = exception_for_rc(result.error, f"{base_msg}: {error_msg}")
                     if not results:
@@ -388,13 +416,22 @@ class BinlogClient:
 
     def stop(self) -> None:
         """Request stream stop. Thread-safe; unblocks a pending poll()."""
-        with self._lifecycle_lock:
+        with self._handle_lock:
             if self._handle is not None:
                 self._lib.mes_client_stop(self._handle)
 
     def disconnect(self) -> None:
-        """Disconnect from MySQL server."""
-        with self._lifecycle_lock, self._poll_lock:
+        """Disconnect from MySQL server.
+
+        Safe to call while another thread is blocked in :meth:`poll`: the stop
+        request goes out first, so this waits for a poll that is already ending
+        rather than for one that would only return on its own.
+        """
+        # Issued outside the poll lock, which an in-flight poll holds: stop() is
+        # the one entry point the C ABI accepts from a non-owner thread, and
+        # interrupting that poll is exactly what it is for.
+        self.stop()
+        with self._poll_lock, self._handle_lock:
             if self._handle is not None:
                 self._lib.mes_client_disconnect(self._handle)
 
@@ -405,22 +442,27 @@ class BinlogClient:
         unblocks the pending poll, then the poll lock is acquired to wait for it
         to return before the handle is destroyed (avoiding a use-after-free).
         """
-        with self._lifecycle_lock:
+        # Same ordering rule as disconnect(): unblock the poll before waiting
+        # for it. The handle lock is held across the destroy so no observer and
+        # no concurrent stop() can be inside the handle while it is freed.
+        self.stop()
+        with self._poll_lock, self._handle_lock:
             if self._handle is not None:
-                # Unblock an in-flight poll before waiting for _poll_lock.
-                # _lifecycle_lock prevents another stop()/close() from using
-                # the handle while this close operation owns its lifetime.
-                self._lib.mes_client_stop(self._handle)
-                with self._poll_lock:
-                    if self._handle is not None:
-                        self._lib.mes_client_disconnect(self._handle)
-                        self._lib.mes_client_destroy(self._handle)
-                        self._handle = None
+                self._lib.mes_client_disconnect(self._handle)
+                self._lib.mes_client_destroy(self._handle)
+                self._handle = None
+
+    # Every accessor below takes only the handle lock, never the poll lock, so
+    # none of them waits for a blocking poll to return. mes.h declares
+    # is_connected, is_streaming, checksum_enabled, queued_bytes and crc_errors
+    # safe to sample from a non-owner thread while the owner polls; the rest
+    # read state written only by connect() and the limit setters, which run
+    # under the poll lock and therefore never concurrently with a poll.
 
     @property
     def is_connected(self) -> bool:
         """Check whether the authenticated transport is still usable."""
-        with self._poll_lock:
+        with self._handle_lock:
             if self._handle is None:
                 return False
             return bool(self._lib.mes_client_is_connected(self._handle) != 0)
@@ -428,7 +470,7 @@ class BinlogClient:
     @property
     def is_streaming(self) -> bool:
         """Check whether poll() can still drain data or a terminal error."""
-        with self._poll_lock:
+        with self._handle_lock:
             if self._handle is None:
                 return False
             return bool(self._lib.mes_client_is_streaming(self._handle) != 0)
@@ -440,18 +482,30 @@ class BinlogClient:
         The value advances after polling past a commit boundary. It is not a
         durable acknowledgement; persist it only after processing succeeds.
         """
-        with self._poll_lock:
+        with self._handle_lock:
             if self._handle is None:
                 return ""
-            # Copy while holding the lock: the C pointer is only valid until
-            # the next client call and close() may otherwise destroy it.
+            # The native call keeps one snapshot buffer per client, so the
+            # returned pointer survives only until the next reader takes it.
+            # Copying under the handle lock is what makes concurrent readers
+            # safe, and it also keeps close() from freeing the buffer mid-copy.
             raw = self._lib.mes_client_current_gtid(self._handle)
-            return raw.decode("utf-8") if raw else ""
+            return raw.decode("utf-8", errors="replace") if raw else ""
+
+    @property
+    def last_error(self) -> str:
+        """Return the last native error message, or ``""`` if there is none."""
+        with self._handle_lock:
+            if self._handle is None:
+                return ""
+            # Same single-snapshot-buffer contract as current_gtid.
+            raw = self._lib.mes_client_last_error(self._handle)
+            return raw.decode("utf-8", errors="replace") if raw else ""
 
     @property
     def flavor(self) -> ServerFlavor:
         """Return the database flavor detected during connection."""
-        with self._poll_lock:
+        with self._handle_lock:
             if self._handle is None:
                 return ServerFlavor.MYSQL
             return ServerFlavor(self._lib.mes_client_flavor(self._handle))
@@ -459,7 +513,7 @@ class BinlogClient:
     @property
     def checksum_enabled(self) -> bool:
         """Return the checksum mode for events produced by :meth:`poll`."""
-        with self._poll_lock:
+        with self._handle_lock:
             if self._handle is None:
                 return False
             return bool(self._lib.mes_client_checksum_enabled(self._handle))
@@ -467,7 +521,7 @@ class BinlogClient:
     @property
     def queued_bytes(self) -> int:
         """Return currently charged payload bytes waiting in the event queue."""
-        with self._poll_lock:
+        with self._handle_lock:
             return (
                 0 if self._handle is None else int(self._lib.mes_client_queued_bytes(self._handle))
             )
@@ -475,7 +529,7 @@ class BinlogClient:
     @property
     def max_queue_bytes(self) -> int:
         """Return the configured event-queue payload budget in bytes."""
-        with self._poll_lock:
+        with self._handle_lock:
             return (
                 0
                 if self._handle is None
@@ -485,7 +539,7 @@ class BinlogClient:
     @property
     def max_event_size(self) -> int:
         """Return the configured maximum individual binlog event size."""
-        with self._poll_lock:
+        with self._handle_lock:
             return (
                 0
                 if self._handle is None
@@ -495,7 +549,7 @@ class BinlogClient:
     @property
     def crc_errors(self) -> int:
         """Return the number of CRC32-invalid events detected by this client."""
-        with self._poll_lock:
+        with self._handle_lock:
             return 0 if self._handle is None else int(self._lib.mes_client_crc_errors(self._handle))
 
     def __enter__(self) -> BinlogClient:
@@ -521,10 +575,3 @@ class BinlogClient:
         error = self._latched_error
         self._latched_error = None
         return error
-
-    def _get_last_error(self) -> str:
-        with self._poll_lock:
-            if self._handle is None:
-                return ""
-            raw = self._lib.mes_client_last_error(self._handle)
-            return raw.decode("utf-8") if raw else ""

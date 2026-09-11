@@ -46,10 +46,10 @@ def reference_convert_columns(
             if name is None:
                 if len(name_cache) >= 8192:
                     name_cache.clear()
-                name = raw_name.decode("utf-8")
+                name = raw_name.decode("utf-8", errors="replace")
                 name_cache[raw_name] = name
         else:
-            name = raw_name.decode("utf-8") if raw_name else ""
+            name = raw_name.decode("utf-8", errors="replace") if raw_name else ""
         key = name if name else str(i)
 
         col_type = col.type
@@ -250,14 +250,12 @@ class TestColumnKeys:
             "名前": 1
         }
 
-    def test_invalid_utf8_column_name_raises(self) -> None:
+    def test_invalid_utf8_column_name_substitutes(self) -> None:
+        """An undecodable identifier costs one character, never the whole row."""
         array = build_array([ColumnSpec(MES_COL_INT, int_val=1, name=b"bad\xff")])
-        with pytest.raises(UnicodeDecodeError):
-            _convert_columns(array, 1)
-        with pytest.raises(UnicodeDecodeError):
-            _convert_columns(array, 1, {})
-        with pytest.raises(UnicodeDecodeError):
-            reference_convert_columns(array, 1)
+        assert _convert_columns(array, 1) == {"bad�": 1}
+        assert _convert_columns(array, 1, {}) == {"bad�": 1}
+        assert reference_convert_columns(array, 1) == {"bad�": 1}
 
     def test_duplicate_names_keep_the_last_value(self) -> None:
         specs = [
