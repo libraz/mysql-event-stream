@@ -15,6 +15,53 @@ namespace mes {
 
 namespace {
 
+// MySQL collation id of the `binary` collation, the one that marks a
+// character-family column as holding opaque bytes rather than text.
+constexpr uint32_t kBinaryCollationId = 63;
+
+/**
+ * @brief The single decision: does a character-family column hold bytes?
+ *
+ * Every character-family and BLOB-family decode arm resolves text vs. bytes
+ * here and nowhere else, so a column's classification is a function of its
+ * resolved collation alone and never of which arm produced the value.
+ *
+ * The two members of each on-wire pair — VARCHAR/VARBINARY, CHAR/BINARY,
+ * TEXT/BLOB — share a binlog type byte, so the declared collation is the only
+ * discriminator. When TABLE_MAP carries no collation for the column (MariaDB
+ * omits the field entirely under its default binlog_row_metadata=NO_LOG) the
+ * pair cannot be told apart, and the value is surfaced as bytes: bytes
+ * reproduce the payload exactly and leave decoding to the consumer, whereas
+ * text would push a binary key or hash through a UTF-8 decoder and lose it
+ * irrecoverably.
+ *
+ * @param charset_known Whether TABLE_MAP carried a collation for the column.
+ * @param binary_charset Whether that collation is the binary one.
+ * @return true when the payload must be surfaced as an opaque byte sequence.
+ */
+bool PayloadIsBinary(bool charset_known, bool binary_charset) {
+  return !charset_known || binary_charset;
+}
+
+/// Build a character-family value from a contiguous range of wire bytes.
+ColumnValue MakeCharacterValue(ColumnType type, const uint8_t* data, size_t len, bool charset_known,
+                               bool binary_charset) {
+  if (PayloadIsBinary(charset_known, binary_charset)) {
+    return ColumnValue::Bytes(type, data, len);
+  }
+  return ColumnValue::String(type, std::string(reinterpret_cast<const char*>(data), len));
+}
+
+// Build a character-family value from an already-materialized buffer, moving it
+// in rather than copying: a second copy would double the peak for exactly the
+// field types most able to expand.
+ColumnValue MakeCharacterValue(ColumnType type, std::string value, bool charset_known,
+                               bool binary_charset) {
+  ColumnValue result = ColumnValue::String(type, std::move(value));
+  result.is_binary = PayloadIsBinary(charset_known, binary_charset);
+  return result;
+}
+
 // Read big-endian integer of arbitrary byte count (1-8).
 uint64_t ReadBigEndian(const uint8_t* data, size_t bytes) {
   uint64_t val = 0;
@@ -137,7 +184,7 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
     const uint32_t meta = col_info ? col_info->metadata : 0;
     const bool is_unsigned = col_info ? col_info->is_unsigned : false;
     const bool charset_known = col_info ? col_info->charset_known : false;
-    const bool binary_charset = charset_known && col_info->charset_id == 63;
+    const bool binary_charset = charset_known && col_info->charset_id == kBinaryCollationId;
 
     size_t consumed = 0;
     row->columns[i] = DecodeColumnValue(col_type, meta, is_unsigned, ptr, remaining, &consumed,
@@ -428,11 +475,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       }
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
-      if (binary_charset) {
-        return ColumnValue::Bytes(type, data + prefix_size, str_len);
-      }
-      return ColumnValue::String(
-          type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
+      return MakeCharacterValue(type, data + prefix_size, str_len, charset_known, binary_charset);
     }
 
     case ColumnType::kVarcharCompressed: {
@@ -448,7 +491,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
         return ColumnValue::Null(type);
       }
       *bytes_consumed = prefix_size + payload_length;
-      return ColumnValue::String(type, std::move(value));
+      return MakeCharacterValue(type, std::move(value), charset_known, binary_charset);
     }
 
     case ColumnType::kBlob:
@@ -471,11 +514,8 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       if (prefix_consumed == 0) return ColumnValue::Null(type);
       if (blob_len > len - prefix_consumed) return ColumnValue::Null(type);
       *bytes_consumed = prefix_consumed + blob_len;
-      if (charset_known && !binary_charset) {
-        return ColumnValue::String(
-            type, std::string(reinterpret_cast<const char*>(data + prefix_consumed), blob_len));
-      }
-      return ColumnValue::Bytes(type, data + prefix_consumed, blob_len);
+      return MakeCharacterValue(type, data + prefix_consumed, blob_len, charset_known,
+                                binary_charset);
     }
 
     case ColumnType::kBlobCompressed: {
@@ -496,11 +536,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
         return ColumnValue::Null(type);
       }
       *bytes_consumed = prefix_consumed + payload_length;
-      // Move the inflated buffer in rather than copying it: a second copy
-      // would double the peak for exactly the field type most able to expand.
-      ColumnValue result = ColumnValue::String(type, std::move(value));
-      result.is_binary = true;
-      return result;
+      return MakeCharacterValue(type, std::move(value), charset_known, binary_charset);
     }
 
     case ColumnType::kJson: {
@@ -585,11 +621,7 @@ ColumnValue DecodeColumnValue(ColumnType type, uint32_t meta, bool is_unsigned, 
       }
       if (len < prefix_size + str_len) return ColumnValue::Null(type);
       *bytes_consumed = prefix_size + str_len;
-      if (binary_charset) {
-        return ColumnValue::Bytes(type, data + prefix_size, str_len);
-      }
-      return ColumnValue::String(
-          type, std::string(reinterpret_cast<const char*>(data + prefix_size), str_len));
+      return MakeCharacterValue(type, data + prefix_size, str_len, charset_known, binary_charset);
     }
 
     case ColumnType::kDate: {

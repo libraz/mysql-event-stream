@@ -741,6 +741,217 @@ TEST(DecodeColumnValueTest, CharsetMetadataSelectsTextOrBytes) {
   EXPECT_EQ(text_blob.string_val, "ok");
 }
 
+// --- Charset classification matrix ---
+
+// The parameter model for the text-vs-bytes decision, enumerated rather than
+// sampled: every on-wire encoding that occupies a slot in the TABLE_MAP charset
+// index space, crossed with every state that slot can be in. VAR_STRING and
+// CHAR have no COMPRESSED counterpart — MariaDB's column compression covers
+// VARCHAR/VARBINARY and the BLOB/TEXT family only, and only those two received
+// their own binlog type byte — so the compression axis spans exactly the
+// encodings a server can emit.
+
+enum class CharsetMatrixFraming {
+  kOneBytePrefix,            ///< VARCHAR/VAR_STRING/CHAR with a length below 256
+  kTwoBytePrefix,            ///< BLOB-family pack_length 2
+  kCompressedOneBytePrefix,  ///< MariaDB compressed field behind a 1-byte length
+  kCompressedTwoBytePrefix,  ///< MariaDB compressed field behind a 2-byte length
+};
+
+struct CharsetMatrixEncoding {
+  const char* label;
+  ColumnType type;
+  uint32_t metadata;
+  CharsetMatrixFraming framing;
+};
+
+struct CharsetMatrixState {
+  const char* label;
+  bool charset_known;
+  bool binary_charset;
+  bool expect_binary;
+};
+
+// A payload carrying an embedded NUL and a byte no UTF-8 decoder can represent,
+// so a misclassified cell shows up in the value and not only in the flag.
+std::string CharsetMatrixPayload() {
+  static constexpr char kBytes[] = {'a', 'b', '\0', '\xFF', 'c', 'd'};
+  return std::string(kBytes, sizeof(kBytes));
+}
+
+// Frame a payload the way the given encoding carries it on the wire. Returns an
+// empty body if the compressor failed.
+std::vector<uint8_t> FrameCharsetMatrixValue(CharsetMatrixFraming framing,
+                                             const std::string& payload) {
+  test::EventBuilder w;
+  switch (framing) {
+    case CharsetMatrixFraming::kOneBytePrefix:
+      w.WriteU8(static_cast<uint8_t>(payload.size()));
+      w.WriteString(payload);
+      break;
+    case CharsetMatrixFraming::kTwoBytePrefix:
+      w.WriteU16Le(static_cast<uint16_t>(payload.size()));
+      w.WriteString(payload);
+      break;
+    case CharsetMatrixFraming::kCompressedOneBytePrefix:
+    case CharsetMatrixFraming::kCompressedTwoBytePrefix: {
+      const auto compressed = BuildMariaZlibPayload(payload, true);
+      if (compressed.empty()) return {};
+      if (framing == CharsetMatrixFraming::kCompressedOneBytePrefix) {
+        w.WriteU8(static_cast<uint8_t>(compressed.size()));
+      } else {
+        w.WriteU16Le(static_cast<uint16_t>(compressed.size()));
+      }
+      w.WriteBytes(compressed);
+      break;
+    }
+  }
+  return w.Data();
+}
+
+const CharsetMatrixEncoding kCharsetMatrixEncodings[] = {
+    {"VARCHAR", ColumnType::kVarchar, 100, CharsetMatrixFraming::kOneBytePrefix},
+    {"VAR_STRING", ColumnType::kVarString, 100, CharsetMatrixFraming::kOneBytePrefix},
+    {"CHAR", ColumnType::kString, 0xFE0A, CharsetMatrixFraming::kOneBytePrefix},
+    {"BLOB", ColumnType::kBlob, 2, CharsetMatrixFraming::kTwoBytePrefix},
+    {"VARCHAR COMPRESSED", ColumnType::kVarcharCompressed, 100,
+     CharsetMatrixFraming::kCompressedOneBytePrefix},
+    {"BLOB COMPRESSED", ColumnType::kBlobCompressed, 2,
+     CharsetMatrixFraming::kCompressedTwoBytePrefix},
+};
+
+// Absent metadata resolves to bytes for every encoding, the conservative
+// default: without a collation the decoder cannot tell VARBINARY from VARCHAR,
+// and bytes are the only answer that preserves the value.
+const CharsetMatrixState kCharsetMatrixStates[] = {
+    {"absent", false, false, true},
+    {"text collation", true, false, false},
+    {"binary collation", true, true, true},
+};
+
+TEST(DecodeColumnValueTest, CharsetMatrixClassifiesEveryEncodingByCollation) {
+  const std::string payload = CharsetMatrixPayload();
+  size_t cells = 0;
+  for (const auto& encoding : kCharsetMatrixEncodings) {
+    for (const auto& state : kCharsetMatrixStates) {
+      SCOPED_TRACE(std::string(encoding.label) + " / charset " + state.label);
+      const std::vector<uint8_t> body = FrameCharsetMatrixValue(encoding.framing, payload);
+      ASSERT_FALSE(body.empty());
+
+      size_t consumed = 0;
+      const ColumnValue result =
+          DecodeColumnValue(encoding.type, encoding.metadata, false, body.data(), body.size(),
+                            &consumed, state.charset_known, state.binary_charset);
+      EXPECT_EQ(consumed, body.size());
+      ASSERT_FALSE(result.is_null);
+      // The expectation is a property of the charset state alone, so every
+      // encoding in the row is required to reach the same classification.
+      EXPECT_EQ(result.is_binary, state.expect_binary);
+      ASSERT_EQ(result.string_val.size(), payload.size());
+      EXPECT_EQ(std::memcmp(result.string_val.data(), payload.data(), payload.size()), 0);
+      ++cells;
+    }
+  }
+  EXPECT_EQ(cells, 18u);
+}
+
+// is_binary must be a function of the resolved collation and never of which
+// decode arm produced the value, so each MariaDB COMPRESSED encoding has to
+// agree with its uncompressed counterpart in every charset state.
+TEST(DecodeColumnValueTest, CompressedEncodingsAgreeWithTheirUncompressedCounterparts) {
+  struct Pair {
+    const char* label;
+    CharsetMatrixEncoding plain;
+    CharsetMatrixEncoding compressed;
+  };
+  const Pair kPairs[] = {
+      {"VARCHAR", kCharsetMatrixEncodings[0], kCharsetMatrixEncodings[4]},
+      {"BLOB", kCharsetMatrixEncodings[3], kCharsetMatrixEncodings[5]},
+  };
+
+  const std::string payload = CharsetMatrixPayload();
+  for (const auto& pair : kPairs) {
+    for (const auto& state : kCharsetMatrixStates) {
+      SCOPED_TRACE(std::string(pair.label) + " / charset " + state.label);
+      const std::vector<uint8_t> plain_body = FrameCharsetMatrixValue(pair.plain.framing, payload);
+      const std::vector<uint8_t> compressed_body =
+          FrameCharsetMatrixValue(pair.compressed.framing, payload);
+      ASSERT_FALSE(plain_body.empty());
+      ASSERT_FALSE(compressed_body.empty());
+
+      size_t consumed = 0;
+      const ColumnValue plain = DecodeColumnValue(pair.plain.type, pair.plain.metadata, false,
+                                                  plain_body.data(), plain_body.size(), &consumed,
+                                                  state.charset_known, state.binary_charset);
+      const ColumnValue compressed = DecodeColumnValue(
+          pair.compressed.type, pair.compressed.metadata, false, compressed_body.data(),
+          compressed_body.size(), &consumed, state.charset_known, state.binary_charset);
+      ASSERT_FALSE(plain.is_null);
+      ASSERT_FALSE(compressed.is_null);
+      EXPECT_EQ(compressed.is_binary, plain.is_binary);
+      EXPECT_EQ(compressed.string_val, plain.string_val);
+    }
+  }
+}
+
+// The row path derives charset_known and the binary-collation test from
+// TableMetadata before handing them to the decoder, so assert the same matrix
+// end to end — an absent collation and a MariaDB COMPRESSED column both have to
+// reach the classification through that one hand-off.
+TEST(DecodeWriteRowsTest, CharsetMatrixClassifiesEveryEncodingByCollation) {
+  // utf8mb4_general_ci stands in for any text collation.
+  constexpr uint32_t kTextCollationId = 45;
+  constexpr uint32_t kBinaryCollationId = 63;
+
+  const CharsetMatrixEncoding kRowEncodings[] = {
+      kCharsetMatrixEncodings[0],  // VARCHAR
+      kCharsetMatrixEncodings[3],  // BLOB
+      kCharsetMatrixEncodings[4],  // VARCHAR COMPRESSED
+      kCharsetMatrixEncodings[5],  // BLOB COMPRESSED
+  };
+  const size_t kColumns = sizeof(kRowEncodings) / sizeof(kRowEncodings[0]);
+  const std::string payload = CharsetMatrixPayload();
+
+  for (const auto& state : kCharsetMatrixStates) {
+    SCOPED_TRACE(std::string("charset ") + state.label);
+
+    TableMetadata metadata;
+    metadata.table_id = 77;
+    metadata.database_name = "testdb";
+    metadata.table_name = "charsets";
+    metadata.columns.resize(kColumns);
+    for (size_t i = 0; i < kColumns; ++i) {
+      metadata.columns[i].type = kRowEncodings[i].type;
+      metadata.columns[i].metadata = kRowEncodings[i].metadata;
+      metadata.columns[i].charset_known = state.charset_known;
+      metadata.columns[i].charset_id = state.binary_charset ? kBinaryCollationId : kTextCollationId;
+    }
+
+    BinaryWriter w;
+    w.WriteU48Le(77);
+    w.WriteU16Le(0);
+    w.WriteU16Le(2);  // V2 var_header_len
+    w.WriteU8(static_cast<uint8_t>(kColumns));
+    w.WriteU8(0x0F);  // columns_present
+    w.WriteU8(0x00);  // null bitmap
+    for (const auto& encoding : kRowEncodings) {
+      const std::vector<uint8_t> body = FrameCharsetMatrixValue(encoding.framing, payload);
+      ASSERT_FALSE(body.empty());
+      w.WriteBytes(body);
+    }
+
+    std::vector<RowData> rows;
+    ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+    ASSERT_EQ(rows.size(), 1u);
+    ASSERT_EQ(rows[0].columns.size(), kColumns);
+    for (size_t i = 0; i < kColumns; ++i) {
+      SCOPED_TRACE(kRowEncodings[i].label);
+      EXPECT_EQ(rows[0].columns[i].is_binary, state.expect_binary);
+      EXPECT_EQ(rows[0].columns[i].string_val, payload);
+    }
+  }
+}
+
 // --- DecodeWriteRows test ---
 
 TEST(DecodeWriteRowsTest, SingleRowIntVarchar) {

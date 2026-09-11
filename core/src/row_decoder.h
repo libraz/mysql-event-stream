@@ -130,6 +130,11 @@ bool DecodeDeleteRows(const uint8_t* data, size_t len, const TableMetadata& meta
  * @param len Remaining data length.
  * @param[out] bytes_consumed Number of bytes consumed.
  * @param charset_known Whether TABLE_MAP carried a collation for the column.
+ *        Character-family and BLOB-family columns are surfaced as bytes when it
+ *        is false: the two members of each on-wire pair (VARCHAR/VARBINARY,
+ *        CHAR/BINARY, TEXT/BLOB) share a binlog type byte, so without a
+ *        collation they cannot be told apart, and bytes reproduce the payload
+ *        exactly where text would corrupt a binary value.
  * @param binary_charset Whether that collation is the binary one.
  * @param max_value_bytes Ceiling on the decoded value; compressed columns
  *        refuse to expand beyond it. Callers decoding a whole event pass the
