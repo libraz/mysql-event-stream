@@ -60,6 +60,12 @@ def _borrow_bytes(data: bytes) -> Any:
 _PAYLOAD_WINDOW_BYTES = 1 << 16
 _payload_window_at: Callable[[int], Any] = (ctypes.c_char * _PAYLOAD_WINDOW_BYTES).from_address
 
+# Cached ANNOTATE_ROWS statements are whole SQL texts rather than identifiers,
+# so the ceiling is far below the column-name cache's: every row of one ROWS
+# event is drained before the next statement appears, which is all the reuse
+# window this has to cover.
+_SOURCE_SQL_CACHE_MAX = 64
+
 
 def _raise_for_rc(rc: int, op: str) -> None:
     """Translate a C-ABI error code into the best-fitting Python exception.
@@ -106,6 +112,7 @@ class CdcEngine:
         self._lib = get_library(lib_path)
         self._client_lib_loaded = False
         self._column_name_cache: dict[bytes, str] = {}
+        self._source_sql_cache: dict[bytes, str] = {}
         self._handle: int | None = self._lib.mes_create()
         if self._handle is None:
             raise exception_for_rc(MES_ERR_INVALID_ARG, "Failed to create CDC engine")
@@ -189,7 +196,9 @@ class CdcEngine:
                 return None
             if rc != MES_OK:
                 _raise_for_rc(rc, "mes_next_event")
-            return _convert_event(event_ptr.contents, self._column_name_cache)
+            return _convert_event(
+                event_ptr.contents, self._column_name_cache, self._source_sql_cache
+            )
 
     def has_events(self) -> bool:
         """Check if there are pending events.
@@ -583,7 +592,11 @@ def _convert_columns(
     return result
 
 
-def _convert_event(raw: MESEvent, name_cache: dict[bytes, str] | None = None) -> ChangeEvent:
+def _convert_event(
+    raw: MESEvent,
+    name_cache: dict[bytes, str] | None = None,
+    source_sql_cache: dict[bytes, str] | None = None,
+) -> ChangeEvent:
     """Convert C mes_event_t to Python ChangeEvent.
 
     An unknown C-ABI event type is a parse failure. It is not skipped because
@@ -612,7 +625,23 @@ def _convert_event(raw: MESEvent, name_cache: dict[bytes, str] | None = None) ->
     db = raw.database.decode("utf-8", errors="replace") if raw.database else ""
     table = raw.table.decode("utf-8", errors="replace") if raw.table else ""
     binlog_file = raw.binlog_file.decode("utf-8", errors="replace") if raw.binlog_file else ""
-    source_sql = raw.source_sql.decode("utf-8", errors="replace") if raw.source_sql else ""
+
+    # One ANNOTATE_ROWS statement annotates every row of the ROWS event that
+    # follows it, and each of those rows arrives as a separate C event carrying
+    # the same statement, so decoding it per row repeats identical work. The
+    # cache is keyed on the statement bytes rather than on the C pointer: the
+    # engine reuses its storage across events, so pointer identity would serve
+    # the previous statement's text for a new statement at the same address.
+    raw_sql = raw.source_sql or b""
+    if raw_sql and source_sql_cache is not None:
+        source_sql = source_sql_cache.get(raw_sql)
+        if source_sql is None:
+            if len(source_sql_cache) >= _SOURCE_SQL_CACHE_MAX:
+                source_sql_cache.clear()
+            source_sql = raw_sql.decode("utf-8", errors="replace")
+            source_sql_cache[raw_sql] = source_sql
+    else:
+        source_sql = raw_sql.decode("utf-8", errors="replace") if raw_sql else ""
 
     return ChangeEvent(
         type=event_type,

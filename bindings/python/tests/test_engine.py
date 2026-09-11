@@ -20,7 +20,11 @@ from mysql_event_stream._ffi import (
     MESColumn,
     MESEvent,
 )
-from mysql_event_stream.engine import _convert_columns, _convert_event
+from mysql_event_stream.engine import (
+    _SOURCE_SQL_CACHE_MAX,
+    _convert_columns,
+    _convert_event,
+)
 
 from .helpers import (
     build_delete_rows_body,
@@ -603,6 +607,143 @@ def test_column_name_cache_is_reused_across_rows() -> None:
     cached_name = cache[b"id"]
     assert _convert_columns(arr, 1, cache) == {"id": 7}
     assert cache[b"id"] is cached_name
+
+
+class _StatementCache(dict[bytes, str]):
+    """Source-SQL cache that records every statement decoded into it.
+
+    A statement is decoded only on a miss and stored immediately after, so the
+    recorded keys are exactly the decodes the conversion performed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.decoded: list[bytes] = []
+
+    def __setitem__(self, key: bytes, value: str) -> None:
+        self.decoded.append(key)
+        super().__setitem__(key, value)
+
+
+def _make_annotated_event(source_sql: bytes | None) -> MESEvent:
+    """Build a row event carrying the statement an ANNOTATE_ROWS event supplied."""
+    raw = MESEvent()
+    raw.type = 0
+    raw.database = b"testdb"
+    raw.table = b"users"
+    if source_sql is not None:
+        raw.source_sql = source_sql
+    return raw
+
+
+def _build_multi_row_write_rows_body(table_id: int, values: list[int]) -> bytes:
+    """Build a WRITE_ROWS_EVENT V2 body with one INT column and one row per value."""
+    parts = bytearray()
+    parts.extend(table_id.to_bytes(6, "little"))
+    parts.extend(b"\x00\x00")  # flags
+    parts.extend(struct.pack("<H", 2))  # var_header_len (V2)
+    parts.append(1)  # column_count
+    parts.append(0x01)  # columns_present bitmap
+    for value in values:
+        parts.append(0x00)  # null_bitmap (no nulls)
+        parts.extend(struct.pack("<i", value))
+    return bytes(parts)
+
+
+class TestSourceSqlDecoding:
+    """One ANNOTATE_ROWS statement is shared by every row of the event it annotates.
+
+    Each of those rows crosses the C ABI as its own event carrying the same
+    statement, so the statement must be decoded per event, not per row, while
+    still surfacing on every row.
+    """
+
+    def test_statement_is_decoded_once_for_all_rows_of_one_event(self) -> None:
+        statement = b"INSERT INTO users (id) VALUES (1), (2), (3)"
+        cache = _StatementCache()
+
+        events = [_convert_event(_make_annotated_event(statement), None, cache) for _ in range(3)]
+
+        assert [event.source_sql for event in events] == [statement.decode()] * 3
+        assert cache.decoded == [statement]
+        assert all(event.source_sql is events[0].source_sql for event in events)
+
+    def test_new_statement_is_not_served_the_previous_one(self) -> None:
+        first_statement = b"UPDATE users SET name = 'a' WHERE id = 1"
+        second_statement = b"DELETE FROM users WHERE id = 2"
+        cache = _StatementCache()
+
+        first = _convert_event(_make_annotated_event(first_statement), None, cache)
+        second = _convert_event(_make_annotated_event(second_statement), None, cache)
+
+        assert first.source_sql == first_statement.decode()
+        assert second.source_sql == second_statement.decode()
+        assert cache.decoded == [first_statement, second_statement]
+
+    def test_new_statement_at_a_repeated_address_is_not_served_the_previous_one(self) -> None:
+        """The engine may hold a new statement at the address the last one used."""
+        buffer = ctypes.create_string_buffer(b"UPDATE users SET name = 'a'", 64)
+        address = ctypes.addressof(buffer)
+        raw = _make_annotated_event(None)
+        raw.source_sql = ctypes.cast(buffer, ctypes.c_char_p)
+        cache = _StatementCache()
+
+        first = _convert_event(raw, None, cache)
+        buffer.value = b"UPDATE users SET name = 'b'"
+        second = _convert_event(raw, None, cache)
+
+        assert ctypes.addressof(buffer) == address
+        assert first.source_sql == "UPDATE users SET name = 'a'"
+        assert second.source_sql == "UPDATE users SET name = 'b'"
+        assert len(cache.decoded) == 2
+
+    def test_undecodable_statement_substitutes_instead_of_raising(self) -> None:
+        statement = b"INSERT INTO users VALUES ('\xff')"
+        cache = _StatementCache()
+
+        event = _convert_event(_make_annotated_event(statement), None, cache)
+
+        assert event.source_sql == "INSERT INTO users VALUES ('�')"
+        assert cache.decoded == [statement]
+
+    @pytest.mark.parametrize("statement", [None, b""])
+    def test_event_without_a_statement_reports_no_statement(self, statement: bytes | None) -> None:
+        cache = _StatementCache()
+
+        event = _convert_event(_make_annotated_event(statement), None, cache)
+
+        assert event.source_sql == ""
+        assert cache.decoded == []
+
+    def test_cache_is_bounded(self) -> None:
+        cache: dict[bytes, str] = {}
+
+        for i in range(_SOURCE_SQL_CACHE_MAX + 1):
+            statement = f"INSERT INTO users (id) VALUES ({i})".encode()
+            event = _convert_event(_make_annotated_event(statement), None, cache)
+            assert event.source_sql == statement.decode()
+
+        assert len(cache) <= _SOURCE_SQL_CACHE_MAX
+
+    def test_engine_decodes_the_statement_once_per_row_event(self, lib_path: str) -> None:
+        statement = b"INSERT INTO users (id) VALUES (10), (20), (30)"
+        with CdcEngine(lib_path=lib_path) as engine:
+            cache = _StatementCache()
+            engine._source_sql_cache = cache
+            engine.set_checksum_enabled(False)
+            engine.feed(build_event_no_checksum(160, 1, statement))
+            engine.feed(build_event_no_checksum(19, 1, build_table_map_body(1, "testdb", "users")))
+            engine.feed(
+                build_event_no_checksum(30, 1, _build_multi_row_write_rows_body(1, [10, 20, 30]))
+            )
+
+            events = []
+            while (event := engine.next_event()) is not None:
+                events.append(event)
+
+        assert [event.after for event in events] == [{"0": 10}, {"0": 20}, {"0": 30}]
+        assert [event.source_sql for event in events] == [statement.decode()] * 3
+        assert cache.decoded == [statement]
 
 
 class TestPositionTextIsNeverFatal:
