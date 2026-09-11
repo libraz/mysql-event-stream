@@ -56,6 +56,9 @@ class BinlogClientTestAccess {
   static size_t QueuedEvents(const BinlogClient& client) {
     return client.event_queue_ ? client.event_queue_->Size() : 0;
   }
+
+  /** @brief Whether the connection underneath still holds a usable transport. */
+  static bool TransportUsable(const BinlogClient& client) { return client.conn_.IsConnected(); }
 };
 
 namespace {
@@ -106,6 +109,9 @@ class ScriptedMysqlPeer {
   enum class Mode {
     /// Stop answering once StartStream() issues its first query.
     kStallDuringStartStream,
+    /// Answer StartStream()'s first query with a packet that carries no
+    /// payload, which no result-set framing can consume.
+    kMalformedReplyDuringStartStream,
     /// Answer the whole start sequence, then stream `stream_event`.
     kStreamOneEvent,
     /// Stream `stream_event` and a heartbeat, then end the dump with a server
@@ -115,7 +121,12 @@ class ScriptedMysqlPeer {
     kStreamThenServerError,
   };
 
-  ScriptedMysqlPeer(Mode mode, std::vector<uint8_t> stream_event = {}) {
+  /// ER_SERVER_SHUTDOWN: ends a dump without implying anything about the
+  /// requested position, so a restart over the same session stays valid.
+  static constexpr uint16_t kDefaultDumpError = 1053;
+
+  ScriptedMysqlPeer(Mode mode, std::vector<uint8_t> stream_event = {},
+                    uint16_t dump_error = kDefaultDumpError) {
     listener_ = socket(AF_INET, SOCK_STREAM, 0);
     EXPECT_GE(listener_, 0);
     sockaddr_in address{};
@@ -128,7 +139,9 @@ class ScriptedMysqlPeer {
     EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length), 0);
     port_ = ntohs(address.sin_port);
 
-    thread_ = std::thread([this, mode, event = std::move(stream_event)] { Serve(mode, event); });
+    thread_ = std::thread([this, mode, event = std::move(stream_event), dump_error] {
+      Serve(mode, event, dump_error);
+    });
   }
 
   ~ScriptedMysqlPeer() {
@@ -171,7 +184,7 @@ class ScriptedMysqlPeer {
   }
 
  private:
-  void Serve(Mode mode, const std::vector<uint8_t>& stream_event) {
+  void Serve(Mode mode, const std::vector<uint8_t>& stream_event, uint16_t dump_error) {
     const int peer = accept(listener_, nullptr, nullptr);
     if (peer < 0) return;
     if (!SendPacket(peer, 0, BuildHandshake())) {
@@ -203,7 +216,7 @@ class ScriptedMysqlPeer {
           // An ERR packet ends the dump without closing the session, so the
           // loop goes back to serving commands and the client can start a
           // replacement stream over this same connection.
-          SendPacket(peer, 3, BuildStreamError());
+          SendPacket(peer, 3, BuildStreamError(dump_error));
           continue;
         }
         std::vector<uint8_t> packet{0x00};  // replication OK marker
@@ -221,6 +234,11 @@ class ScriptedMysqlPeer {
       if (connect_phase && !is_validation_query) {
         connect_phase = false;
         if (mode == Mode::kStallDuringStartStream) {
+          Stall(peer);
+          break;
+        }
+        if (mode == Mode::kMalformedReplyDuringStartStream) {
+          SendPacket(peer, 1, {});
           Stall(peer);
           break;
         }
@@ -244,15 +262,12 @@ class ScriptedMysqlPeer {
   }
 
   /// ERR packet for a source that ends the dump but keeps the session.
-  static std::vector<uint8_t> BuildStreamError() {
-    // ER_SERVER_SHUTDOWN. Deliberately not 1236, which the client maps to
-    // MES_ERR_GTID_PURGED: a purged position is unrecoverable by a restart.
-    constexpr uint16_t kServerShutdown = 1053;
-    std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(kServerShutdown),
-                                 static_cast<uint8_t>(kServerShutdown >> 8), '#'};
+  static std::vector<uint8_t> BuildStreamError(uint16_t error_code) {
+    std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(error_code),
+                                 static_cast<uint8_t>(error_code >> 8), '#'};
     const std::string sql_state = "08S01";
     payload.insert(payload.end(), sql_state.begin(), sql_state.end());
-    const std::string message = "Server shutdown in progress";
+    const std::string message = "the source ended the dump";
     payload.insert(payload.end(), message.begin(), message.end());
     return payload;
   }
@@ -497,6 +512,51 @@ TEST(BinlogClientLifecycle, StopInterruptsStartStreamBlockedOnTheServer) {
   EXPECT_FALSE(client.IsStreaming());
 }
 
+/**
+ * @brief A stream setup that breaks the protocol stops reporting connected.
+ *
+ * Stream setup spends several queries on the connection, and each of them
+ * closes the descriptor if the response cannot be framed. A client that keeps
+ * answering "connected" there defeats the documented supervisor pattern: the
+ * caller skips its reconnect and spends another whole start sequence on a dead
+ * descriptor. Two independent failures are driven because setup queries fail
+ * for more than one reason.
+ */
+TEST(BinlogClientLifecycle, AStreamSetupFailureThatClosesTheSocketReportsDisconnected) {
+  struct Failure {
+    const char* description;
+    ScriptedMysqlPeer::Mode mode;
+    uint32_t read_timeout_s;
+  };
+  const Failure failures[] = {
+      {"setup query left unanswered", ScriptedMysqlPeer::Mode::kStallDuringStartStream, 1},
+      {"setup query answered with an unframeable packet",
+       ScriptedMysqlPeer::Mode::kMalformedReplyDuringStartStream, 10},
+  };
+
+  for (const Failure& failure : failures) {
+    SCOPED_TRACE(failure.description);
+    ScriptedMysqlPeer peer(failure.mode);
+    BinlogClient client;
+    ASSERT_EQ(client.Connect(PeerConfig(peer, failure.read_timeout_s)), MES_OK)
+        << client.GetLastError();
+    // Without this the assertions below would also hold for a client that
+    // never connected at all.
+    ASSERT_TRUE(client.IsConnected());
+
+    EXPECT_EQ(client.StartStream(), MES_ERR_STREAM) << client.GetLastError();
+    EXPECT_FALSE(client.IsStreaming());
+    EXPECT_FALSE(BinlogClientTestAccess::TransportUsable(client))
+        << "the failure under test did not close the socket";
+    EXPECT_FALSE(client.IsConnected());
+    // The consequence that matters: the next start is refused instead of
+    // spending the whole setup sequence on a descriptor that is gone.
+    EXPECT_EQ(client.StartStream(), MES_ERR_DISCONNECTED) << client.GetLastError();
+
+    client.Disconnect();
+  }
+}
+
 TEST(BinlogClientLifecycle, StartStreamRejectsAQueueBudgetBelowOneMaxSizedEvent) {
   ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream);
   BinlogClient client;
@@ -617,6 +677,69 @@ TEST(BinlogClientLifecycle, RestartAfterAStreamErrorResumesFromTheDeliveredCheck
 
   client.Stop();
   client.Disconnect();
+}
+
+/**
+ * @brief The source's fatal binlog error is unrecoverable only for a GTID
+ *        start; a file/position dump reports it as a retryable stream error.
+ *
+ * One error code covers both a purged GTID interval and a stale file offset,
+ * and the offset case is fixed by restarting from a valid one. Reporting it as
+ * a purged position would send the consumer to the one classification its
+ * reconnect logic refuses to retry.
+ */
+TEST(BinlogClientLifecycle, FatalDumpErrorIsUnrecoverableOnlyForAGtidStart) {
+  constexpr uint16_t kFatalErrorReadingBinlog = 1236;
+  struct StartMode {
+    bool from_file_position;
+    uint8_t dump_command;
+    mes_error_t expected;
+  };
+  const StartMode start_modes[] = {
+      {false, kComBinlogDumpGtid, MES_ERR_GTID_PURGED},
+      {true, kComBinlogDump, MES_ERR_STREAM},
+  };
+
+  for (const StartMode& start_mode : start_modes) {
+    SCOPED_TRACE(start_mode.from_file_position ? "file/position start" : "GTID start");
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError, {},
+                           kFatalErrorReadingBinlog);
+    BinlogClient client;
+    BinlogClientConfig config = PeerConfig(peer, 10);
+    if (start_mode.from_file_position) {
+      config.start_gtid.clear();
+      config.start_at_file_position = true;
+      config.binlog_file = "binlog.000001";
+      config.binlog_position = kBinlogMagicOffset;
+    }
+    ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+    ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+    // The start mode has to be visible in the request that reached the peer,
+    // otherwise both rows of this table would be driving the same dump.
+    ASSERT_TRUE(peer.WaitForDumpRequests(1, seconds(3)));
+    const std::vector<std::vector<uint8_t> > requests = peer.DumpRequests();
+    ASSERT_FALSE(requests.empty());
+    ASSERT_FALSE(requests[0].empty());
+    EXPECT_EQ(requests[0][0], start_mode.dump_command);
+
+    // The scripted dump carries no event, so the replication OK markers ahead
+    // of the error arrive as heartbeats.
+    PollResult result{};
+    bool terminal = false;
+    for (int poll = 0; poll < 8; ++poll) {
+      result = client.Poll();
+      if (result.error != MES_OK || !result.is_heartbeat) {
+        terminal = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(terminal) << "the scripted dump never delivered its terminal error";
+    EXPECT_EQ(result.error, start_mode.expected) << client.GetLastError();
+
+    client.Stop();
+    client.Disconnect();
+  }
 }
 
 TEST(BinlogClientLifecycle, RestartDoesNotPublishABatchCheckpointFromThePreviousStream) {

@@ -3,9 +3,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
@@ -107,46 +110,216 @@ TEST(BinlogEventPacketTest, DefaultValues) {
   EXPECT_TRUE(packet.error_message.empty());
 }
 
-TEST(BinlogStreamPacketTest, ServerPurgeErrorPreservesCodeAndMessage) {
+#ifndef _WIN32
+
+/**
+ * @brief Loopback peer that captures one dump request, then answers with bytes.
+ *
+ * Accepts a single connection, reads the start command the client sends, and
+ * replies with a scripted packet so FetchEvent() can be driven over a real
+ * socket. The captured request is what proves the dump actually started before
+ * a test interprets what the reply produced.
+ */
+class DumpRequestPeer {
+ public:
+  explicit DumpRequestPeer(std::vector<uint8_t> reply, bool send_reply = true) {
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    EXPECT_EQ(bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(listen(listener_, 1), 0);
+    socklen_t address_len = sizeof(address);
+    EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &address_len), 0);
+    port_ = ntohs(address.sin_port);
+
+    thread_ =
+        std::thread([this, payload = std::move(reply), send_reply] { Serve(payload, send_reply); });
+  }
+
+  ~DumpRequestPeer() {
+    if (thread_.joinable()) thread_.join();
+    if (listener_ >= 0) close(listener_);
+  }
+
+  DumpRequestPeer(const DumpRequestPeer&) = delete;
+  DumpRequestPeer& operator=(const DumpRequestPeer&) = delete;
+
+  uint16_t port() const { return port_; }
+
+  /** @brief The start command payload received, empty if none arrived. */
+  std::vector<uint8_t> Request() const {
+    std::lock_guard<std::mutex> lock(request_mutex_);
+    return request_;
+  }
+
+ private:
+  void Serve(const std::vector<uint8_t>& reply, bool send_reply) {
+    const int peer = accept(listener_, nullptr, nullptr);
+    if (peer < 0) return;
+    std::vector<uint8_t> request;
+    if (ReadCommand(peer, &request)) {
+      {
+        std::lock_guard<std::mutex> lock(request_mutex_);
+        request_ = std::move(request);
+      }
+      if (send_reply) SendReply(peer, reply);
+    }
+    close(peer);
+  }
+
+  static bool ReadCommand(int peer, std::vector<uint8_t>* payload) {
+    uint8_t header[4]{};
+    if (recv(peer, header, sizeof(header), MSG_WAITALL) != static_cast<ssize_t>(sizeof(header))) {
+      return false;
+    }
+    payload->assign(ReadFixedInt(header, 3), 0);
+    if (payload->empty()) return true;
+    return recv(peer, payload->data(), payload->size(), MSG_WAITALL) ==
+           static_cast<ssize_t>(payload->size());
+  }
+
+  static void SendReply(int peer, const std::vector<uint8_t>& payload) {
+    const size_t size = payload.size();
+    std::vector<uint8_t> packet = {static_cast<uint8_t>(size), static_cast<uint8_t>(size >> 8),
+                                   static_cast<uint8_t>(size >> 16), 1};
+    packet.insert(packet.end(), payload.begin(), payload.end());
+    size_t sent = 0;
+    while (sent < packet.size()) {
+      const ssize_t written = send(peer, packet.data() + sent, packet.size() - sent, 0);
+      if (written <= 0) return;
+      sent += static_cast<size_t>(written);
+    }
+  }
+
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  // Written by the peer thread, read by the test thread.
+  mutable std::mutex request_mutex_;
+  std::vector<uint8_t> request_;
+  std::thread thread_;
+};
+
+/** @brief ERR packet payload carrying @p error_code and @p message. */
+std::vector<uint8_t> BuildErrPacket(uint16_t error_code, const std::string& message) {
+  std::vector<uint8_t> payload = {0xFF, static_cast<uint8_t>(error_code),
+                                  static_cast<uint8_t>(error_code >> 8), '#'};
+  const std::string sql_state = "HY000";
+  payload.insert(payload.end(), sql_state.begin(), sql_state.end());
+  payload.insert(payload.end(), message.begin(), message.end());
+  return payload;
+}
+
+#endif  // _WIN32
+
+/**
+ * @brief The unrecoverable classification follows the start mode, not the
+ *        command byte or the server's error code alone.
+ *
+ * The server reports a purged GTID interval and a stale file/offset under one
+ * error code, and MariaDB starts a GTID dump with the same command a
+ * file/position dump uses. Only the start mode separates them, so all three
+ * inputs that reach the mapping are enumerated rather than sampled.
+ */
+TEST(BinlogStreamServerErrorTest, PurgedPositionIsClaimedOnlyForAGtidStart) {
 #ifdef _WIN32
   GTEST_SKIP() << "local socket test is POSIX-only";
 #else
-  const int listener = socket(AF_INET, SOCK_STREAM, 0);
-  ASSERT_GE(listener, 0);
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  address.sin_port = 0;
-  ASSERT_EQ(bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
-  ASSERT_EQ(listen(listener, 1), 0);
-  socklen_t address_len = sizeof(address);
-  ASSERT_EQ(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_len), 0);
+  constexpr uint16_t kFatalErrorReadingBinlog = 1236;
+  constexpr uint16_t kServerShutdown = 1053;
+  constexpr bool kGtidCommand[] = {true, false};
+  constexpr bool kPositionFromGtid[] = {true, false};
+  constexpr uint16_t kServerErrors[] = {kFatalErrorReadingBinlog, kServerShutdown};
 
-  const std::string server_message = "The requested GTID has been purged";
-  std::thread server([&] {
-    const int peer = accept(listener, nullptr, nullptr);
-    if (peer < 0) return;
-    std::vector<uint8_t> payload = {0xFF, 0xD4, 0x04, '#', 'H', 'Y', '0', '0', '0'};
-    payload.insert(payload.end(), server_message.begin(), server_message.end());
-    const uint32_t payload_size = static_cast<uint32_t>(payload.size());
-    std::vector<uint8_t> packet = {static_cast<uint8_t>(payload_size),
-                                   static_cast<uint8_t>(payload_size >> 8),
-                                   static_cast<uint8_t>(payload_size >> 16), 1};
-    packet.insert(packet.end(), payload.begin(), payload.end());
-    send(peer, packet.data(), packet.size(), 0);
-    close(peer);
-  });
+  for (const bool gtid_command : kGtidCommand) {
+    for (const bool position_from_gtid : kPositionFromGtid) {
+      for (const uint16_t server_error : kServerErrors) {
+        SCOPED_TRACE(std::string("command=") + (gtid_command ? "dump_gtid" : "dump") +
+                     " position_from_gtid=" + (position_from_gtid ? "true" : "false") +
+                     " server_error=" + std::to_string(server_error));
 
-  SocketHandle socket;
-  ASSERT_EQ(socket.Connect("127.0.0.1", ntohs(address.sin_port), 1), MES_OK);
-  BinlogStream stream;
-  std::vector<uint8_t> buffer;
-  BinlogEventPacket result;
-  EXPECT_EQ(stream.FetchEvent(&socket, &buffer, &result, 1024), MES_ERR_GTID_PURGED);
-  EXPECT_EQ(result.server_error_code, 1236u);
-  EXPECT_EQ(result.error_message, "MySQL server error 1236: " + server_message);
-  server.join();
-  close(listener);
+        const std::string server_message = "the source gave up on the dump";
+        DumpRequestPeer peer(BuildErrPacket(server_error, server_message));
+
+        SocketHandle socket;
+        ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+
+        BinlogStreamConfig config;
+        config.position_from_gtid = position_from_gtid;
+        if (gtid_command) config.gtid_encoded.assign(8, 0);
+        BinlogStream stream;
+        ASSERT_EQ(gtid_command ? stream.Start(&socket, config)
+                               : stream.StartComBinlogDump(&socket, config),
+                  MES_OK);
+
+        std::vector<uint8_t> buffer;
+        BinlogEventPacket result;
+        const mes_error_t rc = stream.FetchEvent(&socket, &buffer, &result, 1024);
+
+        // Both halves of the exchange have to have happened, otherwise the
+        // returned code would describe a transport failure instead of the
+        // mapping under test.
+        const std::vector<uint8_t> request = peer.Request();
+        ASSERT_FALSE(request.empty()) << "no start command reached the peer";
+        EXPECT_EQ(request[0], gtid_command ? 0x1Eu : 0x12u);
+        ASSERT_EQ(result.server_error_code, server_error) << "the ERR packet was not parsed";
+        EXPECT_EQ(result.error_message,
+                  "MySQL server error " + std::to_string(server_error) + ": " + server_message);
+
+        const bool purged = position_from_gtid && server_error == kFatalErrorReadingBinlog;
+        EXPECT_EQ(rc, purged ? MES_ERR_GTID_PURGED : MES_ERR_STREAM);
+      }
+    }
+  }
+#endif
+}
+
+/**
+ * @brief No exit path other than the server-error mapping reports a purged
+ *        position, even on the GTID start where that code is reachable.
+ */
+TEST(BinlogStreamServerErrorTest, NonErrorPacketExitsNeverReportAPurgedPosition) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  struct Reply {
+    const char* description;
+    std::vector<uint8_t> payload;
+    bool sent;
+    mes_error_t expected;
+  };
+  const Reply replies[] = {
+      {"stream ended with an EOF packet",
+       {0xFE, 0x00, 0x00, 0x02, 0x00},
+       true,
+       MES_ERR_DISCONNECTED},
+      {"unexpected status byte", {0x42, 0x00}, true, MES_ERR_STREAM},
+      {"peer closed before sending a packet", {}, false, MES_ERR_STREAM},
+  };
+
+  for (const Reply& reply : replies) {
+    SCOPED_TRACE(reply.description);
+    DumpRequestPeer peer(reply.payload, reply.sent);
+
+    SocketHandle socket;
+    ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+
+    BinlogStreamConfig config;
+    config.position_from_gtid = true;
+    config.gtid_encoded.assign(8, 0);
+    BinlogStream stream;
+    ASSERT_EQ(stream.Start(&socket, config), MES_OK);
+
+    std::vector<uint8_t> buffer;
+    BinlogEventPacket result;
+    const mes_error_t rc = stream.FetchEvent(&socket, &buffer, &result, 1024);
+
+    ASSERT_FALSE(peer.Request().empty()) << "no start command reached the peer";
+    EXPECT_EQ(result.server_error_code, 0u) << "no ERR packet was sent, so none may be reported";
+    EXPECT_EQ(rc, reply.expected);
+  }
 #endif
 }
 

@@ -13,6 +13,7 @@
 
 #include "client/binlog_client.h"
 #include "protocol/mysql_connection.h"
+#include "protocol/mysql_query.h"
 #include "protocol/mysql_socket.h"
 
 #ifndef _WIN32
@@ -298,6 +299,137 @@ TEST(MysqlConnection, ConnectSpendsOneTimeoutBudgetAcrossResolvedAddresses) {
 
   for (const int fd : pending) close(fd);
   close(listener);
+}
+
+/**
+ * @brief Responder that authenticates, then hands one query reply to @p script.
+ *
+ * Accepts whatever credentials the client offers, consumes the COM_QUERY
+ * packet, and lets the caller shape a response that leaves the protocol state
+ * unusable.
+ */
+std::function<void(int)> AuthenticatedQueryResponder(std::function<void(int)> script) {
+  return [reply = std::move(script)](int fd) {
+    if (!HandshakePeer::ConsumePacket(fd)) return;  // client handshake response
+    if (!HandshakePeer::SendPacket(fd, 2, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00})) return;
+    if (!HandshakePeer::ConsumePacket(fd)) return;  // COM_QUERY
+    reply(fd);
+  };
+}
+
+/** @brief One-column definition packet naming the column "x". */
+const std::vector<uint8_t> kColumnDefinition = {0, 0, 0, 0, 1, 'x'};
+
+/** @brief Traditional EOF packet, below the nine bytes that would make it a row. */
+const std::vector<uint8_t> kEofPacket = {0xFE, 0x00, 0x00, 0x02, 0x00};
+
+/**
+ * @brief A failed query leaves the connection reporting disconnected.
+ *
+ * Every transport, framing and limit failure inside ExecuteQuery() closes the
+ * descriptor to keep a later command from reading the remains of this response
+ * as its own. Liveness has to follow: a caller whose supervisor reconnects on
+ * IsConnected() == false would otherwise spend a whole start sequence on a
+ * dead descriptor. The reachable failures are enumerated one per row, each
+ * pinned by the message that names its site, so a fix that only reaches one of
+ * them cannot pass.
+ */
+TEST(MysqlConnection, EveryQueryFailureThatClosesTheSocketAlsoReportsDisconnected) {
+  struct Response {
+    const char* site;
+    std::function<void(int)> script;
+    mes_error_t expected;
+    const char* message;
+    bool poisons;
+  };
+  const Response responses[] = {
+      {"no response at all", [](int) {}, MES_ERR_STREAM, "Failed to read query response", true},
+      {"empty response packet", [](int fd) { HandshakePeer::SendPacket(fd, 1, {}); },
+       MES_ERR_STREAM, "Empty response from server", true},
+      {"column count above the cap",
+       [](int fd) { HandshakePeer::SendPacket(fd, 1, {0xFC, 0x01, 0x10}); }, MES_ERR_STREAM,
+       "Column count exceeds maximum (4097)", true},
+      {"column definition never sent", [](int fd) { HandshakePeer::SendPacket(fd, 1, {1}); },
+       MES_ERR_STREAM, "Failed to read column definition", true},
+      {"intermediate EOF never sent",
+       [](int fd) {
+         if (!HandshakePeer::SendPacket(fd, 1, {1})) return;
+         HandshakePeer::SendPacket(fd, 2, kColumnDefinition);
+       },
+       MES_ERR_STREAM, "Failed to read intermediate EOF packet", true},
+      {"intermediate packet is not an EOF",
+       [](int fd) {
+         if (!HandshakePeer::SendPacket(fd, 1, {1})) return;
+         if (!HandshakePeer::SendPacket(fd, 2, kColumnDefinition)) return;
+         HandshakePeer::SendPacket(fd, 3, {0x01, 0x02, 0x03});
+       },
+       MES_ERR_STREAM, "Expected intermediate EOF packet", true},
+      {"row packet never sent",
+       [](int fd) {
+         if (!HandshakePeer::SendPacket(fd, 1, {1})) return;
+         if (!HandshakePeer::SendPacket(fd, 2, kColumnDefinition)) return;
+         HandshakePeer::SendPacket(fd, 3, kEofPacket);
+       },
+       MES_ERR_STREAM, "Failed to read row data", true},
+      {"nothing but empty row packets",
+       [](int fd) {
+         if (!HandshakePeer::SendPacket(fd, 1, {1})) return;
+         if (!HandshakePeer::SendPacket(fd, 2, kColumnDefinition)) return;
+         if (!HandshakePeer::SendPacket(fd, 3, kEofPacket)) return;
+         for (uint8_t sequence = 4; sequence < 10; ++sequence) {
+           if (!HandshakePeer::SendPacket(fd, sequence, {})) return;
+         }
+       },
+       MES_ERR_STREAM, "Server sent only empty packets while reading result-set rows", true},
+      {"row shorter than its own length prefix",
+       [](int fd) {
+         if (!HandshakePeer::SendPacket(fd, 1, {1})) return;
+         if (!HandshakePeer::SendPacket(fd, 2, kColumnDefinition)) return;
+         if (!HandshakePeer::SendPacket(fd, 3, kEofPacket)) return;
+         HandshakePeer::SendPacket(fd, 4, {5, 'x'});
+       },
+       MES_ERR_STREAM, "Truncated result-set row", true},
+      // The control: a server that rejects the query answers within the
+      // protocol, so the response is complete and the session stays usable.
+      // Without this row a fix that simply always reported disconnected would
+      // satisfy every row above.
+      {"server rejected the query",
+       [](int fd) {
+         std::vector<uint8_t> err = {0xFF, 0x15, 0x04, '#', 'H', 'Y', '0', '0', '0'};
+         const std::string message = "access denied";
+         err.insert(err.end(), message.begin(), message.end());
+         if (!HandshakePeer::SendPacket(fd, 1, err)) return;
+         HandshakePeer::WaitForClose(fd);
+       },
+       MES_ERR_VALIDATION, "MySQL error 1045: access denied", false},
+  };
+
+  for (const Response& response : responses) {
+    SCOPED_TRACE(response.site);
+    HandshakePeer peer("mysql_native_password", AuthenticatedQueryResponder(response.script));
+
+    MysqlConnection connection;
+    ASSERT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, 0, "", "", ""),
+              MES_OK)
+        << connection.GetLastError();
+    ASSERT_TRUE(connection.IsConnected()) << "the session never came up";
+    // This peer withholds CLIENT_DEPRECATE_EOF, so the result sets above are
+    // framed with the intermediate and trailing EOF packets.
+    ASSERT_FALSE(connection.DeprecateEofNegotiated());
+
+    QueryResult result;
+    std::string error;
+    EXPECT_EQ(ExecuteQuery(connection.Socket(), "SELECT 1", &result, &error,
+                           connection.DeprecateEofNegotiated()),
+              response.expected);
+    // The message pins which failure inside ExecuteQuery() this row reached.
+    EXPECT_EQ(error, response.message);
+    EXPECT_EQ(connection.Socket()->IsValid(), !response.poisons);
+    EXPECT_EQ(connection.IsConnected(), !response.poisons);
+    // A poisoned transport must be reported as unusable, not as never
+    // established: the session still owns state that has to be released.
+    EXPECT_TRUE(connection.HasSession());
+  }
 }
 
 TEST(MysqlConnection, StopInterruptsHandshakeBeforeLogicalConnection) {
