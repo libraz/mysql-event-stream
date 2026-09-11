@@ -162,7 +162,11 @@ export interface ClientConfig {
   allowPublicKeyRetrieval?: boolean;
   /** Maximum internal event queue size (0 = default 10000). */
   maxQueueSize?: number;
-  /** Total queued payload byte budget (default 48 MiB; 0 restores default). */
+  /**
+   * Total queue byte budget (default 48 MiB; 0 restores default). It charges
+   * each queued wire payload plus the GTID checkpoint held with it, so a source
+   * with a wide GTID set applies backpressure after fewer events.
+   */
   maxQueueBytes?: number;
   /**
    * Maximum binlog event size accepted by both the client and parser

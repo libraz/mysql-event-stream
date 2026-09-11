@@ -152,12 +152,12 @@ export class BinlogClient {
     return this.client?.checksumEnabled ?? false;
   }
 
-  /** Current charged payload bytes waiting for the consumer. */
+  /** Bytes charged to the queue: wire payloads plus their checkpoint bookkeeping. */
   get queuedBytes(): number {
     return this.client?.queuedBytes ?? 0;
   }
 
-  /** Configured queue payload byte budget. */
+  /** Configured queue byte budget. See {@link ClientConfig.maxQueueBytes}. */
   get maxQueueBytes(): number {
     return this.client?.maxQueueBytes ?? 0;
   }
