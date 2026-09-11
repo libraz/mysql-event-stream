@@ -212,17 +212,18 @@ export function buildDeleteRowsBody(tableId: number, value: number): Uint8Array 
   return new Uint8Array(parts);
 }
 
-/** Build a ROTATE_EVENT body. */
-export function buildRotateBody(position: number, filename: string): Uint8Array {
+/**
+ * Build a ROTATE_EVENT body. The position is the full 8-byte field, so it can
+ * express offsets a JS number cannot hold exactly.
+ */
+export function buildRotateBody(position: number | bigint, filename: string): Uint8Array {
   const parts: number[] = [];
   // position (8 bytes LE)
-  parts.push(
-    position & 0xff,
-    (position >> 8) & 0xff,
-    (position >> 16) & 0xff,
-    (position >> 24) & 0xff,
-  );
-  parts.push(0, 0, 0, 0); // high 4 bytes = 0
+  let remaining = BigInt(position);
+  for (let i = 0; i < 8; i++) {
+    parts.push(Number(remaining & 0xffn));
+    remaining >>= 8n;
+  }
   // filename
   for (const ch of filename) parts.push(ch.charCodeAt(0));
   return new Uint8Array(parts);
