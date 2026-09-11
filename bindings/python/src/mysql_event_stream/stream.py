@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+from collections import deque
 from collections.abc import Callable
-from typing import cast
+from typing import Any, ParamSpec, TypeVar, cast
 
 from ._contract import (
     NON_RETRYABLE_ERROR_CODES,
@@ -16,6 +17,9 @@ from ._contract import (
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 # Public option name -> attribute holding it. Drives both construction-time and
 # configure() validation so the two paths can never accept different values.
@@ -89,6 +93,10 @@ class CdcStream:
 
     Without the context manager, call :meth:`aclose` (or :meth:`close`)
     explicitly once iteration is done.
+
+    One stream serves one consumer at a time: the native engine and client have
+    a single owner, so entering a second iteration while another is in flight
+    raises instead of splitting the event stream between the two.
     """
 
     def __init__(
@@ -200,10 +208,16 @@ class CdcStream:
         self._engine: CdcEngine | None = None
         self._started = False
         self._closed = False
-        # Tracks an in-flight poll worker so close() can await its completion
-        # before destroying the client (prevents a use-after-free).
-        self._poll_task: asyncio.Task[list[PollResult] | PollResult] | None = None
-        self._pending_poll_results: list[PollResult] = []
+        # The single in-flight native dispatch. Every blocking call onto the
+        # engine or client handle is tracked here, so close() has exactly one
+        # thing to wait for before destroying either handle.
+        self._native_task: asyncio.Task[Any] | None = None
+        # True while __anext__ is running. The handles have a single owner, so a
+        # second concurrent consumer is refused rather than served.
+        self._iterating = False
+        # Events the last feed already decoded, delivered from here without any
+        # further native call.
+        self._ready_events: deque[ChangeEvent] = deque()
         self._backoff_task: asyncio.Task[None] | None = None
         self._leftover = b""
         # Retains the last non-empty checkpoint after close() releases the
@@ -263,6 +277,89 @@ class CdcStream:
             _validate_stream_option(key, value)
             setattr(self, attr, list(cast(list[str], value)) if isinstance(value, list) else value)
 
+    async def _dispatch(self, func: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+        """Run one blocking native call on a worker thread, tracked for close().
+
+        Every call onto the engine or client handle goes through here, so close()
+        has a single slot to wait on. The task awaiting the result can be
+        cancelled; the worker thread cannot, so the slot is released only once
+        that thread has actually returned from the native call.
+
+        Args:
+            func: The native call to run off the event loop.
+            *args: Positional arguments forwarded to ``func``.
+            **kwargs: Keyword arguments forwarded to ``func``.
+
+        Returns:
+            Whatever ``func`` returned.
+        """
+        # A predecessor abandoned by a cancelled await may still hold the handle.
+        await self._quiesce_native_calls()
+        dispatch = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+        self._native_task = dispatch
+        try:
+            # Shielded: cancelling the consumer must not cancel the dispatch,
+            # because the worker thread would keep running regardless and the
+            # slot would stop describing what is inside the handle.
+            return await asyncio.shield(dispatch)
+        finally:
+            if dispatch.done() and self._native_task is dispatch:
+                self._native_task = None
+
+    async def _quiesce_native_calls(self) -> None:
+        """Wait until no worker thread is inside a native call on our handles.
+
+        Every path that destroys or resets a handle runs this first. A blocking
+        poll returns only once the client is told to stop, and the task that
+        awaited the dispatch may already have been cancelled, so what has to
+        settle is the tracked dispatch rather than the cancellable await.
+        """
+        dispatch = getattr(self, "_native_task", None)
+        if dispatch is None:
+            return
+        if self._client is not None:
+            # stop() is the only client entry point callable while another
+            # thread is inside the client, and it is what unblocks poll().
+            self._client.stop()
+        while not dispatch.done():
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(dispatch)
+        if getattr(self, "_native_task", None) is dispatch:
+            self._native_task = None
+
+    def _ready_queue(self) -> deque[ChangeEvent]:
+        """Return the buffer holding the events the last feed decoded."""
+        ready: deque[ChangeEvent] | None = getattr(self, "_ready_events", None)
+        if ready is None:
+            ready = deque()
+            self._ready_events = ready
+        return ready
+
+    def _feed_and_drain(self, chunk: bytes) -> tuple[int, list[ChangeEvent]]:
+        """Feed one poll batch into the engine and decode everything it queued.
+
+        Runs as a single worker dispatch. Parsing and the per-column ctypes
+        marshalling are what dominate the cost of an event, so both belong here
+        and the event loop is left with nothing but buffer handoffs.
+
+        Args:
+            chunk: Leftover bytes followed by the bytes of one poll batch.
+
+        Returns:
+            The number of bytes the engine consumed, and the decoded events.
+
+        Raises:
+            RuntimeError: If the engine is gone, or the engine call fails.
+        """
+        engine = self._engine
+        if engine is None:
+            raise RuntimeError("Internal error: engine missing during feed")
+        consumed = engine.feed(chunk)
+        events: list[ChangeEvent] = []
+        while (event := engine.next_event()) is not None:
+            events.append(event)
+        return consumed, events
+
     async def __anext__(self) -> ChangeEvent:
         # Note: close() is safe to call during iteration. It sets
         # _closed=True and calls client.stop(), which unblocks the worker
@@ -270,7 +367,28 @@ class CdcStream:
         # observe _closed and return StopAsyncIteration cleanly.
         if self._closed:
             raise StopAsyncIteration
+        # The engine and client have a single owner, so a second consumer is
+        # refused here -- before any native call is dispatched -- instead of
+        # splitting the byte stream between two iterations.
+        if getattr(self, "_iterating", False):
+            raise RuntimeError("CdcStream is already being iterated. Use a single async for loop.")
+        self._iterating = True
+        try:
+            return await self._next_change_event()
+        finally:
+            self._iterating = False
 
+    async def _next_change_event(self) -> ChangeEvent:
+        """Deliver the next event, starting or reconnecting the stream as needed.
+
+        Returns:
+            The next decoded change event.
+
+        Raises:
+            StopAsyncIteration: If the stream was closed.
+            RuntimeError: If the retry budget is exhausted or an internal
+                invariant is violated.
+        """
         while not self._started:
             try:
                 await self._start()
@@ -280,66 +398,56 @@ class CdcStream:
                 if self._closed:
                     raise StopAsyncIteration from err
 
-        # Explicit checks over `assert`: _start() guarantees both are set
-        # when it returns normally, but assertions vanish under `python -O`
-        # and we want a clear error if an internal invariant is ever
-        # violated (e.g. a subclass override of _start()).
-        if self._client is None or self._engine is None:
-            raise RuntimeError("Internal error: stream not properly started")
-
         while True:
+            if self._closed:
+                raise StopAsyncIteration
             try:
-                ev = self._engine.next_event()
-                if ev is not None:
+                ready = self._ready_queue()
+                if ready:
                     # A decoded event is the only progress signal that can
                     # reset the retry budget. Receiving framing metadata alone
                     # must not make a permanently undecodable event retry
                     # forever.
                     self._reconnect_attempts = 0
-                    return ev
+                    return ready.popleft()
 
-                pending_results = getattr(self, "_pending_poll_results", [])
-                if pending_results:
-                    result = pending_results.pop(0)
+                # Explicit checks over `assert`: _start() guarantees both are
+                # set when it returns normally, but assertions vanish under
+                # `python -O` and we want a clear error if an internal
+                # invariant is ever violated (e.g. a subclass override of
+                # _start()).
+                client = self._client
+                if client is None or self._engine is None:
+                    raise RuntimeError("Internal error: stream not properly started")
+
+                # Real clients use one blocking batch call followed by a
+                # non-blocking queue drain; lightweight test doubles that only
+                # implement poll() remain supported.
+                poll_method: Callable[[], PollResult | list[PollResult]]
+                if callable(getattr(type(client), "poll_batch", None)):
+                    poll_method = client.poll_batch
                 else:
-                    # Track the worker so close() can await it before tearing
-                    # down the client. Real clients use one blocking batch call
-                    # followed by a non-blocking queue drain; lightweight test
-                    # doubles that only implement poll() remain supported.
-                    poll_method: Callable[[], PollResult | list[PollResult]]
-                    if callable(getattr(type(self._client), "poll_batch", None)):
-                        poll_method = self._client.poll_batch
-                    else:
-                        poll_method = self._client.poll
-                    poll_task = cast(
-                        asyncio.Task[PollResult | list[PollResult]],
-                        asyncio.create_task(asyncio.to_thread(poll_method)),
-                    )
-                    self._poll_task = poll_task
-                    try:
-                        polled = await poll_task
-                    finally:
-                        self._poll_task = None
-                    if isinstance(polled, PollResult):
-                        result = polled
-                    elif polled:
-                        result = polled[0]
-                        self._pending_poll_results = list(polled[1:])
-                    else:
-                        continue
-                leftover = getattr(self, "_leftover", b"")
-                if result.data or leftover:
-                    chunk = leftover + (result.data or b"")
-                    # Decoding can process a full configured event. Keep that
-                    # CPU-bound ctypes call off the asyncio event-loop just
-                    # like the blocking native poll/connect/start calls.
-                    consumed = await asyncio.to_thread(self._engine.feed, chunk)
-                    self._leftover = chunk[consumed:]
+                    poll_method = client.poll
+                polled: PollResult | list[PollResult] = await self._dispatch(poll_method)
+                results = [polled] if isinstance(polled, PollResult) else list(polled)
+                chunk = getattr(self, "_leftover", b"") + b"".join(
+                    result.data for result in results if result.data
+                )
+                if not chunk:
+                    continue
+                # One dispatch per poll batch: the whole batch is one byte
+                # stream, so feeding it once and draining the events it
+                # produced costs a single worker handoff however many rows it
+                # carried.
+                consumed, events = await self._dispatch(self._feed_and_drain, chunk)
+                self._leftover = chunk[consumed:]
+                ready.extend(events)
             except asyncio.CancelledError:
-                # The Future returned by to_thread is cancelled, but the
-                # underlying C poll() call keeps blocking. Signal the C
-                # layer to unblock it so the worker thread can exit and
-                # the thread pool slot is released promptly.
+                # We stop awaiting the dispatch, but the worker thread keeps
+                # blocking inside the C poll(). Signal the C layer to unblock it
+                # so the thread can exit and release its pool slot. The dispatch
+                # stays tracked, so close() still waits for that thread to leave
+                # the handle before destroying it.
                 if self._client is not None:
                     self._client.stop()
                 raise
@@ -382,15 +490,9 @@ class CdcStream:
             with contextlib.suppress(BaseException):
                 await backoff_task
         self._backoff_task = None
-        # Unblock and await any in-flight poll() before destroying the client so
-        # the worker thread is not still inside the C poll() call during destroy.
-        poll_task = getattr(self, "_poll_task", None)
-        if poll_task is not None:
-            if self._client is not None:
-                self._client.stop()
-            with contextlib.suppress(BaseException):
-                await poll_task
-            self._poll_task = None
+        # Destroying a handle a worker thread is still inside is a use-after-free
+        # in C, not an exception, so every dispatch has to settle first.
+        await self._quiesce_native_calls()
         # Capture the checkpoint before the client goes away: callers persist it
         # after leaving the iteration scope. This has to run once no poll is in
         # flight, because the accessor takes the same lock a blocking poll holds.
@@ -402,6 +504,8 @@ class CdcStream:
         if self._engine is not None:
             self._engine.close()
             self._engine = None
+        # Nothing can consume buffered events once iteration has ended.
+        self._ready_queue().clear()
 
     @property
     def current_gtid(self) -> str:
@@ -447,6 +551,9 @@ class CdcStream:
         """Perform one reconnect attempt using the last known GTID."""
         if self._closed:
             return
+        # The dropped client and the engine are both about to be replaced or
+        # reset, so no worker may still be inside a call on either of them.
+        await self._quiesce_native_calls()
         gtid = self.current_gtid
         if self._client is not None:
             # close() internally calls stop() and disconnect()
@@ -462,9 +569,10 @@ class CdcStream:
         self._adopt_resume_position(gtid)
         # The engine resumes from a GTID checkpoint after reconnect. Bytes
         # buffered from the dropped transport must not be replayed into the
-        # new connection's parser state.
+        # new connection's parser state, and events decoded from them are
+        # dropped with the connection that produced them.
         self._leftover = b""
-        self._pending_poll_results = []
+        self._ready_queue().clear()
 
         self._client = BinlogClient(
             host=self._host,
@@ -487,7 +595,6 @@ class CdcStream:
             allow_public_key_retrieval=self._allow_public_key_retrieval,
             lib_path=self._lib_path,
         )
-        self._pending_poll_results = []
         # Explicit check instead of `assert`: assertions are stripped when
         # Python is run with -O and we would then silently call .reset() on
         # None and crash with AttributeError. A RuntimeError here gives a
@@ -500,24 +607,11 @@ class CdcStream:
         self._apply_filters()
         # Metadata is optional; column names fall back to indices.
         try:
-            self._engine.enable_metadata(
-                host=self._host,
-                port=self._port,
-                user=self._user,
-                password=self._password,
-                server_id=self._server_id,
-                connect_timeout_s=self._connect_timeout_s,
-                read_timeout_s=self._read_timeout_s,
-                ssl_mode=self._ssl_mode,
-                ssl_ca=self._ssl_ca,
-                ssl_cert=self._ssl_cert,
-                ssl_key=self._ssl_key,
-                allow_public_key_retrieval=self._allow_public_key_retrieval,
-            )
+            await self._enable_metadata()
         except RuntimeError as exc:
             self._report_metadata_error(exc)
-        await asyncio.to_thread(self._client.connect)
-        await asyncio.to_thread(self._client.start)
+        await self._dispatch(self._client.connect)
+        await self._dispatch(self._client.start)
         self._engine.set_checksum_enabled(self._client.checksum_enabled)
         # Do NOT reset _reconnect_attempts here. The counter should only
         # reset when a real event is successfully received (in __anext__),
@@ -559,7 +653,7 @@ class CdcStream:
 
     async def _start(self) -> None:
         """Create client and engine, connect and start streaming."""
-        self._pending_poll_results = []
+        self._ready_queue().clear()
         self._client = BinlogClient(
             host=self._host,
             port=self._port,
@@ -587,27 +681,17 @@ class CdcStream:
         self._apply_filters()
         try:
             try:
-                self._engine.enable_metadata(
-                    host=self._host,
-                    port=self._port,
-                    user=self._user,
-                    password=self._password,
-                    server_id=self._server_id,
-                    connect_timeout_s=self._connect_timeout_s,
-                    read_timeout_s=self._read_timeout_s,
-                    ssl_mode=self._ssl_mode,
-                    ssl_ca=self._ssl_ca,
-                    ssl_cert=self._ssl_cert,
-                    ssl_key=self._ssl_key,
-                    allow_public_key_retrieval=self._allow_public_key_retrieval,
-                )
+                await self._enable_metadata()
             except RuntimeError as exc:
                 self._report_metadata_error(exc)
-            await asyncio.to_thread(self._client.connect)
-            await asyncio.to_thread(self._client.start)
+            await self._dispatch(self._client.connect)
+            await self._dispatch(self._client.start)
             self._engine.set_checksum_enabled(self._client.checksum_enabled)
             self._started = True
         except Exception:
+            # Same rule as close(): nothing is destroyed while a worker thread
+            # may still be inside a call on it.
+            await self._quiesce_native_calls()
             if self._engine is not None:
                 self._engine.close()
                 self._engine = None
@@ -615,6 +699,34 @@ class CdcStream:
                 self._client.close()
                 self._client = None
             raise
+
+    async def _enable_metadata(self) -> None:
+        """Open the optional metadata connection off the event loop.
+
+        The native call performs a full MySQL connect, TLS and auth handshake
+        included, so it blocks exactly like connect() and start() and must not
+        run on the loop thread.
+
+        Raises:
+            RuntimeError: If the metadata connection cannot be enabled.
+        """
+        if self._engine is None:
+            raise RuntimeError("Internal error: engine missing during metadata setup")
+        await self._dispatch(
+            self._engine.enable_metadata,
+            host=self._host,
+            port=self._port,
+            user=self._user,
+            password=self._password,
+            server_id=self._server_id,
+            connect_timeout_s=self._connect_timeout_s,
+            read_timeout_s=self._read_timeout_s,
+            ssl_mode=self._ssl_mode,
+            ssl_ca=self._ssl_ca,
+            ssl_cert=self._ssl_cert,
+            ssl_key=self._ssl_key,
+            allow_public_key_retrieval=self._allow_public_key_retrieval,
+        )
 
     def _apply_filters(self) -> None:
         """Apply case-sensitive exact/prefix filters after construction or reset."""

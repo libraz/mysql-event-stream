@@ -23,9 +23,9 @@ from .contract_fixture import load_binding_contract
 contract = load_binding_contract()
 
 
-async def _run_in_test(func: object, *args: object) -> object:
+async def _run_in_test(func: object, *args: object, **kwargs: object) -> object:
     """Execute a to_thread target synchronously while preserving its arguments."""
-    return func(*args)  # type: ignore[operator]
+    return func(*args, **kwargs)  # type: ignore[operator]
 
 
 class TestStreamClose:
@@ -103,7 +103,7 @@ class TestStreamClose:
             awaited = True
 
         poll_task = asyncio.ensure_future(fake_poll())
-        stream._poll_task = poll_task
+        stream._native_task = poll_task
 
         # stop() must release the in-flight poll so close() can complete.
         mock_client.stop.side_effect = lambda: release.set()
@@ -113,7 +113,7 @@ class TestStreamClose:
         assert awaited, "close() did not await the in-flight poll task"
         mock_client.stop.assert_called_once()
         mock_client.close.assert_called_once()
-        assert stream._poll_task is None
+        assert stream._native_task is None
 
 
 class TestCheckpointRetention:
@@ -171,7 +171,7 @@ class TestCheckpointRetention:
 
         type(client).current_gtid = PropertyMock(side_effect=read_gtid)
         client.stop.side_effect = lambda: release.set()
-        stream._poll_task = asyncio.ensure_future(fake_poll())
+        stream._native_task = asyncio.ensure_future(fake_poll())
 
         await stream.close()
 
@@ -191,7 +191,7 @@ class TestCheckpointRetention:
         mock_client_cls.return_value = client
         engine = MagicMock()
         event = MagicMock()
-        engine.next_event.side_effect = [None, event, event, event, None]
+        engine.next_event.side_effect = [event, event, event, None]
         engine.feed.return_value = 1
         mock_engine_cls.return_value = engine
 
@@ -577,7 +577,7 @@ class TestReconnectAttempts:
         stream._max_reconnect_attempts = 3
         stream._reconnect_attempts = 0
         stream._backoff_task = None
-        stream._poll_task = None
+        stream._native_task = None
 
         engine = MagicMock()
         engine.next_event.return_value = None
@@ -702,7 +702,7 @@ class TestEngineFailures:
         stream._max_reconnect_attempts = 10
         stream._reconnect_attempts = 0
         stream._backoff_task = None
-        stream._poll_task = None
+        stream._native_task = None
         stream._client = client
         stream._engine = engine
 
@@ -722,7 +722,7 @@ class TestEngineFailures:
         client.poll.return_value = PollResult(b"abcdef", False)
         engine = MagicMock()
         decoded = MagicMock()
-        engine.next_event.side_effect = [None, decoded]
+        engine.next_event.side_effect = [decoded, None]
         engine.feed.return_value = 2
         stream = CdcStream(host="127.0.0.1")
         stream._started = True
