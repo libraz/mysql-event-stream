@@ -13,16 +13,21 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "binary_util.h"
 #include "client/binlog_client.h"
 #include "client/event_queue.h"
+#include "client/gtid_encoder.h"
+#include "event_header.h"
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -33,11 +38,23 @@
 
 namespace mes {
 
-/** @brief Reads the credential the client retains after Connect(). */
+/** @brief Reads client state the public surface deliberately does not expose. */
 class BinlogClientTestAccess {
  public:
   static const std::string& RetainedPassword(const BinlogClient& client) {
     return client.config_.password;
+  }
+
+  /** @brief Payload bytes still held by events already handed to the consumer. */
+  static size_t RetainedEventBytes(const BinlogClient& client) {
+    size_t bytes = client.current_event_.data.size();
+    for (const QueuedEvent& event : client.batch_events_) bytes += event.data.size();
+    return bytes;
+  }
+
+  /** @brief Events the reader has buffered but the consumer has not drained. */
+  static size_t QueuedEvents(const BinlogClient& client) {
+    return client.event_queue_ ? client.event_queue_->Size() : 0;
   }
 };
 
@@ -91,6 +108,11 @@ class ScriptedMysqlPeer {
     kStallDuringStartStream,
     /// Answer the whole start sequence, then stream `stream_event`.
     kStreamOneEvent,
+    /// Stream `stream_event` and a heartbeat, then end the dump with a server
+    /// error and go on answering commands. That is the state a source leaves a
+    /// client in when the dump dies but the session survives, which is what
+    /// makes a restart possible without reconnecting.
+    kStreamThenServerError,
   };
 
   ScriptedMysqlPeer(Mode mode, std::vector<uint8_t> stream_event = {}) {
@@ -129,6 +151,25 @@ class ScriptedMysqlPeer {
     return stalled_.load(std::memory_order_acquire);
   }
 
+  /** @brief Every COM_BINLOG_DUMP[_GTID] payload received so far, in order. */
+  std::vector<std::vector<uint8_t> > DumpRequests() const {
+    std::lock_guard<std::mutex> lock(dump_mutex_);
+    return dump_requests_;
+  }
+
+  /** @brief Wait until @p count dump requests have been received. */
+  bool WaitForDumpRequests(size_t count, milliseconds timeout) const {
+    const auto deadline = steady_clock::now() + timeout;
+    for (;;) {
+      {
+        std::lock_guard<std::mutex> lock(dump_mutex_);
+        if (dump_requests_.size() >= count) return true;
+      }
+      if (steady_clock::now() >= deadline) return false;
+      std::this_thread::sleep_for(milliseconds(5));
+    }
+  }
+
  private:
   void Serve(Mode mode, const std::vector<uint8_t>& stream_event) {
     const int peer = accept(listener_, nullptr, nullptr);
@@ -151,6 +192,20 @@ class ScriptedMysqlPeer {
       if (command.empty()) break;
       const uint8_t command_byte = command[0];
       if (command_byte == kComBinlogDump || command_byte == kComBinlogDumpGtid) {
+        const size_t dumps = RecordDumpRequest(command);
+        if (mode == Mode::kStreamThenServerError) {
+          if (dumps == 1) {
+            std::vector<uint8_t> packet{0x00};  // replication OK marker
+            packet.insert(packet.end(), stream_event.begin(), stream_event.end());
+            SendPacket(peer, 1, packet);
+            SendPacket(peer, 2, {0x00});  // OK marker with no event: a heartbeat
+          }
+          // An ERR packet ends the dump without closing the session, so the
+          // loop goes back to serving commands and the client can start a
+          // replacement stream over this same connection.
+          SendPacket(peer, 3, BuildStreamError());
+          continue;
+        }
         std::vector<uint8_t> packet{0x00};  // replication OK marker
         packet.insert(packet.end(), stream_event.begin(), stream_event.end());
         SendPacket(peer, 1, packet);
@@ -180,6 +235,26 @@ class ScriptedMysqlPeer {
       }
     }
     close(peer);
+  }
+
+  size_t RecordDumpRequest(const std::vector<uint8_t>& request) {
+    std::lock_guard<std::mutex> lock(dump_mutex_);
+    dump_requests_.push_back(request);
+    return dump_requests_.size();
+  }
+
+  /// ERR packet for a source that ends the dump but keeps the session.
+  static std::vector<uint8_t> BuildStreamError() {
+    // ER_SERVER_SHUTDOWN. Deliberately not 1236, which the client maps to
+    // MES_ERR_GTID_PURGED: a purged position is unrecoverable by a restart.
+    constexpr uint16_t kServerShutdown = 1053;
+    std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(kServerShutdown),
+                                 static_cast<uint8_t>(kServerShutdown >> 8), '#'};
+    const std::string sql_state = "08S01";
+    payload.insert(payload.end(), sql_state.begin(), sql_state.end());
+    const std::string message = "Server shutdown in progress";
+    payload.insert(payload.end(), message.begin(), message.end());
+    return payload;
   }
 
   /** @brief Stop answering and hold the connection until the client hangs up. */
@@ -292,8 +367,16 @@ class ScriptedMysqlPeer {
   int listener_ = -1;
   uint16_t port_ = 0;
   std::atomic<bool> stalled_{false};
+  // Written by the peer thread, read by the test thread.
+  mutable std::mutex dump_mutex_;
+  std::vector<std::vector<uint8_t> > dump_requests_;
   std::thread thread_;
 };
+
+/// Start position PeerConfig() asks for, and the wider set the scripted stream
+/// publishes as a checkpoint before the dump drops.
+constexpr char kConfiguredGtid[] = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5";
+constexpr char kDeliveredGtid[] = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-9";
 
 BinlogClientConfig PeerConfig(const ScriptedMysqlPeer& peer, uint32_t read_timeout_s) {
   BinlogClientConfig config;
@@ -303,10 +386,19 @@ BinlogClientConfig PeerConfig(const ScriptedMysqlPeer& peer, uint32_t read_timeo
   config.password = "repl";
   config.server_id = 4242;
   config.start_at_current = false;
-  config.start_gtid = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5";
+  config.start_gtid = kConfiguredGtid;
   config.connect_timeout_s = 2;
   config.read_timeout_s = read_timeout_s;
   return config;
+}
+
+/** @brief Write the event's own byte count into its header length field. */
+void SetEventLength(std::vector<uint8_t>* event) {
+  const uint32_t length = static_cast<uint32_t>(event->size());
+  (*event)[9] = static_cast<uint8_t>(length);
+  (*event)[10] = static_cast<uint8_t>(length >> 8);
+  (*event)[11] = static_cast<uint8_t>(length >> 16);
+  (*event)[12] = static_cast<uint8_t>(length >> 24);
 }
 
 /** @brief A well-formed binlog event header followed by filler bytes. */
@@ -318,12 +410,63 @@ std::vector<uint8_t> MakeWireEvent(uint32_t event_length) {
   event[3] = 0;                              // timestamp
   event[4] = 30;                             // WRITE_ROWS_EVENT
   for (int i = 5; i < 9; ++i) event[i] = 0;  // server id
-  event[9] = static_cast<uint8_t>(event_length);
-  event[10] = static_cast<uint8_t>(event_length >> 8);
-  event[11] = static_cast<uint8_t>(event_length >> 16);
-  event[12] = static_cast<uint8_t>(event_length >> 24);
+  SetEventLength(&event);
   for (int i = 13; i < 19; ++i) event[i] = 0;  // next position + flags
   return event;
+}
+
+/**
+ * @brief A PREVIOUS_GTIDS_EVENT advertising @p gtid_set as the baseline.
+ *
+ * One such event is enough to produce a checkpoint: the tracker merges the
+ * baseline into its set and hands the result back immediately, where a
+ * transaction would need a GTID event plus its commit boundary.
+ */
+std::vector<uint8_t> MakePreviousGtidsEvent(const std::string& gtid_set) {
+  std::vector<uint8_t> encoded;
+  EXPECT_EQ(GtidEncoder::Encode(gtid_set.c_str(), &encoded), MES_OK);
+  std::vector<uint8_t> event(kEventHeaderSize + encoded.size(), 0);
+  event[4] = static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent);
+  SetEventLength(&event);
+  std::copy(encoded.begin(), encoded.end(), event.begin() + kEventHeaderSize);
+  return event;
+}
+
+/** @brief The encoded GTID set carried by a captured dump request. */
+std::vector<uint8_t> DumpRequestGtidData(const std::vector<uint8_t>& request) {
+  // COM_BINLOG_DUMP_GTID: command, flags, server id, filename length, filename,
+  // position, GTID data length, GTID data.
+  size_t offset = 1 + 2 + 4;
+  if (request.size() < offset + 4) return {};
+  const uint32_t filename_length = binary::ReadU32Le(request.data() + offset);
+  offset += 4 + filename_length + 8;
+  if (request.size() < offset + 4) return {};
+  const uint32_t gtid_length = binary::ReadU32Le(request.data() + offset);
+  offset += 4;
+  if (request.size() < offset + gtid_length) return {};
+  return std::vector<uint8_t>(request.data() + offset, request.data() + offset + gtid_length);
+}
+
+/**
+ * @brief Wait until the reader has buffered @p count events.
+ *
+ * PollBatch() drains only what is already queued, so a test that needs a whole
+ * scripted stream in one batch has to wait for the reader rather than race it.
+ */
+bool WaitForQueuedEvents(const BinlogClient& client, size_t count, milliseconds timeout) {
+  const auto deadline = steady_clock::now() + timeout;
+  while (BinlogClientTestAccess::QueuedEvents(client) < count) {
+    if (steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(milliseconds(5));
+  }
+  return true;
+}
+
+/** @brief Binary form of @p gtid_set as the dump request carries it. */
+std::vector<uint8_t> EncodedGtidSet(const std::string& gtid_set) {
+  std::vector<uint8_t> encoded;
+  EXPECT_EQ(GtidEncoder::Encode(gtid_set.c_str(), &encoded), MES_OK);
+  return encoded;
 }
 
 TEST(BinlogClientLifecycle, StopInterruptsStartStreamBlockedOnTheServer) {
@@ -432,6 +575,128 @@ TEST(BinlogClientLifecycle, QueuedBytesIsSampledWhileTheStreamIsRestarted) {
   monitor.join();
   EXPECT_GT(samples.load(std::memory_order_relaxed), 0u);
   EXPECT_EQ(client.QueuedBytes(), 0u);
+}
+
+TEST(BinlogClientLifecycle, RestartAfterAStreamErrorResumesFromTheDeliveredCheckpoint) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
+                         MakePreviousGtidsEvent(kDeliveredGtid));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // The baseline event carries the checkpoint; requesting the following event is
+  // the acknowledgement that publishes it.
+  const PollResult delivered = client.Poll();
+  ASSERT_EQ(delivered.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(delivered.data, nullptr);
+  const PollResult heartbeat = client.Poll();
+  ASSERT_EQ(heartbeat.error, MES_OK) << client.GetLastError();
+  ASSERT_TRUE(heartbeat.is_heartbeat);
+  ASSERT_EQ(std::string(client.GetCurrentGtid()), kDeliveredGtid);
+
+  // The dump dies with a server error while the session stays usable, which is
+  // the state the documented recovery path starts from.
+  const PollResult dropped = client.Poll();
+  EXPECT_EQ(dropped.error, MES_ERR_STREAM) << client.GetLastError();
+  EXPECT_FALSE(client.IsStreaming());
+
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(peer.WaitForDumpRequests(2, seconds(3)));
+  const std::vector<std::vector<uint8_t> > requests = peer.DumpRequests();
+  ASSERT_EQ(requests.size(), 2u);
+
+  EXPECT_EQ(DumpRequestGtidData(requests[0]), EncodedGtidSet(kConfiguredGtid));
+  // The replacement stream asks for the checkpoint this client published, not
+  // the configured anchor: requesting that again would re-deliver everything
+  // after it, and asking the source for its position now would skip whatever
+  // committed while the stream was down.
+  EXPECT_EQ(DumpRequestGtidData(requests[1]), EncodedGtidSet(kDeliveredGtid));
+  EXPECT_NE(DumpRequestGtidData(requests[1]), DumpRequestGtidData(requests[0]));
+  // Establishing the replacement stream may not walk the checkpoint backwards.
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), kDeliveredGtid);
+
+  client.Stop();
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, RestartDoesNotPublishABatchCheckpointFromThePreviousStream) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
+                         MakePreviousGtidsEvent(kDeliveredGtid));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // One batch drains the event, the heartbeat and the terminal error. Its
+  // checkpoint is only published by the following poll, so the client is holding
+  // an unpublished checkpoint of this stream when it is restarted below.
+  ASSERT_TRUE(WaitForQueuedEvents(client, 3, seconds(3)));
+  std::vector<PollResult> batch;
+  ASSERT_EQ(client.PollBatch(8, &batch), 3u);
+  ASSERT_NE(batch.front().data, nullptr);
+  ASSERT_EQ(batch.back().error, MES_ERR_STREAM);
+  ASSERT_EQ(std::string(client.GetCurrentGtid()), kConfiguredGtid);
+  ASSERT_FALSE(client.IsStreaming());
+
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  const PollResult after_restart = client.Poll();
+  EXPECT_EQ(after_restart.error, MES_ERR_STREAM) << client.GetLastError();
+  // Nothing has been delivered since the restart, so the first poll of the new
+  // stream must not publish a checkpoint the previous one left behind.
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), kConfiguredGtid);
+
+  client.Stop();
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, PollWithoutDataReleasesThePreviousEventBuffer) {
+  constexpr uint32_t kEventSize = 4096;
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
+                         MakeWireEvent(kEventSize));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  const PollResult delivered = client.Poll();
+  ASSERT_EQ(delivered.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(delivered.data, nullptr);
+  EXPECT_GE(BinlogClientTestAccess::RetainedEventBytes(client), kEventSize);
+
+  // A heartbeat hands back no data, so the payload of the previous event is
+  // released rather than kept for the rest of the client's life: an idle client
+  // must not sit on the largest event it ever received.
+  const PollResult heartbeat = client.Poll();
+  ASSERT_TRUE(heartbeat.is_heartbeat);
+  EXPECT_EQ(BinlogClientTestAccess::RetainedEventBytes(client), 0u);
+
+  const PollResult dropped = client.Poll();
+  EXPECT_EQ(dropped.error, MES_ERR_STREAM) << client.GetLastError();
+  EXPECT_EQ(BinlogClientTestAccess::RetainedEventBytes(client), 0u);
+
+  client.Stop();
+  client.Disconnect();
+  EXPECT_EQ(BinlogClientTestAccess::RetainedEventBytes(client), 0u);
+}
+
+TEST(BinlogClientLifecycle, PollAfterStopNamesReconnectInsteadOfStart) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream);
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 2)), MES_OK) << client.GetLastError();
+
+  // Never started: start() is precisely what this caller is missing.
+  EXPECT_EQ(client.Poll().error, MES_ERR_DISCONNECTED);
+  EXPECT_NE(std::string(client.GetLastError()).find("start()"), std::string::npos)
+      << client.GetLastError();
+
+  client.Stop();
+  EXPECT_EQ(client.Poll().error, MES_ERR_DISCONNECTED);
+  // A stop latches until a reconnect, so every later start is refused. The
+  // message may not send the caller to the one action already ruled out.
+  const std::string message = client.GetLastError();
+  EXPECT_NE(message.find("reconnect"), std::string::npos) << message;
+  EXPECT_EQ(message.find("start()"), std::string::npos) << message;
+  EXPECT_EQ(client.StartStream(), MES_ERR_DISCONNECTED) << client.GetLastError();
+
+  client.Disconnect();
 }
 
 TEST(BinlogClientLifecycle, EventAtMaxEventSizeSurvivesTheMinimumQueueBudget) {

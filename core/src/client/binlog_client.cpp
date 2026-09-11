@@ -70,10 +70,13 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   // Reset stop flag after previous stream is fully torn down
   stop_requested_.store(false, std::memory_order_release);
   connected_.store(false, std::memory_order_release);
-  {
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
-    current_gtid_.clear();
-  }
+  // Every buffer the previous stream handed to the consumer dies here, so no
+  // checkpoint of that stream stays reachable by PromoteDeliveredCheckpoint().
+  // current_gtid_ itself is deliberately kept: a published checkpoint is the
+  // successor connection's start position (see EstablishStartState()), and
+  // clearing it here would be the difference between resuming the stream and
+  // re-resolving the configured position.
+  ResetDeliveredEvents();
 
   if (config.ssl_mode > MES_SSL_VERIFY_IDENTITY) {
     SetLastError("Invalid ssl_mode value");
@@ -169,6 +172,14 @@ mes_error_t BinlogClient::StartStream() {
     return MES_ERR_DISCONNECTED;
   }
 
+  // Placed ahead of every remaining exit path -- including the queue-budget
+  // rejection below -- so a start that fails part-way cannot leave a prior
+  // stream's events reachable. It deliberately sits after the two checks above:
+  // neither begins a new stream, and a start refused while one is still running
+  // must not free the buffer that stream's last poll returned.
+  gtid_tracker_.Reset();
+  ResetDeliveredEvents();
+
   {
     // A reader that terminated after delivering a terminal error remains
     // joinable until the owner consumes that error. Reap it before assigning a
@@ -188,9 +199,6 @@ mes_error_t BinlogClient::StartStream() {
     SetLastError("max_queue_bytes is smaller than one max_event_size event");
     return MES_ERR_INVALID_ARG;
   }
-
-  gtid_tracker_.Reset();
-  current_event_ = {};
 
   // Re-checked after every stage so a Stop() that unblocked the round trip is
   // reported as such instead of as whatever transport error the shutdown
@@ -360,11 +368,27 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   if (rc != MES_OK) return rc;
   if (ConfigureHeartbeat() != MES_OK) return MES_ERR_STREAM;
 
+  // A non-empty checkpoint is a position this client instance published, so it
+  // is the only start position that neither skips the transactions committed
+  // while the previous stream was down nor re-delivers the ones already handed
+  // to the consumer. It therefore outranks every configured start mode,
+  // including a file/offset anchor: the anchor says where that earlier stream
+  // began, not where it stopped. An empty checkpoint means none was ever
+  // published -- never "the empty GTID set" -- so the configuration is used
+  // verbatim; forwarding an empty set would request every retained binlog.
+  std::string resume_checkpoint;
+  {
+    std::lock_guard<std::mutex> lock(gtid_mutex_);
+    resume_checkpoint = current_gtid_;
+  }
+  const std::string* resume = resume_checkpoint.empty() ? nullptr : &resume_checkpoint;
+
   state->gtid_set.clear();
-  state->from_file_position = config_.start_at_file_position;
+  state->from_file_position = resume == nullptr && config_.start_at_file_position;
   if (!state->from_file_position) {
-    rc = server_flavor_ == ServerFlavor::kMariaDB ? ResolveStartGtidMariaDB(&state->gtid_set)
-                                                  : ResolveStartGtidMySQL(&state->gtid_set);
+    rc = server_flavor_ == ServerFlavor::kMariaDB
+             ? ResolveStartGtidMariaDB(resume, &state->gtid_set)
+             : ResolveStartGtidMySQL(resume, &state->gtid_set);
     if (rc != MES_OK) return rc;
   }
 
@@ -377,6 +401,9 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
                  " GTID checkpoint set");
     return MES_ERR_INVALID_ARG;
   }
+  // Publishing the resolved set cannot move the checkpoint backwards: it is
+  // either the value current_gtid_ already held (the resume above) or the first
+  // position this instance has ever established.
   {
     std::lock_guard<std::mutex> lock(gtid_mutex_);
     current_gtid_ = state->gtid_set;
@@ -384,12 +411,18 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   return MES_OK;
 }
 
-mes_error_t BinlogClient::ResolveStartGtidMySQL(std::string* gtid_set) {
+mes_error_t BinlogClient::ResolveStartGtidMySQL(const std::string* resume_checkpoint,
+                                                std::string* gtid_set) {
   // An omitted start GTID means "from the connection's current executed
   // position", not "from the beginning". Snapshot the full set immediately
   // before starting the dump so transactions committed afterwards are sent.
+  // A resume checkpoint replaces both, and still goes through the encoding and
+  // the purged preflight below: a checkpoint the source has since purged must
+  // fail with MES_ERR_GTID_PURGED rather than silently skip transactions.
   std::string requested_gtid = config_.start_gtid;
-  if (config_.start_at_current) {
+  if (resume_checkpoint != nullptr) {
+    requested_gtid = *resume_checkpoint;
+  } else if (config_.start_at_current) {
     protocol::QueryResult current_qr;
     std::string current_err;
     mes_error_t current_rc =
@@ -449,9 +482,14 @@ mes_error_t BinlogClient::ResolveStartGtidMySQL(std::string* gtid_set) {
   return MES_OK;
 }
 
-mes_error_t BinlogClient::ResolveStartGtidMariaDB(std::string* gtid_set) {
+mes_error_t BinlogClient::ResolveStartGtidMariaDB(const std::string* resume_checkpoint,
+                                                  std::string* gtid_set) {
   std::string gtid = config_.start_gtid;
-  if (config_.start_at_current) {
+  if (resume_checkpoint != nullptr) {
+    // A resume checkpoint is the domain high-water set this client last
+    // published, which is exactly what @slave_connect_state expects.
+    gtid = *resume_checkpoint;
+  } else if (config_.start_at_current) {
     auto query_gtid_position = [this](const char* query, std::string* value,
                                       std::string* query_error) -> bool {
       protocol::QueryResult result;
@@ -763,13 +801,23 @@ PollResult BinlogClient::Poll() {
   // finished using the previous event buffer. Promote a commit checkpoint at
   // that point, before a subsequent error can trigger reconnect logic.
   PromoteDeliveredCheckpoint();
-  batch_events_.clear();
+  // The contract makes the pointer returned by the previous call invalid as
+  // soon as this one begins, so every buffer it handed out is released here --
+  // on every exit path below. Deferring it to the next data event would keep a
+  // full event payload resident for the whole life of a client that goes on to
+  // see only heartbeats, a terminal error, or nothing at all.
+  ResetDeliveredEvents();
 
   // Both disconnect paths record a message: the C ABI exposes the last error
   // as the only description a binding can attach to the rejected poll, and an
   // empty one leaves the consumer with a bare error code.
   if (!streaming_.load(std::memory_order_acquire) || !event_queue_) {
-    SetLastError("Poll on a client that is not streaming; call start() first");
+    // Stop() latches until a fresh Connect(), so after a stop every start is
+    // refused. Naming start() there would send the caller to the one action the
+    // client has already ruled out.
+    SetLastError(stop_requested_.load(std::memory_order_acquire)
+                     ? "Poll on a client that was stopped; reconnect before polling again"
+                     : "Poll on a client that is not streaming; call start() first");
     return {MES_ERR_DISCONNECTED, nullptr, 0, false};
   }
 
@@ -827,24 +875,24 @@ size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* resul
   if (results == nullptr || max_events == 0) return 0;
   results->clear();
 
-  // A subsequent poll/batch is the acknowledgement boundary for every event
-  // delivered by the prior batch.
-  PromoteDeliveredCheckpoint();
-  batch_events_.clear();
+  // The first Poll() is also this batch's acknowledgement boundary: it promotes
+  // the checkpoints of the events the prior call delivered and releases their
+  // buffers, so nothing from that call is still held once this one starts
+  // filling batch_events_ again.
+  PollResult first = Poll();
+  if (first.data == nullptr) {
+    results->push_back(first);
+    return results->size();
+  }
   // `max_events` is supplied by C ABI callers. Avoid reserving an
   // unbounded amount of memory up front; the vector grows only as events are
   // actually available.
   batch_events_.reserve(std::min(max_events, static_cast<size_t>(1024)));
-
-  PollResult first = Poll();
-  if (first.data != nullptr) {
-    batch_events_.push_back(std::move(current_event_));
+  batch_events_.push_back(std::move(current_event_));
+  {
     const QueuedEvent& held = batch_events_.back();
     results->push_back(
         {MES_OK, held.data.data() + held.data_offset, held.data.size() - held.data_offset, false});
-  } else {
-    results->push_back(first);
-    return results->size();
   }
 
   while (results->size() < max_events) {
@@ -910,6 +958,12 @@ void BinlogClient::StopReaderThread() {
   // and Stop() can be called from any thread. Resetting event_queue_ here
   // would race with Poll()'s non-atomic read. The closed queue stays alive
   // until StartStream() replaces it or the destructor runs.
+  //
+  // current_event_ and batch_events_ are held back for the same reason: Poll()
+  // writes them without a lock, so resetting them from a Stop() on another
+  // thread would be a data race. They are released by the owner thread instead,
+  // at the next Poll()/PollBatch(), at Connect()/StartStream(), by Disconnect()
+  // below this call, or at destruction.
   if (event_queue_) {
     event_queue_->Clear();
   }
@@ -918,6 +972,9 @@ void BinlogClient::StopReaderThread() {
 void BinlogClient::Disconnect() {
   std::lock_guard<std::mutex> lock(stop_mutex_);
   StopReaderThread();
+  // Safe here where it is not inside Stop(): Disconnect() is an owner-thread
+  // entry point, and the reader has just been joined.
+  ResetDeliveredEvents();
   // Keep descriptor destruction in the same critical section as Stop's
   // shutdown. SocketHandle additionally serializes shutdown() with close(),
   // so a descriptor number cannot be reused between those operations.
@@ -964,6 +1021,14 @@ void BinlogClient::PromoteDeliveredCheckpoint() {
   std::lock_guard<std::mutex> lock(gtid_mutex_);
   current_gtid_ = std::move(current_event_.checkpoint_gtid);
   current_event_.checkpoint_gtid.clear();
+}
+
+void BinlogClient::ResetDeliveredEvents() {
+  // Assigning a fresh QueuedEvent hands the payload back to the allocator; the
+  // batch keeps its slot capacity, which holds no payload once cleared, so a
+  // steady stream of batches does not reallocate the array on every call.
+  current_event_ = {};
+  batch_events_.clear();
 }
 
 uint64_t BinlogClient::GetCRCErrors() const { return crc_errors_.load(std::memory_order_relaxed); }

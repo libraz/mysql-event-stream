@@ -326,17 +326,29 @@ class BinlogClient {
    * start position, and seeds both the GTID tracker and the published
    * checkpoint. Every flavor and every start mode goes through this function,
    * so the set of established state cannot vary by start mode.
+   *
+   * A checkpoint this client already published outranks the configured start
+   * position, so a restart resumes where the previous stream stopped instead of
+   * re-resolving where it began.
    */
   mes_error_t EstablishStartState(StartState* state);
 
   /** @brief Read @\@global.binlog_checksum into checksum_enabled_. */
   mes_error_t DetectBinlogChecksum();
 
-  /** @brief Resolve and pre-validate the MySQL start GTID set. */
-  mes_error_t ResolveStartGtidMySQL(std::string* gtid_set);
+  /**
+   * @brief Resolve and pre-validate the MySQL start GTID set.
+   * @param resume_checkpoint Checkpoint to resume from, or nullptr to resolve
+   *        the position from the configuration.
+   */
+  mes_error_t ResolveStartGtidMySQL(const std::string* resume_checkpoint, std::string* gtid_set);
 
-  /** @brief Resolve and validate the MariaDB start GTID set. */
-  mes_error_t ResolveStartGtidMariaDB(std::string* gtid_set);
+  /**
+   * @brief Resolve and validate the MariaDB start GTID set.
+   * @param resume_checkpoint Checkpoint to resume from, or nullptr to resolve
+   *        the position from the configuration.
+   */
+  mes_error_t ResolveStartGtidMariaDB(const std::string* resume_checkpoint, std::string* gtid_set);
 
   /** @brief Issue COM_BINLOG_DUMP_GTID (or COM_BINLOG_DUMP for a file offset). */
   mes_error_t SendBinlogDumpMySQL(const StartState& state);
@@ -349,6 +361,20 @@ class BinlogClient {
 
   /** Promote the prior Poll() event's commit checkpoint to delivered state. */
   void PromoteDeliveredCheckpoint();
+
+  /**
+   * @brief Release every event buffer retained from the previous poll.
+   *
+   * current_event_ and batch_events_ are two halves of one piece of state --
+   * the events already handed to the consumer -- so they are only ever reset
+   * together. Clearing one alone would leave a checkpoint from the released
+   * half reachable by PromoteDeliveredCheckpoint(), which is how a restarted
+   * stream can publish a position belonging to the stream before it.
+   *
+   * Owner thread only: Poll() writes both members without a lock, so Stop(),
+   * which may run on another thread, must not reset them.
+   */
+  void ResetDeliveredEvents();
 };
 
 }  // namespace mes
