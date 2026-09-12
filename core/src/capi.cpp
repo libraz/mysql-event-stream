@@ -447,6 +447,17 @@ MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size
   return MES_OK;
 }
 
+MES_API mes_error_t mes_set_max_queue_bytes(mes_engine_t* engine, size_t max_queue_bytes) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  engine->engine.SetMaxQueueBytes(max_queue_bytes);
+  return MES_OK;
+}
+
+MES_API size_t mes_get_max_queue_bytes(mes_engine_t* engine) {
+  if (engine == nullptr) return 0;
+  return engine->engine.MaxQueueBytes();
+}
+
 MES_API mes_error_t mes_reset(mes_engine_t* engine) {
   if (engine == nullptr) {
     return MES_ERR_NULL_ARG;
@@ -470,6 +481,17 @@ MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled) 
   if (engine == nullptr) return MES_ERR_NULL_ARG;
   engine->engine.SetChecksumEnabled(enabled != 0);
   return MES_OK;
+}
+
+MES_API mes_error_t mes_set_trailer_pre_verified(mes_engine_t* engine, int pre_verified) {
+  if (engine == nullptr) return MES_ERR_NULL_ARG;
+  engine->engine.SetTrailerPreVerified(pre_verified != 0);
+  return MES_OK;
+}
+
+MES_API int mes_get_trailer_pre_verified(mes_engine_t* engine) {
+  if (engine == nullptr) return 0;
+  return engine->engine.TrailerPreVerified() ? 1 : 0;
 }
 
 MES_API size_t mes_sizeof_event(void) { return sizeof(mes_event_t); }

@@ -363,10 +363,10 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * A stream of highly compressible BLOB/TEXT columns therefore reaches
  * backpressure on bytes long before it reaches @p max_size entries.
  *
- * @note That byte budget is fixed at MES_DEFAULT_QUEUE_BYTES: this is the only
- * queue bound an engine exposes, so @p max_size cannot be used to express a
- * memory limit. What one entry costs depends on the table it came from and on
- * any statement annotating it, and spans an order of magnitude across the
+ * @note mes_set_max_queue_bytes() overrides that byte budget and is the queue
+ * bound to reach for when the requirement is a memory limit. @p max_size cannot
+ * express one: what a single entry costs depends on the table it came from and
+ * on any statement annotating it, and spans an order of magnitude across the
  * schemas in core/benchmarks/BASELINE.md. mes_client_set_max_queue_bytes() is
  * a different budget, over the client's own queue of undecoded events, and
  * does not apply to an engine fed directly.
@@ -378,6 +378,37 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size);
+
+/**
+ * @brief Set the total byte budget for the engine's decoded event queue.
+ *
+ * mes_feed() stops consuming input when either this budget or the
+ * mes_set_max_queue_size() entry count is reached, whichever comes first. The
+ * charge counts every decoded column payload a queued entry holds, which is what
+ * lets this bound express a memory limit where an entry count cannot: a
+ * compressed column decodes to a size its on-wire length does not predict.
+ *
+ * Resident bytes stay below this budget plus the one event pushed after the last
+ * check, whose decoded payloads the same budget caps.
+ *
+ * mes_client_set_max_queue_bytes() is a different budget, over the client's own
+ * queue of undecoded events, and does not apply to an engine fed directly.
+ *
+ * @param engine Engine handle.
+ * @param max_queue_bytes Budget in bytes. 0 restores MES_DEFAULT_QUEUE_BYTES.
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_set_max_queue_bytes(mes_engine_t* engine, size_t max_queue_bytes);
+
+/**
+ * @brief Get the engine's configured queue byte budget.
+ *
+ * @param engine Engine handle.
+ * @return Configured budget in bytes, or 0 if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API size_t mes_get_max_queue_bytes(mes_engine_t* engine);
 
 /**
  * @brief Reset parser, table-map, position, and error state.
@@ -443,6 +474,46 @@ MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_set_checksum_enabled(mes_engine_t* engine, int enabled);
+
+/**
+ * @brief Declare that fed events have already had their trailer validated.
+ *
+ * This is the caller asserting a property of the bytes it supplies: that
+ * something upstream computed the CRC32 over the identical buffer and found it
+ * correct. While it is set, mes_feed() performs no CRC32 pass of its own, which
+ * is what the setting is for -- that pass is O(event size) on every event, and
+ * on the documented client-to-engine path the client's reader thread has already
+ * made it over the same bytes.
+ *
+ * @warning Nothing verifies the promise. Set it on a stream nothing validated
+ * and a corrupt event is accepted in silence: no MES_ERR_CHECKSUM, no log
+ * record, just a decoded row carrying whatever the corruption produced. Leave it
+ * at 0 unless the upstream validation is known to cover every event that reaches
+ * this engine, in every configuration it can run in.
+ *
+ * Orthogonal to mes_set_checksum_enabled(), which is a framing switch deciding
+ * whether an event's last four bytes are a trailer at all. Framing is unchanged
+ * here: the trailer is still excluded from the body and a
+ * FORMAT_DESCRIPTION_EVENT still updates the framing flag. That switch is never
+ * an alternative to this one, because clearing it also strips four bytes from
+ * every event body and corrupts the last column.
+ *
+ * @param engine Engine handle.
+ * @param pre_verified Non-zero to skip the engine's own CRC32 pass; 0 to verify.
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API mes_error_t mes_set_trailer_pre_verified(mes_engine_t* engine, int pre_verified);
+
+/**
+ * @brief Get whether the engine is skipping its own trailer verification.
+ *
+ * @param engine Engine handle.
+ * @return Non-zero when the caller has declared trailers pre-verified, 0
+ *         otherwise or if @p engine is NULL.
+ * @threadsafety NOT thread-safe.
+ */
+MES_API int mes_get_trailer_pre_verified(mes_engine_t* engine);
 
 /* ---- ABI introspection ---- */
 

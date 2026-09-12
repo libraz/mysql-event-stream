@@ -1123,6 +1123,145 @@ TEST(CApi, SetMaxQueueSizeZeroRestoresBoundedDefault) {
   mes_destroy(engine);
 }
 
+// ---- mes_set_max_queue_bytes / mes_get_max_queue_bytes ----
+
+TEST(CApi, MaxQueueBytesNullEngine) {
+  EXPECT_EQ(mes_set_max_queue_bytes(nullptr, 1024), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_get_max_queue_bytes(nullptr), 0u);
+}
+
+TEST(CApi, MaxQueueBytesRoundTripsAndZeroRestoresTheDefault) {
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  EXPECT_EQ(mes_get_max_queue_bytes(engine), MES_DEFAULT_QUEUE_BYTES);
+  ASSERT_EQ(mes_set_max_queue_bytes(engine, 1024u * 1024u), MES_OK);
+  EXPECT_EQ(mes_get_max_queue_bytes(engine), 1024u * 1024u);
+  ASSERT_EQ(mes_set_max_queue_bytes(engine, 0), MES_OK);
+  EXPECT_EQ(mes_get_max_queue_bytes(engine), MES_DEFAULT_QUEUE_BYTES);
+
+  mes_destroy(engine);
+}
+
+TEST(CApi, MaxQueueBytesStopsTheFeedWhileTheEntryCountStillAllowsMore) {
+  // Both engines keep the default entry count, so whatever separates them is
+  // the byte budget alone.
+  auto tm_body = BuildTableMapBody(1, "db", "t");
+  auto tm_event =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                        BuildWriteRowsBody(1, 10));
+  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+                        BuildWriteRowsBody(1, 20));
+
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr1.begin(), wr1.end());
+  stream.insert(stream.end(), wr2.begin(), wr2.end());
+
+  auto* unbudgeted = mes_create();
+  ASSERT_NE(unbudgeted, nullptr);
+  size_t consumed_unbudgeted = 0;
+  ASSERT_EQ(mes_feed(unbudgeted, stream.data(), stream.size(), &consumed_unbudgeted), MES_OK);
+  EXPECT_EQ(consumed_unbudgeted, stream.size());
+  mes_destroy(unbudgeted);
+
+  auto* budgeted = mes_create();
+  ASSERT_NE(budgeted, nullptr);
+  // One decoded row already charges more than this, so the second row event is
+  // refused with 9,999 entries still free.
+  ASSERT_EQ(mes_set_max_queue_bytes(budgeted, 1), MES_OK);
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(budgeted, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_LT(consumed, stream.size());
+  EXPECT_EQ(mes_has_events(budgeted), 1);
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(budgeted, &event), MES_OK);
+  EXPECT_EQ(event->after_columns[0].int_val, 10);
+  EXPECT_EQ(mes_has_events(budgeted), 0);
+
+  // Draining released the charge, so the tail the budget held back goes through.
+  size_t consumed_tail = 0;
+  ASSERT_EQ(mes_feed(budgeted, stream.data() + consumed, stream.size() - consumed, &consumed_tail),
+            MES_OK);
+  ASSERT_EQ(mes_next_event(budgeted, &event), MES_OK);
+  EXPECT_EQ(event->after_columns[0].int_val, 20);
+
+  mes_destroy(budgeted);
+}
+
+// ---- mes_set_trailer_pre_verified / mes_get_trailer_pre_verified ----
+
+TEST(CApi, TrailerPreVerifiedNullEngine) {
+  EXPECT_EQ(mes_set_trailer_pre_verified(nullptr, 1), MES_ERR_NULL_ARG);
+  EXPECT_EQ(mes_get_trailer_pre_verified(nullptr), 0);
+}
+
+TEST(CApi, TrailerPreVerifiedRoundTripsAndDefaultsToVerifying) {
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+
+  EXPECT_EQ(mes_get_trailer_pre_verified(engine), 0);
+  ASSERT_EQ(mes_set_trailer_pre_verified(engine, 1), MES_OK);
+  EXPECT_EQ(mes_get_trailer_pre_verified(engine), 1);
+  ASSERT_EQ(mes_set_trailer_pre_verified(engine, 0), MES_OK);
+  EXPECT_EQ(mes_get_trailer_pre_verified(engine), 0);
+
+  mes_destroy(engine);
+}
+
+TEST(CApi, TrailerPreVerifiedAcceptsAnEventTheEngineWouldOtherwiseRefuse) {
+  // The same corrupt event either way: what changes is only whether the engine
+  // is told someone upstream already validated the trailer.
+  auto corrupt = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                            BuildTableMapBody(1, "db", "t"));
+  corrupt[mes::kEventHeaderSize + 1] ^= 0x40;
+
+  auto* verifying = mes_create();
+  ASSERT_NE(verifying, nullptr);
+  size_t consumed = 123;
+  EXPECT_EQ(mes_feed(verifying, corrupt.data(), corrupt.size(), &consumed), MES_ERR_CHECKSUM);
+  EXPECT_EQ(consumed, 0u);
+  mes_destroy(verifying);
+
+  auto* trusting = mes_create();
+  ASSERT_NE(trusting, nullptr);
+  ASSERT_EQ(mes_set_trailer_pre_verified(trusting, 1), MES_OK);
+  size_t trusted_consumed = 0;
+  EXPECT_EQ(mes_feed(trusting, corrupt.data(), corrupt.size(), &trusted_consumed), MES_OK);
+  EXPECT_EQ(trusted_consumed, corrupt.size());
+  mes_destroy(trusting);
+}
+
+TEST(CApi, TrailerPreVerifiedLeavesFramingToTheChecksumSwitch) {
+  // Skipping verification must not also strip the trailer differently: a valid
+  // checksummed event decodes to the same row with the flag set as without it.
+  auto tm = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                       BuildTableMapBody(1, "db", "t"));
+  auto wr = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                       BuildWriteRowsBody(1, 77));
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm.begin(), tm.end());
+  stream.insert(stream.end(), wr.begin(), wr.end());
+
+  auto* engine = mes_create();
+  ASSERT_NE(engine, nullptr);
+  ASSERT_EQ(mes_set_trailer_pre_verified(engine, 1), MES_OK);
+
+  size_t consumed = 0;
+  ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+  EXPECT_EQ(consumed, stream.size());
+
+  const mes_event_t* event = nullptr;
+  ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+  EXPECT_EQ(event->type, MES_EVENT_INSERT);
+  EXPECT_EQ(event->after_columns[0].int_val, 77);
+
+  mes_destroy(engine);
+}
+
 // ---- mes_set_max_event_size / mes_get_max_event_size ----
 
 TEST(CApi, MaxEventSizeDefault) {

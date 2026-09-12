@@ -205,6 +205,9 @@ class CdcEngine {
    */
   void SetTrailerPreVerified(bool pre_verified);
 
+  /** @brief Whether the caller has declared fed trailers already validated. */
+  bool TrailerPreVerified() const;
+
  private:
   void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
   void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
