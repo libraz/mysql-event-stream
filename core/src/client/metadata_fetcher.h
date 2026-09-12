@@ -13,23 +13,17 @@
 #define MES_CLIENT_METADATA_FETCHER_H_
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "client/column_name_source.h"
 #include "mes.h"
 #include "protocol/mysql_connection.h"
 
 namespace mes {
-
-/**
- * @brief Column info retrieved from SHOW COLUMNS
- */
-struct ColumnInfo {
-  std::string name;
-  bool is_unsigned = false;
-};
 
 class MetadataFetcherTestAccess;
 
@@ -39,10 +33,35 @@ class MetadataFetcherTestAccess;
  * Uses a separate MySQL connection (not the binlog streaming connection)
  * to query column names and unsigned flags via SHOW COLUMNS FROM.
  */
-class MetadataFetcher {
+class MetadataFetcher : public ColumnNameSource {
  public:
+  /**
+   * @brief Cached tables retained before the cache is dropped.
+   *
+   * Metadata is an optional enhancement, so a cold refetch is preferable to
+   * unbounded growth in long-lived multi-tenant streams.
+   */
+  static constexpr size_t kMaxCacheEntries = 8192;
+
+  /**
+   * @brief Cached metadata bytes retained before the cache is dropped.
+   *
+   * The entry count alone cannot bound what this cache holds. Per-entry cost is
+   * set by schema content the client does not choose -- how many columns a
+   * table has and how long their identifiers are -- so a source of wide tables
+   * retains orders of magnitude more per entry than a narrow one, and the
+   * entry count says nothing about the memory.
+   *
+   * Sized to give an entry the same allowance TableMapRegistry does
+   * (kMaxCacheEntries entries of 2 KiB), because the two bound the same
+   * content: the schema of the tables one stream touches. That leaves the entry
+   * count the binding bound in ordinary use and this one engaging only on the
+   * wide-table case it exists for.
+   */
+  static constexpr size_t kMaxRetainedBytes = 16u * 1024 * 1024;
+
   MetadataFetcher();
-  ~MetadataFetcher();
+  ~MetadataFetcher() override;
 
   // Non-copyable
   MetadataFetcher(const MetadataFetcher&) = delete;
@@ -74,7 +93,7 @@ class MetadataFetcher {
    * @return Column info vector, or empty on failure
    */
   std::vector<ColumnInfo> FetchColumnInfo(const std::string& database, const std::string& table,
-                                          size_t expected_count);
+                                          size_t expected_count) override;
 
   /**
    * @brief Remove cached entry for a table (e.g., after schema change)
@@ -89,10 +108,53 @@ class MetadataFetcher {
    * per-table count guard cannot detect. Clearing forces a fresh SHOW COLUMNS
    * on the next row event.
    */
-  void ClearCache();
+  void ClearCache() override;
+
+  /** @brief Number of tables the cache holds, resolved and unresolvable alike. */
+  size_t CacheEntryCount() const;
+
+  /**
+   * @brief Bytes of variable-length metadata the cached entries retain.
+   *
+   * Counts what a schema's own content sizes: each entry's database and table
+   * name, its column array and every column name in it. Fixed per-entry
+   * structure is not counted -- it is proportional to the entry count, which
+   * kMaxCacheEntries bounds on its own.
+   */
+  size_t RetainedBytes() const;
 
  private:
   friend class MetadataFetcherTestAccess;
+
+  static size_t IdentifierCharge(const std::string& database, const std::string& table);
+  static size_t EntryCharge(const std::string& database, const std::string& table,
+                            const std::vector<ColumnInfo>& columns);
+
+  /**
+   * @brief Cache a resolved table, dropping the cache first if it is full.
+   *
+   * Overflow drops every entry rather than evicting one: unlike
+   * TableMapRegistry, which a ROWS event decodes against and must therefore
+   * keep populated, nothing here is needed before the next SHOW COLUMNS can
+   * repopulate it, which is what makes a cold refetch the cheaper trade. The
+   * entry being stored is always kept, so a single table wider than the whole
+   * byte budget leaves the cache holding just that one entry.
+   */
+  void StoreCacheEntry(const std::string& database, const std::string& table,
+                       std::vector<ColumnInfo> columns);
+
+  /** @brief Remember that a table could not be resolved; bounded as above. */
+  void StoreNegativeEntry(const std::string& database, const std::string& table,
+                          size_t expected_count);
+
+  /** @brief Drop a cached table and its charge. @return true when one was held. */
+  bool EraseCacheEntry(const std::string& database, const std::string& table);
+
+  /** @brief Drop a negative entry and its charge. @return true when one was held. */
+  bool EraseNegativeEntry(const std::string& database, const std::string& table);
+
+  /** @brief Drop every entry and reset the retained-byte total. */
+  void DropAllEntries();
 
   protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::vector<ColumnInfo>>> cache_;
@@ -100,6 +162,10 @@ class MetadataFetcher {
   // stable until DDL/cache invalidation. Remember the expected column count
   // so repeated TABLE_MAP events do not cause a query/reconnect storm.
   std::unordered_map<std::string, std::unordered_map<std::string, size_t>> negative_cache_;
+  // Both maps are charged against one total because they share one bound and
+  // one overflow policy. A negative entry retains only the two identifiers, so
+  // it is the resolved entries that can reach the byte bound.
+  size_t retained_bytes_ = 0;
 
   // Stored connection parameters for reconnection
   std::string host_;
@@ -115,7 +181,6 @@ class MetadataFetcher {
   bool allow_public_key_retrieval_ = false;
   std::chrono::steady_clock::time_point next_reconnect_attempt_{};
 
-  size_t CacheEntryCount() const;
   bool Reconnect();
   std::string EscapeIdentifier(const std::string& id);
 };

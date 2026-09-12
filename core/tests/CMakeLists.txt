@@ -93,4 +93,7 @@ mes_add_gtest(test_mariadb_event_parser test_mariadb_event_parser.cpp)
 # test_secure_cleanse
 mes_add_gtest(test_secure_cleanse test_secure_cleanse.cpp OpenSSL::Crypto)
 
+# test_metadata_fetcher
+mes_add_gtest(test_metadata_fetcher test_metadata_fetcher.cpp)
+
 add_subdirectory(e2e)

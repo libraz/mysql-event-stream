@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <string>
+#include <utility>
 
 #include "logger.h"
 #include "protocol/mysql_query.h"
@@ -14,10 +15,6 @@ namespace mes {
 
 namespace {
 
-// Match TableMapRegistry's bounded clear-on-overflow policy. Metadata is an
-// optional enhancement, so a cold refetch is preferable to unbounded growth
-// in long-lived multi-tenant streams.
-constexpr size_t kMaxMetadataCacheEntries = 8192;
 constexpr auto kReconnectRetryInterval = std::chrono::seconds(1);
 
 }  // namespace
@@ -58,8 +55,7 @@ mes_error_t MetadataFetcher::Connect(const std::string& host, uint16_t port,
 }
 
 void MetadataFetcher::Disconnect() {
-  cache_.clear();
-  negative_cache_.clear();
+  DropAllEntries();
   next_reconnect_attempt_ = {};
   conn_.Disconnect();
 
@@ -85,20 +81,24 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
   }
 
   // Check cache
-  auto db_it = cache_.find(database);
-  if (db_it != cache_.end()) {
-    auto table_it = db_it->second.find(table);
-    if (table_it != db_it->second.end() && table_it->second.size() == expected_count) {
-      return table_it->second;
+  {
+    auto db_it = cache_.find(database);
+    if (db_it != cache_.end()) {
+      auto table_it = db_it->second.find(table);
+      if (table_it != db_it->second.end() && table_it->second.size() == expected_count) {
+        return table_it->second;
+      }
     }
   }
 
-  auto negative_db_it = negative_cache_.find(database);
-  if (negative_db_it != negative_cache_.end()) {
-    auto negative_table_it = negative_db_it->second.find(table);
-    if (negative_table_it != negative_db_it->second.end() &&
-        negative_table_it->second == expected_count) {
-      return {};
+  {
+    auto negative_db_it = negative_cache_.find(database);
+    if (negative_db_it != negative_cache_.end()) {
+      auto negative_table_it = negative_db_it->second.find(table);
+      if (negative_table_it != negative_db_it->second.end() &&
+          negative_table_it->second == expected_count) {
+        return {};
+      }
     }
   }
 
@@ -146,16 +146,9 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     }
   }
   if (!query_ok) {
-    if (db_it != cache_.end()) db_it->second.erase(table);
+    EraseCacheEntry(database, table);
     if (query_rc == MES_ERR_VALIDATION) {
-      if (negative_db_it == negative_cache_.end() ||
-          negative_db_it->second.find(table) == negative_db_it->second.end()) {
-        if (CacheEntryCount() >= kMaxMetadataCacheEntries) {
-          StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
-          ClearCache();
-        }
-      }
-      negative_cache_[database][table] = expected_count;
+      StoreNegativeEntry(database, table, expected_count);
     }
     StructuredLog()
         .Event("metadata_fetch_failed")
@@ -186,7 +179,7 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
 
   // Verify column count matches expectation
   if (infos.size() != expected_count) {
-    if (db_it != cache_.end()) db_it->second.erase(table);
+    EraseCacheEntry(database, table);
     StructuredLog()
         .Event("metadata_fetch_column_count_mismatch")
         .Field("db", database)
@@ -197,37 +190,21 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     return {};
   }
 
-  const bool already_cached =
-      db_it != cache_.end() && db_it->second.find(table) != db_it->second.end();
-  if (!already_cached && CacheEntryCount() >= kMaxMetadataCacheEntries) {
-    StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
-    ClearCache();
-  }
-  cache_[database][table] = infos;
-  negative_db_it = negative_cache_.find(database);
-  if (negative_db_it != negative_cache_.end()) {
-    negative_db_it->second.erase(table);
-    if (negative_db_it->second.empty()) negative_cache_.erase(negative_db_it);
-  }
+  StoreCacheEntry(database, table, infos);
   return infos;
 }
 
 void MetadataFetcher::InvalidateCache(const std::string& database, const std::string& table) {
-  auto db_it = cache_.find(database);
-  if (db_it != cache_.end()) {
-    db_it->second.erase(table);
-    if (db_it->second.empty()) cache_.erase(db_it);
-  }
-  auto negative_db_it = negative_cache_.find(database);
-  if (negative_db_it != negative_cache_.end()) {
-    negative_db_it->second.erase(table);
-    if (negative_db_it->second.empty()) negative_cache_.erase(negative_db_it);
-  }
+  EraseCacheEntry(database, table);
+  EraseNegativeEntry(database, table);
 }
 
-void MetadataFetcher::ClearCache() {
+void MetadataFetcher::ClearCache() { DropAllEntries(); }
+
+void MetadataFetcher::DropAllEntries() {
   cache_.clear();
   negative_cache_.clear();
+  retained_bytes_ = 0;
 }
 
 size_t MetadataFetcher::CacheEntryCount() const {
@@ -241,6 +218,73 @@ size_t MetadataFetcher::CacheEntryCount() const {
     count += tables.size();
   }
   return count;
+}
+
+size_t MetadataFetcher::RetainedBytes() const { return retained_bytes_; }
+
+size_t MetadataFetcher::IdentifierCharge(const std::string& database, const std::string& table) {
+  return database.size() + table.size();
+}
+
+size_t MetadataFetcher::EntryCharge(const std::string& database, const std::string& table,
+                                    const std::vector<ColumnInfo>& columns) {
+  size_t bytes = IdentifierCharge(database, table);
+  bytes += columns.size() * sizeof(ColumnInfo);
+  for (const ColumnInfo& column : columns) {
+    bytes += column.name.size();
+  }
+  return bytes;
+}
+
+void MetadataFetcher::StoreCacheEntry(const std::string& database, const std::string& table,
+                                      std::vector<ColumnInfo> columns) {
+  const size_t charge = EntryCharge(database, table, columns);
+  // Refreshing an entry the cache already holds adds no table, so only the
+  // byte total can put such a store over a bound.
+  const bool replaces_existing = EraseCacheEntry(database, table);
+  if ((!replaces_existing && CacheEntryCount() >= kMaxCacheEntries) ||
+      retained_bytes_ + charge > kMaxRetainedBytes) {
+    StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
+    DropAllEntries();
+  }
+  cache_[database][table] = std::move(columns);
+  retained_bytes_ += charge;
+  EraseNegativeEntry(database, table);
+}
+
+void MetadataFetcher::StoreNegativeEntry(const std::string& database, const std::string& table,
+                                         size_t expected_count) {
+  const size_t charge = IdentifierCharge(database, table);
+  const bool replaces_existing = EraseNegativeEntry(database, table);
+  if ((!replaces_existing && CacheEntryCount() >= kMaxCacheEntries) ||
+      retained_bytes_ + charge > kMaxRetainedBytes) {
+    StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
+    DropAllEntries();
+  }
+  negative_cache_[database][table] = expected_count;
+  retained_bytes_ += charge;
+}
+
+bool MetadataFetcher::EraseCacheEntry(const std::string& database, const std::string& table) {
+  auto db_it = cache_.find(database);
+  if (db_it == cache_.end()) return false;
+  auto table_it = db_it->second.find(table);
+  if (table_it == db_it->second.end()) return false;
+  retained_bytes_ -= EntryCharge(database, table, table_it->second);
+  db_it->second.erase(table_it);
+  if (db_it->second.empty()) cache_.erase(db_it);
+  return true;
+}
+
+bool MetadataFetcher::EraseNegativeEntry(const std::string& database, const std::string& table) {
+  auto db_it = negative_cache_.find(database);
+  if (db_it == negative_cache_.end()) return false;
+  auto table_it = db_it->second.find(table);
+  if (table_it == db_it->second.end()) return false;
+  retained_bytes_ -= IdentifierCharge(database, table);
+  db_it->second.erase(table_it);
+  if (db_it->second.empty()) negative_cache_.erase(db_it);
+  return true;
 }
 
 bool MetadataFetcher::Reconnect() {

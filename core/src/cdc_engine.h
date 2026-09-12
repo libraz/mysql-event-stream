@@ -29,7 +29,7 @@
 
 namespace mes {
 
-class MetadataFetcher;
+class ColumnNameSource;
 
 /**
  * @brief Determine whether a QUERY_EVENT body carries a DDL statement.
@@ -162,8 +162,12 @@ class CdcEngine {
    *  A trailing '*' performs a case-sensitive prefix match. */
   void SetExcludeTables(const std::vector<std::string>& tables);
 
-  /** @brief Set metadata fetcher for column name resolution */
-  void SetMetadataFetcher(MetadataFetcher* fetcher);
+  /**
+   * @brief Set the source consulted for column names a TABLE_MAP omits.
+   *
+   * Pass nullptr to resolve nothing, which leaves such columns unnamed.
+   */
+  void SetMetadataFetcher(ColumnNameSource* fetcher);
 
   /**
    * @brief Override the maximum per-event size accepted by the parser.
@@ -272,9 +276,9 @@ class CdcEngine {
   bool include_filter_saw_table_map_ = false;
   bool include_filter_matched_ = false;
 
-  // Non-owning pointer. Caller must ensure the MetadataFetcher outlives this CdcEngine.
+  // Non-owning pointer. Caller must ensure the source outlives this CdcEngine.
   // Set via SetMetadataFetcher(). May be null if metadata resolution is not configured.
-  MetadataFetcher* metadata_fetcher_ = nullptr;
+  ColumnNameSource* metadata_fetcher_ = nullptr;
 };
 
 }  // namespace mes

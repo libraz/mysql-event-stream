@@ -15,6 +15,7 @@
 
 #include "binary_util.h"
 #include "cdc_engine.h"
+#include "client/column_name_source.h"
 #include "client/metadata_fetcher.h"
 #include "crc32.h"
 #include "event_header.h"
@@ -43,6 +44,50 @@ using test::BuildTableMapBody;
 using test::BuildUpdateRowsBody;
 using test::BuildWriteRowsBody;
 using test::BuildWriteRowsBodyMultiRow;
+
+// A column-name source the test drives directly. A real fetcher without a
+// server can only ever fail, so this is what makes a resolution that SUCCEEDS
+// observable: the names it supplies, and what the engine does with them.
+class FakeColumnNameSource : public ColumnNameSource {
+ public:
+  std::vector<ColumnInfo> FetchColumnInfo(const std::string& database, const std::string& table,
+                                          size_t expected_count) override {
+    last_database_ = database;
+    last_table_ = table;
+    last_expected_count_ = expected_count;
+    ++fetch_count_;
+    // A source that cannot describe the table the TABLE_MAP declared resolves
+    // nothing, which is the only answer the engine treats as a failure.
+    if (names_.size() != expected_count) return {};
+    std::vector<ColumnInfo> infos;
+    infos.reserve(names_.size());
+    for (const std::string& name : names_) {
+      ColumnInfo info;
+      info.name = name;
+      infos.push_back(std::move(info));
+    }
+    return infos;
+  }
+
+  void ClearCache() override { ++clear_count_; }
+
+  /** @brief Names to answer with; a count other than the table's fails. */
+  void SetNames(std::vector<std::string> names) { names_ = std::move(names); }
+
+  const std::string& LastDatabase() const { return last_database_; }
+  const std::string& LastTable() const { return last_table_; }
+  size_t LastExpectedCount() const { return last_expected_count_; }
+  int FetchCount() const { return fetch_count_; }
+  int ClearCount() const { return clear_count_; }
+
+ private:
+  std::vector<std::string> names_;
+  std::string last_database_;
+  std::string last_table_;
+  size_t last_expected_count_ = 0;
+  int fetch_count_ = 0;
+  int clear_count_ = 0;
+};
 
 int g_include_filter_warning_count = 0;
 std::string g_include_filter_warning_message;
@@ -564,6 +609,117 @@ TEST(CdcEngineNamesResolvedTest, RetriedResolutionDoesNotWriteIntoMetadataQueued
   EXPECT_EQ(events[0].table.data(), events[0].table_metadata->table_name.data());
   EXPECT_EQ(events[0].database, "testdb");
   EXPECT_EQ(events[0].table, "users");
+}
+
+TEST(CdcEngineNamesResolvedTest, ColumnNamesComeFromTheSourceWhenTheBinlogCarriesNone) {
+  // A TABLE_MAP without COLUMN_NAME metadata leaves every column unnamed, so
+  // what the emitted event reports is whatever the source supplied, asked for
+  // by the table the TABLE_MAP named and the column count it declared.
+  CdcEngine engine;
+  FakeColumnNameSource source;
+  source.SetNames({"user_id"});
+  engine.SetMetadataFetcher(&source);
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                                BuildWriteRowsBody(42, 1));
+  engine.Feed(table_map.data(), table_map.size());
+  engine.Feed(write.data(), write.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(source.FetchCount(), 1);
+  EXPECT_EQ(source.LastDatabase(), "testdb");
+  EXPECT_EQ(source.LastTable(), "users");
+  EXPECT_EQ(source.LastExpectedCount(), 1u);
+
+  EXPECT_TRUE(event.names_resolved);
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].name, "user_id");
+  // The name is a view into the metadata the event keeps alive, not a copy.
+  ASSERT_TRUE(event.table_metadata);
+  ASSERT_EQ(event.table_metadata->columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].name.data(), event.table_metadata->columns[0].name.data());
+}
+
+TEST(CdcEngineNamesResolvedTest, AResolutionSuppliedLaterLeavesAQueuedEventReadingWhatItDecoded) {
+  // The same TABLE_MAP precedes every ROWS event, so a resolution that failed
+  // once is retried and may succeed while events decoded before it are still
+  // queued. Those events read their column names out of the metadata they were
+  // decoded against, and the resolved name here exceeds std::string's inline
+  // buffer while the name it replaces fits inside it: writing it into that
+  // metadata would reallocate and leave the queued event's views pointing at
+  // storage it no longer owns.
+  static constexpr const char* kResolvedName = "a_column_name_longer_than_the_inline_buffer";
+
+  CdcEngine engine;
+  FakeColumnNameSource source;  // Resolves nothing until told which names to answer with.
+  engine.SetMetadataFetcher(&source);
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
+                                      200, BuildWriteRowsBody(42, 1));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                       300, BuildWriteRowsBody(42, 2));
+
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
+  ASSERT_EQ(source.FetchCount(), 1);
+
+  // The resolution becomes available while the first event is still queued.
+  source.SetNames({kResolvedName});
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(second_write.data(), second_write.size()), second_write.size());
+  ASSERT_EQ(source.FetchCount(), 2);
+  ASSERT_EQ(engine.PendingEventCount(), 2u);
+
+  std::vector<ChangeEvent> events;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) events.push_back(std::move(event));
+  ASSERT_EQ(events.size(), 2u);
+  ASSERT_TRUE(events[0].table_metadata);
+  ASSERT_TRUE(events[1].table_metadata);
+  ASSERT_EQ(events[0].after.columns.size(), 1u);
+  ASSERT_EQ(events[1].after.columns.size(), 1u);
+  // The resolution was installed on a new object rather than written into the
+  // one the first event holds.
+  EXPECT_NE(events[0].table_metadata.get(), events[1].table_metadata.get());
+
+  // The first event still reports what it was decoded with, and its view still
+  // borrows from its own metadata.
+  EXPECT_FALSE(events[0].names_resolved);
+  EXPECT_TRUE(events[0].after.columns[0].name.empty());
+  EXPECT_TRUE(events[0].table_metadata->columns[0].name.empty());
+  EXPECT_EQ(events[0].after.columns[0].name.data(),
+            events[0].table_metadata->columns[0].name.data());
+
+  // The second event was decoded against the resolution.
+  EXPECT_TRUE(events[1].names_resolved);
+  EXPECT_EQ(events[1].after.columns[0].name, kResolvedName);
+  EXPECT_EQ(events[1].after.columns[0].name.data(),
+            events[1].table_metadata->columns[0].name.data());
+}
+
+TEST(CdcEngineDdlTest, ADdlStatementDropsWhatTheColumnNameSourceResolved) {
+  // A schema change may rename or retype columns while preserving the column
+  // count, which no per-table count guard can detect, so what the source
+  // resolved before it describes a schema that no longer exists.
+  CdcEngine engine;
+  FakeColumnNameSource source;
+  engine.SetMetadataFetcher(&source);
+
+  const auto ddl =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+                 BuildQueryEventBody("testdb", "ALTER TABLE users RENAME COLUMN a TO b"));
+  engine.Feed(ddl.data(), ddl.size());
+  EXPECT_EQ(source.ClearCount(), 1);
+
+  const auto dml = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 300,
+                              BuildQueryEventBody("testdb", "BEGIN"));
+  engine.Feed(dml.data(), dml.size());
+  EXPECT_EQ(source.ClearCount(), 1);
 }
 
 TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt) {

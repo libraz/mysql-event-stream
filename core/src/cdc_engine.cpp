@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "binary_util.h"
-#include "client/metadata_fetcher.h"
+#include "client/column_name_source.h"
 #include "logger.h"
 #include "mariadb_event_parser.h"
 #include "rotate_event.h"
@@ -385,7 +385,7 @@ void CdcEngine::RebuildBlockedTableIds() {
   });
 }
 
-void CdcEngine::SetMetadataFetcher(MetadataFetcher* fetcher) { metadata_fetcher_ = fetcher; }
+void CdcEngine::SetMetadataFetcher(ColumnNameSource* fetcher) { metadata_fetcher_ = fetcher; }
 
 void CdcEngine::SetMaxEventSize(uint32_t max_event_size) {
   stream_parser_.SetMaxEventSize(max_event_size);
