@@ -28,6 +28,7 @@
 #include "client/event_queue.h"
 #include "client/gtid_encoder.h"
 #include "event_header.h"
+#include "mariadb_gtid.h"
 #include "protocol/mysql_binlog_stream.h"
 
 #ifndef _WIN32
@@ -144,9 +145,35 @@ class ScriptedMysqlPeer {
     std::vector<uint8_t> payload;  ///< Whole payload of a dump request
   };
 
+  /**
+   * @brief The answer one named statement gets in place of the default one.
+   *
+   * A non-zero error code answers with an ERR packet, which is how a source
+   * rejects a statement it does not accept; otherwise the statement is answered
+   * with a single-column, single-row result set carrying `value`.
+   */
+  struct ScriptedResponse {
+    uint16_t error_code = 0;  ///< Non-zero rejects the statement
+    std::string value;        ///< Result-set value of an accepted statement
+  };
+
+  /// Statement text to the answer it gets, matched in full.
+  using StatementScript = std::map<std::string, ScriptedResponse>;
+
+  /** @brief A response that accepts the statement and returns @p value. */
+  static ScriptedResponse Answer(std::string value) {
+    return ScriptedResponse{0, std::move(value)};
+  }
+
+  /** @brief A response that rejects the statement with @p error_code. */
+  static ScriptedResponse Rejection(uint16_t error_code) {
+    return ScriptedResponse{error_code, std::string()};
+  }
+
   ScriptedMysqlPeer(Mode mode, std::vector<uint8_t> stream_event = {},
                     uint16_t dump_error = kDefaultDumpError,
-                    const std::string& server_version = kMySQLVersion) {
+                    const std::string& server_version = kMySQLVersion,
+                    StatementScript script = {}) {
     listener_ = socket(AF_INET, SOCK_STREAM, 0);
     EXPECT_GE(listener_, 0);
     sockaddr_in address{};
@@ -159,8 +186,9 @@ class ScriptedMysqlPeer {
     EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length), 0);
     port_ = ntohs(address.sin_port);
 
-    thread_ = std::thread([this, mode, event = std::move(stream_event), dump_error,
-                           version = server_version] { Serve(mode, event, dump_error, version); });
+    thread_ = std::thread(
+        [this, mode, event = std::move(stream_event), dump_error, version = server_version,
+         scripted = std::move(script)] { Serve(mode, event, dump_error, version, scripted); });
   }
 
   ~ScriptedMysqlPeer() {
@@ -225,7 +253,7 @@ class ScriptedMysqlPeer {
 
  private:
   void Serve(Mode mode, const std::vector<uint8_t>& stream_event, uint16_t dump_error,
-             const std::string& server_version) {
+             const std::string& server_version, const StatementScript& script) {
     const int peer = accept(listener_, nullptr, nullptr);
     if (peer < 0) return;
     if (!SendPacket(peer, 0, BuildHandshake(server_version))) {
@@ -298,6 +326,21 @@ class ScriptedMysqlPeer {
         }
       }
 
+      // The script is consulted ahead of the defaults so a single statement can
+      // be given its own answer -- a chosen value, or a rejection -- while every
+      // other statement of the same shape keeps the answer it would have had.
+      const auto scripted = script.find(query);
+      if (scripted != script.end()) {
+        if (scripted->second.error_code != 0) {
+          SendPacket(
+              peer, 1,
+              BuildErrorPacket(scripted->second.error_code, "the source rejected the statement"));
+        } else {
+          SendSingleValueRow(peer, scripted->second.value);
+        }
+        continue;
+      }
+
       if (is_validation_query) {
         SendVariableRow(peer, query);
       } else if (query.rfind("SET ", 0) == 0) {
@@ -325,15 +368,20 @@ class ScriptedMysqlPeer {
     return dumps;
   }
 
-  /// ERR packet for a source that ends the dump but keeps the session.
-  static std::vector<uint8_t> BuildStreamError(uint16_t error_code) {
+  /// ERR packet: the marker byte, the code, then the protocol-41 SQL state
+  /// ahead of the message.
+  static std::vector<uint8_t> BuildErrorPacket(uint16_t error_code, const std::string& message) {
     std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(error_code),
                                  static_cast<uint8_t>(error_code >> 8), '#'};
     const std::string sql_state = "08S01";
     payload.insert(payload.end(), sql_state.begin(), sql_state.end());
-    const std::string message = "the source ended the dump";
     payload.insert(payload.end(), message.begin(), message.end());
     return payload;
+  }
+
+  /// ERR packet for a source that ends the dump but keeps the session.
+  static std::vector<uint8_t> BuildStreamError(uint16_t error_code) {
+    return BuildErrorPacket(error_code, "the source ended the dump");
   }
 
   /** @brief Stop answering and hold the connection until the client hangs up. */
@@ -462,6 +510,14 @@ constexpr char kDeliveredGtid[] = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-9";
 /// The same start position in MariaDB's domain-server-sequence form, which is
 /// the only form its GTID parsing and its session variables accept.
 constexpr char kMariaDBConfiguredGtid[] = "0-1-5";
+/// A MariaDB position ahead of the configured one, in the same domain, so
+/// merging it into the tracker's set replaces rather than extends the anchor.
+constexpr char kMariaDBDeliveredGtid[] = "0-1-9";
+
+/// ER_UNKNOWN_SYSTEM_VARIABLE: what a source answers for a session variable it
+/// does not know, which is the failure the MariaDB session statements face on
+/// a server older than the one they were written for.
+constexpr uint16_t kUnknownSystemVariable = 1193;
 
 BinlogClientConfig PeerConfig(const ScriptedMysqlPeer& peer, uint32_t read_timeout_s) {
   BinlogClientConfig config;
@@ -517,6 +573,46 @@ std::vector<uint8_t> MakePreviousGtidsEvent(const std::string& gtid_set) {
   return event;
 }
 
+/// GTID_LIST_EVENT body: a 4-byte count-and-flags word, then one entry per
+/// GTID holding a 4-byte domain id, a 4-byte server id and an 8-byte sequence.
+constexpr size_t kGtidListCountSize = 4;
+constexpr size_t kGtidListEntrySize = 16;
+
+/**
+ * @brief A MariaDB GTID_LIST_EVENT advertising @p gtid_set as the baseline.
+ *
+ * The MariaDB counterpart of MakePreviousGtidsEvent(), and a checkpoint for the
+ * same reason: the tracker merges the baseline into its set and hands the
+ * result back immediately, where a transaction would need a GTID event plus the
+ * event that closes its group.
+ */
+std::vector<uint8_t> MakeMariaDBGtidListEvent(const std::string& gtid_set) {
+  std::vector<MariaDBGtid> gtids;
+  EXPECT_EQ(MariaDBGtid::ParseSet(gtid_set, &gtids), MES_OK);
+  std::vector<uint8_t> event(
+      kEventHeaderSize + kGtidListCountSize + gtids.size() * kGtidListEntrySize, 0);
+  event[4] = static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent);
+  SetEventLength(&event);
+
+  // The flags occupy the top four bits of the count word and none of them
+  // change how the list is read, so the count alone is written.
+  size_t offset = kEventHeaderSize;
+  const auto put_u32 = [&event, &offset](uint32_t value) {
+    for (int byte = 0; byte < 4; ++byte) {
+      event[offset++] = static_cast<uint8_t>(value >> (8 * byte));
+    }
+  };
+  put_u32(static_cast<uint32_t>(gtids.size()));
+  for (const MariaDBGtid& gtid : gtids) {
+    put_u32(gtid.domain_id);
+    put_u32(gtid.server_id);
+    for (int byte = 0; byte < 8; ++byte) {
+      event[offset++] = static_cast<uint8_t>(gtid.sequence_no >> (8 * byte));
+    }
+  }
+  return event;
+}
+
 /** @brief The encoded GTID set carried by a captured dump request. */
 std::vector<uint8_t> DumpRequestGtidData(const std::vector<uint8_t>& request) {
   // COM_BINLOG_DUMP_GTID: command, flags, server id, filename length, filename,
@@ -543,6 +639,16 @@ size_t IndexOfQuery(const std::vector<ScriptedMysqlPeer::ReceivedCommand>& comma
     if (commands[i].command == kComQuery && commands[i].query == statement) return i;
   }
   return std::string::npos;
+}
+
+/** @brief Every statement in @p queries beginning with @p prefix, in order. */
+std::vector<std::string> QueriesStartingWith(const std::vector<std::string>& queries,
+                                             const std::string& prefix) {
+  std::vector<std::string> matches;
+  for (const std::string& query : queries) {
+    if (query.rfind(prefix, 0) == 0) matches.push_back(query);
+  }
+  return matches;
 }
 
 /** @brief Position of the first dump request among @p commands, or npos. */
@@ -981,6 +1087,188 @@ TEST(BinlogClientLifecycle, AMySQLFormatStartGtidIsRefusedForAMariaDBSource) {
     EXPECT_EQ(query.find(kConfiguredGtid), std::string::npos) << query;
   }
 
+  client.Disconnect();
+}
+
+/**
+ * @brief "Start at the current position" reads a MariaDB source's own binlog
+ *        position, and falls back to its wider one only when that is empty.
+ *
+ * A replica holds GTIDs in gtid_current_pos that it received from upstream but
+ * never wrote to its own binlog, so that set names positions this source cannot
+ * serve. gtid_binlog_pos is the one it can, which makes the preference the
+ * whole point: taking the wider set from a replica asks for transactions that
+ * are not in the binlog being dumped. The fallback is what keeps a source that
+ * has written nothing yet from starting at the empty position, which requests
+ * every binlog it still retains rather than only what follows.
+ */
+TEST(BinlogClientLifecycle, MariaDBStartAtCurrentFallsBackOnlyWhenTheBinlogPositionIsEmpty) {
+  const std::string binlog_position_query = "SELECT @@GLOBAL.gtid_binlog_pos";
+  const std::string current_position_query = "SELECT @@GLOBAL.gtid_current_pos";
+  struct Source {
+    const char* description;
+    const char* binlog_position;
+    const char* current_position;
+    bool consults_current_position;
+    const char* expected_start;
+  };
+  const Source sources[] = {
+      {"source that has written GTIDs of its own", "0-1-7", "0-1-9", false, "0-1-7"},
+      {"source that has written none", "", "0-1-9", true, "0-1-9"},
+  };
+
+  for (const Source& source : sources) {
+    SCOPED_TRACE(source.description);
+    ScriptedMysqlPeer peer(
+        ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256),
+        ScriptedMysqlPeer::kDefaultDumpError, kMariaDBVersion,
+        {{binlog_position_query, ScriptedMysqlPeer::Answer(source.binlog_position)},
+         {current_position_query, ScriptedMysqlPeer::Answer(source.current_position)}});
+    BinlogClient client;
+    BinlogClientConfig config = PeerConfig(peer, 10);
+    config.start_gtid.clear();
+    config.start_at_current = true;
+    ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+    ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+    ASSERT_TRUE(peer.WaitForDumpRequests(1, seconds(3)));
+
+    const std::vector<ScriptedMysqlPeer::ReceivedCommand> commands = peer.Commands();
+    EXPECT_NE(IndexOfQuery(commands, binlog_position_query), std::string::npos)
+        << "the source's own binlog position was never asked for";
+    // The second variable is queried only to cover the first coming back empty,
+    // so asking for it unconditionally would be reading a set this source may
+    // not be able to serve from.
+    EXPECT_EQ(IndexOfQuery(commands, current_position_query) != std::string::npos,
+              source.consults_current_position);
+    // The resolved position is what the session actually starts from, which is
+    // where a variable picked wrongly becomes a wrong start rather than a
+    // wasted round trip.
+    EXPECT_NE(IndexOfQuery(commands, std::string("SET @slave_connect_state = '") +
+                                         source.expected_start + "'"),
+              std::string::npos)
+        << "the resolved position never reached the session";
+    EXPECT_EQ(std::string(client.GetCurrentGtid()), source.expected_start);
+
+    client.Stop();
+    client.Disconnect();
+  }
+}
+
+/**
+ * @brief A rejected MariaDB session statement ends the stream only when the
+ *        dump cannot be read without it.
+ *
+ * These statements are sent to servers across the whole supported range, and an
+ * older one answers a variable it does not know with an error rather than
+ * ignoring it. Which of them may be survived is therefore a decision the code
+ * makes, and both ways of getting it wrong are silent: refusing to stream over
+ * a variable that only tightens how the requested range is treated loses a
+ * source that would have worked, while streaming on without the two the dump is
+ * read against yields events that are misframed or carry no GTID at all.
+ */
+TEST(BinlogClientLifecycle, AMariaDBSessionStatementEndsTheStreamOnlyIfTheDumpDependsOnIt) {
+  struct Statement {
+    const char* text;
+    bool fatal;
+  };
+  const Statement statements[] = {
+      // Without capability 4 the source falls back to the legacy replication
+      // format, whose stream carries no per-transaction GTID events, so no
+      // checkpoint could ever be established.
+      {"SET @mariadb_slave_capability = 4", true},
+      // The trailer mode has to be agreed before the first event: reading the
+      // stream against the wrong one leaves every event either four bytes short
+      // or verified against bytes that are not a checksum.
+      {"SET @master_binlog_checksum = @@global.binlog_checksum", true},
+      // These two only tighten how the source treats the requested range. A
+      // source that does not know them still sends the right events, so
+      // declining to stream at all would be the worse outcome.
+      {"SET @slave_gtid_strict_mode = 1", false},
+      {"SET @slave_gtid_ignore_duplicates = 0", false},
+  };
+
+  for (const Statement& statement : statements) {
+    SCOPED_TRACE(statement.text);
+    ScriptedMysqlPeer peer(
+        ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256),
+        ScriptedMysqlPeer::kDefaultDumpError, kMariaDBVersion,
+        {{statement.text, ScriptedMysqlPeer::Rejection(kUnknownSystemVariable)}});
+    BinlogClient client;
+    BinlogClientConfig config = PeerConfig(peer, 10);
+    config.start_gtid = kMariaDBConfiguredGtid;
+    ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+
+    if (statement.fatal) {
+      EXPECT_EQ(client.StartStream(), MES_ERR_STREAM) << client.GetLastError();
+      EXPECT_FALSE(client.IsStreaming());
+      // Ending the start is the whole of it: a dump requested anyway would
+      // deliver events the rejected statement was supposed to shape.
+      EXPECT_TRUE(peer.DumpRequests().empty());
+    } else {
+      ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+      // Draining the scripted event proves the rejection left a usable session
+      // behind, rather than only being absent from the return value.
+      const PollResult result = client.Poll();
+      EXPECT_EQ(result.error, MES_OK) << client.GetLastError();
+      EXPECT_EQ(result.size, 256u);
+      client.Stop();
+    }
+
+    client.Disconnect();
+  }
+}
+
+/**
+ * @brief A MariaDB checkpoint is published from the stream and is what the
+ *        replacement stream starts from.
+ *
+ * The same contract the MySQL restart covers, over the one part of it that is
+ * entirely different: the checkpoint is merged from a MariaDB baseline event
+ * rather than a MySQL one, and it reaches the source through a session variable
+ * rather than the dump request, since COM_BINLOG_DUMP has no field to carry a
+ * GTID set. Resuming from the configured anchor instead would re-deliver
+ * everything the consumer has already seen.
+ */
+TEST(BinlogClientLifecycle, ARestartedMariaDBStreamResumesFromTheDeliveredCheckpoint) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
+                         MakeMariaDBGtidListEvent(kMariaDBDeliveredGtid),
+                         ScriptedMysqlPeer::kDefaultDumpError, kMariaDBVersion);
+  BinlogClient client;
+  BinlogClientConfig config = PeerConfig(peer, 10);
+  config.start_gtid = kMariaDBConfiguredGtid;
+  ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // The baseline event carries the checkpoint; requesting the following event is
+  // the acknowledgement that publishes it.
+  const PollResult delivered = client.Poll();
+  ASSERT_EQ(delivered.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(delivered.data, nullptr);
+  const PollResult heartbeat = client.Poll();
+  ASSERT_EQ(heartbeat.error, MES_OK) << client.GetLastError();
+  ASSERT_TRUE(heartbeat.is_heartbeat);
+  ASSERT_EQ(std::string(client.GetCurrentGtid()), kMariaDBDeliveredGtid);
+
+  const PollResult dropped = client.Poll();
+  EXPECT_EQ(dropped.error, MES_ERR_STREAM) << client.GetLastError();
+  EXPECT_FALSE(client.IsStreaming());
+
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(peer.WaitForDumpRequests(2, seconds(3)));
+
+  // Both dumps are COM_BINLOG_DUMP, so the connect-state statement ahead of each
+  // is the only record of where it was asked to start.
+  const std::vector<std::string> connect_states =
+      QueriesStartingWith(peer.Queries(), "SET @slave_connect_state = ");
+  ASSERT_EQ(connect_states.size(), 2u);
+  EXPECT_EQ(connect_states[0],
+            std::string("SET @slave_connect_state = '") + kMariaDBConfiguredGtid + "'");
+  EXPECT_EQ(connect_states[1],
+            std::string("SET @slave_connect_state = '") + kMariaDBDeliveredGtid + "'");
+  // Establishing the replacement stream may not walk the checkpoint backwards.
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), kMariaDBDeliveredGtid);
+
+  client.Stop();
   client.Disconnect();
 }
 
