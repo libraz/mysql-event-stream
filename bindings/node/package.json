@@ -15,6 +15,7 @@
     "build": "npm run build:native && npm run build:js",
     "check": "biome check src/ tests/",
     "check:fix": "biome check --write src/ tests/",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tests/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
     "test:e2e": "vitest run --config e2e/vitest.config.ts",
     "test:watch": "vitest",

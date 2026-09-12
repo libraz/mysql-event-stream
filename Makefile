@@ -185,7 +185,7 @@ node-test: node-build
 	@$(call require_executed_tests,Node,cd bindings/node && yarn test,$(VITEST_EXECUTED_RE))
 
 node-check:
-	cd bindings/node && yarn check
+	cd bindings/node && yarn check && yarn typecheck
 
 node-fix:
 	cd bindings/node && yarn check:fix
