@@ -17,9 +17,13 @@ interface NativeEngine {
   getPosition(): { file: string; offset: number | bigint };
   reset(): void;
   setMaxQueueSize(maxSize: number): void;
+  setMaxQueueBytes(maxQueueBytes: number): void;
+  getMaxQueueBytes(): number;
   setMaxEventSize(maxEventSize: number): void;
   getMaxEventSize(): number;
   setChecksumEnabled(enabled: boolean): void;
+  setTrailerPreVerified(preVerified: boolean): void;
+  getTrailerPreVerified(): boolean;
   setIncludeDatabases(databases: string[]): void;
   setIncludeTables(tables: string[]): void;
   setExcludeTables(tables: string[]): void;
@@ -105,6 +109,31 @@ export class CdcEngine {
   }
 
   /**
+   * Set the total byte budget for the queue of decoded events. {@link feed}
+   * stops consuming bytes when either this budget or the
+   * {@link setMaxQueueSize} entry count is reached, whichever comes first.
+   *
+   * This is the bound to reach for when the requirement is a memory limit: the
+   * charge counts every decoded column payload a queued entry holds, and what
+   * one entry costs varies by an order of magnitude with the table it came from
+   * and any statement annotating it, so an entry count cannot express one.
+   *
+   * `0` restores the default of 48 MiB. The budget over the client's own queue
+   * of undecoded events is a different one, set through `maxQueueBytes` on a
+   * stream or client config, and does not apply to an engine fed directly.
+   */
+  setMaxQueueBytes(maxQueueBytes: number): void {
+    this.ensureNotDestroyed();
+    this.engine!.setMaxQueueBytes(maxQueueBytes);
+  }
+
+  /** Return the configured queue byte budget. */
+  getMaxQueueBytes(): number {
+    this.ensureNotDestroyed();
+    return this.engine!.getMaxQueueBytes();
+  }
+
+  /**
    * Override the maximum per-event size accepted by the parser (bytes).
    * Default is 64 MiB. Values are clamped at the C layer to the range
    * [header+checksum, 1 GiB]. Raise this when the server's
@@ -135,6 +164,32 @@ export class CdcEngine {
   setChecksumEnabled(enabled: boolean): void {
     this.ensureNotDestroyed();
     this.engine!.setChecksumEnabled(enabled);
+  }
+
+  /**
+   * Declare that the events fed from here on have already had their trailing
+   * CRC32 validated, so {@link feed} skips its own pass over the same bytes.
+   *
+   * Nothing checks the claim. Set it on a stream nothing validated and a corrupt
+   * event is accepted in silence — no error, no log record, just a decoded row
+   * carrying whatever the corruption produced. Only set it when the upstream
+   * validation is known to cover every event reaching this engine, in every
+   * configuration it can run in.
+   *
+   * Orthogonal to {@link setChecksumEnabled}, which decides whether an event's
+   * last four bytes are a trailer at all. Framing is unchanged here, and that
+   * switch is never an alternative: clearing it also strips four bytes from
+   * every event body.
+   */
+  setTrailerPreVerified(preVerified: boolean): void {
+    this.ensureNotDestroyed();
+    this.engine!.setTrailerPreVerified(preVerified);
+  }
+
+  /** Return whether the engine is skipping its own trailer verification. */
+  getTrailerPreVerified(): boolean {
+    this.ensureNotDestroyed();
+    return this.engine!.getTrailerPreVerified();
   }
 
   /** Set database include filter. Only events from these databases are processed. Empty array = all. */

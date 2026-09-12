@@ -506,6 +506,9 @@ const REFUSED_ARGUMENTS: Array<{ method: string; argument: unknown; label: strin
   { method: "feed", argument: "0102", label: "a string" },
   { method: "setMaxQueueSize", argument: "100", label: "a string" },
   { method: "setMaxQueueSize", argument: -1, label: "a negative count" },
+  { method: "setMaxQueueBytes", argument: "100", label: "a string" },
+  { method: "setMaxQueueBytes", argument: -1, label: "a negative budget" },
+  { method: "setTrailerPreVerified", argument: 1, label: "a number" },
   { method: "setMaxEventSize", argument: "100", label: "a string" },
   { method: "setMaxEventSize", argument: 2 ** 32, label: "a size past uint32" },
   { method: "setChecksumEnabled", argument: 1, label: "a number" },
@@ -628,7 +631,81 @@ describe("CdcEngine size limits", () => {
     expect(zeroMeaning("setMaxEventSize")).toContain("1 GiB");
   });
 
+  it("documents that 0 restores the default queue byte budget", () => {
+    expect(zeroMeaning("setMaxQueueBytes")).toContain("48 MiB");
+  });
+
   it("fails rather than passing over a doc it cannot read", () => {
     expect(() => loadMethodDoc("noSuchMethod")).toThrow();
+  });
+});
+
+describe("CdcEngine queue byte budget", () => {
+  let engine: CdcEngine;
+
+  afterEach(() => {
+    engine?.destroy();
+  });
+
+  it("round-trips a budget and restores the default on 0", async () => {
+    engine = await CdcEngine.create();
+    expect(engine.getMaxQueueBytes()).toBe(48 * 1024 * 1024);
+    engine.setMaxQueueBytes(1024 * 1024);
+    expect(engine.getMaxQueueBytes()).toBe(1024 * 1024);
+    engine.setMaxQueueBytes(0);
+    expect(engine.getMaxQueueBytes()).toBe(48 * 1024 * 1024);
+  });
+});
+
+describe("CdcEngine trailer pre-verification", () => {
+  let engine: CdcEngine;
+
+  afterEach(() => {
+    engine?.destroy();
+  });
+
+  /** A TABLE_MAP event whose body no longer matches its CRC32 trailer. */
+  function corruptTableMap(): Uint8Array {
+    const event = buildEvent(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "testdb", "users"));
+    const corrupt = Uint8Array.from(event);
+    // One body byte, so the trailer is the only thing that disagrees.
+    const target = 20;
+    corrupt.set([(corrupt.at(target) ?? 0) ^ 0x40], target);
+    return corrupt;
+  }
+
+  it("round-trips and defaults to verifying", async () => {
+    engine = await CdcEngine.create();
+    expect(engine.getTrailerPreVerified()).toBe(false);
+    engine.setTrailerPreVerified(true);
+    expect(engine.getTrailerPreVerified()).toBe(true);
+    engine.setTrailerPreVerified(false);
+    expect(engine.getTrailerPreVerified()).toBe(false);
+  });
+
+  it("refuses a wrong trailer while unset and accepts the same bytes once set", async () => {
+    const corrupt = corruptTableMap();
+
+    engine = await CdcEngine.create();
+    expect(() => engine.feed(corrupt)).toThrow();
+    engine.destroy();
+
+    engine = await CdcEngine.create();
+    engine.setTrailerPreVerified(true);
+    expect(engine.feed(corrupt)).toBe(corrupt.length);
+  });
+
+  it("leaves framing to the checksum switch", async () => {
+    // A valid event still decodes to the same row: only the check is skipped.
+    const stream = concat(
+      buildEvent(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "testdb", "users")),
+      buildEvent(WRITE_ROWS_EVENT, 1000, buildWriteRowsBody(1, 77)),
+    );
+    engine = await CdcEngine.create();
+    engine.setTrailerPreVerified(true);
+    expect(engine.feed(stream)).toBe(stream.length);
+    const event = engine.nextEvent() as ChangeEvent;
+    expect(event).not.toBeNull();
+    expect(event.after?.["0"]).toBe(77);
   });
 });

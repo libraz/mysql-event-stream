@@ -33,9 +33,13 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&EngineWrap::GetPosition>("getPosition"),
           InstanceMethod<&EngineWrap::Reset>("reset"),
           InstanceMethod<&EngineWrap::SetMaxQueueSize>("setMaxQueueSize"),
+          InstanceMethod<&EngineWrap::SetMaxQueueBytes>("setMaxQueueBytes"),
+          InstanceMethod<&EngineWrap::GetMaxQueueBytes>("getMaxQueueBytes"),
           InstanceMethod<&EngineWrap::SetMaxEventSize>("setMaxEventSize"),
           InstanceMethod<&EngineWrap::GetMaxEventSize>("getMaxEventSize"),
           InstanceMethod<&EngineWrap::SetChecksumEnabled>("setChecksumEnabled"),
+          InstanceMethod<&EngineWrap::SetTrailerPreVerified>("setTrailerPreVerified"),
+          InstanceMethod<&EngineWrap::GetTrailerPreVerified>("getTrailerPreVerified"),
           InstanceMethod<&EngineWrap::SetIncludeDatabases>("setIncludeDatabases"),
           InstanceMethod<&EngineWrap::SetIncludeTables>("setIncludeTables"),
           InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
@@ -287,6 +291,48 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   }
 }
 
+void EngineWrap::SetMaxQueueBytes(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!engine_) {
+    ThrowDestroyed(env);
+    return;
+  }
+
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
+        .ThrowAsJavaScriptException();
+    return;
+  }
+
+  int64_t max_queue_bytes = info[0].As<Napi::Number>().Int64Value();
+  if (max_queue_bytes < 0) {
+    mes_node::MakeMesError(
+        env,
+        "maxQueueBytes must be between 0 and unbounded, got " + std::to_string(max_queue_bytes),
+        MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  mes_error_t err = mes_set_max_queue_bytes(engine_, static_cast<size_t>(max_queue_bytes));
+  if (err != MES_OK) {
+    mes_node::MakeMesError(
+        env, std::string("mes_set_max_queue_bytes failed: ") + mes_error_string(err), err)
+        .ThrowAsJavaScriptException();
+  }
+}
+
+Napi::Value EngineWrap::GetMaxQueueBytes(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    ThrowDestroyed(env);
+    return env.Undefined();
+  }
+  size_t value = mes_get_max_queue_bytes(engine_);
+  return Napi::Number::New(env, static_cast<double>(value));
+}
+
 void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -345,6 +391,36 @@ void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
         env, std::string("mes_set_checksum_enabled failed: ") + mes_error_string(err), err)
         .ThrowAsJavaScriptException();
   }
+}
+
+void EngineWrap::SetTrailerPreVerified(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    ThrowDestroyed(env);
+    return;
+  }
+  if (info.Length() < 1 || !info[0].IsBoolean()) {
+    mes_node::MakeMesError(env, "Expected boolean argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
+        .ThrowAsJavaScriptException();
+    return;
+  }
+  mes_error_t err =
+      mes_set_trailer_pre_verified(engine_, info[0].As<Napi::Boolean>().Value() ? 1 : 0);
+  if (err != MES_OK) {
+    mes_node::MakeMesError(
+        env, std::string("mes_set_trailer_pre_verified failed: ") + mes_error_string(err), err)
+        .ThrowAsJavaScriptException();
+  }
+}
+
+Napi::Value EngineWrap::GetTrailerPreVerified(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  if (!engine_) {
+    ThrowDestroyed(env);
+    return env.Undefined();
+  }
+  return Napi::Boolean::New(env, mes_get_trailer_pre_verified(engine_) != 0);
 }
 
 // Helper to extract a string array from a JS Array argument.

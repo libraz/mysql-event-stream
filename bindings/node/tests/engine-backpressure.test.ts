@@ -73,9 +73,9 @@ function feedWithBackpressure(engine: CdcEngine, bytes: Uint8Array): FeedRun {
 
 describe("CdcEngine backpressure", () => {
   // Feed() stops at the top of its loop whenever the queue is at capacity, and
-  // capacity is either the entry count or the queue's byte budget. The engine
-  // surface exposes only the entry count, so that is the lever here; the byte
-  // budget keeps its default, which this fixture comes nowhere near.
+  // capacity is either the entry count or the queue's byte budget. Each is its
+  // own lever, so each gets a case below; whichever one a case is not driving
+  // keeps its default, which this fixture comes nowhere near.
   const values = [11, 22, 33, 44, 55, 66, 77, 88];
   const bytes = concat(...values.map(buildInsertPair));
 
@@ -105,6 +105,33 @@ describe("CdcEngine backpressure", () => {
       const first = steps[0];
       if (first === undefined) throw new Error("the constrained engine was never fed");
       expect(first.consumed, `first feed consumed/offered: ${report}`).toBeLessThan(first.offered);
+      const shortFeeds = steps.filter((step) => step.consumed < step.offered);
+      expect(shortFeeds.length, `consumed/offered per feed: ${report}`).toBeGreaterThan(1);
+
+      expect(events).toEqual(expected);
+    } finally {
+      control.destroy();
+      constrained.destroy();
+    }
+  });
+
+  it("applies backpressure on the byte budget with the entry count untouched", async () => {
+    const control = await CdcEngine.create();
+    const constrained = await CdcEngine.create();
+    try {
+      expect(control.feed(bytes), "the unconstrained control takes the whole buffer").toBe(
+        bytes.length,
+      );
+      const expected: ChangeEvent[] = [];
+      drainInto(control, expected);
+
+      // The entry count stays at its 10,000 default, which these eight events
+      // come nowhere near, so a feed that stops short here stopped on bytes.
+      constrained.setMaxQueueBytes(1);
+      expect(constrained.getMaxQueueBytes()).toBe(1);
+
+      const { events, steps } = feedWithBackpressure(constrained, bytes);
+      const report = steps.map((step) => `${step.consumed}/${step.offered}`).join(" ");
       const shortFeeds = steps.filter((step) => step.consumed < step.offered);
       expect(shortFeeds.length, `consumed/offered per feed: ${report}`).toBeGreaterThan(1);
 

@@ -25,9 +25,13 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   Napi::Value GetPosition(const Napi::CallbackInfo& info);
   void Reset(const Napi::CallbackInfo& info);
   void SetMaxQueueSize(const Napi::CallbackInfo& info);
+  void SetMaxQueueBytes(const Napi::CallbackInfo& info);
+  Napi::Value GetMaxQueueBytes(const Napi::CallbackInfo& info);
   void SetMaxEventSize(const Napi::CallbackInfo& info);
   Napi::Value GetMaxEventSize(const Napi::CallbackInfo& info);
   void SetChecksumEnabled(const Napi::CallbackInfo& info);
+  void SetTrailerPreVerified(const Napi::CallbackInfo& info);
+  Napi::Value GetTrailerPreVerified(const Napi::CallbackInfo& info);
   void SetIncludeDatabases(const Napi::CallbackInfo& info);
   void SetIncludeTables(const Napi::CallbackInfo& info);
   void SetExcludeTables(const Napi::CallbackInfo& info);
