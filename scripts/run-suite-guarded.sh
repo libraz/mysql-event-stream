@@ -19,7 +19,10 @@ case "${1:-}" in
 esac
 
 case "$runner" in
-    pytest) executed_re='^=+ .*[1-9][0-9]* passed' ;;
+    # pytest frames its summary in "=" only at its default verbosity; under -q
+    # the counts are printed bare at the start of the line, so both shapes are
+    # accepted. Neither alternative can match a count of zero.
+    pytest) executed_re='^=+ .*[1-9][0-9]* passed|^[1-9][0-9]* passed' ;;
     vitest) executed_re='^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed' ;;
     *)
         echo "usage: $0 --runner=<pytest|vitest> <command> [arguments...]" >&2

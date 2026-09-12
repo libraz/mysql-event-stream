@@ -59,9 +59,11 @@ dev-dependencies = [
 lint = "ruff check --fix ."
 format = "ruff format ."
 typecheck = "mypy src tests"
-e2e = "pytest e2e/tests -v --timeout=120"
-# pytest exits 0 when every collected test is skipped, so the suite runs behind
-# a guard that requires its summary to report a test that actually passed.
+# pytest exits 0 when every collected test is skipped, so every suite runs
+# behind a guard that requires its summary to report a test that actually
+# passed. An E2E run with no reachable server skips wholesale, which is exactly
+# the result that must not read as success.
+e2e = { cmd = ["../../scripts/run-suite-guarded.sh", "--runner=pytest", "pytest", "e2e/tests", "-v", "--timeout=120"] }
 test-ci = { cmd = ["../../scripts/run-suite-guarded.sh", "--runner=pytest", "pytest", "tests/", "-v"] }
 
 [tool.hatch.build.targets.wheel]
@@ -74,9 +76,12 @@ artifacts = ["src/mysql_event_stream/*.dylib", "src/mysql_event_stream/*.so", "s
 build = "cp311-*"
 skip = "*-musllinux*"
 test-requires = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+# The wheel is only as good as this gate, so the suite runs behind the same
+# guard the rest of the tree uses: pytest exits 0 when every collected test is
+# skipped, and a wheel must not pass on a run that executed nothing.
 test-command = [
     "python -c \"from mysql_event_stream import CdcEngine; engine = CdcEngine(); engine.feed(b''); engine.close()\"",
-    "pytest {project}/bindings/python/tests -x -q",
+    "bash {project}/scripts/run-suite-guarded.sh --runner=pytest pytest {project}/bindings/python/tests -x -q",
 ]
 
 [tool.cibuildwheel.linux]
