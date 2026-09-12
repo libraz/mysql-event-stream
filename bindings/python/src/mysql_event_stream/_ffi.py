@@ -121,7 +121,39 @@ class MESPollResult(ctypes.Structure):
         ("data", ctypes.POINTER(ctypes.c_uint8)),
         ("size", ctypes.c_size_t),
         ("is_heartbeat", ctypes.c_int32),
+        ("checksum_enabled", ctypes.c_int32),
     ]
+
+
+# The LP64 field positions the core publishes for the structs above, recorded
+# the way their sizes are: a mirror has to reproduce them exactly, and the core
+# fails its own build if either layout moves without these numbers moving too.
+_CLIENT_CONFIG_OFFSETS = {
+    "host": 0,
+    "port": 8,
+    "user": 16,
+    "password": 24,
+    "server_id": 32,
+    "start_gtid": 40,
+    "connect_timeout_s": 48,
+    "read_timeout_s": 52,
+    "ssl_mode": 56,
+    "ssl_ca": 64,
+    "ssl_cert": 72,
+    "ssl_key": 80,
+    "max_queue_size": 88,
+    "allow_public_key_retrieval": 96,
+    "start_position_mode": 100,
+    "binlog_file": 104,
+    "binlog_position": 112,
+}
+_POLL_RESULT_OFFSETS = {
+    "error": 0,
+    "data": 8,
+    "size": 16,
+    "is_heartbeat": 24,
+    "checksum_enabled": 28,
+}
 
 
 # Names the library can carry inside a distribution, across platforms.
@@ -282,18 +314,29 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
     # every build, so these numbers are checked on both sides of the boundary
     # rather than only here. Both are LP64 layouts; on a narrower platform the
     # sizes differ and the layout is exercised at call time instead.
+    #
+    # The field offsets are checked alongside the size because a size alone
+    # misses a field that lands in what used to be tail padding: the total is
+    # unchanged and a mirror without that field still reads the right bytes for
+    # every field before it, while the new one is silently absent.
     import struct as _struct
 
     if _struct.calcsize("P") == 8:
-        for name, mirror, expected in (
-            ("MESClientConfig", MESClientConfig, 120),
-            ("MESPollResult", MESPollResult, 32),
+        for name, mirror, expected, offsets in (
+            ("MESClientConfig", MESClientConfig, 120, _CLIENT_CONFIG_OFFSETS),
+            ("MESPollResult", MESPollResult, 32, _POLL_RESULT_OFFSETS),
         ):
             actual = ctypes.sizeof(mirror)
             if actual != expected:
                 raise RuntimeError(
                     f"{name} size mismatch: got {actual}, expected {expected}. "
                     "ABI incompatibility detected."
+                )
+            mirrored = {field[0]: getattr(mirror, field[0]).offset for field in mirror._fields_}
+            if mirrored != offsets:
+                raise RuntimeError(
+                    f"{name} field offsets {mirrored} do not match the published "
+                    f"layout {offsets}. ABI incompatibility detected."
                 )
 
 

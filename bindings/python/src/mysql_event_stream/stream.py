@@ -197,7 +197,9 @@ class CdcStream:
         # further native call.
         self._ready_events: deque[ChangeEvent] = deque()
         self._backoff_task: asyncio.Task[None] | None = None
-        self._leftover = b""
+        # Bytes the engine has not taken yet, each run paired with the checksum
+        # framing the client read it under.
+        self._pending: list[tuple[bool, bytes]] = []
         # Retains the last non-empty checkpoint after close() releases the
         # native client, so it stays readable once the `async with` scope ends.
         self._last_gtid = ""
@@ -321,18 +323,27 @@ class CdcStream:
             self._ready_events = ready
         return ready
 
-    def _feed_and_drain(self, chunk: bytes) -> tuple[int, list[ChangeEvent]]:
+    def _feed_and_drain(
+        self, segments: list[tuple[bool, bytes]]
+    ) -> tuple[list[tuple[bool, bytes]], list[ChangeEvent]]:
         """Feed one poll batch into the engine and decode everything it queued.
 
         Runs as a single worker dispatch. Parsing and the per-column ctypes
         marshalling are what dominate the cost of an event, so both belong here
         and the event loop is left with nothing but buffer handoffs.
 
+        Each segment carries the checksum framing its bytes were read under, and
+        the engine is set to that framing before the segment is fed. Feeding
+        stops at the first segment the engine does not take whole: the engine is
+        applying backpressure, and feeding past it would decode later events
+        ahead of the ones still waiting.
+
         Args:
-            chunk: Leftover bytes followed by the bytes of one poll batch.
+            segments: Framing flag and bytes for each run of events, in the
+                order the client produced them.
 
         Returns:
-            The number of bytes the engine consumed, and the decoded events.
+            The segments still to be fed, and the decoded events.
 
         Raises:
             RuntimeError: If the engine is gone, or the engine call fails.
@@ -340,11 +351,15 @@ class CdcStream:
         engine = self._engine
         if engine is None:
             raise RuntimeError("Internal error: engine missing during feed")
-        consumed = engine.feed(chunk)
         events: list[ChangeEvent] = []
-        while (event := engine.next_event()) is not None:
-            events.append(event)
-        return consumed, events
+        for index, (checksum_enabled, chunk) in enumerate(segments):
+            engine.set_checksum_enabled(checksum_enabled)
+            consumed = engine.feed(chunk)
+            while (event := engine.next_event()) is not None:
+                events.append(event)
+            if consumed < len(chunk):
+                return [(checksum_enabled, chunk[consumed:]), *segments[index + 1 :]], events
+        return [], events
 
     async def __anext__(self) -> ChangeEvent:
         # Note: close() is safe to call during iteration. It sets
@@ -418,17 +433,25 @@ class CdcStream:
                     poll_method = client.poll
                 polled: PollResult | list[PollResult] = await self._dispatch(poll_method)
                 results = [polled] if isinstance(polled, PollResult) else list(polled)
-                chunk = getattr(self, "_leftover", b"") + b"".join(
-                    result.data for result in results if result.data
-                )
-                if not chunk:
+                # Consecutive events read under the same framing are one byte
+                # stream and are fed as one; a framing change starts a new
+                # segment, because the engine frames whatever it is given with
+                # a single flag and the events on either side of the change
+                # need different ones.
+                segments = self._pending
+                for result in results:
+                    if not result.data:
+                        continue
+                    if segments and segments[-1][0] == result.checksum_enabled:
+                        segments[-1] = (result.checksum_enabled, segments[-1][1] + result.data)
+                    else:
+                        segments.append((result.checksum_enabled, result.data))
+                if not segments:
                     continue
-                # One dispatch per poll batch: the whole batch is one byte
-                # stream, so feeding it once and draining the events it
-                # produced costs a single worker handoff however many rows it
-                # carried.
-                consumed, events = await self._dispatch(self._feed_and_drain, chunk)
-                self._leftover = chunk[consumed:]
+                # One dispatch per poll batch: feeding every segment and
+                # draining the events they produced costs a single worker
+                # handoff however many rows the batch carried.
+                self._pending, events = await self._dispatch(self._feed_and_drain, segments)
                 ready.extend(events)
             except asyncio.CancelledError:
                 # We stop awaiting the dispatch, but the worker thread keeps
@@ -559,7 +582,7 @@ class CdcStream:
         # buffered from the dropped transport must not be replayed into the
         # new connection's parser state, and events decoded from them are
         # dropped with the connection that produced them.
-        self._leftover = b""
+        self._pending = []
         self._ready_queue().clear()
 
         self._client = BinlogClient(
@@ -600,7 +623,6 @@ class CdcStream:
             self._report_metadata_error(exc)
         await self._dispatch(self._client.connect)
         await self._dispatch(self._client.start)
-        self._engine.set_checksum_enabled(self._client.checksum_enabled)
         # Do NOT reset _reconnect_attempts here. The counter should only
         # reset when a real event is successfully received (in __anext__),
         # not when a reconnection completes. Otherwise, a server that
@@ -675,7 +697,6 @@ class CdcStream:
                 self._report_metadata_error(exc)
             await self._dispatch(self._client.connect)
             await self._dispatch(self._client.start)
-            self._engine.set_checksum_enabled(self._client.checksum_enabled)
             self._started = True
         except Exception:
             # Same rule as close(): nothing is destroyed while a worker thread

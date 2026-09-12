@@ -115,16 +115,26 @@ asyncio.run(main())
 `BinlogClient` exposes explicit `connect()`, `start()`, `poll()`, `stop()`,
 `disconnect()`, and `close()` calls for applications that own their own event
 loop. `ClientConfig` and `SslMode` describe its connection settings; `PollResult`
-contains packet data or a heartbeat. `CdcStream` is the higher-level async
-iterator and is the usual choice.
+contains packet data or a heartbeat, along with the checksum framing that event
+was read under. `CdcStream` is the higher-level async iterator and is the usual
+choice.
 
 ```python
-from mysql_event_stream import BinlogClient, SslMode
+from mysql_event_stream import BinlogClient, CdcEngine, SslMode
 
-with BinlogClient(user="replicator", password="secret", ssl_mode=SslMode.REQUIRED) as client:
+with (
+    BinlogClient(user="replicator", password="secret", ssl_mode=SslMode.REQUIRED) as client,
+    CdcEngine() as engine,
+):
     client.connect()
     client.start()
     result = client.poll()
+    if result.data is not None:
+        # Frame the engine from the result rather than from
+        # client.checksum_enabled: a FORMAT_DESCRIPTION_EVENT moves the client's
+        # framing while events read under the previous one are still queued.
+        engine.set_checksum_enabled(result.checksum_enabled)
+        engine.feed(result.data)
 ```
 
 ### Errors and logging

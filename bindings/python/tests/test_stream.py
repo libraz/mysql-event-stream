@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
 
@@ -133,7 +133,7 @@ class TestCheckpointRetention:
     ) -> None:
         client = MagicMock()
         client.current_gtid = "uuid:1-42"
-        client.poll.return_value = PollResult(b"\x01", False)
+        client.poll.return_value = PollResult(b"\x01", False, True)
         mock_client_cls.return_value = client
         engine = MagicMock()
         event = MagicMock()
@@ -193,7 +193,7 @@ class TestCheckpointRetention:
         client = MagicMock()
         gtid_reads = PropertyMock(return_value="uuid:1-7")
         type(client).current_gtid = gtid_reads
-        client.poll.return_value = PollResult(b"\x01", False)
+        client.poll.return_value = PollResult(b"\x01", False, True)
         mock_client_cls.return_value = client
         engine = MagicMock()
         event = MagicMock()
@@ -296,11 +296,10 @@ class TestStreamStartFailure:
     @pytest.mark.asyncio
     @patch("mysql_event_stream.stream.CdcEngine")
     @patch("mysql_event_stream.stream.BinlogClient")
-    async def test_start_propagates_client_checksum_mode(
+    async def test_start_leaves_engine_framing_to_the_polled_results(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         mock_client = MagicMock()
-        mock_client.checksum_enabled = False
         mock_client_cls.return_value = mock_client
         mock_engine = MagicMock()
         mock_engine_cls.return_value = mock_engine
@@ -308,7 +307,9 @@ class TestStreamStartFailure:
         stream = CdcStream(host="127.0.0.1")
         await stream._start()
 
-        mock_engine.set_checksum_enabled.assert_called_once_with(False)
+        # Sampling the client here would frame every event of the stream with
+        # whatever the reader happened to be doing at this instant.
+        mock_engine.set_checksum_enabled.assert_not_called()
         await stream.close()
         assert not stream._started
 
@@ -368,7 +369,6 @@ class TestReconnectAttempts:
         stream._client = previous_client
         stream._engine = MagicMock()
         replacement_client = MagicMock()
-        replacement_client.checksum_enabled = True
 
         with (
             patch.object(stream, "_wait_for_backoff", new=AsyncMock()),
@@ -585,7 +585,7 @@ class TestReconnectAttempts:
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"bad event", False)
+        client.poll.return_value = PollResult(b"bad event", False, True)
         client.poll.side_effect = RuntimeError("immediate drop")
         mock_client_cls.side_effect = [
             ConnectionError("connect refused 1"),
@@ -728,7 +728,7 @@ class TestEngineFailures:
         self, error_code: int
     ) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"abcdef", False)
+        client.poll.return_value = PollResult(b"abcdef", False, True)
         engine = MagicMock()
         engine.next_event.return_value = None
         permanent_error = exception_for_rc(error_code, "permanent error")
@@ -741,6 +741,7 @@ class TestEngineFailures:
         stream._reconnect_attempts = 0
         stream._backoff_task = None
         stream._native_task = None
+        stream._pending = []
         stream._client = client
         stream._engine = engine
 
@@ -757,7 +758,7 @@ class TestEngineFailures:
     @pytest.mark.asyncio
     async def test_feed_retains_unconsumed_packet_suffix(self) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"abcdef", False)
+        client.poll.return_value = PollResult(b"abcdef", False, True)
         engine = MagicMock()
         decoded = MagicMock()
         engine.next_event.side_effect = [decoded, None]
@@ -771,4 +772,32 @@ class TestEngineFailures:
             assert await stream.__anext__() is decoded
 
         engine.feed.assert_called_once_with(b"abcdef")
-        assert stream._leftover == b"cdef"
+        # The suffix is kept with the framing it arrived under, so the bytes the
+        # engine has not taken yet are still fed as what they are.
+        assert stream._pending == [(True, b"cdef")]
+
+    @pytest.mark.asyncio
+    async def test_feed_frames_each_result_under_the_flag_it_carried(self) -> None:
+        client = MagicMock()
+        client.poll.side_effect = [
+            PollResult(b"before", False, False),
+            PollResult(b"after", False, True),
+        ]
+        engine = MagicMock()
+        first, second = MagicMock(), MagicMock()
+        engine.next_event.side_effect = [first, None, second, None]
+        engine.feed.side_effect = [len(b"before"), len(b"after")]
+
+        stream = CdcStream(host="127.0.0.1")
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)):
+            assert await stream.__anext__() is first
+            assert await stream.__anext__() is second
+
+        # An event read before the framing changed is fed under the value it was
+        # read with, never under the one a later event established.
+        assert engine.set_checksum_enabled.call_args_list == [call(False), call(True)]
+        assert engine.feed.call_args_list == [call(b"before"), call(b"after")]

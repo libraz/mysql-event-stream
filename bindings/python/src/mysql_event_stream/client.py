@@ -381,14 +381,22 @@ class BinlogClient:
                 raise exception_for_rc(result.error, f"{base_msg}: {error_msg}")
 
             if result.is_heartbeat or result.size == 0:
-                return PollResult(data=None, is_heartbeat=bool(result.is_heartbeat))
+                return PollResult(
+                    data=None,
+                    is_heartbeat=bool(result.is_heartbeat),
+                    checksum_enabled=False,
+                )
 
             if not result.data:
-                return PollResult(data=None, is_heartbeat=False)
+                return PollResult(data=None, is_heartbeat=False, checksum_enabled=False)
 
             # Copy data from C buffer to Python bytes while still holding the lock.
             data = ctypes.string_at(result.data, result.size)
-            return PollResult(data=data, is_heartbeat=False)
+            return PollResult(
+                data=data,
+                is_heartbeat=False,
+                checksum_enabled=bool(result.checksum_enabled),
+            )
 
     def poll_batch(self, max_events: int = POLL_BATCH_DEFAULT_MAX_EVENTS) -> list[PollResult]:
         """Block for one wire event, then drain further queued events.
@@ -430,11 +438,19 @@ class BinlogClient:
                     self._latched_error = terminal
                     break
                 if result.is_heartbeat or result.size == 0 or not result.data:
-                    results.append(PollResult(data=None, is_heartbeat=bool(result.is_heartbeat)))
+                    results.append(
+                        PollResult(
+                            data=None,
+                            is_heartbeat=bool(result.is_heartbeat),
+                            checksum_enabled=False,
+                        )
+                    )
                 else:
                     results.append(
                         PollResult(
-                            data=ctypes.string_at(result.data, result.size), is_heartbeat=False
+                            data=ctypes.string_at(result.data, result.size),
+                            is_heartbeat=False,
+                            checksum_enabled=bool(result.checksum_enabled),
                         )
                     )
             return results
@@ -537,7 +553,13 @@ class BinlogClient:
 
     @property
     def checksum_enabled(self) -> bool:
-        """Return the checksum mode for events produced by :meth:`poll`."""
+        """Return the framing the reader is applying to the events it reads now.
+
+        A ``FORMAT_DESCRIPTION_EVENT`` moves this while events read under the
+        previous value are still queued, so it describes the stream rather than
+        any one result. Frame an engine from :attr:`PollResult.checksum_enabled`
+        instead.
+        """
         with self._handle_lock:
             if self._handle is None:
                 return False

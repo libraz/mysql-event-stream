@@ -166,6 +166,7 @@ class StreamingCollector:
                         result = client.poll()
                         if result.is_heartbeat or not result.data:
                             continue
+                        engine.set_checksum_enabled(result.checksum_enabled)
                         engine.feed(result.data)
                         while (ev := engine.next_event()) is not None:
                             with self._lock:

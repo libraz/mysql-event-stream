@@ -145,7 +145,7 @@ class _FakeClient:
 
     def poll(self) -> PollResult:
         self.poll_calls += 1
-        return PollResult(data=self._chunk, is_heartbeat=False)
+        return PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -167,7 +167,7 @@ class _BlockingPollClient(_FakeClient):
         self.poll_calls += 1
         self.entered_poll.set()
         self.release_poll.wait(_BLOCK_TIMEOUT_S)
-        return PollResult(data=self._chunk, is_heartbeat=False)
+        return PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)
 
     def stop(self) -> None:
         super().stop()
