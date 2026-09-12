@@ -63,6 +63,11 @@ export interface BindingContract {
     unsetRule: string;
     unsetValues: { node: Record<string, number>; python: Record<string, number> };
   };
+  mutuallyExclusive: {
+    rule: string;
+    pairs: ContractOptionPair[];
+    orderRule: string;
+  };
   options: ContractOption[];
 }
 

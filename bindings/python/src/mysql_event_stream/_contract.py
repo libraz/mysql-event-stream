@@ -120,6 +120,19 @@ REQUIRED_TOGETHER_OPTIONS: tuple[tuple[str, str], ...] = (
     ("start_binlog_file", "start_binlog_position"),
 )
 
+#: Options that name competing start modes, at most one of which may be
+#: supplied. A GTID and a file/offset anchor each say where replication begins,
+#: so a configuration carrying both asks for two starts and a binding honouring
+#: either would replicate from a position the caller never asked for.
+#:
+#: The file anchor stands for its whole start mode because
+#: :data:`REQUIRED_TOGETHER_OPTIONS` is checked first and binds the offset to
+#: the file: a configuration that reaches this check carrying an offset carries
+#: the file with it. What counts as supplied is what the pair rule counts,
+#: unset spellings included, so an empty ``start_gtid`` is supplied -- it is a
+#: deliberate request for the empty GTID set.
+MUTUALLY_EXCLUSIVE_OPTIONS: tuple[tuple[str, str], ...] = (("start_gtid", "start_binlog_file"),)
+
 #: What "not supplied" looks like for an option this surface cannot spell as
 #: absent. ``start_binlog_position`` is a plain integer here, so a
 #: zero-initialized configuration passes 0 -- below the conditional floor, and

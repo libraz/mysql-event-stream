@@ -145,6 +145,17 @@
       "python": { "start_binlog_position": 0 }
     }
   },
+  "mutuallyExclusive": {
+    "rule": "At most one option of a pair is supplied, and the whole-config entry point that received them rejects a configuration supplying both: each names a different start mode, so a binding that accepted the combination would have to pick one of them and replicate from a position the caller never asked for. The refusal belongs to the entry points that see a whole configuration, for the same reason the sibling requiredTogether rule does: a per-key validator cannot see the competing mode. Whether an option counts as supplied is decided exactly as that rule decides it, unset spellings included, so the two rules never disagree about what a configuration carries.",
+    "pairs": [
+      {
+        "canonical": ["startGtid", "startBinlogFile"],
+        "node": ["startGtid", "startBinlogFile"],
+        "python": ["start_gtid", "start_binlog_file"]
+      }
+    ],
+    "orderRule": "Checked after requiredTogether, which is what lets the file anchor stand for the whole file/offset start mode here: the offset is bound to the file by that rule, so a configuration reaching this check with an offset carries the file too. Naming the offset in a pair of its own would state a rule no configuration can reach."
+  },
   "optionsRule": "Every entry states the accepted range each binding must enforce for the option. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only. A selector may also state a tighter floor that holds only while the companion option it names is set: the stated range stays in force when that companion is unset, because the value a binding passes through then is the one that means no start position was requested. Naming a companion states when the floor applies and nothing more: whether the two options may appear alone is the sibling requiredTogether rule, not this one. The first binlog event begins after the file's 4-byte magic number, which is why an offset into a named file cannot be below 4.",
   "options": [
     {

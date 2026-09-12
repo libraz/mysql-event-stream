@@ -123,6 +123,23 @@ export const REQUIRED_TOGETHER_OPTIONS: ReadonlyArray<readonly [string, string]>
   ["startBinlogFile", "startBinlogPosition"],
 ];
 
+/**
+ * Options that name competing start modes, at most one of which may be
+ * supplied. A GTID and a file/offset anchor each say where replication begins,
+ * so a configuration carrying both asks for two starts and a binding honouring
+ * either would replicate from a position the caller never asked for.
+ *
+ * The file anchor stands for its whole start mode because
+ * {@link REQUIRED_TOGETHER_OPTIONS} is checked first and binds the offset to
+ * the file: a configuration that reaches this check carrying an offset carries
+ * the file with it. Absence is how this surface leaves an option unset, as it
+ * is for the pair rule, so an empty `startGtid` counts as supplied — it is a
+ * deliberate request for the empty GTID set.
+ */
+export const MUTUALLY_EXCLUSIVE_OPTIONS: ReadonlyArray<readonly [string, string]> = [
+  ["startGtid", "startBinlogFile"],
+];
+
 /** Accepted `maxEvents` window for a batched poll. */
 export const POLL_BATCH = {
   defaultMaxEvents: 64,

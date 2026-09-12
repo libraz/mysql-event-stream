@@ -15,6 +15,7 @@ from collections.abc import Mapping
 
 from ._contract import (
     CONDITIONAL_OPTION_MINIMUMS,
+    MUTUALLY_EXCLUSIVE_OPTIONS,
     OPTION_RANGES,
     REQUIRED_TOGETHER_OPTIONS,
     UNSET_OPTION_VALUES,
@@ -109,6 +110,25 @@ def _validate_required_together(options: Mapping[str, object]) -> None:
         raise ValueError(f"{pair[0]} and {pair[1]} are required together, and {unset[0]} is unset")
 
 
+def _validate_mutually_exclusive(options: Mapping[str, object]) -> None:
+    """Reject a configuration supplying both options of an exclusive pair.
+
+    Another whole-configuration check: the competing option is a different key,
+    so no per-key validator can see it. Runs after the pair rule, which is what
+    lets one option stand for a start mode its companion is bound to.
+
+    Args:
+        options: Every option the configuration carries, unset keys included.
+
+    Raises:
+        ValueError: If both options of an exclusive pair are supplied.
+    """
+    for pair in MUTUALLY_EXCLUSIVE_OPTIONS:
+        if not all(_is_supplied(options, key) for key in pair):
+            continue
+        raise ValueError(f"{pair[0]} and {pair[1]} cannot be combined")
+
+
 def _validate_conditional_minimums(options: Mapping[str, object]) -> None:
     """Apply the floors that hold only while a companion option is set.
 
@@ -150,11 +170,13 @@ def validate_options(
     Raises:
         TypeError: If any key is unrecognized or any value has the wrong type.
         ValueError: If an integer option falls outside its accepted range, if
-            one option of a required-together pair is supplied alone, or if a
+            one option of a required-together pair is supplied alone, if two
+            options naming competing start modes are supplied together, or if a
             value is below the floor its companion brings into force.
     """
     for key, value in options.items():
         validate_option(key, value)
     effective = {**(base or {}), **options}
     _validate_required_together(effective)
+    _validate_mutually_exclusive(effective)
     _validate_conditional_minimums(effective)

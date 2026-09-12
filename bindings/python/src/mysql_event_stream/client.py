@@ -144,7 +144,8 @@ class BinlogClient:
 
         Raises:
             TypeError: If an option has the wrong type.
-            ValueError: If an option falls outside its accepted range.
+            ValueError: If an option falls outside its accepted range, or if
+                the configuration names two start modes that exclude each other.
             RuntimeError: If the loaded library does not export the
                 ``mes_client`` entry points.
             OSError: If the shared library cannot be found.
@@ -250,16 +251,13 @@ class BinlogClient:
             raise ValueError(
                 f"max_queue_bytes must be non-negative, got {self._config.max_queue_bytes}"
             )
-        if self._config.start_binlog_file is not None:
-            if self._config.start_gtid is not None:
-                raise ValueError("start_binlog_file cannot be combined with start_gtid")
-            # The pair and the floor are enforced by __init__, against the
-            # contract's own numbers, for keyword arguments and a pre-built
-            # ClientConfig alike. Restating them here would be a second copy
-            # free to drift, so what is left is the file having to name
-            # something, which no option range can express.
-            if not self._config.start_binlog_file:
-                raise ValueError("start_binlog_file must name a binlog file")
+        # The pair, the floor and the start modes that exclude each other are
+        # enforced by __init__, against the contract's own numbers, for keyword
+        # arguments and a pre-built ClientConfig alike. Restating any of them
+        # here would be a second copy free to drift, so what is left is a named
+        # file having to name something, which no option range can express.
+        if self._config.start_binlog_file == "":
+            raise ValueError("start_binlog_file must name a binlog file")
         # Keep explicit references to encoded bytes so they are not
         # garbage-collected before the C call completes (matters on
         # non-CPython runtimes like PyPy).

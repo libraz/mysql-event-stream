@@ -24,6 +24,7 @@ from mysql_event_stream._contract import (
     LOG_LEVEL_MAX,
     LOG_LEVEL_MIN,
     METADATA_ERROR_DEFAULT,
+    MUTUALLY_EXCLUSIVE_OPTIONS,
     NON_RETRYABLE_ERROR_CODES,
     OPTION_RANGES,
     POLL_BATCH_DEFAULT_MAX_EVENTS,
@@ -61,6 +62,20 @@ START_POSITION_PAIR = next(
     ),
     None,
 )
+
+#: The GTID anchor and the file anchor, which the contract makes exclusive.
+START_MODE_PAIR = next(
+    (
+        pair
+        for pair in contract["mutuallyExclusive"]["pairs"]
+        if pair["canonical"] == ["startGtid", "startBinlogFile"]
+    ),
+    None,
+)
+
+#: A GTID a start-mode case can name. Which mode an option selects is what the
+#: exclusion is about, so any well-formed set serves.
+START_MODE_GTID = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2"
 
 #: How a supplied offset relates to the windows the contract states. Crossed
 #: with the paired file option's two states and with both entry points that
@@ -173,9 +188,32 @@ def _case_kwargs(file_set: bool, position: int | None) -> dict[str, Any]:
     return kwargs
 
 
+def _start_mode_kwargs(gtid_set: bool, anchor_set: bool) -> dict[str, Any]:
+    """Build the start-position options one start-mode case supplies.
+
+    The anchor is both of its options, because the pair rule refuses either one
+    alone: naming only the file would be refused over a constraint this case is
+    not about.
+    """
+    assert START_MODE_PAIR is not None
+    assert START_POSITION is not None
+    gtid_option, file_option = START_MODE_PAIR["python"]
+    kwargs: dict[str, Any] = {}
+    if gtid_set:
+        kwargs[gtid_option] = START_MODE_GTID
+    if anchor_set:
+        kwargs[file_option] = "binlog.000001"
+        kwargs[START_POSITION["python"]] = START_POSITION["minWhenFileSet"]
+    return kwargs
+
+
 @contextlib.contextmanager
-def _mocked_client_library() -> Iterator[None]:
-    """Stand in for libmes so a client can be built and connected without a server."""
+def _mocked_client_library() -> Iterator[MagicMock]:
+    """Stand in for libmes so a client can be built and connected without a server.
+
+    Yields:
+        The stand-in library, whose recorded calls say how far a case got.
+    """
     lib = MagicMock()
     lib.mes_client_create.return_value = 0xDEAD
     lib.mes_client_set_max_event_size.return_value = 0
@@ -185,7 +223,7 @@ def _mocked_client_library() -> Iterator[None]:
         patch("mysql_event_stream.client.get_library", return_value=lib),
         patch("mysql_event_stream.client.load_client_library", return_value=True),
     ):
-        yield
+        yield lib
 
 
 class TestBindingContract:
@@ -288,6 +326,63 @@ class TestBindingContract:
                 validate_option(name, UNSET_OPTION_VALUES.get(name))
                 with pytest.raises(TypeError):
                     validate_option(f"not_{name}", None)
+
+    def test_mirrors_the_contract_mutually_exclusive_pairs(self) -> None:
+        expected = tuple(tuple(pair["python"]) for pair in contract["mutuallyExclusive"]["pairs"])
+        assert expected == MUTUALLY_EXCLUSIVE_OPTIONS
+
+        for pair in expected:
+            for name in pair:
+                # Recognized by this surface's option table, and a name the
+                # table does not know is refused by the same validator.
+                validate_option(name, None)
+                with pytest.raises(TypeError):
+                    validate_option(f"not_{name}", None)
+
+        # The file anchor stands for its whole start mode only because the pair
+        # rule binds the offset to it, so the two blocks have to name the same
+        # file option.
+        assert START_MODE_PAIR is not None
+        assert START_POSITION_PAIR is not None
+        assert START_MODE_PAIR["python"][1] == START_POSITION_PAIR["python"][0]
+
+    def test_refuses_two_start_modes_at_construction_on_every_entry_point(self) -> None:
+        assert START_MODE_PAIR is not None
+        gtid_option, file_option = START_MODE_PAIR["python"]
+
+        for gtid_set in (False, True):
+            for anchor_set in (False, True):
+                kwargs = _start_mode_kwargs(gtid_set, anchor_set)
+                label = (
+                    f"gtid {'set' if gtid_set else 'unset'}, "
+                    f"anchor {'set' if anchor_set else 'unset'}"
+                )
+
+                if not (gtid_set and anchor_set):
+                    validate_options(kwargs)
+                    CdcStream(**kwargs)
+                    with _mocked_client_library():
+                        client = BinlogClient(**kwargs)
+                        client.connect()
+                        client.close()
+                    continue
+
+                with pytest.raises(ValueError) as rejection:
+                    validate_options(kwargs)
+                stated = str(rejection.value)
+                # A refusal the exclusion decides names both start modes.
+                assert gtid_option in stated, label
+                assert file_option in stated, label
+
+                with pytest.raises(ValueError):
+                    CdcStream(**kwargs)
+                with _mocked_client_library() as lib:
+                    with pytest.raises(ValueError):
+                        BinlogClient(**kwargs)
+                    # Construction is where it is refused, so nothing the
+                    # connection would have done was reached.
+                    lib.mes_client_create.assert_not_called()
+                    lib.mes_client_connect.assert_not_called()
 
     def test_mirrors_the_contract_conditional_start_position_floor(self) -> None:
         assert START_POSITION is not None, "startBinlogPosition declared in the contract options"

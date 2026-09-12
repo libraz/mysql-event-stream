@@ -1,5 +1,6 @@
 import {
   CONDITIONAL_OPTION_MINIMUMS,
+  MUTUALLY_EXCLUSIVE_OPTIONS,
   OPTION_RANGES,
   POLL_BATCH,
   REQUIRED_TOGETHER_OPTIONS,
@@ -127,6 +128,23 @@ function validateRequiredTogether(supplied: Record<string, unknown>): void {
 }
 
 /**
+ * Reject a configuration that supplies both options of a mutually exclusive
+ * pair.
+ *
+ * Another whole-configuration check: the competing option is a different key,
+ * so no per-key validator can see it. Runs after the pair rule, which is what
+ * lets one option stand for a start mode its companion is bound to.
+ *
+ * @param supplied Every option the configuration carries, unset keys included.
+ */
+function validateMutuallyExclusive(supplied: Record<string, unknown>): void {
+  for (const pair of MUTUALLY_EXCLUSIVE_OPTIONS) {
+    if (pair.some((key) => supplied[key] === undefined)) continue;
+    throw invalidArgument(`${pair[0]} and ${pair[1]} cannot be combined`);
+  }
+}
+
+/**
  * Apply the floors that hold only while a companion option is set.
  *
  * Also a whole-configuration check: the companion is another key, so the
@@ -151,8 +169,8 @@ function validateConditionalMinimums(supplied: Record<string, unknown>): void {
 /**
  * Validate a supplied stream configuration in full: unrecognized keys, values
  * that do not match their declared type, integers outside their accepted range,
- * options of a pair supplied alone, and a value below the floor its companion
- * brings into force are all rejected here.
+ * options of a pair supplied alone, options naming competing start modes, and a
+ * value below the floor its companion brings into force are all rejected here.
  *
  * Every entry point into a stream's configuration runs this, so no key or value
  * can be refused by one of them and silently defaulted by another. A key whose
@@ -186,6 +204,7 @@ export function validateStreamOptions(
   }
   const effective = { ...base, ...supplied } as Record<string, unknown>;
   validateRequiredTogether(effective);
+  validateMutuallyExclusive(effective);
   validateConditionalMinimums(effective);
 }
 

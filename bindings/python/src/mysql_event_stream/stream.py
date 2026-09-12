@@ -150,7 +150,8 @@ class CdcStream:
 
         Raises:
             TypeError: If an option has the wrong type.
-            ValueError: If an option falls outside its accepted range.
+            ValueError: If an option falls outside its accepted range, or if
+                the configuration names two start modes that exclude each other.
         """
         self._host = host
         self._port = port
@@ -245,8 +246,9 @@ class CdcStream:
         Raises:
             RuntimeError: If streaming has already started.
             TypeError: If a key is unrecognized or a value has the wrong type.
-            ValueError: If a value falls outside its accepted range, or leaves
-                one option of a required-together pair supplied alone.
+            ValueError: If a value falls outside its accepted range, leaves one
+                option of a required-together pair supplied alone, or names two
+                start modes that exclude each other.
         """
         if self._started:
             raise RuntimeError("Cannot configure after streaming has started")

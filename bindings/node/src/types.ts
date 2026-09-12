@@ -160,7 +160,11 @@ export interface ClientConfig {
    * verbatim.
    */
   startGtid?: string;
-  /** Binlog filename for an exact file/offset start. Requires startBinlogPosition. */
+  /**
+   * Binlog filename for an exact file/offset start. Requires
+   * startBinlogPosition, and cannot be combined with startGtid: the two name
+   * different start modes and only one of them can be honoured.
+   */
   startBinlogFile?: string;
   /** Binlog offset for an exact file/offset start (minimum 4). Requires startBinlogFile. */
   startBinlogPosition?: number;

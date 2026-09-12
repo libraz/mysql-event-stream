@@ -433,12 +433,14 @@ class TestClientClose:
         lib.mes_client_create.return_value = 0xDEAD
         mock_load.return_value = lib
 
+        # Two start modes name two positions, refused at construction before a
+        # connection is attempted at all.
         with pytest.raises(ValueError, match="cannot be combined"):
             BinlogClient(
                 start_gtid="uuid:1-1",
                 start_binlog_file="binlog.000001",
                 start_binlog_position=4,
-            ).connect()
+            )
         with pytest.raises(ValueError, match="must name a binlog file"):
             BinlogClient(start_binlog_file="", start_binlog_position=4).connect()
         # Below the floor the companion file brings into force, refused at

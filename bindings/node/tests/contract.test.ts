@@ -8,6 +8,7 @@ import {
   CONDITIONAL_OPTION_MINIMUMS,
   LOG_LEVEL_RANGE,
   METADATA_ERROR_DEFAULT,
+  MUTUALLY_EXCLUSIVE_OPTIONS,
   NON_RETRYABLE_ERROR_CODES,
   OPTION_RANGES,
   POLL_BATCH,
@@ -160,6 +161,32 @@ function refusalReason(
   return null;
 }
 
+/** The GTID anchor and the file anchor, which the contract makes exclusive. */
+const startModePair = contract.mutuallyExclusive.pairs.find(
+  (pair) => pair.canonical[0] === "startGtid",
+);
+
+/**
+ * A GTID a start-mode case can name. Which mode an option selects is what the
+ * exclusion is about, so any well-formed set serves.
+ */
+const START_MODE_GTID = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2";
+
+/**
+ * Build the start-position options one start-mode case supplies. The anchor is
+ * both of its options, because the pair rule refuses either one alone: naming
+ * only the file would be refused over a constraint this case is not about.
+ */
+function startModeConfig(gtidSet: boolean, anchorSet: boolean): StreamConfig {
+  const config: StreamConfig = { host: "127.0.0.1" };
+  if (gtidSet) config.startGtid = START_MODE_GTID;
+  if (anchorSet) {
+    config.startBinlogFile = "binlog.000001";
+    config.startBinlogPosition = acceptedMinimum("startBinlogPosition");
+  }
+  return config;
+}
+
 /** Build the option subset one case supplies, leaving everything else unset. */
 function caseConfig(fileSet: boolean, position: number | undefined): Partial<StreamConfig> {
   const [fileOption, offsetOption] = (startPositionPair as ContractOptionPair).node;
@@ -281,6 +308,70 @@ describe("binding contract", () => {
         // Recognized by this surface's option table, whether or not the shared
         // table states a range for it.
         expect(OPTION_TYPES, `${key} is a declared option`).toHaveProperty(key);
+      }
+    }
+  });
+
+  it("mirrors the contract's mutually exclusive pairs", () => {
+    expect(MUTUALLY_EXCLUSIVE_OPTIONS).toEqual(
+      contract.mutuallyExclusive.pairs.map((pair) => pair.node),
+    );
+    for (const pair of MUTUALLY_EXCLUSIVE_OPTIONS) {
+      for (const key of pair) {
+        expect(OPTION_TYPES, `${key} is a declared option`).toHaveProperty(key);
+      }
+    }
+    // The file anchor stands for its whole start mode only because the pair
+    // rule binds the offset to it, so the two blocks have to name the same
+    // file option.
+    const [, fileOption] = (startModePair as ContractOptionPair).node;
+    expect((startPositionPair as ContractOptionPair).node[0]).toBe(fileOption);
+  });
+
+  it("refuses two start modes at construction on every entry point", () => {
+    const [gtidOption, fileOption] = (startModePair as ContractOptionPair).node;
+    // No server listens here, so a config every entry point accepts fails at
+    // the connection instead — which is how acceptance is observed.
+    const unreachablePort = 19999;
+
+    for (const gtidSet of [false, true]) {
+      for (const anchorSet of [false, true]) {
+        const config = startModeConfig(gtidSet, anchorSet);
+        const label = `gtid ${gtidSet ? "set" : "unset"}, anchor ${anchorSet ? "set" : "unset"}`;
+        const refused = gtidSet && anchorSet;
+
+        const optionsCall = () => validateStreamOptions(config);
+        const streamCall = () => new CdcStream(config);
+        let thrown: unknown;
+        try {
+          new BinlogClient({ ...config, port: unreachablePort }).destroy();
+        } catch (error) {
+          thrown = error;
+        }
+        const code = (thrown as { code?: number } | undefined)?.code;
+
+        if (!refused) {
+          expect(optionsCall, `shared options accept ${label}`).not.toThrow();
+          expect(streamCall, `stream construction accepts ${label}`).not.toThrow();
+          expect(thrown, `client reaches the connection for ${label}`).toBeDefined();
+          expect(code, `client accepts ${label}`).not.toBe(MesErrorCode.InvalidArg);
+          continue;
+        }
+
+        expect(optionsCall, `shared options reject ${label}`).toThrow();
+        let stated = "";
+        try {
+          optionsCall();
+        } catch (error) {
+          stated = String((error as Error).message);
+        }
+        // A refusal the exclusion decides names both start modes.
+        expect(stated, `rejection cites the GTID anchor for ${label}`).toContain(gtidOption);
+        expect(stated, `rejection cites the file anchor for ${label}`).toContain(fileOption);
+        expect(streamCall, `stream construction rejects ${label}`).toThrow();
+        // The addon keeps its own refusal: a direct client is validated by
+        // nothing else, and construction is where it connects.
+        expect(code, `client rejects ${label}`).toBe(MesErrorCode.InvalidArg);
       }
     }
   });
