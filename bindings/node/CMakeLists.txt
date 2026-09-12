@@ -94,6 +94,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
+  # Node-API level the published addon is compiled against, and so the ABI
+  # floor of the binary package.json ships. It is the highest level every
+  # runtime the package's `engines` field admits provides: Node 22.0 carries
+  # level 9, and level 10 first appears in 22.14. The two are one decision --
+  # a change to the supported runtime range is what moves this value.
+  NAPI_VERSION=9
   NAPI_DISABLE_CPP_EXCEPTIONS
   MES_BUILDING
 )
