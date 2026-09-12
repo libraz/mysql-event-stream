@@ -9,17 +9,36 @@ import {
 import type { StreamConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
 
+/**
+ * Category name a refused argument carries. `MesErrorName()` in
+ * `src/addon/mes_error_util.h` resolves the C ABI's invalid-argument code to
+ * the same string, so `name` reads alike whichever layer refused the value.
+ */
+export const REFUSAL_ERROR_NAME = "MesError";
+
+/**
+ * Present a refusal the way this surface presents every refusal: the built-in
+ * subclass the kind of refusal calls for, kept so `instanceof RangeError` and
+ * `instanceof TypeError` hold, plus the numeric C ABI code and the category
+ * name. The addon states the same presentation once in `MakeMesError()`, and
+ * `tests/option-refusal.test.ts` drives one refused value per option through
+ * both layers so neither can be changed alone.
+ */
+function refused<E extends Error>(error: E): E & { code: number } {
+  const presented = error as E & { code: number };
+  presented.code = MesErrorCode.InvalidArg;
+  presented.name = REFUSAL_ERROR_NAME;
+  return presented;
+}
+
+/** Build the error a value outside the window its option accepts raises. */
 export function invalidArgument(message: string): RangeError {
-  const error = new RangeError(message) as RangeError & { code: number };
-  error.code = MesErrorCode.InvalidArg;
-  return error;
+  return refused(new RangeError(message));
 }
 
 /** Build the error a wrongly-typed or unrecognized option raises. */
 export function invalidType(message: string): TypeError {
-  const error = new TypeError(message) as TypeError & { code: number };
-  error.code = MesErrorCode.InvalidArg;
-  return error;
+  return refused(new TypeError(message));
 }
 
 /** The runtime shape an option's value must have to be accepted. */

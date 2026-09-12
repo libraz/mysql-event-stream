@@ -262,7 +262,8 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsObject()) {
-    mes_node::MakeMesError(env, "Expected config object", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "config must be an object", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -300,22 +301,35 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (!binlog_file_v.IsUndefined() || !binlog_position_v.IsUndefined()) {
     if (start_gtid_v.IsString()) {
       mes_node::MakeMesError(env, "startGtid and startBinlogFile cannot be combined",
-                             MES_ERR_INVALID_ARG)
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
     if (!binlog_file_v.IsString() || !binlog_position_v.IsNumber()) {
       mes_node::MakeMesError(
           env, "startBinlogFile (string) and startBinlogPosition (number) are required together",
-          MES_ERR_INVALID_ARG)
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
     strings.binlog_file = binlog_file_v.As<Napi::String>().Utf8Value();
     const int64_t position = binlog_position_v.As<Napi::Number>().Int64Value();
-    if (strings.binlog_file.empty() || position < 4 || position > UINT32_MAX) {
-      mes_node::MakeMesError(env, "startBinlogPosition must be between 4 and UINT32_MAX",
-                             MES_ERR_INVALID_ARG)
+    if (position < 0 || position > UINT32_MAX) {
+      mes_node::MakeMesError(
+          env,
+          "startBinlogPosition must be between 0 and 4294967295, got " + std::to_string(position),
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+          .ThrowAsJavaScriptException();
+      return;
+    }
+    // The floor holds once a file names the offset's binlog: the first event in
+    // a file begins after its 4-byte magic number.
+    if (strings.binlog_file.empty() || position < 4) {
+      mes_node::MakeMesError(env,
+                             "startBinlogPosition must be 4 through 4294967295 when "
+                             "startBinlogFile is set, got " +
+                                 std::to_string(position),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -330,7 +344,10 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     // avoid silently truncating large values, then reject anything negative.
     int64_t max_queue_size = max_queue_size_v.As<Napi::Number>().Int64Value();
     if (max_queue_size < 0) {
-      mes_node::MakeMesError(env, "maxQueueSize must be non-negative", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(
+          env,
+          "maxQueueSize must be between 0 and unbounded, got " + std::to_string(max_queue_size),
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -342,7 +359,9 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (max_event_size_v.IsNumber()) {
     int64_t raw = max_event_size_v.As<Napi::Number>().Int64Value();
     if (raw < 0 || raw > UINT32_MAX) {
-      mes_node::MakeMesError(env, "maxEventSize must fit in uint32", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(
+          env, "maxEventSize must be between 0 and 4294967295, got " + std::to_string(raw),
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -360,7 +379,9 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   if (max_queue_bytes_v.IsNumber()) {
     int64_t raw = max_queue_bytes_v.As<Napi::Number>().Int64Value();
     if (raw < 0) {
-      mes_node::MakeMesError(env, "maxQueueBytes must be non-negative", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(
+          env, "maxQueueBytes must be between 0 and unbounded, got " + std::to_string(raw),
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -463,14 +484,15 @@ Napi::Value ClientWrap::PollBatch(const Napi::CallbackInfo& info) {
   size_t max_events = 64;
   if (info.Length() > 0) {
     if (!info[0].IsNumber()) {
-      deferred.Reject(
-          mes_node::MakeMesError(env, "maxEvents must be a number", MES_ERR_INVALID_ARG).Value());
+      deferred.Reject(mes_node::MakeMesError(env, "maxEvents must be a number", MES_ERR_INVALID_ARG,
+                                             mes_node::MesErrorClass::kType)
+                          .Value());
       return deferred.Promise();
     }
     const double value = info[0].As<Napi::Number>().DoubleValue();
     if (!std::isfinite(value) || value < 1 || value > 1024 || std::floor(value) != value) {
       deferred.Reject(mes_node::MakeMesError(env, "maxEvents must be an integer between 1 and 1024",
-                                             MES_ERR_INVALID_ARG)
+                                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
                           .Value());
       return deferred.Promise();
     }

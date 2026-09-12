@@ -8,6 +8,7 @@
 #include <napi.h>
 #include <secure_cleanse.h>
 
+#include <cstdint>
 #include <string>
 
 #include "mes_error_util.h"
@@ -110,7 +111,7 @@ inline bool ValidateConfigTypes(Napi::Env env, Napi::Object config) {
     }
     if (!matches) {
       mes_node::MakeMesError(env, std::string(option.key) + " must be " + expected,
-                             MES_ERR_INVALID_ARG)
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kType)
           .ThrowAsJavaScriptException();
       return false;
     }
@@ -139,9 +140,12 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
 
   Napi::Value port_v = config.Get("port");
   if (port_v.IsNumber()) {
-    uint32_t port = port_v.As<Napi::Number>().Uint32Value();
+    // Read as int64 so the refusal can state the value the caller passed: a
+    // negative port read as uint32 would be reported as a large positive one.
+    int64_t port = port_v.As<Napi::Number>().Int64Value();
     if (port < 1 || port > 65535) {
-      mes_node::MakeMesError(env, "port must be 1-65535", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(env, "port must be 1-65535, got " + std::to_string(port),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return false;
     }
@@ -183,12 +187,14 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
     cfg.connect_timeout_s = kDefaultConnectTimeoutS;
   }
 
-  uint32_t ssl_mode = MES_SSL_PREFERRED;
+  int64_t ssl_mode = MES_SSL_PREFERRED;
   Napi::Value ssl_mode_v = config.Get("sslMode");
   if (ssl_mode_v.IsNumber()) {
-    ssl_mode = ssl_mode_v.As<Napi::Number>().Uint32Value();
-    if (ssl_mode > 4) {
-      mes_node::MakeMesError(env, "sslMode must be 0-4", MES_ERR_INVALID_ARG)
+    ssl_mode = ssl_mode_v.As<Napi::Number>().Int64Value();
+    if (ssl_mode < 0 || ssl_mode > 4) {
+      mes_node::MakeMesError(env,
+                             "sslMode must be between 0 and 4, got " + std::to_string(ssl_mode),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return false;
     }

@@ -132,8 +132,9 @@ Napi::Value SetLogCallback(const Napi::CallbackInfo& info) {
     // matches, which is indistinguishable from never installing a handler.
     const int32_t raw = info[1].As<Napi::Number>().Int32Value();
     if (raw < MES_LOG_ERROR || raw > MES_LOG_DEBUG) {
-      mes_node::MakeMesError(env, "log level must be an integer between 0 and 3",
-                             MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(
+          env, "log level must be an integer between 0 and 3, got " + std::to_string(raw),
+          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return env.Undefined();
     }
@@ -153,7 +154,8 @@ Napi::Value SetLogCallback(const Napi::CallbackInfo& info) {
   }
 
   if (!info[0].IsFunction()) {
-    mes_node::MakeMesError(env, "setLogCallback expects a function or null", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "setLogCallback expects a function or null", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }

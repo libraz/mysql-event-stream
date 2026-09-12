@@ -75,7 +75,8 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1) {
-    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -87,7 +88,8 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
   if (info[0].IsTypedArray()) {
     auto typed = info[0].As<Napi::TypedArray>();
     if (typed.TypedArrayType() != napi_uint8_array) {
-      mes_node::MakeMesError(env, "Expected Buffer or Uint8Array", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(env, "Expected Buffer or Uint8Array", MES_ERR_INVALID_ARG,
+                             mes_node::MesErrorClass::kType)
           .ThrowAsJavaScriptException();
       return Napi::Number::New(env, 0);
     }
@@ -99,7 +101,8 @@ Napi::Value EngineWrap::Feed(const Napi::CallbackInfo& info) {
     data = buf.Data();
     len = buf.Length();
   } else {
-    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected Buffer or Uint8Array argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -262,14 +265,17 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1 || !info[0].IsNumber()) {
-    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
   }
 
   int64_t max_size = info[0].As<Napi::Number>().Int64Value();
   if (max_size < 0) {
-    mes_node::MakeMesError(env, "maxQueueSize must be non-negative", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(
+        env, "maxQueueSize must be between 0 and unbounded, got " + std::to_string(max_size),
+        MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -289,14 +295,17 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsNumber()) {
-    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
   }
 
   int64_t raw = info[0].As<Napi::Number>().Int64Value();
   if (raw < 0 || raw > UINT32_MAX) {
-    mes_node::MakeMesError(env, "maxEventSize must fit in uint32", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(
+        env, "maxEventSize must be between 0 and 4294967295, got " + std::to_string(raw),
+        MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -325,7 +334,8 @@ void EngineWrap::SetChecksumEnabled(const Napi::CallbackInfo& info) {
     return;
   }
   if (info.Length() < 1 || !info[0].IsBoolean()) {
-    mes_node::MakeMesError(env, "Expected boolean argument", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected boolean argument", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -345,7 +355,8 @@ static std::vector<std::string> ExtractStringArray(Napi::Env env, const Napi::Va
   for (uint32_t i = 0; i < arr.Length(); i++) {
     Napi::Value item = arr[i];
     if (!item.IsString()) {
-      mes_node::MakeMesError(env, "Array must contain only strings", MES_ERR_INVALID_ARG)
+      mes_node::MakeMesError(env, "Array must contain only strings", MES_ERR_INVALID_ARG,
+                             mes_node::MesErrorClass::kType)
           .ThrowAsJavaScriptException();
       return {};
     }
@@ -363,7 +374,8 @@ void EngineWrap::SetStringFilter(const Napi::CallbackInfo& info,
     return;
   }
   if (info.Length() < 1 || !info[0].IsArray()) {
-    mes_node::MakeMesError(env, "Expected array of strings", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "Expected array of strings", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -407,7 +419,8 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   }
 
   if (info.Length() < 1 || !info[0].IsObject()) {
-    mes_node::MakeMesError(env, "Expected config object", MES_ERR_INVALID_ARG)
+    mes_node::MakeMesError(env, "config must be an object", MES_ERR_INVALID_ARG,
+                           mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }

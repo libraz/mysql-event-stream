@@ -7,16 +7,24 @@ import { OPTION_RANGES } from "../src/contract.js";
 import { CdcStream } from "../src/stream.js";
 import type { ClientConfig, StreamConfig } from "../src/types.js";
 import { MesErrorCode } from "../src/types.js";
-import { OPTION_TYPES, type OptionType } from "../src/validation.js";
+import { OPTION_TYPES, type OptionType, REFUSAL_ERROR_NAME } from "../src/validation.js";
 import { acceptedMinimum, companionOptions, loadBindingContract } from "./contract-fixture.js";
 
 const contract = loadBindingContract();
 
 /** What a caller can observe about a rejection, compared path against path. */
 interface Rejection {
+  /** Built-in class the refusal is an instance of, which `name` no longer says. */
+  className: string;
   name: string;
   message: string;
   code: unknown;
+}
+
+function classNameOf(error: Error): string {
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof RangeError) return "RangeError";
+  return "Error";
 }
 
 /** Run `call` and describe how it failed, or return null if it succeeded. */
@@ -26,7 +34,12 @@ function rejectionFrom(call: () => void): Rejection | null {
     return null;
   } catch (error) {
     const thrown = error as Error & { code?: unknown };
-    return { name: thrown.name, message: thrown.message, code: thrown.code };
+    return {
+      className: classNameOf(thrown),
+      name: thrown.name,
+      message: thrown.message,
+      code: thrown.code,
+    };
   }
 }
 
@@ -117,14 +130,17 @@ const NON_OBJECT_CONFIGS: unknown[] = [null, undefined, 42, "host=127.0.0.1", tr
 function expectSharedRejection(
   options: Record<string, unknown>,
   label: string,
-  expected: { name: string; contains: string },
+  expected: { className: string; contains: string },
 ): void {
   const [first, ...rest] = ENTRY_PATHS.map((path) => ({
     path: path.name,
     rejection: rejectionFrom(() => path.apply(options)),
   }));
   expect(first?.rejection, `${label} via ${first?.path}`).not.toBeNull();
-  expect(first?.rejection?.name, `${label} via ${first?.path}`).toBe(expected.name);
+  expect(first?.rejection?.className, `${label} via ${first?.path}`).toBe(expected.className);
+  // The category name is the same for every refusal, whichever layer decided
+  // it; `tests/option-refusal.test.ts` compares the two layers against it.
+  expect(first?.rejection?.name, `${label} via ${first?.path}`).toBe(REFUSAL_ERROR_NAME);
   expect(first?.rejection?.message, `${label} via ${first?.path}`).toContain(expected.contains);
   expect(first?.rejection?.code, `${label} via ${first?.path}`).toBe(MesErrorCode.InvalidArg);
   for (const other of rest) {
@@ -146,7 +162,7 @@ describe("stream option validation", () => {
   it("rejects a wrongly-typed value the same way on every entry path", () => {
     for (const { key, sample } of WRONG_TYPE_CASES) {
       expectSharedRejection({ [key]: sample.value }, `${key} = ${sample.label}`, {
-        name: "TypeError",
+        className: "TypeError",
         contains: key,
       });
     }
@@ -177,7 +193,7 @@ describe("stream option validation", () => {
   it("rejects an out-of-range integer the same way on every entry path", () => {
     for (const { key, rejected, edge } of RANGE_CASES) {
       expectSharedRejection({ [key]: rejected }, `${key} past its ${edge}`, {
-        name: "RangeError",
+        className: "RangeError",
         contains: key,
       });
     }
@@ -197,7 +213,7 @@ describe("stream option validation", () => {
   it("rejects an unrecognized key the same way on every entry path", () => {
     for (const key of UNKNOWN_KEYS) {
       expectSharedRejection({ [key]: 1 }, `unknown key ${key}`, {
-        name: "TypeError",
+        className: "TypeError",
         contains: `Unknown config key: ${key}`,
       });
     }
@@ -206,7 +222,7 @@ describe("stream option validation", () => {
   it("rejects a config that is not an object the same way on every entry path", () => {
     for (const config of NON_OBJECT_CONFIGS) {
       expectSharedRejection(config as Record<string, unknown>, `config = ${String(config)}`, {
-        name: "TypeError",
+        className: "TypeError",
         contains: "config must be an object",
       });
     }

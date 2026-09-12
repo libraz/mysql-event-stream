@@ -201,10 +201,10 @@ describe("BinlogClient", () => {
 
   it("rejects invalid byte and event limits before connecting", () => {
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxQueueBytes: -1 })).toThrow(
-      /maxQueueBytes must be non-negative/,
+      /maxQueueBytes must be between 0 and unbounded, got -1/,
     );
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxEventSize: -1 })).toThrow(
-      /maxEventSize must fit in uint32/,
+      /maxEventSize must be between 0 and 4294967295, got -1/,
     );
   });
 

@@ -4,6 +4,7 @@
 import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
+import { REFUSAL_ERROR_NAME } from "./validation.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -30,7 +31,7 @@ const addon = loadNativeAddon<NativeAddon>();
 
 function destroyedError(): Error {
   const error = new Error("Engine has been destroyed") as Error & { code: number };
-  error.name = "MesError";
+  error.name = REFUSAL_ERROR_NAME;
   error.code = MesErrorCode.InvalidArg;
   return error;
 }

@@ -5,7 +5,12 @@ import { POLL_BATCH } from "./contract.js";
 import { loadNativeAddon } from "./native.js";
 import type { ClientConfig, PollResult, ServerFlavor } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { invalidArgument, validatePollBatchSize, validatePort } from "./validation.js";
+import {
+  invalidArgument,
+  REFUSAL_ERROR_NAME,
+  validatePollBatchSize,
+  validatePort,
+} from "./validation.js";
 
 interface NativeAddon {
   BinlogClient: new () => NativeClient;
@@ -35,7 +40,7 @@ const addon = loadNativeAddon<NativeAddon>();
 
 function destroyedError(): Error {
   const error = new Error("Client has been destroyed") as Error & { code: number };
-  error.name = "MesError";
+  error.name = REFUSAL_ERROR_NAME;
   error.code = MesErrorCode.InvalidArg;
   return error;
 }
