@@ -260,6 +260,49 @@ class CdcEngine:
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_queue_size")
 
+    def set_max_queue_bytes(self, max_queue_bytes: int) -> None:
+        """Set the total byte budget for the queue of decoded events.
+
+        feed() stops consuming bytes when either this budget or the
+        :meth:`set_max_queue_size` entry count is reached, whichever comes
+        first. This is the bound to reach for when the requirement is a memory
+        limit: the charge counts every decoded column payload a queued entry
+        holds, and what one entry costs varies by an order of magnitude with the
+        table it came from and any statement annotating it, so an entry count
+        cannot express one.
+
+        Args:
+            max_queue_bytes: Budget in bytes. 0 restores the default of 48 MiB.
+                The budget over the client's own queue of undecoded events is a
+                different one, set through ``max_queue_bytes`` on a stream or
+                client, and does not apply to an engine fed directly.
+
+        Raises:
+            TypeError: If max_queue_bytes is not an integer.
+            ValueError: If max_queue_bytes is negative.
+            RuntimeError: If the engine is closed or the call fails.
+        """
+        self._check_open()
+        if isinstance(max_queue_bytes, bool) or not isinstance(max_queue_bytes, int):
+            raise TypeError(
+                f"max_queue_bytes must be an integer, got {type(max_queue_bytes).__name__}"
+            )
+        if max_queue_bytes < 0:
+            raise ValueError(f"max_queue_bytes must be non-negative, got {max_queue_bytes}")
+        rc = self._lib.mes_set_max_queue_bytes(self._handle, max_queue_bytes)
+        if rc != MES_OK:
+            _raise_for_rc(rc, "mes_set_max_queue_bytes")
+
+    def get_max_queue_bytes(self) -> int:
+        """Return the configured queue byte budget.
+
+        Raises:
+            RuntimeError: If the engine is closed.
+        """
+        self._check_open()
+        result: int = self._lib.mes_get_max_queue_bytes(self._handle)
+        return result
+
     def set_max_event_size(self, max_event_size: int) -> None:
         """Override the maximum per-event size accepted by the parser.
 
@@ -322,6 +365,47 @@ class CdcEngine:
         rc = self._lib.mes_set_checksum_enabled(self._handle, int(enabled))
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_checksum_enabled")
+
+    def set_trailer_pre_verified(self, pre_verified: bool) -> None:
+        """Declare that fed events have already had their trailer validated.
+
+        While this is set, feed() performs no CRC32 pass of its own, skipping a
+        second walk over bytes something upstream already checked.
+
+        Nothing verifies the claim. Set it on a stream nothing validated and a
+        corrupt event is accepted in silence -- no exception, no log record,
+        just a decoded row carrying whatever the corruption produced. Only set
+        it when the upstream validation is known to cover every event reaching
+        this engine, in every configuration it can run in.
+
+        Orthogonal to :meth:`set_checksum_enabled`, which decides whether an
+        event's last four bytes are a trailer at all. Framing is unchanged here,
+        and that switch is never an alternative: clearing it also strips four
+        bytes from every event body.
+
+        Args:
+            pre_verified: ``True`` to skip the engine's CRC32 pass, ``False`` to
+                verify each trailer.
+
+        Raises:
+            TypeError: If pre_verified is not a bool.
+            RuntimeError: If the engine is closed or the native call fails.
+        """
+        self._check_open()
+        if not isinstance(pre_verified, bool):
+            raise TypeError(f"pre_verified must be bool, got {type(pre_verified).__name__}")
+        rc = self._lib.mes_set_trailer_pre_verified(self._handle, int(pre_verified))
+        if rc != MES_OK:
+            _raise_for_rc(rc, "mes_set_trailer_pre_verified")
+
+    def get_trailer_pre_verified(self) -> bool:
+        """Return whether the engine is skipping its own trailer verification.
+
+        Raises:
+            RuntimeError: If the engine is closed.
+        """
+        self._check_open()
+        return bool(self._lib.mes_get_trailer_pre_verified(self._handle))
 
     def reset(self) -> None:
         """Reset the engine, clearing all state.

@@ -133,6 +133,106 @@ class TestFeed:
                 engine.feed(event)
 
 
+class TestMaxQueueBytes:
+    """The queue's byte budget, which is a separate bound from its entry count."""
+
+    def test_round_trips_and_zero_restores_the_default(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine:
+            assert engine.get_max_queue_bytes() == 48 * 1024 * 1024
+            engine.set_max_queue_bytes(1024 * 1024)
+            assert engine.get_max_queue_bytes() == 1024 * 1024
+            engine.set_max_queue_bytes(0)
+            assert engine.get_max_queue_bytes() == 48 * 1024 * 1024
+
+    def test_negative_max_queue_bytes_rejected(self, lib_path: str) -> None:
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(ValueError, match="non-negative"),
+        ):
+            engine.set_max_queue_bytes(-1)
+
+    @pytest.mark.parametrize("value", ["1048576", 1.5, True, None])
+    def test_wrong_typed_max_queue_bytes_rejected(self, lib_path: str, value: object) -> None:
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(TypeError, match="max_queue_bytes must be an integer"),
+        ):
+            engine.set_max_queue_bytes(value)  # type: ignore[arg-type]
+
+    def test_budget_stops_the_feed_while_the_entry_count_still_allows_more(
+        self, lib_path: str
+    ) -> None:
+        tm = build_event(19, 1000, build_table_map_body(1, "db", "t"))
+        first = build_event(30, 1001, build_write_rows_body(1, 10))
+        second = build_event(30, 1002, build_write_rows_body(1, 20))
+        stream = tm + first + second
+
+        # Both engines keep the default entry count, so the byte budget is the
+        # only thing separating them.
+        with CdcEngine(lib_path=lib_path) as unbudgeted:
+            assert unbudgeted.feed(stream) == len(stream)
+
+        with CdcEngine(lib_path=lib_path) as budgeted:
+            # One decoded row already charges more than this.
+            budgeted.set_max_queue_bytes(1)
+            consumed = budgeted.feed(stream)
+            assert consumed < len(stream)
+            event = budgeted.next_event()
+            assert event is not None
+            assert event.after is not None
+            assert event.after["0"] == 10
+            assert budgeted.next_event() is None
+            # Draining released the charge, so the held-back tail goes through.
+            budgeted.feed(stream[consumed:])
+            tail = budgeted.next_event()
+            assert tail is not None
+            assert tail.after is not None
+            assert tail.after["0"] == 20
+
+
+class TestTrailerPreVerified:
+    """The caller's assertion that something upstream validated each trailer."""
+
+    def test_round_trips_and_defaults_to_verifying(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine:
+            assert engine.get_trailer_pre_verified() is False
+            engine.set_trailer_pre_verified(True)
+            assert engine.get_trailer_pre_verified() is True
+            engine.set_trailer_pre_verified(False)
+            assert engine.get_trailer_pre_verified() is False
+
+    @pytest.mark.parametrize("value", [1, "true", None])
+    def test_wrong_typed_pre_verified_rejected(self, lib_path: str, value: object) -> None:
+        with (
+            CdcEngine(lib_path=lib_path) as engine,
+            pytest.raises(TypeError, match="pre_verified must be bool"),
+        ):
+            engine.set_trailer_pre_verified(value)  # type: ignore[arg-type]
+
+    def test_accepts_an_event_the_engine_would_otherwise_refuse(self, lib_path: str) -> None:
+        corrupt = bytearray(build_event(19, 1000, build_table_map_body(1, "db", "t")))
+        corrupt[20] ^= 0x40
+
+        with CdcEngine(lib_path=lib_path) as verifying, pytest.raises(ChecksumError):
+            verifying.feed(corrupt)
+
+        with CdcEngine(lib_path=lib_path) as trusting:
+            trusting.set_trailer_pre_verified(True)
+            assert trusting.feed(corrupt) == len(corrupt)
+
+    def test_leaves_framing_to_the_checksum_switch(self, lib_path: str) -> None:
+        """A valid event still decodes identically: only verification is skipped."""
+        tm = build_event(19, 1000, build_table_map_body(1, "db", "t"))
+        wr = build_event(30, 1001, build_write_rows_body(1, 77))
+        with CdcEngine(lib_path=lib_path) as engine:
+            engine.set_trailer_pre_verified(True)
+            assert engine.feed(tm + wr) == len(tm + wr)
+            event = engine.next_event()
+            assert event is not None
+            assert event.after is not None
+            assert event.after["0"] == 77
+
+
 class TestInsertEvent:
     def test_insert(self, lib_path: str) -> None:
         with CdcEngine(lib_path=lib_path) as engine:
@@ -811,6 +911,8 @@ class TestNativeErrorCodes:
         [
             ("mes_get_position", lambda engine: engine.get_position()),
             ("mes_set_max_queue_size", lambda engine: engine.set_max_queue_size(10)),
+            ("mes_set_max_queue_bytes", lambda engine: engine.set_max_queue_bytes(1024)),
+            ("mes_set_trailer_pre_verified", lambda engine: engine.set_trailer_pre_verified(True)),
             ("mes_set_max_event_size", lambda engine: engine.set_max_event_size(1024)),
             ("mes_reset", lambda engine: engine.reset()),
             ("mes_set_include_databases", lambda engine: engine.set_include_databases(["db"])),
@@ -866,6 +968,9 @@ class TestSizeLimitDocumentation:
 
     def test_queue_size_zero_restores_the_default(self) -> None:
         assert "10000" in self._zero_meaning(CdcEngine.set_max_queue_size)
+
+    def test_queue_bytes_zero_restores_the_default(self) -> None:
+        assert "48 MiB" in self._zero_meaning(CdcEngine.set_max_queue_bytes)
 
     def test_event_size_zero_resolves_to_the_hard_cap(self) -> None:
         assert "1 GiB" in self._zero_meaning(CdcEngine.set_max_event_size)

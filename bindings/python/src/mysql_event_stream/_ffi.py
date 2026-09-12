@@ -374,6 +374,12 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     lib.mes_set_max_queue_size.restype = ctypes.c_int32
     lib.mes_set_max_queue_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 
+    # mes_set_max_queue_bytes / mes_get_max_queue_bytes
+    lib.mes_set_max_queue_bytes.restype = ctypes.c_int32
+    lib.mes_set_max_queue_bytes.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    lib.mes_get_max_queue_bytes.restype = ctypes.c_size_t
+    lib.mes_get_max_queue_bytes.argtypes = [ctypes.c_void_p]
+
     # mes_set_max_event_size
     lib.mes_set_max_event_size.restype = ctypes.c_int32
     lib.mes_set_max_event_size.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -391,6 +397,12 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     # mes_set_checksum_enabled
     lib.mes_set_checksum_enabled.restype = ctypes.c_int32
     lib.mes_set_checksum_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+    # mes_set_trailer_pre_verified / mes_get_trailer_pre_verified
+    lib.mes_set_trailer_pre_verified.restype = ctypes.c_int32
+    lib.mes_set_trailer_pre_verified.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.mes_get_trailer_pre_verified.restype = ctypes.c_int32
+    lib.mes_get_trailer_pre_verified.argtypes = [ctypes.c_void_p]
 
     # mes_set_log_callback
     lib.mes_set_log_callback.restype = None
