@@ -8,7 +8,7 @@ against the same measurement rather than against a remembered one.
 
 | | |
 |---|---|
-| Date | 2026-08-15 |
+| Date | 2026-08-15; queued memory and thread scaling re-measured 2026-09-13 |
 | CPU | Apple M5 Max (18 cores), arm64 |
 | RAM | 128 GB |
 | OS | macOS 26.6 |
@@ -16,14 +16,18 @@ against the same measurement rather than against a remembered one.
 | Build | `CMAKE_BUILD_TYPE=Release`, `-DBUILD_TESTING=OFF -DMES_BUILD_BENCHMARKS=ON` |
 | Python | CPython 3.11.11 |
 
-**The host was under concurrent load while these runs were taken** (load average
-5-25 from unrelated work on the same machine). Repeated runs of the identical
-command varied by up to 3x on the worst samples, so every table that compares
-two builds alternates them run by run inside one session and reports medians;
-an absolute rate from one section is not comparable with one from another.
-Ratios within a section were stable across every round and are what the
-conclusions rest on. Re-baselining on a quiet machine is worthwhile before
-using these as a regression gate.
+**The host was under concurrent load while the two-build comparisons were
+taken** (load average 5-25 from unrelated work on the same machine). Repeated
+runs of the identical command varied by up to 3x on the worst samples, so every
+table that compares two builds alternates them run by run inside one session and
+reports medians; an absolute rate from one section is not comparable with one
+from another. Ratios within a section were stable across every round and are
+what the conclusions rest on.
+
+The queued-memory and thread-scaling sections were taken later on a quiet host
+(load average 1.6-4.1) against a single build, so their absolute figures are
+usable directly. They are not comparable with an absolute rate from a two-build
+section above.
 
 ## Workloads
 
@@ -134,84 +138,89 @@ against the count the engine is actually holding rather than the count the
 workload was expected to produce. `resident_total` is what 10,000 pending events
 actually hold.
 
-**Each workload is measured in its own process.** The row-column pool is created
-once per process and never returns memory to the system, so a workload that runs
-after another reuses the blocks its predecessor released and is billed only for
-what the pool could not already satisfy — sharing a process, `wide28_write_x50`
-reports 629 bytes/event against the 2,677 it reports alone. The pool has no
-reset, so the harness forks before its first decode and every workload starts
-from the same empty pool. Within that isolation the figures are deterministic
-and identical between a debug and a release build, because what is counted is
-allocated bytes rather than elapsed time.
+**Each workload is measured in its own process.** `max_rss_bytes` is the peak
+resident size of the whole process and only ever grows, so in a shared process
+every workload after the first would report its predecessor's peak rather than
+its own. The harness forks before it has decoded anything, which also keeps
+whatever the decode path builds lazily on first use out of the first workload's
+figures. Within that isolation the figures are deterministic and identical
+between a debug and a release build, because what is counted is allocated bytes
+rather than elapsed time.
 
 | Workload | bytes/event | allocs/event | 10k events |
 |---|---:|---:|---:|
-| `int1_write_x1` | 241 | 0.0 | 2.4 MB |
-| `temporal7_write_x1` | 723 | 1.0 | 7.2 MB |
-| `strings7_write_x1` | 979 | 3.0 | 9.8 MB |
-| `wide28_write_x1` | 2,684 | 6.0 | 26.8 MB |
-| `wide28_write_x50` | 2,677 | 6.0 | 26.8 MB |
-| `wide28_update_x1` | 6,114 | 12.0 | 61.1 MB |
-| `wide28_update_x50` | 6,096 | 12.0 | 61.0 MB |
-| `annotate256_wide28_x1` | 2,996 | 8.0 | 30.0 MB |
-| `annotate256_wide28_x50` | 2,684 | 6.1 | 26.8 MB |
-| `annotate8k_wide28_x1` | 10,933 | 8.0 | 109.3 MB |
-| `annotate8k_wide28_x50` | 2,842 | 6.1 | 28.4 MB |
-| `annotate8k_wide28_x200` | 2,691 | 6.1 | 26.9 MB |
+| `int1_write_x1` | 241 | 1.0 | 2.4 MB |
+| `temporal7_write_x1` | 657 | 2.0 | 6.6 MB |
+| `strings7_write_x1` | 913 | 4.0 | 9.1 MB |
+| `wide28_write_x1` | 2,418 | 7.0 | 24.2 MB |
+| `wide28_write_x50` | 2,421 | 7.0 | 24.2 MB |
+| `wide28_update_x1` | 4,659 | 14.0 | 46.6 MB |
+| `wide28_update_x50` | 4,665 | 14.0 | 46.6 MB |
+| `annotate256_wide28_x1` | 2,730 | 9.0 | 27.3 MB |
+| `annotate256_wide28_x50` | 2,427 | 7.1 | 24.3 MB |
+| `annotate8k_wide28_x1` | 10,667 | 9.0 | 106.7 MB |
+| `annotate8k_wide28_x50` | 2,585 | 7.1 | 25.9 MB |
+| `annotate8k_wide28_x200` | 2,470 | 7.1 | 24.7 MB |
 
 Three effects are visible:
 
 * **Row column storage dominates and cannot be amortised.** Every `wide28` write
-  workload lands within 7 bytes of 2,684 whatever its rows per event, because
+  workload lands within 3 bytes of 2,420 whatever its rows per event, because
   each row owns its own column array however the events were framed. An UPDATE
-  pays twice that, 6,096-6,114, for holding a before and an after image.
+  pays twice that, 4,659-4,665, for holding a before and an after image.
 * **ANNOTATE SQL is charged per ROWS event, not per row.** At 8 KB the statement
   adds its length divided by the row count on top of that baseline: 8,192/50 =
-  164 bytes at 50 rows and 41 at 200, so 2,842 and 2,691 against the 2,684 of
+  164 bytes at 50 rows and 41 at 200, so 2,585 and 2,470 against the 2,420 of
   the same schema with no annotation.
 * **At one row per event there is nothing to share**, and the event instead pays
-  ~56 bytes and one allocation for the statement's control block: 2,996 and
-  10,933 are 2,684 plus the whole statement plus that overhead.
+  ~56 bytes and one allocation for the statement's control block: 2,730 and
+  10,667 are 2,418 plus the whole statement plus that overhead.
+
+The column array of a row is one allocation per row, which is what separates
+each workload's `allocs/event` from the count of its variable-length column
+payloads: `int1_write_x1` allocates once for an event with no payload at all.
 
 These are per-event costs, not a queue footprint: the measurement lifts the
 queue byte budget so that nothing is retired before the snapshot. It is that
-budget, not the entry count, that bounds a running engine. The figures show why
-the entry count alone could not: 10,000 events of `wide28_update` would be
-61 MB, and 109 MB if each also carried an 8 KB statement, so the same entry
-count spans a twenty-fold range of memory depending on the schema in front of
-it.
+budget, not the entry count, that bounds a running engine, and these figures are
+why the entry count alone could not. `MES_DEFAULT_QUEUE_SIZE` is 10,000 entries
+and `MES_DEFAULT_QUEUE_BYTES` is 48 MB, so the entry count is what binds only
+while an event costs under roughly 5 KB. The table spans 241 bytes to 10,667, a
+forty-fold range set by the schema in front of the engine; at the top of it the
+byte budget retires events at roughly half the default entry count. The budget
+charges an event for the column names and statement that produced it as well,
+so these figures place a workload in that range rather than predicting the
+exact entry count at which it is retired.
 
 ## Thread scaling
 
 `mes_benchmark_workloads --only <workload> --scaling <iterations>`, one
-independent `CdcEngine` per thread, the same A/B pair as the throughput table
-alternated over three rounds. Iterations per thread: 2,000,000 for
-`temporal7_write_x1`, 3,000,000 for `strings7_write_x1`, 60,000 for
-`wide28_write_x50`. Each cell is the median of the three rounds, in aggregate
-row events/sec across all threads.
+independent `CdcEngine` per thread, three rounds. Iterations per thread:
+2,000,000 for `temporal7_write_x1`, 3,000,000 for `strings7_write_x1`, 60,000
+for `wide28_write_x50`. Each cell is the median of the three rounds, in
+aggregate row events/sec across all threads; the parenthesised figure is that
+median against the same workload's own single-thread median.
 
-| Workload | Build | 1t | 2t | 4t | 8t |
-|---|---|---:|---:|---:|---:|
-| `temporal7_write_x1` | printf | 888,665 | 1,234,565 | 990,932 | 752,197 |
-| | direct | 2,185,870 | 2,766,594 | 1,647,887 | 1,121,309 |
-| `strings7_write_x1` | printf | 3,160,057 | 1,879,308 | 1,203,927 | 1,365,767 |
-| | direct | 3,242,570 | 1,914,349 | 1,205,419 | 1,373,195 |
-| `wide28_write_x50` | printf | 755,330 | 816,996 | 685,094 | 556,627 |
-| | direct | 1,699,320 | 1,528,195 | 1,211,483 | 834,326 |
+| Workload | 1t | 2t | 4t | 8t |
+|---|---:|---:|---:|---:|
+| `temporal7_write_x1` | 3,655,937 | 6,910,545 (1.89x) | 12,820,813 (3.51x) | 19,408,091 (5.31x) |
+| `strings7_write_x1` | 4,072,881 | 7,385,539 (1.81x) | 14,011,566 (3.44x) | 22,383,146 (5.50x) |
+| `wide28_write_x50` | 1,998,903 | 3,009,955 (1.51x) | 4,542,358 (2.27x) | 9,561,361 (4.78x) |
 
-Every thread count decodes faster with the digits written directly: 1.49x at 8
-threads on `temporal7_write_x1` and 1.50x on `wide28_write_x50`. The *ratio* to
-the same build's own single-thread rate is nonetheless worse (0.85 -> 0.51 and
-0.74 -> 0.49 at 8 threads), because the single-thread rate is what improved
-most.
+Aggregate throughput rises at every thread count on every workload. Independent
+engines share no allocator, no locale state and no lock, so what the numbers are
+bounded by is the host: this machine has 6 performance cores and 12 efficiency
+cores, which is why 8 threads returns 4.8-5.5x rather than 8x, and why
+`wide28_write_x50` -- the workload with the largest working set per row --
+falls furthest short.
 
-Aggregate throughput therefore still **falls** as threads are added past each
-workload's peak -- two threads for the two that format columns, one thread for
-`strings7_write_x1`. The locale lock printf took on every field is gone: every
-`os_unfair_lock` sample in the printf profiles sits under `localeconv_l`, and
-both are absent from the direct build. What remains is the other serialization
-point, `std::pmr::synchronized_pool_resource`, now 67% of the 8-thread
-profile.
+Two things in the decode path are what this measurement is sensitive to, and
+neither takes a lock. Temporal and DECIMAL columns write their digits directly
+instead of through `std::snprintf`, which would resolve the decimal point
+through `localeconv_l` and its process-wide `os_unfair_lock` on every field.
+Row column arrays are allocated from `std::pmr::new_delete_resource()`, a
+stateless resource with nothing for threads to contend over; `core/src/types.h`
+records why it has to be that one resource for every row in the process.
 
 ## Plaintext socket read
 
@@ -299,13 +308,16 @@ each row held its own copy. With the statement shared, that subtree is absent:
 | `snprintf` | 60.9% | 42.1% | 0.0% | 0.0% |
 | `localeconv_l` (within `snprintf`) | 3.4% | 30.2% | 0.0% | 0.0% |
 | `os_unfair_lock` (the locale lock) | 1.5% | 29.9% | 0.0% | 0.0% |
-| `std::pmr::synchronized_pool_resource::do_allocate` | 0.8% | 15.6% | 2.0% | 38.0% |
-| `std::pmr::synchronized_pool_resource::do_deallocate` | 0.7% | 16.1% | 1.8% | 29.0% |
 
 `localeconv_l` resolves the decimal point on every printf call and takes a
 process-wide `os_unfair_lock` to do it; at 8 threads that lock was 30% of all
-samples. Writing the digits directly removes it outright. The pool resource is
-the serialization point left standing.
+samples. Writing the digits directly removes it outright.
+
+No `std::pmr` pool symbol appears anywhere in a profile of this build; row
+column arrays go straight to the system allocator, which accounts for 408 of the
+5,220 samples on the decoding thread of a single-thread run, 7.8%. How that
+allocator behaves as engines are added is read off the thread-scaling table
+above, which measures the outcome rather than attributing it.
 
 ## Position against the project targets
 
@@ -316,11 +328,13 @@ the serialization point left standing.
   (`wide28_update_x1`, 881k/sec) is 8.8x the target.
 * **Latency**: met by three orders of magnitude. The slowest row event costs
   1.13 us against a 5 ms budget.
-* **Memory**: met except when every queued event carries its own distinct
-  large statement. A full default queue (`MES_DEFAULT_QUEUE_SIZE` = 10,000) of
-  `wide28` rows annotated with an 8 KB statement holds 8.2 MB at 50 rows per
-  event and 7.0 MB at 200, against 6.5 MB for the same rows with no ANNOTATE.
-  The one case still above the target is 10,000 single-row events each with
-  their own 8 KB statement: 89.0 MB, of which 81.9 MB is the statement text
-  itself. That is data the caller asked for rather than duplication, and
-  `mes_set_max_queue_size()` is the lever for bounding it.
+* **Memory**: met by the defaults, because `MES_DEFAULT_QUEUE_BYTES` is 48 MB
+  and it is the bound that binds first on anything wide. Taking the entry-count
+  default on its own, 10,000 queued events of `wide28` rows annotated with an
+  8 KB statement would hold 25.9 MB at 50 rows per event and 24.7 MB at 200,
+  against 24.2 MB for the same rows with no ANNOTATE. The one shape that would
+  pass the target is 10,000 single-row events each with their own 8 KB
+  statement, 106.7 MB, of which 81.9 MB is the statement text itself -- data the
+  caller asked for rather than duplication. The byte budget retires that shape
+  at roughly 4,700 events, well inside the target; `mes_set_max_queue_bytes()`
+  is the lever for moving it.

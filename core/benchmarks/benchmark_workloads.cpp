@@ -310,8 +310,9 @@ void MeasureWorkload(const Workload& w, size_t queued_events) {
   const size_t iterations = std::max<size_t>(1, queued_events / w.rows_per_iteration);
   const size_t rows = iterations * w.rows_per_iteration;
   {
-    // Warm the row-column pool so its first-touch growth is not billed to
-    // the measured run.
+    // Decode on a throwaway engine first, so whatever the decode path builds
+    // lazily on its first use is already resident and is not billed to the
+    // measured run.
     mes::CdcEngine warmup;
     for (size_t i = 0; i < 8; ++i) {
       if (!RunIteration(warmup, w)) {
@@ -370,14 +371,11 @@ void MeasureWorkload(const Workload& w, size_t queued_events) {
 /**
  * Measure every selected workload, each in its own process.
  *
- * The row-column pool lives for the whole process and is never returned to the
- * system, so a workload that runs after another reuses the blocks its
- * predecessor released and is billed only for what the pool could not already
- * satisfy. Measured in a shared process, the same workload reports a per-event
- * figure several times smaller purely because of where it sits in the list.
- * The pool has no reset, so isolation is the only way to make the figures
- * comparable: the fork happens before this process has decoded anything, which
- * gives every child the pool in the same empty state.
+ * max_rss_bytes is the peak resident size of the whole process and only ever
+ * grows, so in a shared process every workload after the first would report
+ * its predecessor's peak rather than its own. The fork happens before this
+ * process has decoded anything, which also keeps whatever the decode path
+ * builds lazily on first use out of the first workload's figures.
  */
 void ReportMemory(size_t queued_events) {
   std::cout << "mode=memory queued_events=" << queued_events << '\n';
