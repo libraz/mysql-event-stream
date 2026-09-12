@@ -496,8 +496,32 @@ bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata
   return ParseOptionalMetadata(data, offset, len, metadata);
 }
 
+size_t TableMapRegistry::EntryCharge(const Entry& entry) {
+  size_t bytes = entry.raw_body.size();
+  const TableMetadata& metadata = *entry.metadata;
+  bytes += metadata.database_name.size() + metadata.table_name.size();
+  bytes += metadata.columns.size() * sizeof(ColumnMetadata);
+  for (const ColumnMetadata& column : metadata.columns) {
+    bytes += column.name.size();
+  }
+  return bytes;
+}
+
+void TableMapRegistry::EvictUntilWithinBounds(std::vector<uint64_t>* evicted_table_ids) {
+  while (entries_.size() > 1 &&
+         (entries_.size() > kMaxEntries || retained_bytes_ > kMaxRetainedBytes)) {
+    const uint64_t evicted = lru_.back();
+    auto it = entries_.find(evicted);
+    retained_bytes_ -= EntryCharge(it->second);
+    entries_.erase(it);
+    lru_.pop_back();
+    if (evicted_table_ids != nullptr) evicted_table_ids->push_back(evicted);
+  }
+}
+
 bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len,
-                                            uint64_t* evicted_table_id, bool* unchanged) {
+                                            std::vector<uint64_t>* evicted_table_ids,
+                                            bool* unchanged) {
   if (unchanged != nullptr) *unchanged = false;
   if (data == nullptr || len < 6) return false;
   const uint64_t table_id = binary::ReadU48Le(data);
@@ -515,20 +539,20 @@ bool TableMapRegistry::ProcessTableMapEvent(const uint8_t* data, size_t len,
   }
   auto it = entries_.find(table_id);
   if (it != entries_.end()) {
+    retained_bytes_ -= EntryCharge(it->second);
     it->second.metadata = std::make_shared<TableMetadata>(std::move(metadata));
     it->second.raw_body.assign(data, data + len);
+    retained_bytes_ += EntryCharge(it->second);
     Touch(it);
+    EvictUntilWithinBounds(evicted_table_ids);
     return true;
   }
-  if (entries_.size() == kMaxEntries) {
-    const uint64_t evicted = lru_.back();
-    lru_.pop_back();
-    entries_.erase(evicted);
-    if (evicted_table_id != nullptr) *evicted_table_id = evicted;
-  }
   lru_.push_front(table_id);
-  entries_.emplace(table_id, Entry{std::make_shared<TableMetadata>(std::move(metadata)),
-                                   std::vector<uint8_t>(data, data + len), lru_.begin()});
+  auto inserted =
+      entries_.emplace(table_id, Entry{std::make_shared<TableMetadata>(std::move(metadata)),
+                                       std::vector<uint8_t>(data, data + len), lru_.begin()});
+  retained_bytes_ += EntryCharge(inserted.first->second);
+  EvictUntilWithinBounds(evicted_table_ids);
   return true;
 }
 
@@ -556,9 +580,12 @@ std::shared_ptr<const TableMetadata> TableMapRegistry::SharedLookup(uint64_t tab
 void TableMapRegistry::Clear() {
   entries_.clear();
   lru_.clear();
+  retained_bytes_ = 0;
 }
 
 size_t TableMapRegistry::Size() const { return entries_.size(); }
+
+size_t TableMapRegistry::RetainedBytes() const { return retained_bytes_; }
 
 void TableMapRegistry::ForEach(
     const std::function<void(uint64_t, const TableMetadata&)>& visitor) const {
@@ -567,13 +594,17 @@ void TableMapRegistry::ForEach(
   }
 }
 
-bool TableMapRegistry::ReplaceMetadata(uint64_t table_id, TableMetadata metadata) {
+bool TableMapRegistry::ReplaceMetadata(uint64_t table_id, TableMetadata metadata,
+                                       std::vector<uint64_t>* evicted_table_ids) {
   auto it = entries_.find(table_id);
   if (it == entries_.end()) return false;
+  retained_bytes_ -= EntryCharge(it->second);
   // A new object, never an assignment through the existing one: the current
   // object may still be shared with queued events that borrow its names.
   it->second.metadata = std::make_shared<TableMetadata>(std::move(metadata));
+  retained_bytes_ += EntryCharge(it->second);
   Touch(it);
+  EvictUntilWithinBounds(evicted_table_ids);
   return true;
 }
 

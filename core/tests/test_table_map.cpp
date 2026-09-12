@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -1056,7 +1058,7 @@ TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
   }
   ASSERT_NE(registry.Lookup(1), nullptr);  // Refresh the oldest entry.
 
-  uint64_t evicted = UINT64_MAX;
+  std::vector<uint64_t> evicted;
   ASSERT_TRUE(add_table(TableMapRegistry::kMaxEntries + 1));
   // The optional eviction out-param is used by CdcEngine to bound its filter cache.
   TableMapBuilder replacement;
@@ -1071,7 +1073,7 @@ TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
   ASSERT_TRUE(
       registry.ProcessTableMapEvent(replacement.Data().data(), replacement.Size(), &evicted));
 
-  EXPECT_EQ(evicted, 3u);
+  EXPECT_EQ(evicted, std::vector<uint64_t>{3u});
   EXPECT_NE(registry.Lookup(1), nullptr);
   EXPECT_EQ(registry.Lookup(2), nullptr);
   EXPECT_EQ(registry.Size(), TableMapRegistry::kMaxEntries);
@@ -1341,7 +1343,7 @@ TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRecency) {
   // Installing a replacement reaches the entry, so it counts as a use: the
   // entry must not remain the eviction candidate it was before.
   TableMapRegistry registry;
-  const auto add_table = [&registry](uint64_t id, uint64_t* evicted) {
+  const auto add_table = [&registry](uint64_t id, std::vector<uint64_t>* evicted) {
     TableMapBuilder builder;
     builder.WriteTableId(id);
     builder.WriteFlags(0);
@@ -1367,11 +1369,125 @@ TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRecency) {
   resolved.names_resolved = true;
   ASSERT_TRUE(registry.ReplaceMetadata(1, std::move(resolved)));
 
-  uint64_t evicted = UINT64_MAX;
+  std::vector<uint64_t> evicted;
   ASSERT_TRUE(add_table(TableMapRegistry::kMaxEntries + 1, &evicted));
-  EXPECT_EQ(evicted, 2u);
+  EXPECT_EQ(evicted, std::vector<uint64_t>{2u});
   ASSERT_NE(registry.Lookup(1), nullptr);
   EXPECT_TRUE(registry.Lookup(1)->names_resolved);
+}
+
+// Build a TABLE_MAP body for a table of @p columns INT columns, each named with
+// @p name_length characters. Identifier length on a wide table is what makes
+// one registry entry retain orders of magnitude more than another, and column
+// names reach the registry only through the COLUMN_NAME optional metadata that
+// binlog_row_metadata=FULL emits. @p name_length must stay under 251 so each
+// name's length prefix is a single byte.
+std::vector<uint8_t> BuildWideTableMapBody(uint64_t table_id, size_t columns, size_t name_length) {
+  TableMapBuilder builder;
+  builder.WriteTableId(table_id);
+  builder.WriteFlags(0);
+  builder.WriteDatabaseName("db");
+  builder.WriteTableName("t");
+  builder.WriteColumnCount(columns);
+  builder.WriteColumnTypes(std::vector<uint8_t>(columns, static_cast<uint8_t>(ColumnType::kLong)));
+  builder.WriteMetadataBlock({});
+  builder.WriteNullBitmap(std::vector<uint8_t>((columns + 7) / 8, 0xFF));
+
+  const std::string name(name_length, 'c');
+  std::vector<uint8_t> names;
+  for (size_t i = 0; i < columns; i++) {
+    names.push_back(static_cast<uint8_t>(name_length));
+    names.insert(names.end(), name.begin(), name.end());
+  }
+  std::vector<uint8_t> field = {0x04};  // COLUMN_NAME
+  if (names.size() < 251) {
+    field.push_back(static_cast<uint8_t>(names.size()));
+  } else {
+    field.push_back(0xFC);
+    field.push_back(static_cast<uint8_t>(names.size()));
+    field.push_back(static_cast<uint8_t>(names.size() >> 8));
+  }
+  field.insert(field.end(), names.begin(), names.end());
+  builder.WriteRawBytes(field);
+  return builder.Data();
+}
+
+// Registrations of the wide schema above, enough that their retained bytes
+// exceed kMaxRetainedBytes several times over while the count stays far below
+// kMaxEntries.
+constexpr uint64_t kWideRegistrations = 400;
+constexpr size_t kWideColumns = 250;
+constexpr size_t kWideNameLength = 200;
+
+TEST(TableMapRegistryTest, ByteBudgetEvictsLongBeforeTheEntryCountDoes) {
+  TableMapRegistry registry;
+  std::vector<uint64_t> evicted;
+  for (uint64_t id = 1; id <= kWideRegistrations; ++id) {
+    const auto body = BuildWideTableMapBody(id, kWideColumns, kWideNameLength);
+    ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), &evicted));
+  }
+
+  // Per-entry cost here is set by the server's schema, not by anything the
+  // client chose, so the entry count never reached its own bound.
+  EXPECT_LT(registry.Size(), kWideRegistrations);
+  EXPECT_LT(registry.Size(), TableMapRegistry::kMaxEntries);
+  EXPECT_LE(registry.RetainedBytes(), TableMapRegistry::kMaxRetainedBytes);
+  // Eviction follows the same LRU order the count bound uses.
+  ASSERT_FALSE(evicted.empty());
+  EXPECT_EQ(evicted.front(), 1u);
+  // The newest registration is what the ROWS event that follows decodes
+  // against, so it survives however much the registry had to drop.
+  EXPECT_NE(registry.Lookup(kWideRegistrations), nullptr);
+}
+
+TEST(TableMapRegistryTest, RetainedBytesCountsColumnNames) {
+  TableMapRegistry narrow_registry;
+  const auto narrow = BuildWideTableMapBody(1, 4, 4);
+  ASSERT_TRUE(narrow_registry.ProcessTableMapEvent(narrow.data(), narrow.size()));
+  EXPECT_GT(narrow_registry.RetainedBytes(), 0u);
+
+  TableMapRegistry wide_registry;
+  const auto wide = BuildWideTableMapBody(1, 4, kWideNameLength);
+  ASSERT_TRUE(wide_registry.ProcessTableMapEvent(wide.data(), wide.size()));
+
+  // The two schemas differ in nothing but identifier length, so the whole
+  // difference is the column names: counted once in the parsed metadata and
+  // once in the raw body they were parsed from.
+  EXPECT_GE(wide_registry.RetainedBytes() - narrow_registry.RetainedBytes(),
+            2u * 4u * (kWideNameLength - 4u));
+
+  wide_registry.Clear();
+  EXPECT_EQ(wide_registry.RetainedBytes(), 0u);
+}
+
+TEST(TableMapRegistryTest, EvictionLeavesHandedOutMetadataIntact) {
+  TableMapRegistry registry;
+  const auto body = BuildWideTableMapBody(1, 4, kWideNameLength);
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size()));
+  // What a queued ChangeEvent holds while it waits to be drained.
+  std::shared_ptr<const TableMetadata> shared = registry.SharedLookup(1);
+  ASSERT_NE(shared, nullptr);
+  ASSERT_EQ(shared->columns.size(), 4u);
+  const std::string expected_name = shared->columns[0].name;
+  const char* borrowed = shared->columns[0].name.data();
+
+  // Nothing below may touch table_id 1: a lookup would refresh its recency and
+  // move it off the eviction end.
+  std::vector<uint64_t> evicted;
+  for (uint64_t id = 2; id <= kWideRegistrations; ++id) {
+    const auto wide = BuildWideTableMapBody(id, kWideColumns, kWideNameLength);
+    ASSERT_TRUE(registry.ProcessTableMapEvent(wide.data(), wide.size(), &evicted));
+  }
+  ASSERT_FALSE(evicted.empty());
+  EXPECT_EQ(evicted.front(), 1u);
+  EXPECT_EQ(registry.Lookup(1), nullptr);
+
+  // Dropping the registry's own reference left the events reading exactly what
+  // they were decoded against, bytes and address.
+  EXPECT_EQ(shared->table_name, "t");
+  EXPECT_EQ(shared->columns.size(), 4u);
+  EXPECT_EQ(shared->columns[0].name, expected_name);
+  EXPECT_EQ(shared->columns[0].name.data(), borrowed);
 }
 
 }  // namespace

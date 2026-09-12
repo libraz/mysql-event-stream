@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "binary_util.h"
 #include "client/metadata_fetcher.h"
@@ -444,9 +445,11 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         break;
       }
       uint64_t table_id = binary::ReadU48Le(body);
-      uint64_t evicted_table_id = UINT64_MAX;
+      // Empty unless the registration evicted, which is the rare case, so this
+      // allocates nothing on the ordinary path.
+      std::vector<uint64_t> evicted_table_ids;
       bool unchanged = false;
-      if (!table_registry_.ProcessTableMapEvent(body, body_len, &evicted_table_id, &unchanged)) {
+      if (!table_registry_.ProcessTableMapEvent(body, body_len, &evicted_table_ids, &unchanged)) {
         last_error_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("table_map_parse_failed")
@@ -455,7 +458,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
             .Error();
         break;
       }
-      if (evicted_table_id != UINT64_MAX) blocked_table_ids_.erase(evicted_table_id);
+      for (uint64_t evicted : evicted_table_ids) blocked_table_ids_.erase(evicted);
       const TableMetadata* meta = table_registry_.Lookup(table_id);
       if (meta) {
         // A byte-identical TABLE_MAP re-registers no new schema, so the work
@@ -507,7 +510,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
           ReportUnknownSignedness(&resolved);
         }
-        table_registry_.ReplaceMetadata(table_id, std::move(resolved));
+        evicted_table_ids.clear();
+        table_registry_.ReplaceMetadata(table_id, std::move(resolved), &evicted_table_ids);
+        for (uint64_t evicted : evicted_table_ids) blocked_table_ids_.erase(evicted);
       }
       break;
     }
