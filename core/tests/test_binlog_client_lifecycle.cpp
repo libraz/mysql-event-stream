@@ -1097,6 +1097,99 @@ TEST(BinlogClientLifecycle, PollAfterStopNamesReconnectInsteadOfStart) {
   client.Disconnect();
 }
 
+/**
+ * @brief Stop() from another thread releases a Poll() already waiting on the
+ *        queue.
+ *
+ * The header names stop() as the one entry point a thread other than the
+ * client's owner may call, and releasing a parked consumer is what that is
+ * for: a poll waiting on a source that has gone quiet has no other way out,
+ * and a caller shutting down cannot be made to sit through the read timeout
+ * first.
+ */
+TEST(BinlogClientLifecycle, StopFromAnotherThreadReleasesAPollWaitingOnTheQueue) {
+  // The scripted peer goes silent after its one event, so the reader parks in
+  // recv() and nothing else is ever queued. The read timeout is what the poll
+  // below would otherwise be waiting for, and it is set far past the bound this
+  // test asserts so that only the stop can account for the poll returning.
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 60)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // Draining the one scripted event is what leaves the queue empty, which is
+  // the state in which the next poll genuinely waits.
+  const PollResult delivered = client.Poll();
+  ASSERT_EQ(delivered.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(delivered.data, nullptr);
+  ASSERT_TRUE(peer.WaitUntilStalled(seconds(3)));
+
+  // The stop is held back so the poll is measurably waiting when it arrives: a
+  // stop that landed first would be answered by Poll()'s not-streaming
+  // fast path instead, which is a different path and proves nothing here.
+  constexpr milliseconds kStopDelay(300);
+  std::atomic<bool> poll_entered{false};
+  std::thread stopper([&] {
+    while (!poll_entered.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(milliseconds(1));
+    }
+    std::this_thread::sleep_for(kStopDelay);
+    client.Stop();
+  });
+
+  poll_entered.store(true, std::memory_order_release);
+  const auto poll_started = steady_clock::now();
+  const PollResult interrupted = client.Poll();
+  const auto elapsed = steady_clock::now() - poll_started;
+  stopper.join();
+
+  EXPECT_EQ(interrupted.error, MES_ERR_DISCONNECTED) << client.GetLastError();
+  EXPECT_EQ(interrupted.data, nullptr);
+  // The poll waited for the stop rather than returning ahead of it,
+  EXPECT_GE(elapsed, kStopDelay / 2);
+  // and the stop is what ended the wait, not the configured read timeout.
+  EXPECT_LT(elapsed, seconds(5));
+  EXPECT_FALSE(client.IsStreaming());
+
+  client.Disconnect();
+}
+
+/**
+ * @brief A poll after a stop never hands out an event the stopped stream had
+ *        already queued.
+ *
+ * Stop() latches until a reconnect, so everything the reader buffered belongs
+ * to a stream the caller has abandoned. Delivering one of those afterwards
+ * would hand a consumer a row change from a position it has stopped tracking,
+ * and would do it with an error state already set.
+ */
+TEST(BinlogClientLifecycle, PollAfterStopDoesNotHandOutAnEventTheStreamHadQueued) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // Nothing is polled first: the scripted event has to be sitting in the queue
+  // when the stop arrives, otherwise there is nothing that could be handed out
+  // wrongly and the assertions below would hold for any stopped client.
+  ASSERT_TRUE(WaitForQueuedEvents(client, 1, seconds(3)));
+  ASSERT_EQ(BinlogClientTestAccess::QueuedEvents(client), 1u);
+
+  client.Stop();
+
+  const PollResult after_stop = client.Poll();
+  EXPECT_EQ(after_stop.error, MES_ERR_DISCONNECTED) << client.GetLastError();
+  EXPECT_EQ(after_stop.data, nullptr);
+  EXPECT_EQ(after_stop.size, 0u);
+  EXPECT_FALSE(client.IsStreaming());
+  // Released as well as withheld: the abandoned stream's payload must not stay
+  // resident for the rest of the client's life just because it was never read.
+  EXPECT_EQ(BinlogClientTestAccess::QueuedEvents(client), 0u);
+  EXPECT_EQ(client.QueuedBytes(), 0u);
+
+  client.Disconnect();
+}
+
 TEST(BinlogClientLifecycle, EventAtMaxEventSizeSurvivesTheMinimumQueueBudget) {
   constexpr uint32_t kMaxEventSize = 4096;
   ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(kMaxEventSize));
