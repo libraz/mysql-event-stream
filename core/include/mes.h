@@ -468,6 +468,10 @@ MES_API uint32_t mes_get_max_event_size(mes_engine_t* engine);
  * contains an FDE, the engine auto-detects the algorithm and this setting
  * is overridden.
  *
+ * When the bytes come from mes_client_poll() or mes_client_poll_batch(), take
+ * the value from the `checksum_enabled` field of the result about to be fed:
+ * that is the framing the client read those bytes under.
+ *
  * @param engine Engine handle.
  * @param enabled Non-zero to treat events as checksummed; 0 otherwise.
  * @return MES_OK on success, MES_ERR_NULL_ARG if @p engine is NULL.
@@ -712,12 +716,25 @@ typedef struct {
  *       wall-clock timestamps or update lag metrics without treating
  *       the poll as a data event. A single poll result has at most one
  *       of these signals set.
+ * @note `checksum_enabled` travels with the event because the client's own
+ *       framing is not constant across a stream: a FORMAT_DESCRIPTION_EVENT
+ *       changes it, and the reader may already have queued events read under
+ *       the previous value. An engine consuming these bytes must be framed
+ *       from the field on the result it is about to feed, so each event is
+ *       parsed under the framing it was read with. Sampling
+ *       mes_client_checksum_enabled() once and applying it to every result
+ *       frames events under a value that was never theirs.
  */
 typedef struct {
   mes_error_t error;
   const uint8_t* data; /**< Event data, valid until next poll. NULL on error. */
   size_t size;
   int is_heartbeat; /**< 1 if this poll represents a server heartbeat (no data). */
+  /** 1 when this event's last four bytes are a CRC32 trailer, 0 when the event
+   *  carries no trailer. Meaningful only while `data` is non-NULL: a heartbeat
+   *  and an error sentinel carry no event, so nothing framed them and the field
+   *  is 0. Pass it to mes_set_checksum_enabled() before feeding `data`. */
+  int checksum_enabled;
 } mes_poll_result_t;
 
 /**
@@ -897,12 +914,14 @@ MES_API const char* mes_client_last_error(mes_client_t* client);
 MES_API const char* mes_client_current_gtid(mes_client_t* client);
 
 /**
- * @brief Return whether the connected binlog stream carries CRC32 trailers.
+ * @brief Return the framing the reader is applying to the events it reads now.
  *
- * Call after mes_client_start(). Pass the result to
- * mes_set_checksum_enabled() on a raw engine consuming this client's poll
- * results, so the engine frames the trailer the way the wire does.
- * FORMAT_DESCRIPTION_EVENT can subsequently update both layers.
+ * This is a live view of the reader thread's state, which a
+ * FORMAT_DESCRIPTION_EVENT moves: events read before that descriptor are
+ * already in the queue, framed under the previous value, and a poll returns
+ * them afterwards. It is therefore a monitoring and diagnostic value, not the
+ * framing of any particular result -- to frame an engine, use the
+ * `checksum_enabled` field of the result being fed.
  *
  * The client verifies each event's trailer on its reader thread and an engine
  * fed those bytes verifies it again, so a checksummed event polled through

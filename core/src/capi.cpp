@@ -130,6 +130,8 @@ static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, data) == 8,
 static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, size) == 16, "size moved");
 static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, is_heartbeat) == 24,
               "is_heartbeat moved");
+static_assert(!kRecordedLayoutApplies || offsetof(mes_poll_result_t, checksum_enabled) == 28,
+              "checksum_enabled moved");
 
 }  // namespace
 

@@ -80,6 +80,12 @@ struct QueuedEvent {
   uint16_t server_error_code = 0;  ///< MySQL ERR packet code for an error sentinel
   std::string error_message;       ///< Detailed error text for an error sentinel
   bool is_heartbeat = false;       ///< true for silent heartbeats from the server
+  /// Framing the reader applied to this event: true when its last four bytes
+  /// are a CRC32 trailer. Recorded per event because a FORMAT_DESCRIPTION_EVENT
+  /// moves the reader's framing while earlier events, read under the previous
+  /// one, are still queued. False for a heartbeat or an error sentinel, neither
+  /// of which carries an event.
+  bool checksum_enabled = false;
   /// Committed GTID promoted after the consumer finishes this event. Its length
   /// follows the number of distinct GTID source UUIDs, not the event, which is
   /// why it is charged to the byte budget like the payload is.

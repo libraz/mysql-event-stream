@@ -153,6 +153,7 @@ MES_API mes_poll_result_t mes_client_poll(mes_client_t* c) {
   out.data = result.data;
   out.size = result.size;
   out.is_heartbeat = result.is_heartbeat ? 1 : 0;
+  out.checksum_enabled = result.checksum_enabled ? 1 : 0;
   return out;
 }
 
@@ -176,6 +177,7 @@ MES_API mes_error_t mes_client_poll_batch(mes_client_t* c, mes_poll_result_t* re
     results[i].data = batch[i].data;
     results[i].size = batch[i].size;
     results[i].is_heartbeat = batch[i].is_heartbeat ? 1 : 0;
+    results[i].checksum_enabled = batch[i].checksum_enabled ? 1 : 0;
   }
   *result_count = batch.size();
   return MES_OK;

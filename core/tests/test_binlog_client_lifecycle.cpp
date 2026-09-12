@@ -24,9 +24,11 @@
 #include <vector>
 
 #include "binary_util.h"
+#include "cdc_engine.h"
 #include "client/binlog_client.h"
 #include "client/event_queue.h"
 #include "client/gtid_encoder.h"
+#include "crc32.h"
 #include "event_header.h"
 #include "mariadb_gtid.h"
 #include "protocol/mysql_binlog_stream.h"
@@ -105,6 +107,9 @@ void AppendLenEncString(std::vector<uint8_t>* out, const std::string& value) {
   out->insert(out->end(), value.begin(), value.end());
 }
 
+/** @brief A FORMAT_DESCRIPTION_EVENT declaring CRC32, with a matching trailer. */
+std::vector<uint8_t> MakeCrc32FormatDescriptionEvent();
+
 /**
  * @brief A loopback MySQL server that follows a fixed script.
  *
@@ -132,6 +137,12 @@ class ScriptedMysqlPeer {
     /// never learns that a client stopped reading, so the dump keeps arriving
     /// after the client has given up on it.
     kStreamCorruptedEventThenKeepStreaming,
+    /// Report binlog_checksum=NONE, stream `stream_event`, then a
+    /// FORMAT_DESCRIPTION_EVENT declaring CRC32. That is the order a source
+    /// produces when the file being read was written under a checksum setting
+    /// the global variable no longer holds: the first event is read under one
+    /// framing and the descriptor that follows establishes another.
+    kStreamEventAheadOfTheFormatDescription,
   };
 
   /// ER_SERVER_SHUTDOWN: ends a dump without implying anything about the
@@ -287,6 +298,16 @@ class ScriptedMysqlPeer {
           // replacement stream over this same connection.
           SendPacket(peer, 3, BuildStreamError(dump_error));
           continue;
+        }
+        if (mode == Mode::kStreamEventAheadOfTheFormatDescription) {
+          std::vector<uint8_t> packet{0x00};  // replication OK marker
+          packet.insert(packet.end(), stream_event.begin(), stream_event.end());
+          const std::vector<uint8_t> descriptor = MakeCrc32FormatDescriptionEvent();
+          std::vector<uint8_t> descriptor_packet{0x00};
+          descriptor_packet.insert(descriptor_packet.end(), descriptor.begin(), descriptor.end());
+          if (SendPacket(peer, 1, packet)) SendPacket(peer, 2, descriptor_packet);
+          Stall(peer);
+          break;
         }
         if (mode == Mode::kStreamCorruptedEventThenKeepStreaming) {
           std::vector<uint8_t> packet{0x00};  // replication OK marker
@@ -553,6 +574,22 @@ std::vector<uint8_t> MakeWireEvent(uint32_t event_length) {
   for (int i = 5; i < 9; ++i) event[i] = 0;  // server id
   SetEventLength(&event);
   for (int i = 13; i < 19; ++i) event[i] = 0;  // next position + flags
+  return event;
+}
+
+std::vector<uint8_t> MakeCrc32FormatDescriptionEvent() {
+  // Fixed FDE prefix after the common header, then the checksum algorithm byte
+  // the detector reads, then the trailer that byte announces.
+  constexpr size_t kFdePrefix = 57;
+  std::vector<uint8_t> event(kEventHeaderSize + kFdePrefix + 1 + kChecksumSize, 0);
+  event[4] = static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent);
+  event[kEventHeaderSize + kFdePrefix] = kBinlogChecksumAlgCrc32;
+  SetEventLength(&event);
+  const size_t data_length = event.size() - kChecksumSize;
+  const uint32_t crc = ComputeCRC32(event.data(), data_length);
+  for (size_t byte = 0; byte < kChecksumSize; ++byte) {
+    event[data_length + byte] = static_cast<uint8_t>(crc >> (8 * byte));
+  }
   return event;
 }
 
@@ -1329,6 +1366,66 @@ TEST(BinlogClientLifecycle, RestartDoesNotPublishABatchCheckpointFromThePrevious
   // Nothing has been delivered since the restart, so the first poll of the new
   // stream must not publish a checkpoint the previous one left behind.
   EXPECT_EQ(std::string(client.GetCurrentGtid()), kConfiguredGtid);
+
+  client.Stop();
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, AnEventKeepsTheFramingItWasReadUnderWhenTheDescriptorMovesIt) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamEventAheadOfTheFormatDescription,
+                         MakePreviousGtidsEvent(kDeliveredGtid));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  const PollResult before_descriptor = client.Poll();
+  ASSERT_EQ(before_descriptor.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(before_descriptor.data, nullptr);
+  // The source reported binlog_checksum=NONE, so this event was read without a
+  // trailer and carries that framing however the stream continues.
+  EXPECT_FALSE(before_descriptor.checksum_enabled);
+
+  const PollResult descriptor = client.Poll();
+  ASSERT_EQ(descriptor.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(descriptor.data, nullptr);
+  EXPECT_TRUE(descriptor.checksum_enabled);
+
+  // The client's own view has moved to what the descriptor established, which
+  // is exactly the value the first event must not be framed with.
+  EXPECT_TRUE(client.ChecksumEnabled());
+
+  client.Stop();
+  client.Disconnect();
+}
+
+TEST(BinlogClientLifecycle, TheEngineFramesAnEventFromTheResultThatCarriedIt) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamEventAheadOfTheFormatDescription,
+                         MakePreviousGtidsEvent(kDeliveredGtid));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  const PollResult first = client.Poll();
+  ASSERT_EQ(first.error, MES_OK) << client.GetLastError();
+  ASSERT_NE(first.data, nullptr);
+  // The result's bytes die with the next poll, and the comparison below needs
+  // them afterwards.
+  const std::vector<uint8_t> event(first.data, first.data + first.size);
+  const bool framing = first.checksum_enabled;
+
+  CdcEngine from_result;
+  from_result.SetChecksumEnabled(framing);
+  EXPECT_EQ(from_result.Feed(event.data(), event.size()), event.size());
+  EXPECT_EQ(from_result.ErrorCode(), MES_OK);
+
+  // Drain the descriptor so the client's view is the post-descriptor one, then
+  // frame the same event with it: four body bytes are read as a trailer and the
+  // engine refuses the event it had just accepted.
+  ASSERT_EQ(client.Poll().error, MES_OK) << client.GetLastError();
+  CdcEngine from_client_view;
+  from_client_view.SetChecksumEnabled(client.ChecksumEnabled());
+  from_client_view.Feed(event.data(), event.size());
+  EXPECT_EQ(from_client_view.ErrorCode(), MES_ERR_CHECKSUM);
 
   client.Stop();
   client.Disconnect();

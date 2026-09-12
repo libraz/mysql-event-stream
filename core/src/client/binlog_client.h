@@ -64,6 +64,10 @@ struct PollResult {
   const uint8_t* data = nullptr;  // Valid until next Poll() call
   size_t size = 0;
   bool is_heartbeat = false;
+  /// Framing this event was read under: true when its last four bytes are a
+  /// CRC32 trailer. False whenever `data` is null, because a heartbeat and an
+  /// error sentinel carry no event for a framing to apply to.
+  bool checksum_enabled = false;
 };
 
 /**
@@ -92,11 +96,14 @@ struct PollResult {
  *   client.StartStream();
  *   // The reader thread already verified every queued event's CRC32, so the
  *   // engine frames the trailer without computing it a second time.
- *   engine.SetChecksumEnabled(client.ChecksumEnabled());
  *   engine.SetTrailerPreVerified(true);
  *   while (client.IsStreaming()) {
  *     auto result = client.Poll();
- *     if (result.data) engine.Feed(result.data, result.size);
+ *     if (!result.data) continue;
+ *     // Per result, not once per stream: the framing the reader used for this
+ *     // event is the only one under which it parses correctly.
+ *     engine.SetChecksumEnabled(result.checksum_enabled);
+ *     engine.Feed(result.data, result.size);
  *   }
  */
 class BinlogClient {
@@ -187,7 +194,13 @@ class BinlogClient {
   /** @brief Get total CRC32 checksum errors detected (thread-safe) */
   uint64_t GetCRCErrors() const;
 
-  /** @brief Whether wire events currently carry CRC32 trailers. */
+  /**
+   * @brief Whether the events the reader is reading now carry CRC32 trailers.
+   *
+   * A live view of the reader's framing, which a FORMAT_DESCRIPTION_EVENT
+   * moves while events read under the previous value are still queued. Use
+   * PollResult::checksum_enabled to frame a consumer of a specific event.
+   */
   bool ChecksumEnabled() const;
 
   /**

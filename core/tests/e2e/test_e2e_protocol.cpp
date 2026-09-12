@@ -735,7 +735,6 @@ TEST(E2EProtocol, EmptyStartGtidSnapshotsCurrentPosition) {
 
   mes_engine_t* engine = mes_create();
   ASSERT_NE(engine, nullptr);
-  ASSERT_EQ(mes_set_checksum_enabled(engine, mes_client_checksum_enabled(client)), MES_OK);
   bool saw_before = false;
   bool saw_after = false;
   for (int poll_count = 0; poll_count < 100 && !saw_after; ++poll_count) {
@@ -743,6 +742,7 @@ TEST(E2EProtocol, EmptyStartGtidSnapshotsCurrentPosition) {
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
     if (result.is_heartbeat || result.data == nullptr) continue;
 
+    ASSERT_EQ(mes_set_checksum_enabled(engine, result.checksum_enabled), MES_OK);
     size_t consumed = 0;
     ASSERT_EQ(mes_feed(engine, result.data, result.size, &consumed), MES_OK);
     const mes_event_t* event = nullptr;

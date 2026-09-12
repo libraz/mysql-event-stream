@@ -777,6 +777,10 @@ void BinlogClient::ReaderLoop() {
     qe.data = std::move(reader_scratch_);
     qe.data_offset = event_pkt.data_offset;
     qe.error = MES_OK;
+    // The framing decision made for this event above, carried with it. The
+    // consumer's engine has to reproduce it, and by the time the event is
+    // polled the atomic may describe a later part of the stream.
+    qe.checksum_enabled = event_has_checksum;
     qe.checkpoint_gtid = std::move(checkpoint_gtid);
 
     const EventQueue::PushResult push_result = event_queue_->PushWithStatus(std::move(qe));
@@ -842,7 +846,7 @@ PollResult BinlogClient::Poll() {
     SetLastError(stop_requested_.load(std::memory_order_acquire)
                      ? "Poll on a client that was stopped; reconnect before polling again"
                      : "Poll on a client that is not streaming; call start() first");
-    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
+    return {MES_ERR_DISCONNECTED, nullptr, 0, false, false};
   }
 
   QueuedEvent event;
@@ -850,13 +854,13 @@ PollResult BinlogClient::Poll() {
     // Queue closed (shutdown)
     streaming_.store(false, std::memory_order_release);
     SetLastError("Binlog stream stopped while polling");
-    return {MES_ERR_DISCONNECTED, nullptr, 0, false};
+    return {MES_ERR_DISCONNECTED, nullptr, 0, false, false};
   }
 
   // Heartbeat: empty data, is_heartbeat=true. No current_event_ buffer
   // update because there is no data to retain.
   if (event.is_heartbeat) {
-    return {MES_OK, nullptr, 0, true};
+    return {MES_OK, nullptr, 0, true, false};
   }
 
   if (event.error != MES_OK) {
@@ -882,7 +886,7 @@ PollResult BinlogClient::Poll() {
         .Field("server_error_code", static_cast<uint64_t>(event.server_error_code))
         .Error();
     streaming_.store(false, std::memory_order_release);
-    return {event.error, nullptr, 0, false};
+    return {event.error, nullptr, 0, false, false};
   }
 
   // Store event data so pointer remains valid until next Poll().
@@ -892,7 +896,7 @@ PollResult BinlogClient::Poll() {
   const size_t offset = current_event_.data_offset;
   const uint8_t* payload = current_event_.data.data() + offset;
   const size_t payload_size = current_event_.data.size() - offset;
-  return {MES_OK, payload, payload_size, false};
+  return {MES_OK, payload, payload_size, false, current_event_.checksum_enabled};
 }
 
 size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* results) {
@@ -915,15 +919,15 @@ size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* resul
   batch_events_.push_back(std::move(current_event_));
   {
     const QueuedEvent& held = batch_events_.back();
-    results->push_back(
-        {MES_OK, held.data.data() + held.data_offset, held.data.size() - held.data_offset, false});
+    results->push_back({MES_OK, held.data.data() + held.data_offset,
+                        held.data.size() - held.data_offset, false, held.checksum_enabled});
   }
 
   while (results->size() < max_events) {
     QueuedEvent event;
     if (!event_queue_ || !event_queue_->TryPop(&event)) break;
     if (event.is_heartbeat) {
-      results->push_back({MES_OK, nullptr, 0, true});
+      results->push_back({MES_OK, nullptr, 0, true, false});
       continue;
     }
     if (event.error != MES_OK) {
@@ -931,13 +935,13 @@ size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* resul
           event.error_message.empty() ? "Binlog stream read error" : event.error_message;
       SetLastError(message);
       streaming_.store(false, std::memory_order_release);
-      results->push_back({event.error, nullptr, 0, false});
+      results->push_back({event.error, nullptr, 0, false, false});
       break;
     }
     batch_events_.push_back(std::move(event));
     const QueuedEvent& held = batch_events_.back();
-    results->push_back(
-        {MES_OK, held.data.data() + held.data_offset, held.data.size() - held.data_offset, false});
+    results->push_back({MES_OK, held.data.data() + held.data_offset,
+                        held.data.size() - held.data_offset, false, held.checksum_enabled});
   }
   return results->size();
 }
