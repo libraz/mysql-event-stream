@@ -154,23 +154,29 @@ whatever else is already queued, and `destroy()` when finished. `destroy()` is
 idempotent.
 
 ```typescript
-import { BinlogClient } from "@libraz/mysql-event-stream";
+import { BinlogClient, CdcEngine } from "@libraz/mysql-event-stream";
 
 const client = new BinlogClient({
   host: "127.0.0.1",
   user: "replicator",
   password: "secret",
 });
+const engine = new CdcEngine();
 
 client.start();
 try {
   const result = await client.poll();
   // A heartbeat is a healthy silent interval, not an event: data is null.
   if (!result.isHeartbeat && result.data !== null) {
-    feedToEngine(result.data);
+    // Frame the engine from the result, not from client.checksumEnabled: a
+    // FORMAT_DESCRIPTION_EVENT moves the client's framing while events read
+    // under the previous one are still queued.
+    engine.setChecksumEnabled(result.checksumEnabled);
+    engine.feed(result.data);
   }
 } finally {
   client.destroy();
+  engine.destroy();
 }
 ```
 

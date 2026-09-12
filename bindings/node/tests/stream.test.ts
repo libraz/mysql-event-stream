@@ -13,6 +13,7 @@ const contract = loadBindingContract();
 interface PollResult {
   data: Uint8Array | null;
   isHeartbeat: boolean;
+  checksumEnabled: boolean;
 }
 
 // Shared spies for the reconnect tests below. Hoisted so the vi.mock factories
@@ -26,7 +27,7 @@ const mocks = vi.hoisted(() => ({
   // Returns the next poll result. Default: a single null-data poll that keeps
   // the loop idle (tests that need data override this).
   pollImpl: vi.fn<() => Promise<PollResult>>(() =>
-    Promise.resolve({ data: null, isHeartbeat: false }),
+    Promise.resolve({ data: null, isHeartbeat: false, checksumEnabled: false }),
   ),
   // Records the chunk fed and returns the number of bytes consumed. Default:
   // consume everything. Tests simulating backpressure override this.
@@ -163,7 +164,11 @@ describe("CdcStream", () => {
     mocks.startImpl.mockReset();
     mocks.startImpl.mockImplementation(() => {});
     mocks.pollImpl.mockReset();
-    mocks.pollImpl.mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false });
+    mocks.pollImpl.mockResolvedValueOnce({
+      data: new Uint8Array([1]),
+      isHeartbeat: false,
+      checksumEnabled: true,
+    });
     mocks.nextEventImpl.mockReset();
     mocks.nextEventImpl.mockReturnValueOnce(rowEvent()).mockReturnValue(null);
 
@@ -224,7 +229,11 @@ describe("CdcStream", () => {
     mocks.startImpl.mockReset();
     mocks.startImpl.mockImplementation(() => {});
     mocks.pollImpl.mockReset();
-    mocks.pollImpl.mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false });
+    mocks.pollImpl.mockResolvedValueOnce({
+      data: new Uint8Array([1]),
+      isHeartbeat: false,
+      checksumEnabled: true,
+    });
     mocks.feedImpl.mockReset();
     mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
     mocks.nextEventImpl.mockReset();
@@ -248,11 +257,18 @@ describe("CdcStream", () => {
     mocks.startImpl.mockImplementation(() => {});
     mocks.pollImpl.mockReset();
     mocks.pollImpl
-      .mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false })
+      .mockResolvedValueOnce({
+        data: new Uint8Array([1]),
+        isHeartbeat: false,
+        checksumEnabled: true,
+      })
       .mockImplementation(
         () =>
           new Promise((resolve) =>
-            setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5),
+            setTimeout(
+              () => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }),
+              5,
+            ),
           ),
       );
     mocks.feedImpl.mockReset();
@@ -296,19 +312,38 @@ describe("CdcStream", () => {
     await expect(stream.close()).resolves.toBeUndefined();
   });
 
-  it("propagates the client checksum mode to the raw engine", async () => {
+  it("frames each result on the raw engine with the flag that came with it", async () => {
     mocks.checksumImpl.mockReset();
     mocks.startImpl.mockReset();
     mocks.startImpl.mockImplementation(() => {});
+    mocks.feedImpl.mockReset();
+    mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
     mocks.pollImpl.mockReset();
-    mocks.pollImpl.mockImplementation(
-      () =>
-        new Promise((resolve) => setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5)),
-    );
+    mocks.pollImpl
+      // Read before a FORMAT_DESCRIPTION_EVENT moved the client's framing.
+      .mockResolvedValueOnce({
+        data: new Uint8Array([1]),
+        isHeartbeat: false,
+        checksumEnabled: false,
+      })
+      .mockResolvedValueOnce({
+        data: new Uint8Array([2]),
+        isHeartbeat: false,
+        checksumEnabled: true,
+      })
+      .mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }),
+              5,
+            ),
+          ),
+      );
 
     const stream = new CdcStream({ host: "127.0.0.1" });
     const next = stream[Symbol.asyncIterator]().next();
-    await vi.waitFor(() => expect(mocks.checksumImpl).toHaveBeenCalledWith(true));
+    await vi.waitFor(() => expect(mocks.checksumImpl.mock.calls).toEqual([[false], [true]]));
     await stream.close();
     await next;
   });
@@ -320,7 +355,9 @@ describe("CdcStream", () => {
     mocks.pollImpl.mockReset();
     mocks.pollImpl.mockImplementation(
       () =>
-        new Promise((resolve) => setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5)),
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }), 5),
+        ),
     );
 
     const stream = new CdcStream({
@@ -354,7 +391,7 @@ describe("CdcStream", () => {
     mocks.pollImpl.mockImplementation(
       () =>
         new Promise((resolve) => {
-          releasePoll = () => resolve({ data: null, isHeartbeat: false });
+          releasePoll = () => resolve({ data: null, isHeartbeat: false, checksumEnabled: false });
         }),
     );
     mocks.stopImpl.mockImplementation(() => releasePoll?.());
@@ -389,14 +426,17 @@ describe("CdcStream", () => {
       const first = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
       const second = new Uint8Array([10, 11, 12, 13, 14, 15]);
       mocks.pollImpl
-        .mockResolvedValueOnce({ data: first, isHeartbeat: false })
-        .mockResolvedValueOnce({ data: second, isHeartbeat: false })
+        .mockResolvedValueOnce({ data: first, isHeartbeat: false, checksumEnabled: true })
+        .mockResolvedValueOnce({ data: second, isHeartbeat: false, checksumEnabled: true })
         // Afterwards yield empty polls so the loop idles but stays responsive
         // to close() (a real client unblocks poll() via stop()).
         .mockImplementation(
           () =>
             new Promise((resolve) =>
-              setTimeout(() => resolve({ data: null, isHeartbeat: false }), 5),
+              setTimeout(
+                () => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }),
+                5,
+              ),
             ),
         );
 

@@ -15,6 +15,25 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
+/** A run of bytes together with the checksum framing they were read under. */
+interface FramedBytes {
+  bytes: Uint8Array;
+  checksumEnabled: boolean;
+}
+
+/**
+ * Append `data` to the pending runs, extending the last one when they share a
+ * framing and starting a new run when they do not.
+ */
+function appendFramed(pending: FramedBytes[], data: Uint8Array, checksumEnabled: boolean): void {
+  const tail = pending.at(-1);
+  if (tail !== undefined && tail.checksumEnabled === checksumEnabled) {
+    tail.bytes = concatBytes(tail.bytes, data);
+    return;
+  }
+  pending.push({ bytes: data, checksumEnabled });
+}
+
 /** Extract the numeric `code` an addon error carries, if any. */
 function errorCode(err: unknown): number | undefined {
   if (err !== null && typeof err === "object" && "code" in err) {
@@ -160,18 +179,20 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
 
     try {
       while (!this.closed) {
-        // Bytes the engine declined to consume on the previous feed (e.g. when
-        // a queue limit applies backpressure). They are prepended to the next
-        // chunk so no data is lost. Scoped per-connection: on reconnect the
-        // engine is reset and the stream resumes from a GTID, so any leftover
-        // from the dropped connection must not carry over.
-        let leftover: Uint8Array | null = null;
+        // Bytes waiting for the engine, each run paired with the checksum
+        // framing the client read it under. Consecutive events read under the
+        // same framing are one byte stream and are fed as one; a framing change
+        // starts a new segment, because the engine frames whatever it is given
+        // with a single flag. A segment survives a feed the engine did not take
+        // whole (queue backpressure) and is retried ahead of later bytes.
+        // Scoped per-connection: on reconnect the engine is reset and the
+        // stream resumes from a GTID, so nothing pending may carry over.
+        const pending: FramedBytes[] = [];
         try {
           // Construction performs connect(), so it belongs to the same retry
           // budget as start() and poll().
           this.client = new BinlogClient(this.config);
           this.client.start();
-          this.engine!.setChecksumEnabled(this.client.checksumEnabled);
 
           while (!this.closed) {
             const results = await this.client.pollBatch();
@@ -180,26 +201,37 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
             // once per decoded row.
             this.cacheCurrentGtid();
             for (const result of results) {
-              if (!result.data && !leftover) continue;
+              if (result.data) appendFramed(pending, result.data, result.checksumEnabled);
 
-              let chunk: Uint8Array;
-              if (leftover && result.data) {
-                chunk = concatBytes(leftover, result.data);
-              } else if (leftover) {
-                chunk = leftover;
-              } else {
-                chunk = result.data as Uint8Array;
-              }
+              for (let head = pending[0]; head !== undefined; head = pending[0]) {
+                // Stated per segment rather than tracked, because the engine
+                // also moves this flag itself when a FORMAT_DESCRIPTION_EVENT
+                // passes through it. What the segment was read under is the
+                // only value that is known here.
+                this.engine!.setChecksumEnabled(head.checksumEnabled);
+                const consumed = this.engine!.feed(head.bytes);
+                const partial = consumed < head.bytes.length;
+                if (partial) {
+                  head.bytes = head.bytes.subarray(consumed);
+                } else {
+                  pending.shift();
+                }
 
-              const consumed = this.engine!.feed(chunk);
-              leftover = consumed < chunk.length ? chunk.subarray(consumed) : null;
-
-              for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
-                // A decoded event is the only progress signal that can reset
-                // retry accounting. Framing metadata may be received before the
-                // same permanently undecodable event on every reconnect.
-                reconnectAttempts = 0;
-                yield ev;
+                for (
+                  let ev = this.engine!.nextEvent();
+                  ev !== null;
+                  ev = this.engine!.nextEvent()
+                ) {
+                  // A decoded event is the only progress signal that can reset
+                  // retry accounting. Framing metadata may be received before
+                  // the same permanently undecodable event on every reconnect.
+                  reconnectAttempts = 0;
+                  yield ev;
+                }
+                // The engine did not take this run whole, which is queue
+                // backpressure: hold what is left -- and everything behind it,
+                // so order is kept -- until the next batch brings more bytes.
+                if (partial) break;
               }
             }
           }

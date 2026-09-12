@@ -143,7 +143,13 @@ export class BinlogClient {
     return this.client?.currentGtid ?? "";
   }
 
-  /** Checksum mode negotiated for events returned by poll(). */
+  /**
+   * Framing the reader is applying to the events it reads now.
+   *
+   * A `FORMAT_DESCRIPTION_EVENT` moves this while events read under the
+   * previous value are still queued, so it describes the stream rather than any
+   * one result. Frame an engine from {@link PollResult.checksumEnabled}.
+   */
   get checksumEnabled(): boolean {
     return this.client?.checksumEnabled ?? false;
   }

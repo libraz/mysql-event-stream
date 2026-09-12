@@ -258,4 +258,13 @@ export interface StreamConfig extends ClientConfig {
 export interface PollResult {
   data: Uint8Array | null;
   isHeartbeat: boolean;
+  /**
+   * Framing this event was read under: `true` when its last four bytes are a
+   * CRC32 trailer. It travels with the event because a
+   * `FORMAT_DESCRIPTION_EVENT` moves the client's framing while events read
+   * under the previous one are still queued, so an engine fed `data` must be
+   * framed from here rather than from {@link BinlogClient.checksumEnabled}.
+   * `false` whenever `data` is null: nothing framed a heartbeat.
+   */
+  checksumEnabled: boolean;
 }

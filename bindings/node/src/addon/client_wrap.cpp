@@ -39,12 +39,14 @@ class PollWorker : public Napi::AsyncWorker {
         wrap_(wrap),
         deferred_(deferred),
         error_(MES_OK),
-        is_heartbeat_(false) {}
+        is_heartbeat_(false),
+        checksum_enabled_(false) {}
 
   void Execute() override {
     mes_poll_result_t result = mes_client_poll(client_);
     error_ = result.error;
     is_heartbeat_ = result.is_heartbeat != 0;
+    checksum_enabled_ = result.checksum_enabled != 0;
 
     if (result.data && result.size > 0 && error_ == MES_OK) {
       data_.assign(result.data, result.data + result.size);
@@ -73,6 +75,7 @@ class PollWorker : public Napi::AsyncWorker {
       }
 
       result.Set("isHeartbeat", Napi::Boolean::New(env, is_heartbeat_));
+      result.Set("checksumEnabled", Napi::Boolean::New(env, checksum_enabled_));
       deferred_.Resolve(result);
     }
 
@@ -90,6 +93,7 @@ class PollWorker : public Napi::AsyncWorker {
   Napi::Promise::Deferred deferred_;
   mes_error_t error_;
   bool is_heartbeat_;
+  bool checksum_enabled_;
   std::vector<uint8_t> data_;
 };
 
@@ -122,6 +126,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
       }
       BatchResult result;
       result.is_heartbeat = raw[i].is_heartbeat != 0;
+      result.checksum_enabled = raw[i].checksum_enabled != 0;
       if (raw[i].data != nullptr && raw[i].size > 0) {
         result.data.assign(raw[i].data, raw[i].data + raw[i].size);
       }
@@ -159,6 +164,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
           result.Set("data", env.Null());
         }
         result.Set("isHeartbeat", Napi::Boolean::New(env, results_[i].is_heartbeat));
+        result.Set("checksumEnabled", Napi::Boolean::New(env, results_[i].checksum_enabled));
         output.Set(i, result);
       }
       deferred_.Resolve(output);
@@ -174,6 +180,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
  private:
   struct BatchResult {
     bool is_heartbeat = false;
+    bool checksum_enabled = false;
     std::vector<uint8_t> data;
   };
 
