@@ -16,7 +16,6 @@
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
-#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -175,30 +174,30 @@ struct ColumnValue {
 };
 
 /**
- * @brief Process-lifetime allocator for decoded row column arrays.
+ * @brief Memory resource backing the column array of every decoded row.
  *
- * A row is moved into a ChangeEvent and can outlive the decoder that produced
- * it, so a per-decode arena would either dangle or require copying.  A
- * synchronized pool keeps that ownership model intact while reusing the
- * small, same-shaped allocations made by RowData::columns across events and
- * consumer threads.  Individual string/blob payloads retain their normal
- * ownership and are bounded by the parser and column decoders.
+ * Every RowData in the process shares this one stateless resource, and that
+ * is a correctness constraint rather than a convenience.
+ * std::pmr::polymorphic_allocator has
+ * propagate_on_container_move_assignment == false, so a move between two
+ * pmr containers is the O(1) pointer steal it looks like only while their
+ * allocators compare equal; between unequal resources the same move silently
+ * degrades into an element-wise copy, with no diagnostic. A row is moved from
+ * the decoder into the engine's queue and out again through NextEvent(), so a
+ * per-engine, per-thread or per-decode resource would turn each of those hops
+ * into a deep copy of the row. A single stateless resource keeps every
+ * allocator equal and every hop O(1).
  *
- * The pool is constructed on first use and never destroyed. A consumer may hold
- * an engine with static storage duration whose queued ChangeEvents still own
- * rows allocated here; an ordinary function-local static is initialized on the
- * first row decode, hence after such an engine, and would therefore be
- * destroyed before it, leaving those rows to deallocate into a pool whose
- * lifetime has already ended. Constructing into static storage that is never
- * reclaimed keeps the resource valid for the whole process lifetime whatever
- * order the consumer's own statics were initialized in, and unlike a leaked
- * heap allocation it gives the leak sanitizers nothing to report.
+ * std::pmr::new_delete_resource() also returns a pointer valid for the whole
+ * program, which rows outliving their engine need: a consumer may hold an
+ * engine with static storage duration whose queued events still own rows when
+ * its destructor runs during process teardown.
+ *
+ * Individual string/blob payloads retain their normal ownership and are
+ * bounded by the parser and column decoders.
  */
 inline std::pmr::memory_resource* RowColumnMemoryResource() {
-  using PoolResource = std::pmr::synchronized_pool_resource;
-  alignas(PoolResource) static unsigned char storage[sizeof(PoolResource)];
-  static PoolResource* resource = new (storage) PoolResource();
-  return resource;
+  return std::pmr::new_delete_resource();
 }
 
 /**

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <zlib.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1213,6 +1214,44 @@ TEST(CdcEngineTest, NextEventEmptyQueue) {
   EXPECT_FALSE(engine.NextEvent(&event));
 }
 
+// NextEvent() drains by move-assigning the queued event over the caller's, and
+// that assignment hands over the queued row's column buffer only while both
+// rows' allocators compare equal. Unequal allocators substitute an
+// element-wise copy into the destination's existing buffer, with no
+// diagnostic, which is why the resource behind RowData::columns is a single
+// shared stateless one.
+//
+// Draining two events into the same ChangeEvent separates the two cases by
+// address: handing over installs the second event's own buffer, allocated
+// while the first was still alive and therefore a different address, whereas
+// copying assigns into the buffer already sitting in the destination and
+// leaves the address unchanged.
+TEST(CdcEngineTest, NextEventHandsOverQueuedRowBuffer) {
+  CdcEngine engine;
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  engine.Feed(table_map.data(), table_map.size());
+  for (int i = 0; i < 2; i++) {
+    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                  150 + 50 * i, BuildWriteRowsBody(42, 7000 + i));
+    engine.Feed(write.data(), write.size());
+  }
+  ASSERT_EQ(engine.PendingEventCount(), 2u);
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns.get_allocator().resource(), RowColumnMemoryResource());
+  // Held as an integer: the drain below deallocates this buffer, and the
+  // address is wanted only for the comparison.
+  const auto first_buffer = reinterpret_cast<uintptr_t>(event.after.columns.data());
+
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 7001);
+  EXPECT_NE(reinterpret_cast<uintptr_t>(event.after.columns.data()), first_buffer);
+}
+
 TEST(CdcEngineTest, RowEventWithoutTableMap) {
   CdcEngine engine;
 
@@ -1693,9 +1732,9 @@ TEST(CdcEngineTest, StaticStorageEngineCompletesDestructionAtProcessExit) {
 }
 
 // A second static engine, used to keep decoded rows queued past the end of
-// main(). Nothing in CdcEngine's constructor allocates a row, so the memory
-// resource backing RowData::columns is first used later than this engine was
-// constructed.
+// main(). The rows it owns deallocate during process teardown, so the memory
+// resource behind RowData::columns has to stay valid for longer than any
+// static a consumer of the library may declare.
 CdcEngine g_static_queued_rows_engine;
 
 TEST(CdcEngineTest, StaticStorageEngineDestroysQueuedRowsAtProcessExit) {

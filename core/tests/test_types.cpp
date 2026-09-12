@@ -5,6 +5,8 @@
 
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "types.h"
 
@@ -157,6 +159,33 @@ TEST(RowDataTest, WithColumns) {
   EXPECT_TRUE(row.columns[2].is_null);
 }
 
+// Moving a row must hand over its column buffer, not duplicate it. The
+// allocator behind RowData::columns does not propagate on move assignment, so
+// this is O(1) only while source and destination resources compare equal;
+// giving rows unequal resources would silently substitute an element-wise copy
+// on every hop a decoded row takes. The buffer address is the only direct
+// evidence of which of the two happened.
+TEST(RowDataTest, MoveBetweenContainersKeepsColumnBuffer) {
+  std::vector<RowData> source(1);
+  source[0].columns.push_back(ColumnValue::Int(ColumnType::kLong, 1));
+  source[0].columns.push_back(ColumnValue::String(ColumnType::kVarchar, "test"));
+  const ColumnValue* buffer = source[0].columns.data();
+
+  std::vector<RowData> destination;
+  destination.push_back(std::move(source[0]));
+  EXPECT_EQ(destination[0].columns.data(), buffer);
+
+  // Move assignment is where unequal resources would differ from equal ones:
+  // it is the one that can assign into the destination's existing storage
+  // instead of taking the source's. Given room to do exactly that, it still
+  // must not.
+  RowData assigned;
+  assigned.columns.reserve(2);
+  assigned = std::move(destination[0]);
+  EXPECT_EQ(assigned.columns.data(), buffer);
+  EXPECT_EQ(assigned.columns.size(), 2u);
+}
+
 // --- BinlogPosition ---
 
 TEST(BinlogPositionTest, DefaultValues) {
@@ -263,6 +292,28 @@ TEST(ChangeEventTest, DeleteEvent) {
   EXPECT_EQ(event.type, EventType::kDelete);
   EXPECT_EQ(event.before.columns.size(), 1u);
   EXPECT_TRUE(event.after.columns.empty());
+}
+
+// An event carries its rows through the same move that RowData is pinned on
+// above: into the engine's queue and back out of it. Both row images must hand
+// over their column buffers rather than duplicate them.
+TEST(ChangeEventTest, MoveBetweenContainersKeepsRowBuffers) {
+  ChangeEvent event;
+  event.type = EventType::kUpdate;
+  event.before.columns.push_back(ColumnValue::Int(ColumnType::kLong, 1));
+  event.after.columns.push_back(ColumnValue::Int(ColumnType::kLong, 2));
+  const ColumnValue* before_buffer = event.before.columns.data();
+  const ColumnValue* after_buffer = event.after.columns.data();
+
+  std::vector<ChangeEvent> queue;
+  queue.push_back(std::move(event));
+  EXPECT_EQ(queue[0].before.columns.data(), before_buffer);
+  EXPECT_EQ(queue[0].after.columns.data(), after_buffer);
+
+  ChangeEvent drained;
+  drained = std::move(queue[0]);
+  EXPECT_EQ(drained.before.columns.data(), before_buffer);
+  EXPECT_EQ(drained.after.columns.data(), after_buffer);
 }
 
 // --- ColumnType enum values ---
