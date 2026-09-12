@@ -258,7 +258,7 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
   EXPECT_TRUE(event.SourceSql().empty());
 }
 
-// One ANNOTATE_ROWS annotates every row of the ROWS event that follows it.
+// One ANNOTATE_ROWS annotates every row of the statement it introduces.
 // Copying the statement into each row would charge its length once per row,
 // which for a large statement dominates a queued event; the rows must share a
 // single copy instead.
@@ -291,6 +291,58 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsSharedAcrossTheRowsOfOneEvent) {
   EXPECT_EQ(first.SourceSql(), sql);
   EXPECT_EQ(second.SourceSql(), sql);
   EXPECT_EQ(first.source_sql.get(), second.source_sql.get());
+}
+
+// A statement whose row data exceeds the server's per-event size limit is
+// written as several consecutive ROWS events under a single ANNOTATE_ROWS,
+// with no TABLE_MAP or control event between them. Every one of those events
+// belongs to the annotated statement, so the annotation has to outlive the
+// first of them; a new ANNOTATE_ROWS is what marks the next statement.
+TEST(CdcEngineMariaDBTest, AnnotateRowsSqlCoversEveryRowsEventOfOneStatement) {
+  CdcEngine engine;
+  const std::string split_stmt = "INSERT INTO users VALUES (1),(2)";
+  const std::string next_stmt = "UPDATE users SET id = 3";
+  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
+                             50, std::vector<uint8_t>(split_stmt.begin(), split_stmt.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  auto first_chunk = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                                BuildWriteRowsBody(42, 1));
+  auto second_chunk = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+                                 BuildWriteRowsBody(42, 2));
+  ASSERT_EQ(engine.Feed(annotate.data(), annotate.size()), annotate.size());
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(first_chunk.data(), first_chunk.size()), first_chunk.size());
+  ASSERT_EQ(engine.Feed(second_chunk.data(), second_chunk.size()), second_chunk.size());
+
+  ChangeEvent first;
+  ChangeEvent second;
+  ASSERT_TRUE(engine.NextEvent(&first));
+  ASSERT_TRUE(engine.NextEvent(&second));
+  ASSERT_EQ(first.after.columns.size(), 1u);
+  ASSERT_EQ(second.after.columns.size(), 1u);
+  EXPECT_EQ(first.after.columns[0].int_val, 1);
+  EXPECT_EQ(second.after.columns[0].int_val, 2);
+  EXPECT_EQ(first.SourceSql(), split_stmt);
+  EXPECT_EQ(second.SourceSql(), split_stmt);
+  // The whole point of the shared pointer is that the split costs one copy of
+  // the statement, not one per ROWS event it was broken into.
+  EXPECT_EQ(first.source_sql.get(), second.source_sql.get());
+
+  // The next statement replaces it rather than inheriting it, which is what
+  // keeps the retention from attributing rows to a statement they did not
+  // come from.
+  auto next_annotate =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000, 250,
+                 std::vector<uint8_t>(next_stmt.begin(), next_stmt.end()));
+  auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 300,
+                               BuildWriteRowsBody(42, 3));
+  ASSERT_EQ(engine.Feed(next_annotate.data(), next_annotate.size()), next_annotate.size());
+  ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
+
+  ChangeEvent third;
+  ASSERT_TRUE(engine.NextEvent(&third));
+  EXPECT_EQ(third.SourceSql(), next_stmt);
 }
 
 // An event with no annotation must not hold an allocation for the empty case.

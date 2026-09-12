@@ -298,11 +298,14 @@ struct ChangeEvent {
   uint32_t timestamp = 0;
   EventPosition position;
   /// Original MariaDB SQL from the preceding ANNOTATE_ROWS event; null when the
-  /// event carried none. Held by shared pointer because one ANNOTATE_ROWS
-  /// annotates every row of the ROWS event that follows it: giving each row its
+  /// event carried none. The server emits one ANNOTATE_ROWS per statement
+  /// rather than per ROWS event: a statement whose row data exceeds the
+  /// server's per-event size limit is split across several consecutive ROWS
+  /// events that share that one annotation. The statement therefore stands
+  /// until the next annotation or the next control event, and covers every row
+  /// the statement produced. Held by shared pointer because giving each row its
   /// own copy charges the statement length per row, which for an 8 KB statement
-  /// dominates the queued event. All ChangeEvents from one ROWS event therefore
-  /// share a single copy. Use SourceSql() to read it.
+  /// dominates the queued event. Use SourceSql() to read it.
   std::shared_ptr<const std::string> source_sql;
 
   /**

@@ -565,8 +565,12 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     }
 
     case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent): {
-      // One allocation per ANNOTATE_ROWS event, shared by every row it
-      // annotates, instead of one copy of the statement per row.
+      // The server emits one ANNOTATE_ROWS per statement, not per ROWS event:
+      // a statement whose row data exceeds the per-event size limit produces
+      // several consecutive ROWS events under a single annotation. The
+      // statement is therefore held past a ROWS event and ends only at the
+      // next annotation or the next control event. One allocation is shared by
+      // every row it annotates instead of copied once per row.
       auto sql = std::make_shared<std::string>();
       if (MariaDBEventParser::ExtractAnnotateRowsBody(body, body_len, sql.get()) != MES_OK) {
         last_error_ = MES_ERR_PARSE;
