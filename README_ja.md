@@ -398,9 +398,12 @@ async def run():
 
 ## エラーコード
 
-ネイティブ側のエラーには安定した数値の `mes_error_t` コードが付きます。Node では
-`error.code` に `MesErrorCode` の値が入り、Python でも例外の `.code` が同じ値を返します
-(`MesErrorCode` は両方でエクスポートされます)。再試行するかどうかの判断には、
+ネイティブ側のエラーには安定した数値の `mes_error_t` コードが付き、各バインディングは
+それを持つ型を宣言しています。Node では `error.code` に値が入り、その形は `MesError` 型が
+表し、`catch` で受けた値は `isMesError()` で絞り込めます。Python はサーバーに到達できな
+かった場合だけ `MesConnectionError`（`ConnectionError` すなわち `OSError` の一種で、他の
+ソケット失敗と同じ分類）を、それ以外は `MesError` を送出します。どちらも `.code` を宣言
+しています。`MesErrorCode` は両方でエクスポートされます。再試行するかどうかの判断には、
 メッセージ文字列ではなくこのコードを使ってください。
 
 | コード | 意味 | 再試行の指針 |

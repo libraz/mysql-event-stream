@@ -443,10 +443,13 @@ head, so treat that as a signal to take a fresh snapshot.
 
 ## Error codes
 
-Native errors expose a stable numeric `mes_error_t` code. Node errors carry it
-as `error.code` with `MesErrorCode`; Python exceptions carry `.code` with the
-same values and export `MesErrorCode`. Use the code, not message text, for
-retry decisions.
+Native errors expose a stable numeric `mes_error_t` code, and each binding
+declares the type that carries it. Node errors carry it as `error.code`,
+described by the `MesError` type and reached from a `catch` binding through
+`isMesError()`. Python raises `MesError` for every failure except one it could
+not reach the server for, which is a `MesConnectionError` and therefore an
+`OSError` like any other socket failure; both declare `.code`. Both bindings
+export `MesErrorCode`. Use the code, not message text, for retry decisions.
 
 | Codes | Meaning | Retry guidance |
 | --- | --- | --- |
