@@ -208,12 +208,12 @@ describe("BinlogClient", () => {
     );
   });
 
-  it("rejects a non-numeric sslMode before connecting", () => {
+  it("rejects a wrongly-typed sslMode before connecting", () => {
     try {
       new BinlogClient({ host: "127.0.0.1", port: 19999, sslMode: "required" as never });
     } catch (error) {
       expect(error).toMatchObject({ code: MesErrorCode.InvalidArg });
-      expect(error).toHaveProperty("message", expect.stringMatching(/sslMode must be a number/));
+      expect(error).toHaveProperty("message", expect.stringMatching(/sslMode must be an integer/));
       return;
     }
     throw new Error("expected validation error");

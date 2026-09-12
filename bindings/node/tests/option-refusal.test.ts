@@ -68,6 +68,7 @@ const NATIVE_CONFIG_KEYS = nativeConfigKeys();
 /** Engine setters that take one option as a positional argument. */
 const ENGINE_SETTERS: Record<string, (engine: CdcEngine, value: unknown) => void> = {
   maxQueueSize: (engine, value) => engine.setMaxQueueSize(value as number),
+  maxQueueBytes: (engine, value) => engine.setMaxQueueBytes(value as number),
   maxEventSize: (engine, value) => engine.setMaxEventSize(value as number),
   includeDatabases: (engine, value) => engine.setIncludeDatabases(value as string[]),
   includeTables: (engine, value) => engine.setIncludeTables(value as string[]),
@@ -201,7 +202,7 @@ const RANGE_CASES: readonly RangeCase[] = [
   {
     key: "maxQueueBytes",
     value: -1,
-    refusedBy: ["stream constructor", "stream configure", "client constructor"],
+    refusedBy: ["stream constructor", "stream configure", "client constructor", "engine setter"],
   },
   {
     key: "startBinlogPosition",
@@ -211,6 +212,35 @@ const RANGE_CASES: readonly RangeCase[] = [
   },
 ];
 
+/**
+ * One fractional value per option declared an integer, kept inside the window
+ * that option accepts so the refusal under test is the type check rather than
+ * the range check. An option an entry point truncates instead of refusing
+ * connects, queues or resumes somewhere other than where the caller wrote, so
+ * every layer that sees the value has to refuse it.
+ */
+const FRACTIONAL_VALUES: Record<string, number> = {
+  port: 3306.5,
+  serverId: 1.5,
+  connectTimeoutS: 1.5,
+  readTimeoutS: 1.5,
+  sslMode: 1.5,
+  maxQueueSize: 1.5,
+  maxQueueBytes: 1.5,
+  maxEventSize: 1.5,
+  maxReconnectAttempts: 1.5,
+  startBinlogPosition: 4.5,
+};
+
+/**
+ * Options supplied alongside a fractional one so that the type check is what
+ * the value reaches: an offset arriving without the file it points into is
+ * refused as an incomplete pair before its value is looked at.
+ */
+const FRACTIONAL_COMPANIONS: Record<string, Record<string, unknown>> = {
+  startBinlogPosition: { startBinlogFile: "binlog.000001" },
+};
+
 describe("refused option values", () => {
   it("presents a wrongly-typed value alike on every entry point that sees it", () => {
     for (const [key, type] of Object.entries(OPTION_TYPES) as Array<[string, OptionType]>) {
@@ -218,6 +248,23 @@ describe("refused option values", () => {
       for (const entry of ENTRY_POINTS) {
         if (!entry.reaches(key)) continue;
         const label = `${key} = ${String(WRONG_TYPE_VALUES[type])} via ${entry.id}`;
+        expect(
+          refusalFrom(() => entry.apply(key, options)),
+          label,
+        ).toEqual(refusal("TypeError"));
+      }
+    }
+  });
+
+  it("presents a fractional value alike on every entry point that sees it", () => {
+    for (const [key, type] of Object.entries(OPTION_TYPES) as Array<[string, OptionType]>) {
+      if (type !== "integer") continue;
+      const value = FRACTIONAL_VALUES[key];
+      expect(value, `a fractional value for ${key}`).toBeDefined();
+      const options = { ...FRACTIONAL_COMPANIONS[key], [key]: value };
+      for (const entry of ENTRY_POINTS) {
+        if (!entry.reaches(key)) continue;
+        const label = `${key} = ${value} via ${entry.id}`;
         expect(
           refusalFrom(() => entry.apply(key, options)),
           label,

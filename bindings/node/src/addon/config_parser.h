@@ -8,6 +8,7 @@
 #include <napi.h>
 #include <secure_cleanse.h>
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -49,7 +50,20 @@ struct ConfigStrings {
 
 /** Runtime type a config option's value must have, as declared for that option
  *  in core/contracts/bindings.json. */
-enum class ConfigValueType { kString, kNumber, kBoolean };
+enum class ConfigValueType { kString, kInteger, kBoolean };
+
+/** Whether a JS value is a number holding an exact integer, which is what
+ *  `Number.isInteger()` reports and what every option the contract declares an
+ *  integer must carry.
+ *
+ *  Testing only for a number would let a fractional or non-finite value through
+ *  to a fixed-width C ABI field, which truncates it: a port arrived at by
+ *  division would then connect somewhere other than where the caller wrote. */
+inline bool IsIntegerNumber(Napi::Value value) {
+  if (!value.IsNumber()) return false;
+  const double number = value.As<Napi::Number>().DoubleValue();
+  return std::isfinite(number) && std::trunc(number) == number;
+}
 
 struct ConfigOption {
   const char* key;
@@ -69,15 +83,15 @@ constexpr ConfigOption kConfigOptions[] = {
     {"sslCa", ConfigValueType::kString},
     {"sslCert", ConfigValueType::kString},
     {"sslKey", ConfigValueType::kString},
-    {"port", ConfigValueType::kNumber},
-    {"serverId", ConfigValueType::kNumber},
-    {"startBinlogPosition", ConfigValueType::kNumber},
-    {"connectTimeoutS", ConfigValueType::kNumber},
-    {"readTimeoutS", ConfigValueType::kNumber},
-    {"sslMode", ConfigValueType::kNumber},
-    {"maxQueueSize", ConfigValueType::kNumber},
-    {"maxQueueBytes", ConfigValueType::kNumber},
-    {"maxEventSize", ConfigValueType::kNumber},
+    {"port", ConfigValueType::kInteger},
+    {"serverId", ConfigValueType::kInteger},
+    {"startBinlogPosition", ConfigValueType::kInteger},
+    {"connectTimeoutS", ConfigValueType::kInteger},
+    {"readTimeoutS", ConfigValueType::kInteger},
+    {"sslMode", ConfigValueType::kInteger},
+    {"maxQueueSize", ConfigValueType::kInteger},
+    {"maxQueueBytes", ConfigValueType::kInteger},
+    {"maxEventSize", ConfigValueType::kInteger},
     {"allowPublicKeyRetrieval", ConfigValueType::kBoolean},
 };
 
@@ -100,9 +114,9 @@ inline bool ValidateConfigTypes(Napi::Env env, Napi::Object config) {
         matches = value.IsString();
         expected = "a string";
         break;
-      case ConfigValueType::kNumber:
-        matches = value.IsNumber();
-        expected = "a number";
+      case ConfigValueType::kInteger:
+        matches = IsIntegerNumber(value);
+        expected = "an integer";
         break;
       case ConfigValueType::kBoolean:
         matches = value.IsBoolean();

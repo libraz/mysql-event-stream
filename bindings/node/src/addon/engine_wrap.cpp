@@ -268,8 +268,8 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
     return;
   }
 
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+  if (info.Length() < 1 || !mes_node::IsIntegerNumber(info[0])) {
+    mes_node::MakeMesError(env, "maxQueueSize must be an integer", MES_ERR_INVALID_ARG,
                            mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
@@ -299,8 +299,8 @@ void EngineWrap::SetMaxQueueBytes(const Napi::CallbackInfo& info) {
     return;
   }
 
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+  if (info.Length() < 1 || !mes_node::IsIntegerNumber(info[0])) {
+    mes_node::MakeMesError(env, "maxQueueBytes must be an integer", MES_ERR_INVALID_ARG,
                            mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
@@ -340,8 +340,8 @@ void EngineWrap::SetMaxEventSize(const Napi::CallbackInfo& info) {
     ThrowDestroyed(env);
     return;
   }
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    mes_node::MakeMesError(env, "Expected number argument", MES_ERR_INVALID_ARG,
+  if (info.Length() < 1 || !mes_node::IsIntegerNumber(info[0])) {
+    mes_node::MakeMesError(env, "maxEventSize must be an integer", MES_ERR_INVALID_ARG,
                            mes_node::MesErrorClass::kType)
         .ThrowAsJavaScriptException();
     return;
@@ -611,6 +611,10 @@ Napi::String EngineWrap::GetSourceSql(Napi::Env env, const char* source_sql) {
   const size_t sql_size = std::strlen(source_sql);
   if (source_sql_cache_.address == source_sql && source_sql_cache_.bytes.size() == sql_size &&
       std::memcmp(source_sql_cache_.bytes.data(), source_sql, sql_size) == 0) {
+    // The cached string is reached through a holder object, at the cost of this
+    // extra Get(), because a reference to a value that is not an object needs
+    // Node-API 10 and aborts at the level this addon declares. Holding a
+    // Napi::Reference<Napi::String> is what removes the holder and the Get().
     return source_sql_cache_.holder.Value().Get("value").As<Napi::String>();
   }
 
@@ -637,6 +641,10 @@ Napi::String EngineWrap::GetColumnKey(Napi::Env env, const mes_column_t& col, ui
   auto cached = column_name_cache_.find(col.col_name);
   if (cached != column_name_cache_.end() && cached->second.bytes.size() == name_size &&
       std::memcmp(cached->second.bytes.data(), col.col_name, name_size) == 0) {
+    // The cached string is reached through a holder object, at the cost of this
+    // extra Get(), because a reference to a value that is not an object needs
+    // Node-API 10 and aborts at the level this addon declares. Holding a
+    // Napi::Reference<Napi::String> is what removes the holder and the Get().
     return cached->second.holder.Value().Get("value").As<Napi::String>();
   }
 
