@@ -30,16 +30,16 @@ export function loadAbiEnums(): Record<string, AbiEnum> {
       continue;
     }
     if (current === null) continue;
-    const closing = line.match(ENUM_CLOSE);
-    if (closing !== null) {
-      enums[closing[1]] = current;
+    const [, tag] = line.match(ENUM_CLOSE) ?? [];
+    if (tag !== undefined) {
+      enums[tag] = current;
       current = null;
       continue;
     }
     // Only explicitly valued enumerators are mirrored by a binding; an implicit
     // one would have no stable value to pin and is left out deliberately.
-    const member = line.match(ENUM_MEMBER);
-    if (member !== null) current[member[1]] = Number(member[2]);
+    const [, name, value] = line.match(ENUM_MEMBER) ?? [];
+    if (name !== undefined && value !== undefined) current[name] = Number(value);
   }
   return enums;
 }

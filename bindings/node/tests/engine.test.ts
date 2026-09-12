@@ -100,14 +100,16 @@ describe("CdcEngine", () => {
       engine.feed(concat(tm, wr));
 
       const row = engine.nextEvent()?.after;
-      expect(row).not.toBeNull();
+      if (row === null || row === undefined) {
+        throw new Error(`no row was decoded for column ${columnName}`);
+      }
       expect(Object.hasOwn(row, columnName)).toBe(true);
-      expect(row?.[columnName]).toBe(40 + index);
+      expect(row[columnName]).toBe(40 + index);
       expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
       // A data property, not the accessor these names reach on
       // Object.prototype: a column value must never arrive as a getter, and
       // "__proto__" must not have gone through the prototype setter.
-      const descriptor = Object.getOwnPropertyDescriptor(row ?? {}, columnName);
+      const descriptor = Object.getOwnPropertyDescriptor(row, columnName);
       expect(descriptor).toEqual({
         value: 40 + index,
         writable: true,
@@ -180,7 +182,10 @@ describe("CdcEngine", () => {
   it("should reject a corrupted CRC32 event", async () => {
     engine = await CdcEngine.create();
     const event = buildEvent(TABLE_MAP_EVENT, 1000, buildTableMapBody(1, "db", "t"));
-    event[20] ^= 0x40;
+    // Flip a bit in the body so the trailing CRC32 no longer covers the event.
+    const original = event[20];
+    if (original === undefined) throw new Error("built event is too short to corrupt");
+    event[20] = original ^ 0x40;
     expect(() => engine.feed(event)).toThrow("checksum mismatch");
   });
 
@@ -478,7 +483,9 @@ function feedChunks(engine: CdcEngine, chunks: readonly Uint8Array[]): void {
 /** Call an engine method with a value its declared parameter type forbids. */
 function callWithArgument(engine: CdcEngine, method: string, argument: unknown): void {
   const methods = engine as unknown as Record<string, (value: unknown) => unknown>;
-  methods[method](argument);
+  const entry = methods[method];
+  if (entry === undefined) throw new Error(`CdcEngine does not declare ${method}`);
+  entry.call(engine, argument);
 }
 
 /** Engine methods that take an argument and can therefore refuse one. */
@@ -591,8 +598,8 @@ function loadMethodDoc(method: string): string {
   const declaration = classStart + offset;
 
   const doc: string[] = [];
-  for (let index = declaration - 1; index >= 0; index--) {
-    const line = lines[index].trim();
+  for (const raw of lines.slice(0, declaration).reverse()) {
+    const line = raw.trim();
     if (!line.startsWith("*") && !line.startsWith("/**")) break;
     doc.unshift(line.replace(/^\/\*\*|^\*\/|^\*/, "").trim());
     if (line.startsWith("/**")) break;

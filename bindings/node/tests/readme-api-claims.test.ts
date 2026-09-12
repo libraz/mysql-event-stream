@@ -45,6 +45,8 @@ interface Mention {
   document: string;
   className: string;
   method: string;
+  /** Prototype of the class the mention is attributed to. */
+  prototype: Record<string, unknown>;
 }
 
 function collectMentions(): Mention[] {
@@ -52,9 +54,15 @@ function collectMentions(): Mention[] {
   for (const document of READMES) {
     const text = readFileSync(`${repoRoot}${document}`, "utf8");
     for (const [, className, method] of text.matchAll(QUALIFIED_CALL)) {
-      if (className in CLASSES) {
-        mentions.push({ document, className, method });
-      }
+      if (className === undefined || method === undefined) continue;
+      const target = CLASSES[className];
+      if (target === undefined) continue;
+      mentions.push({
+        document,
+        className,
+        method,
+        prototype: target.prototype as Record<string, unknown>,
+      });
     }
   }
   return mentions;
@@ -68,8 +76,7 @@ describe("documented method names", () => {
     expect(mentions.length).toBeGreaterThan(0);
     expect(mentions.some((m) => m.className === "BinlogClient" && m.method === "stop")).toBe(true);
 
-    for (const { document, className, method } of mentions) {
-      const prototype = CLASSES[className].prototype as Record<string, unknown>;
+    for (const { document, className, method, prototype } of mentions) {
       expect(
         typeof prototype[method],
         `${document} documents ${className}.${method}(), which ${className} does not expose`,
@@ -120,10 +127,10 @@ function section(text: string, ...headings: string[]): string | null {
     const depth = (heading.match(/^#+/) as RegExpMatchArray)[0].length;
     const terminator = new RegExp(`^#{1,${depth}} `);
     let fenced = false;
-    for (let index = start + 1; index < lines.length; index += 1) {
-      if (lines[index].startsWith("```")) fenced = !fenced;
-      else if (!fenced && terminator.test(lines[index])) {
-        return lines.slice(start, index).join("\n");
+    for (const [offset, line] of lines.slice(start + 1).entries()) {
+      if (line.startsWith("```")) fenced = !fenced;
+      else if (!fenced && terminator.test(line)) {
+        return lines.slice(start, start + 1 + offset).join("\n");
       }
     }
     return lines.slice(start).join("\n");
@@ -155,6 +162,7 @@ describe("the Exports table", () => {
     const entry = readFileSync(`${repoRoot}bindings/node/src/index.ts`, "utf8");
     const exported = new Set<string>();
     for (const [, names] of entry.matchAll(/export(?:\s+type)?\s*\{([^}]*)\}/g)) {
+      if (names === undefined) continue;
       for (const name of names.split(",")) {
         const symbol = name
           .trim()
@@ -358,9 +366,9 @@ describe("the from-source build prerequisites", () => {
     // Derived from CMakeLists so a newly required package cannot slip past the
     // prerequisites of a README that documents building from source.
     const cmake = readFileSync(`${repoRoot}bindings/node/CMakeLists.txt`, "utf8");
-    const required = [
-      ...cmake.matchAll(/^\s*find_package\(\s*([A-Za-z0-9_]+)[^)]*\bREQUIRED\b/gm),
-    ].map(([, name]) => name);
+    const required = [...cmake.matchAll(/^\s*find_package\(\s*([A-Za-z0-9_]+)[^)]*\bREQUIRED\b/gm)]
+      .map(([, name]) => name)
+      .filter((name) => name !== undefined);
     expect(required.length).toBeGreaterThan(0);
 
     // Only the commands a reader runs count. Naming a library in the surrounding

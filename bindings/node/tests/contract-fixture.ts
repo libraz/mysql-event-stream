@@ -129,8 +129,8 @@ export function loadHeaderFieldDoc(field: string): string {
   if (declaration < 0) throw new Error(`mes.h does not declare ${field}`);
 
   const doc: string[] = [];
-  for (let index = declaration - 1; index >= 0; index--) {
-    const line = lines[index].trim();
+  for (const raw of lines.slice(0, declaration).reverse()) {
+    const line = raw.trim();
     if (!line.startsWith("/**") && !line.startsWith("*")) break;
     doc.unshift(line);
     if (line.startsWith("/**")) break;

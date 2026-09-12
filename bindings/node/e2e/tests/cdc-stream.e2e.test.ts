@@ -1,7 +1,7 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { CdcStream } from "../../src/stream.js";
 import type { ChangeEvent, ClientConfig } from "../../src/types.js";
 import { MysqlClient } from "../lib/mysql-client.js";

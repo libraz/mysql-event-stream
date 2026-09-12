@@ -32,13 +32,16 @@ export class MysqlClient {
   }
 
   /** Execute a raw SQL query and return the rows. */
-  async execute<T extends mysql.RowDataPacket[]>(sql: string, values?: unknown[]): Promise<T> {
+  async execute<T extends mysql.RowDataPacket[]>(
+    sql: string,
+    values?: mysql.ExecuteValues[],
+  ): Promise<T> {
     const [rows] = await this.pool.execute<T>(sql, values);
     return rows;
   }
 
   /** Insert a row and return the auto-increment ID. */
-  async insert(table: string, data: Record<string, unknown>): Promise<number> {
+  async insert(table: string, data: Record<string, mysql.ExecuteValues>): Promise<number> {
     const cols = Object.keys(data).join(", ");
     const placeholders = Object.keys(data)
       .map(() => "?")
@@ -49,7 +52,11 @@ export class MysqlClient {
   }
 
   /** Update rows matching the WHERE clause. */
-  async update(table: string, where: string, data: Record<string, unknown>): Promise<number> {
+  async update(
+    table: string,
+    where: string,
+    data: Record<string, mysql.ExecuteValues>,
+  ): Promise<number> {
     const sets = Object.keys(data)
       .map((k) => `${k} = ?`)
       .join(", ");

@@ -65,12 +65,11 @@ function parseTable(file: string, targets: readonly string[]): Map<string, strin
   const mapping = new Map<string, string>();
   let rows = 0;
   for (const line of source.split("\n")) {
-    const match = line.match(ROW_PATTERN);
-    if (!match) continue;
-    const target = match[1];
+    const [, target, types] = line.match(ROW_PATTERN) ?? [];
+    if (target === undefined || types === undefined) continue;
     if (!targets.includes(target)) continue;
     rows += 1;
-    for (const mysqlType of match[2].split(" ")) {
+    for (const mysqlType of types.split(" ")) {
       expect(mapping.has(mysqlType), `${file} lists ${mysqlType} more than once`).toBe(false);
       mapping.set(mysqlType, target);
     }

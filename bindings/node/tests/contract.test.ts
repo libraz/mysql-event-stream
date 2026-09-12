@@ -266,8 +266,9 @@ describe("binding contract", () => {
         validateStreamOptions({ ...companions, [option.node]: value });
       expect(() => probe(accepted - 1), `${option.node} below its accepted minimum`).toThrow();
       expect(() => probe(accepted), `${option.node} at its accepted minimum`).not.toThrow();
-      if (option.max === null || option.max === undefined) continue;
-      expect(() => probe(option.max + 1), `${option.node} above maximum`).toThrow();
+      const { max } = option;
+      if (max === null || max === undefined) continue;
+      expect(() => probe(max + 1), `${option.node} above maximum`).toThrow();
     }
   });
 

@@ -4,19 +4,30 @@
 import { describe, expect, it, vi } from "vitest";
 import { NON_RETRYABLE_ERROR_CODES } from "../src/contract.js";
 import { CdcStream } from "../src/stream.js";
-import { MesErrorCode } from "../src/types.js";
+import { type ChangeEvent, MesErrorCode, type StreamConfig } from "../src/types.js";
 import { loadBindingContract } from "./contract-fixture.js";
 
 const contract = loadBindingContract();
 
+/** One poll result, shaped as the client hands one to the stream. */
+interface PollResult {
+  data: Uint8Array | null;
+  isHeartbeat: boolean;
+}
+
 // Shared spies for the reconnect tests below. Hoisted so the vi.mock factories
 // (which are themselves hoisted above imports) can reference them.
+//
+// Each spy is annotated with the signature it stands in for, so a mocked return
+// value that the real surface could never produce fails here.
 const mocks = vi.hoisted(() => ({
-  clientCtor: vi.fn(),
+  clientCtor: vi.fn<(config: StreamConfig) => void>(),
   startImpl: vi.fn(),
   // Returns the next poll result. Default: a single null-data poll that keeps
   // the loop idle (tests that need data override this).
-  pollImpl: vi.fn(() => Promise.resolve({ data: null, isHeartbeat: false })),
+  pollImpl: vi.fn<() => Promise<PollResult>>(() =>
+    Promise.resolve({ data: null, isHeartbeat: false }),
+  ),
   // Records the chunk fed and returns the number of bytes consumed. Default:
   // consume everything. Tests simulating backpressure override this.
   feedImpl: vi.fn((chunk: Uint8Array) => chunk.length),
@@ -28,21 +39,21 @@ const mocks = vi.hoisted(() => ({
   excludeTablesImpl: vi.fn(),
   stopImpl: vi.fn(),
   currentGtidImpl: vi.fn(() => ""),
-  nextEventImpl: vi.fn(() => null),
+  nextEventImpl: vi.fn<() => ChangeEvent | null>(() => null),
 }));
 
 vi.mock("../src/client.js", () => ({
   BinlogClient: class {
-    constructor(config: unknown) {
+    constructor(config: StreamConfig) {
       mocks.clientCtor(config);
     }
     start(): void {
       mocks.startImpl();
     }
-    poll(): Promise<{ data: Uint8Array | null; isHeartbeat: boolean }> {
+    poll(): Promise<PollResult> {
       return mocks.pollImpl();
     }
-    pollBatch(): Promise<Array<{ data: Uint8Array | null; isHeartbeat: boolean }>> {
+    pollBatch(): Promise<PollResult[]> {
       return this.poll().then((result) => [result]);
     }
     get currentGtid(): string {
@@ -65,7 +76,7 @@ vi.mock("../src/engine.js", () => ({
     feed(chunk: Uint8Array): number {
       return mocks.feedImpl(chunk);
     }
-    nextEvent(): unknown {
+    nextEvent(): ChangeEvent | null {
       return mocks.nextEventImpl();
     }
     setChecksumEnabled(enabled: boolean): void {
@@ -90,6 +101,44 @@ vi.mock("../src/engine.js", () => ({
     destroy(): void {}
   },
 }));
+
+/**
+ * A decoded row event, complete in every field the engine populates.
+ *
+ * Built here rather than as a partial literal per test: the stream forwards
+ * whatever the engine returns, so an event fixture missing a field would let a
+ * delivery assertion agree with itself while the real shape had moved on.
+ *
+ * @param overrides Fields a test cares about, replacing the defaults.
+ */
+function rowEvent(overrides: Partial<ChangeEvent> = {}): ChangeEvent {
+  return {
+    type: "INSERT",
+    database: "db",
+    table: "t",
+    before: null,
+    after: { id: 1 },
+    timestamp: 0,
+    position: { file: "binlog.000001", offset: 4 },
+    namesResolved: true,
+    sourceSql: "",
+    ...overrides,
+  };
+}
+
+/**
+ * Config handed to the nth `BinlogClient` construction.
+ *
+ * @throws If the client was never constructed that many times, which would
+ * otherwise read as an assertion against `undefined`.
+ */
+function constructedConfig(index: number): StreamConfig {
+  const call = mocks.clientCtor.mock.calls[index];
+  if (call === undefined) {
+    throw new Error(`BinlogClient was constructed fewer than ${index + 1} times`);
+  }
+  return call[0];
+}
 
 describe("CdcStream", () => {
   it("should create with config", () => {
@@ -116,7 +165,7 @@ describe("CdcStream", () => {
     mocks.pollImpl.mockReset();
     mocks.pollImpl.mockResolvedValueOnce({ data: new Uint8Array([1]), isHeartbeat: false });
     mocks.nextEventImpl.mockReset();
-    mocks.nextEventImpl.mockReturnValueOnce({ type: "INSERT" }).mockReturnValue(null);
+    mocks.nextEventImpl.mockReturnValueOnce(rowEvent()).mockReturnValue(null);
 
     const stream = new CdcStream({
       host: "127.0.0.1",
@@ -179,16 +228,7 @@ describe("CdcStream", () => {
     mocks.feedImpl.mockReset();
     mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
     mocks.nextEventImpl.mockReset();
-    const event = {
-      type: "INSERT",
-      database: "db",
-      table: "t",
-      before: null,
-      after: { id: 1 },
-      timestamp: 0,
-      position: { file: "binlog.000001", offset: 4 },
-      namesResolved: true,
-    };
+    const event = rowEvent();
     mocks.nextEventImpl.mockReturnValueOnce(event).mockReturnValue(null);
     mocks.currentGtidImpl.mockReset();
     mocks.currentGtidImpl.mockReturnValue("uuid:1-42");
@@ -218,7 +258,7 @@ describe("CdcStream", () => {
     mocks.feedImpl.mockReset();
     mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
     mocks.nextEventImpl.mockReset();
-    const event = { type: "INSERT" };
+    const event = rowEvent();
     mocks.nextEventImpl
       .mockReturnValueOnce(event)
       .mockReturnValueOnce(event)
@@ -375,11 +415,12 @@ describe("CdcStream", () => {
       await stream.close();
       await nextPromise.catch(() => {});
 
-      expect(fedChunks.length).toBeGreaterThanOrEqual(2);
+      const fed = fedChunks.map((chunk) => Array.from(chunk));
+      expect(fed.length).toBeGreaterThanOrEqual(2);
       // First feed: the raw 10-byte chunk.
-      expect(Array.from(fedChunks[0])).toEqual(Array.from(first));
+      expect(fed[0]).toEqual(Array.from(first));
       // Second feed: leftover 6 bytes (4..9) prepended to the new 6 bytes.
-      expect(Array.from(fedChunks[1])).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+      expect(fed[1]).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     });
   });
 
@@ -540,7 +581,7 @@ describe("CdcStream", () => {
       }).rejects.toThrow("temporary drop");
 
       expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
-      const resumed = mocks.clientCtor.mock.calls[1][0];
+      const resumed = constructedConfig(1);
       // An empty checkpoint must never become an empty GTID set: the server
       // answers that with every binlog it still retains.
       expect(resumed.startGtid).toBeUndefined();
@@ -574,9 +615,10 @@ describe("CdcStream", () => {
       // The client was never constructed on the first attempt, so there is no
       // checkpoint to resume from. The implicit "snapshot the current position"
       // start mode has to survive intact.
-      expect(mocks.clientCtor.mock.calls[1][0].startGtid).toBeUndefined();
-      expect(mocks.clientCtor.mock.calls[1][0].startBinlogFile).toBeUndefined();
-      expect(mocks.clientCtor.mock.calls[1][0].startBinlogPosition).toBeUndefined();
+      const retried = constructedConfig(1);
+      expect(retried.startGtid).toBeUndefined();
+      expect(retried.startBinlogFile).toBeUndefined();
+      expect(retried.startBinlogPosition).toBeUndefined();
     });
 
     it("resumes from a published checkpoint instead of the file/position anchor", async () => {
@@ -601,7 +643,7 @@ describe("CdcStream", () => {
       }).rejects.toThrow("temporary drop");
 
       expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
-      const resumed = mocks.clientCtor.mock.calls[1][0];
+      const resumed = constructedConfig(1);
       expect(resumed.startGtid).toBe("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5");
       expect(resumed.startBinlogFile).toBeUndefined();
       expect(resumed.startBinlogPosition).toBeUndefined();
@@ -628,9 +670,7 @@ describe("CdcStream", () => {
       }).rejects.toThrow("temporary drop");
 
       expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
-      expect(mocks.clientCtor.mock.calls[1][0].startGtid).toBe(
-        "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2",
-      );
+      expect(constructedConfig(1).startGtid).toBe("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2");
     });
 
     it("close interrupts reconnect backoff", async () => {

@@ -80,9 +80,14 @@ function compare(mirror: MirroredEnum): {
     remaining.set(pairingKey(name, []), [name, value]);
   }
 
+  const declared = abi[mirror.tag];
+  if (declared === undefined) {
+    throw new Error(`${mirror.tag} is not declared in core/include/mes.h`);
+  }
+
   const expected: Record<string, number> = {};
   const actual: Record<string, number> = {};
-  for (const [cName, cValue] of Object.entries(abi[mirror.tag])) {
+  for (const [cName, cValue] of Object.entries(declared)) {
     const key = pairingKey(cName, mirror.prefixes);
     const member = remaining.get(key);
     const label = `${cName} (${mirror.label}.${member?.[0] ?? "<not declared>"})`;
