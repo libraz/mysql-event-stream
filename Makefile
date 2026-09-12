@@ -66,56 +66,25 @@ build: configure
 	cmake --build $(BUILD_DIR) --parallel
 
 # Every test runner used here reports success for a run in which nothing ran, so
-# no target may take its result from the exit status alone. There are two guards
-# rather than one because the runners differ in when the count is available:
-# ctest can be asked up front how many tests a selection resolves to, so its
-# guard fails fast without running anything, while pytest and vitest report an
-# executed count only in the summary they print at the end, so theirs has to run
-# the suite, keep the output and check it afterwards. Neither runner can be
-# checked the other's way.
-
-# CTest reports success when a selection matches no test at all, so every run
-# below first asks -N how many tests the same selection picks up and stops when
-# the answer is none. $(1) is the build directory, $(2) the selection flags.
-require_tests = ctest --test-dir $(1) -N $(2) | grep -qE 'Total Tests: [1-9]' \
-	|| { echo "No tests matched: ctest --test-dir $(1) $(2)"; exit 1; }
-
-# "At least one test executed and passed", in each runner's own summary. Same
-# patterns the E2E matrix driver checks; the count excludes zero so a summary
-# reporting none cannot satisfy it.
-PYTEST_EXECUTED_RE  := ^=+ .*[1-9][0-9]* passed
-VITEST_EXECUTED_RE  := ^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed
-
-# Run a suite and accept it only when the runner both exited cleanly and reported
-# an executed, passing test. pytest exits 0 when every collected test is skipped
-# (and 5 when it collects none); vitest exits 0 when every test is filtered out.
-# $(1) is the tier label, $(2) the command, $(3) the runner's executed-tests
-# pattern. The runner's exit status is carried out of the pipeline by hand
-# because a pipeline reports tee's status, and pipefail is not portable to the
-# /bin/sh this Makefile runs its recipes under.
-require_executed_tests = out=$$(mktemp); \
-	( $(2) 2>&1; echo $$? > $$out.rc ) | tee $$out; \
-	rc=$$(cat $$out.rc); \
-	if [ "$$rc" -ne 0 ]; then \
-		rm -f $$out $$out.rc; \
-		echo "[$(1)] FAIL: the test runner exited $$rc"; \
-		exit 1; \
-	fi; \
-	grep -qE '$(3)' $$out \
-		|| { rm -f $$out $$out.rc; \
-		     echo "[$(1)] FAIL: no test executed; the run recorded no passing test"; \
-		     exit 1; }; \
-	rm -f $$out $$out.rc
+# no target may take its result from the exit status alone. Both guards live in
+# scripts/ so that the workflows and the bindings' own test entry points run the
+# same check rather than each restating it. There are two of them rather than
+# one because the runners differ in when the count is available: ctest can be
+# asked up front how many tests a selection resolves to, so its guard fails fast
+# without running anything, while pytest and vitest report an executed count
+# only in the summary they print at the end, so theirs has to run the suite,
+# keep the output and check it afterwards. Neither runner can be checked the
+# other's way.
+CTEST_GUARDED := scripts/ctest-guarded.sh
+SUITE_GUARDED := $(CURDIR)/scripts/run-suite-guarded.sh
 
 test: build
-	@$(call require_tests,$(BUILD_DIR),)
-	ctest --test-dir $(BUILD_DIR) --output-on-failure --parallel
+	$(CTEST_GUARDED) $(BUILD_DIR) --output-on-failure --parallel
 
 test-tsan:
 	cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DMES_ENABLE_TSAN=ON $(CMAKE_OPTIONS)
 	cmake --build build-tsan --parallel
-	@$(call require_tests,build-tsan,-E "E2E")
-	ctest --test-dir build-tsan --output-on-failure --parallel -E "E2E"
+	$(CTEST_GUARDED) build-tsan --output-on-failure --parallel -E "E2E"
 
 BENCH_DIR    := build-bench
 BENCH_STREAMS ?= $(BENCH_DIR)/streams
@@ -182,7 +151,7 @@ node-build:
 	cd bindings/node && yarn install && yarn build
 
 node-test: node-build
-	@$(call require_executed_tests,Node,cd bindings/node && yarn test,$(VITEST_EXECUTED_RE))
+	cd bindings/node && yarn test:ci
 
 node-check:
 	cd bindings/node && yarn check && yarn typecheck
@@ -195,7 +164,7 @@ node-fix:
 # ============================================================================
 
 py-test: build
-	@$(call require_executed_tests,Python,cd bindings/python && rye run pytest,$(PYTEST_EXECUTED_RE))
+	cd bindings/python && $(SUITE_GUARDED) --runner=pytest rye run pytest
 
 py-lint:
 	cd bindings/python && rye run ruff check .
@@ -220,8 +189,7 @@ lint: format-check node-check py-lint py-typecheck
 # ============================================================================
 
 e2e:
-	@$(call require_executed_tests,Python E2E,cd bindings/python && rye run pytest e2e/tests -v --timeout=120,$(PYTEST_EXECUTED_RE))
+	cd bindings/python && $(SUITE_GUARDED) --runner=pytest rye run pytest e2e/tests -v --timeout=120
 
 e2e-cpp: build
-	@$(call require_tests,$(BUILD_DIR),-R "E2E")
-	ctest --test-dir $(BUILD_DIR) -R "E2E" --output-on-failure --timeout 60
+	$(CTEST_GUARDED) $(BUILD_DIR) -R "E2E" --output-on-failure --timeout 60

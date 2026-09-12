@@ -95,7 +95,7 @@ jobs:
         run: ccache --show-stats
 
       - name: Run tests (unit only, E2E requires Docker MySQL)
-        run: ctest --test-dir build --output-on-failure --parallel $(nproc) -E "E2E"
+        run: scripts/ctest-guarded.sh build --output-on-failure --parallel $(nproc) -E "E2E"
 
       - name: Upload build artifacts on failure
         if: failure()
@@ -128,7 +128,7 @@ jobs:
         run: yarn check
       - name: Run tests
         working-directory: bindings/node
-        run: yarn test
+        run: yarn test:ci
 
   python-test:
     name: Python Build and Test
@@ -155,7 +155,7 @@ jobs:
         run: rye sync --no-lock
       - name: Run tests
         working-directory: bindings/python
-        run: rye run pytest tests/ -v
+        run: rye run test-ci
 
   sanitizers:
     name: Sanitizers
@@ -178,11 +178,22 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Debug -D${{ matrix.sanitizer.cmake_flag }}=ON
           cmake --build build --parallel
       - name: Run tests
-        run: cd build && ctest --output-on-failure --parallel $(nproc) -E "E2E"
+        run: cd build && ../scripts/ctest-guarded.sh . --output-on-failure --parallel $(nproc) -E "E2E"
       - name: Run reader-thread E2E under ${{ matrix.sanitizer.name }}
         run: |
+          # The selection is pinned to literal test names, so every name must
+          # still resolve: compare the count CTest reports for the selection
+          # against the number of names given. Without this, a rename shrinks
+          # the selection, or empties it, and CTest still exits 0.
+          tests='E2EProtocol.StopInterruptsPoll|E2EBuffer.GracefulShutdownNoLeak'
+          want=$(printf '%s\n' "$tests" | tr '|' '\n' | grep -c .)
+          got=$(ctest --test-dir build -N -R "$tests" | sed -n 's/^Total Tests: //p')
+          if [ "$got" != "$want" ]; then
+            echo "Pinned selection resolved ${got:-0} of $want names; a pinned name no longer exists."
+            exit 1
+          fi
           MYSQL_VERSION=8.4 docker compose -f e2e/docker/docker-compose.yml up -d --wait
-          ctest --test-dir build --output-on-failure -R 'E2EProtocol.StopInterruptsPoll|E2EBuffer.GracefulShutdownNoLeak'
+          ctest --test-dir build --output-on-failure -R "$tests"
       - name: Stop reader-thread E2E services
         if: always()
         run: docker compose -f e2e/docker/docker-compose.yml down -v

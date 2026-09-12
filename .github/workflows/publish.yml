@@ -48,7 +48,7 @@ jobs:
           yarn install --immutable
           yarn build
           yarn check
-          yarn test
+          yarn test:ci
 
       - name: Publish main package
         working-directory: bindings/node

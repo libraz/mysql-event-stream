@@ -145,7 +145,13 @@ declare -a summary_lines
 # none), and vitest exits 0 when every test is filtered out. So a tier's exit
 # status alone cannot distinguish a pass from a vacuous run, and each runner's
 # own count of executed, passing tests is required as well. The count pattern
-# excludes zero, the way the Makefile's ctest selections do.
+# excludes zero.
+#
+# The pytest and vitest patterns below also live in
+# scripts/run-suite-guarded.sh, which is what every invocation outside this
+# driver runs. This driver keeps its own copy because it interleaves the check
+# with its per-target container lifecycle and its own tier reporting, so the two
+# copies have to be changed together.
 CTEST_EXECUTED_RE='^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed'
 PYTEST_EXECUTED_RE='^=+ .*[1-9][0-9]* passed'
 VITEST_EXECUTED_RE='^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed'

@@ -29,11 +29,22 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Debug -D${{ matrix.flag }}=ON
           cmake --build build --parallel "$(nproc)"
       - name: Run unit suite
-        run: ctest --test-dir build --output-on-failure --parallel "$(nproc)" -E E2E
+        run: scripts/ctest-guarded.sh build --output-on-failure --parallel "$(nproc)" -E E2E
       - name: Run reader-thread E2E under ${{ matrix.name }}
         run: |
+          # The selection is pinned to literal test names, so every name must
+          # still resolve: compare the count CTest reports for the selection
+          # against the number of names given. Without this, a rename shrinks
+          # the selection, or empties it, and CTest still exits 0.
+          tests='E2EProtocol.StopInterruptsPoll|E2EBuffer.GracefulShutdownNoLeak'
+          want=$(printf '%s\n' "$tests" | tr '|' '\n' | grep -c .)
+          got=$(ctest --test-dir build -N -R "$tests" | sed -n 's/^Total Tests: //p')
+          if [ "$got" != "$want" ]; then
+            echo "Pinned selection resolved ${got:-0} of $want names; a pinned name no longer exists."
+            exit 1
+          fi
           MYSQL_VERSION=8.4 docker compose -f e2e/docker/docker-compose.yml up -d --wait
-          ctest --test-dir build --output-on-failure -R 'E2EProtocol.StopInterruptsPoll|E2EBuffer.GracefulShutdownNoLeak'
+          ctest --test-dir build --output-on-failure -R "$tests"
       - name: Stop reader-thread E2E services
         if: always()
         run: docker compose -f e2e/docker/docker-compose.yml down -v

@@ -17,9 +17,10 @@
     "check:fix": "biome check --write src/ tests/",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tests/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
+    "test:ci": "../../scripts/run-suite-guarded.sh --runner=vitest npm run test",
     "test:e2e": "vitest run --config e2e/vitest.config.ts",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build && npm run check && npm run test",
+    "prepublishOnly": "npm run build && npm run check && npm run test:ci",
     "prepack": "cp README.md .readme-backup && cp README.npm.md README.md",
     "postpack": "mv .readme-backup README.md"
   },

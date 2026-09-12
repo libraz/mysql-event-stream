@@ -60,6 +60,9 @@ lint = "ruff check --fix ."
 format = "ruff format ."
 typecheck = "mypy src tests"
 e2e = "pytest e2e/tests -v --timeout=120"
+# pytest exits 0 when every collected test is skipped, so the suite runs behind
+# a guard that requires its summary to report a test that actually passed.
+test-ci = { cmd = ["../../scripts/run-suite-guarded.sh", "--runner=pytest", "pytest", "tests/", "-v"] }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mysql_event_stream"]

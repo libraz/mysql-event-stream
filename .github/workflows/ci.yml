@@ -105,7 +105,7 @@ jobs:
         run: ccache --show-stats
 
       - name: Run tests (unit only, E2E requires Docker MySQL)
-        run: ctest --test-dir build --output-on-failure --parallel $(nproc) -E "E2E"
+        run: scripts/ctest-guarded.sh build --output-on-failure --parallel $(nproc) -E "E2E"
 
       - name: Generate coverage report
         run: |
@@ -153,7 +153,7 @@ jobs:
         run: yarn check
       - name: Run tests
         working-directory: bindings/node
-        run: yarn test
+        run: yarn test:ci
       - name: Verify root README Node quick starts
         run: python3 .github/scripts/check-readme-quickstarts.py --node
 
@@ -181,6 +181,6 @@ jobs:
         run: rye sync --no-lock
       - name: Run tests
         working-directory: bindings/python
-        run: rye run pytest tests/ -v
+        run: rye run test-ci
       - name: Verify root README Python quick starts
         run: python3 .github/scripts/check-readme-quickstarts.py --python
