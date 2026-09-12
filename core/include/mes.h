@@ -363,6 +363,14 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * A stream of highly compressible BLOB/TEXT columns therefore reaches
  * backpressure on bytes long before it reaches @p max_size entries.
  *
+ * @note That byte budget is fixed at MES_DEFAULT_QUEUE_BYTES: this is the only
+ * queue bound an engine exposes, so @p max_size cannot be used to express a
+ * memory limit. What one entry costs depends on the table it came from and on
+ * any statement annotating it, and spans an order of magnitude across the
+ * schemas in core/benchmarks/BASELINE.md. mes_client_set_max_queue_bytes() is
+ * a different budget, over the client's own queue of undecoded events, and
+ * does not apply to an engine fed directly.
+ *
  * @param engine Engine handle.
  * @param max_size Maximum queue size. 0 restores the bounded
  *        MES_DEFAULT_QUEUE_SIZE default.
