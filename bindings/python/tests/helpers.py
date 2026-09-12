@@ -48,13 +48,18 @@ def _write_u48_le(value: int) -> bytes:
     return bytes(result)
 
 
-def build_table_map_body(table_id: int, db: str, table_name: str) -> bytes:
+def build_table_map_body(
+    table_id: int, db: str, table_name: str, column_name: str | None = None
+) -> bytes:
     """Build a TABLE_MAP_EVENT body with a single INT column.
 
     Args:
         table_id: Table ID (48-bit).
         db: Database name.
         table_name: Table name.
+        column_name: Name carried in the optional COLUMN_NAME metadata. When
+            omitted the body carries no optional metadata at all, which is what
+            a server running below binlog-row-metadata=FULL sends.
 
     Returns:
         Binary event body.
@@ -80,6 +85,14 @@ def build_table_map_body(table_id: int, db: str, table_name: str) -> bytes:
     parts.append(0)
     # null_bitmap: 0x01 (column is nullable)
     parts.append(0x01)
+    if column_name is not None:
+        name_bytes = column_name.encode("utf-8")
+        # Optional metadata COLUMN_NAME (field type 4): field length followed by
+        # a length-encoded string per column (one column in this helper).
+        parts.append(0x04)
+        parts.append(len(name_bytes) + 1)
+        parts.append(len(name_bytes))
+        parts.extend(name_bytes)
     return bytes(parts)
 
 

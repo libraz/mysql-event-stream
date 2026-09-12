@@ -158,6 +158,20 @@ class TestInsertEvent:
 
             assert engine.next_event() is None
 
+    def test_column_name_from_table_map_resolves_names(self, lib_path: str) -> None:
+        with CdcEngine(lib_path=lib_path) as engine:
+            tm = build_event(19, 1000, build_table_map_body(1, "testdb", "users", "id"))
+            wr = build_event(30, 1000, build_write_rows_body(1, 42))
+
+            engine.feed(tm + wr)
+
+            event = engine.next_event()
+            assert event is not None
+            # The TABLE_MAP carries COLUMN_NAME optional metadata, so the row is
+            # keyed by the real name rather than by the column index.
+            assert event.after == {"id": 42}
+            assert event.names_resolved is True
+
 
 class TestUpdateEvent:
     def test_update(self, lib_path: str) -> None:
