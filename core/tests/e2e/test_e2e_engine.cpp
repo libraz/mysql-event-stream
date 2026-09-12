@@ -407,6 +407,7 @@ TEST(E2EEngine, BackpressureMaxQueueSize) {
     if (result.is_heartbeat || result.data == nullptr) continue;
 
     size_t consumed = 0;
+    mes_set_checksum_enabled(engine, result.checksum_enabled);
     mes_feed(engine, result.data, result.size, &consumed);
 
     // Drain all available events before next feed
@@ -490,6 +491,7 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
     if (result.is_heartbeat || result.data == nullptr) continue;
 
     size_t consumed = 0;
+    ASSERT_EQ(mes_set_checksum_enabled(engine1, result.checksum_enabled), MES_OK);
     ASSERT_EQ(mes_feed(engine1, result.data, result.size, &consumed), MES_OK);
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine1, &event) == MES_OK) {
@@ -552,6 +554,7 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
     if (poll_result.is_heartbeat || poll_result.data == nullptr) continue;
 
     size_t consumed = 0;
+    ASSERT_EQ(mes_set_checksum_enabled(engine, poll_result.checksum_enabled), MES_OK);
     ASSERT_EQ(mes_feed(engine, poll_result.data, poll_result.size, &consumed), MES_OK);
 
     const mes_event_t* event = nullptr;
@@ -631,6 +634,7 @@ TEST(E2EEngine, GtidTracking) {
     if (result.is_heartbeat || result.data == nullptr) continue;
 
     size_t consumed = 0;
+    mes_set_checksum_enabled(engine, result.checksum_enabled);
     mes_feed(engine, result.data, result.size, &consumed);
 
     const mes_event_t* event = nullptr;
