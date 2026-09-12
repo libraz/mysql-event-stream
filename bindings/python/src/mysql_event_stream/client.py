@@ -19,7 +19,14 @@ from ._ffi import (
     load_client_library,
 )
 from ._options import validate_option, validate_options
-from .types import ClientConfig, PollResult, ServerFlavor, exception_for_rc
+from .types import (
+    ClientConfig,
+    MesConnectionError,
+    MesError,
+    PollResult,
+    ServerFlavor,
+    exception_for_rc,
+)
 
 
 def validate_poll_batch_size(max_events: int) -> None:
@@ -240,8 +247,11 @@ class BinlogClient:
         """Connect to MySQL server and validate configuration.
 
         Raises:
-            ConnectionError: If connection or validation fails.
-            RuntimeError: If client has been closed.
+            MesConnectionError: If connection or validation fails. It is a
+                ``ConnectionError``, and its ``code`` carries the native
+                error category.
+            MesError: If the client has been closed or a size limit is
+                rejected; ``code`` carries the native error category.
         """
         if self._config.max_event_size < 0 or self._config.max_event_size > 0xFFFFFFFF:
             raise ValueError(
@@ -325,16 +335,15 @@ class BinlogClient:
             if rc != MES_OK:
                 error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
-                error = ConnectionError(f"{base_msg}: {error_msg}")
                 # Stable native error category used by the stream retry policy.
-                error.code = rc  # type: ignore[attr-defined]
-                raise error
+                raise MesConnectionError(f"{base_msg}: {error_msg}", rc)
 
     def start(self) -> None:
         """Start binlog streaming.
 
         Raises:
-            RuntimeError: If streaming cannot be started.
+            MesError: If streaming cannot be started; ``code`` carries the
+                native error category.
         """
         with self._poll_lock:
             self._check_open()
@@ -342,10 +351,8 @@ class BinlogClient:
             if rc != MES_OK:
                 error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
-                error = RuntimeError(f"{base_msg}: {error_msg}")
                 # Stable native error category used by the stream retry policy.
-                error.code = rc  # type: ignore[attr-defined]
-                raise error
+                raise MesError(f"{base_msg}: {error_msg}", rc)
 
     def poll(self) -> PollResult:
         """Poll for next binlog event (blocking).

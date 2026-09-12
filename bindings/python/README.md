@@ -130,7 +130,18 @@ with BinlogClient(user="replicator", password="secret", ssl_mode=SslMode.REQUIRE
 ### Errors and logging
 
 `ParseError`, `DecodeError`, and `ChecksumError` identify malformed binlog
-input. Native failures also carry a stable `MesErrorCode`. Install a
+input. They subclass `MesError`, which declares the `code` attribute holding a
+stable `MesErrorCode` — branch on that rather than on the message text.
+
+The exception category follows Python's own conventions rather than a single
+library root. A failure to reach the server is a `MesConnectionError`, which is
+a `ConnectionError` and therefore an `OSError`, like any other socket client
+would raise; every other failure is a `MesError`, which is a `RuntimeError`.
+They share no base of their own, so `except MesError` does not catch a
+connection failure — name both types when one handler has to cover everything.
+What they do share is `code`.
+
+Install a
 process-wide structured log handler with `set_log_callback`; it can run on the
 native reader thread, so keep it non-blocking and do not call client lifecycle
 methods from the handler.
@@ -208,6 +219,8 @@ pending `poll()`.
 | `ServerFlavor` | Detected server flavor, as returned by `client.flavor` |
 | `LogLevel`, `set_log_callback` | Structured logging API |
 | `MesErrorCode` | Stable native error-code enum |
+| `MesError` | Base class for native failures; declares `code` |
+| `MesConnectionError` | Connection failure; a `ConnectionError` that declares `code` |
 | `ParseError`, `DecodeError`, `ChecksumError` | Malformed binlog input |
 | `ColumnType`, `ColumnValue` | Deprecated legacy helpers. No API returns them — `ChangeEvent` exposes columns as a plain dict — and they have no Node counterpart |
 

@@ -14,6 +14,21 @@ def test_all_exports() -> None:
         assert hasattr(mysql_event_stream, name), f"{name} not found in module"
 
 
+def test_error_types_share_the_exported_base() -> None:
+    from mysql_event_stream import ChecksumError, DecodeError, MesError, ParseError
+
+    assert issubclass(MesError, RuntimeError)
+    for category in (ParseError, DecodeError, ChecksumError):
+        assert issubclass(category, MesError)
+
+
+def test_connection_error_is_exported_in_the_os_error_category() -> None:
+    from mysql_event_stream import MesConnectionError
+
+    assert issubclass(MesConnectionError, ConnectionError)
+    assert issubclass(MesConnectionError, OSError)
+
+
 def test_ssl_mode_enum() -> None:
     from mysql_event_stream import SslMode
 

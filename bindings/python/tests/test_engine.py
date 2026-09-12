@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mysql_event_stream import CdcEngine, ChecksumError, EventType, ParseError
+from mysql_event_stream import CdcEngine, ChecksumError, EventType, MesError, ParseError
 from mysql_event_stream._ffi import (
     MES_COL_BYTES,
     MES_COL_INT,
@@ -446,7 +446,7 @@ class TestConvertEvent:
 
         with pytest.raises(ParseError, match="Unknown event type: 99") as error:
             _convert_event(raw)
-        assert error.value.code == 100  # type: ignore[attr-defined]
+        assert error.value.code == 100
 
     def test_undecodable_identifiers_substitute_instead_of_losing_the_event(self) -> None:
         """next_event() either returns an event or raises with a C ABI code.
@@ -796,8 +796,8 @@ class TestNativeErrorCodes:
     text, so a bare ``RuntimeError`` from any of these paths is a broken
     promise, not a cosmetic difference.
 
-    ``exception_for_rc`` attaches ``code`` to the instance, so no exception
-    class declares it and the reads below are unchecked by construction.
+    ``MesError`` declares ``code``, so catching it is what makes the reads
+    below checkable.
     """
 
     @staticmethod
@@ -824,9 +824,9 @@ class TestNativeErrorCodes:
         lib = MagicMock()
         getattr(lib, native_name).return_value = MES_ERR_INVALID_ARG
         engine = self._engine(lib)
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(MesError) as excinfo:
             call(engine)
-        assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+        assert excinfo.value.code == MES_ERR_INVALID_ARG
         engine.close()
 
     def test_metadata_connection_failure_carries_the_code(self) -> None:
@@ -835,18 +835,18 @@ class TestNativeErrorCodes:
         engine = self._engine(lib)
         with (
             patch("mysql_event_stream.engine.load_client_library", return_value=True),
-            pytest.raises(RuntimeError) as excinfo,
+            pytest.raises(MesError) as excinfo,
         ):
             engine.enable_metadata(host="127.0.0.1", port=3306)
-        assert excinfo.value.code == MES_ERR_AUTH  # type: ignore[attr-defined]
+        assert excinfo.value.code == MES_ERR_AUTH
         engine.close()
 
     def test_closed_engine_reports_invalid_argument(self, lib_path: str) -> None:
         engine = CdcEngine(lib_path=lib_path)
         engine.close()
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(MesError) as excinfo:
             engine.get_position()
-        assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+        assert excinfo.value.code == MES_ERR_INVALID_ARG
 
 
 class TestSizeLimitDocumentation:

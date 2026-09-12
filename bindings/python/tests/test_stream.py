@@ -17,7 +17,12 @@ from mysql_event_stream._ffi import (
     MES_ERR_QUEUE_FULL,
 )
 from mysql_event_stream.stream import CdcStream
-from mysql_event_stream.types import PollResult, exception_for_rc
+from mysql_event_stream.types import (
+    MesConnectionError,
+    MesError,
+    PollResult,
+    exception_for_rc,
+)
 
 from .contract_fixture import load_binding_contract
 
@@ -529,8 +534,7 @@ class TestReconnectAttempts:
         stream._engine = engine
         stream._client = MagicMock()
 
-        dropped = RuntimeError("stream dropped")
-        dropped.code = MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+        dropped = MesError("stream dropped", MES_ERR_DISCONNECTED)
 
         async def fake_reconnect(self: CdcStream) -> None:
             self._client = MagicMock()
@@ -652,8 +656,7 @@ class TestRetryClassification:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("code", sorted(NON_RETRYABLE_ERROR_CODES))
     async def test_permanent_error_surfaces_on_the_first_attempt(self, code: int) -> None:
-        error = RuntimeError("permanent stream error")
-        error.code = code  # type: ignore[attr-defined]
+        error = MesError("permanent stream error", code)
         stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=10)
 
         with (
@@ -671,8 +674,7 @@ class TestRetryClassification:
         "code", sorted(entry["code"] for entry in contract["retryableErrorCodes"])
     )
     async def test_transient_error_consumes_the_retry_budget(self, code: int) -> None:
-        error = RuntimeError("transient stream error")
-        error.code = code  # type: ignore[attr-defined]
+        error = MesError("transient stream error", code)
         stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=1)
 
         with (
@@ -695,8 +697,9 @@ class TestRetryClassification:
         # max_queue_bytes below max_event_size is rejected by the native
         # connect with MES_ERR_INVALID_ARG. That is a configuration mistake, so
         # it must not burn the reconnect budget before reaching the caller.
-        error = ConnectionError("max_queue_bytes must be greater than max_event_size")
-        error.code = MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+        error = MesConnectionError(
+            "max_queue_bytes must be greater than max_event_size", MES_ERR_INVALID_ARG
+        )
         client = MagicMock()
         client.connect.side_effect = error
         mock_client_cls.return_value = client

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mysql_event_stream._ffi import (
+    MES_ERR_AUTH,
     MES_ERR_DISCONNECTED,
     MES_ERR_INVALID_ARG,
     MES_ERR_STREAM,
@@ -17,7 +18,7 @@ from mysql_event_stream._ffi import (
     MESPollResult,
 )
 from mysql_event_stream.client import BinlogClient
-from mysql_event_stream.types import ServerFlavor
+from mysql_event_stream.types import MesConnectionError, MesError, ServerFlavor
 
 from .abi_fixture import load_abi_enums
 
@@ -173,9 +174,9 @@ def test_poll_batch_delivers_events_that_precede_a_terminal_error(
     assert [result.data for result in delivered] == [b"\x01\x02\x03", b"\x01\x02\x03"]
 
     # The terminal error surfaces on the next call, exactly once.
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.poll_batch(8)
-    assert excinfo.value.code == MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_DISCONNECTED
     assert str(excinfo.value).strip() not in ("", ":")
 
     lib.mes_client_poll_batch.side_effect = _batch_of(MES_OK)
@@ -193,9 +194,9 @@ def test_poll_batch_raises_at_once_when_no_event_precedes_the_error(
     mock_load.return_value = lib
 
     client = _make_client(lib)
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.poll_batch(8)
-    assert excinfo.value.code == MES_ERR_DISCONNECTED  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_DISCONNECTED
     client.close()
 
 
@@ -210,9 +211,9 @@ def test_a_latched_terminal_error_also_surfaces_from_poll(
 
     client = _make_client(lib)
     assert len(client.poll_batch(8)) == 1
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.poll()
-    assert excinfo.value.code == MES_ERR_STREAM  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_STREAM
     lib.mes_client_poll.assert_not_called()
     client.close()
 
@@ -228,20 +229,46 @@ def test_every_native_failure_carries_the_c_abi_code(
 
     lib.mes_client_set_max_event_size.return_value = MES_ERR_INVALID_ARG
     client = _make_client(lib)
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.connect()
-    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_INVALID_ARG
 
     lib.mes_client_set_max_event_size.return_value = MES_OK
     lib.mes_client_set_max_queue_bytes.return_value = MES_ERR_INVALID_ARG
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.connect()
-    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_INVALID_ARG
 
     client.close()
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MesError) as excinfo:
         client.poll()
-    assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+    assert excinfo.value.code == MES_ERR_INVALID_ARG
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_a_failed_connect_carries_the_code_without_leaving_the_os_error_category(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    """Reaching the server is an OS-level operation and fails like one.
+
+    An auth rejection is the code a caller most needs off a failed connect, so
+    it has to be readable from the value an ``except ConnectionError`` handler
+    already catches.
+    """
+    lib = MagicMock()
+    mock_load.return_value = lib
+    lib.mes_client_set_max_event_size.return_value = MES_OK
+    lib.mes_client_set_max_queue_bytes.return_value = MES_OK
+    lib.mes_client_connect.return_value = MES_ERR_AUTH
+
+    client = _make_client(lib)
+    with pytest.raises(MesConnectionError) as excinfo:
+        client.connect()
+    assert excinfo.value.code == MES_ERR_AUTH
+    assert isinstance(excinfo.value, ConnectionError)
+    assert isinstance(excinfo.value, OSError)
+    client.close()
 
 
 class TestClientClose:
@@ -821,8 +848,8 @@ class TestServerSuppliedTextIsNeverFatal:
         lib.mes_client_poll.return_value = result
 
         client = BinlogClient()
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(MesError) as excinfo:
             client.poll()
-        assert excinfo.value.code == MES_ERR_STREAM  # type: ignore[attr-defined]
+        assert excinfo.value.code == MES_ERR_STREAM
         assert "server said �" in str(excinfo.value)
         client.close()

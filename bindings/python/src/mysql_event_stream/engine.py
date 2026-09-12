@@ -72,9 +72,10 @@ def _raise_for_rc(rc: int, op: str) -> None:
 
     Delegates to :func:`exception_for_rc` so engine and client surfaces map
     the same code to the same exception type. Every exception raised here is
-    still a subclass of ``RuntimeError`` for backward compatibility; callers
-    that want to distinguish categories can catch ``ChecksumError`` /
-    ``DecodeError`` / ``ParseError`` directly.
+    a ``MesError``, and therefore still a subclass of ``RuntimeError`` for
+    backward compatibility; callers that want to distinguish categories can
+    catch ``ChecksumError`` / ``DecodeError`` / ``ParseError`` directly, or
+    branch on the ``MesError.code`` every one of them carries.
     """
     if rc == MES_ERR_CHECKSUM:
         message = f"{op} failed: checksum mismatch (code {rc})"

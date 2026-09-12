@@ -256,35 +256,92 @@ class PollResult:
 
 # --- Typed exceptions -----------------------------------------------------
 #
-# These subclass RuntimeError to preserve backward compatibility: code
-# that catches ``RuntimeError`` continues to work, while callers who want
-# to distinguish checksum failures from decode errors from parse errors
-# can now do so without parsing error-message strings.
+# The exception category follows Python's own conventions rather than a single
+# library root: a connection failure is an OSError like any other socket
+# failure, and everything else is a RuntimeError. Existing handlers therefore
+# keep catching exactly what they caught before, and callers who want to
+# distinguish checksum failures from decode errors from parse errors can do so
+# without parsing error-message strings.
 #
-# ConnectionError is intentionally not re-exported here; it is a Python
-# built-in (subclass of OSError) and is raised by ``BinlogClient.connect``
-# to match OS/socket conventions.
+# What every failure raised by this package does share is the ``code``
+# attribute, declared by MesError on the RuntimeError side and by
+# MesConnectionError on the OSError side.
 
 
-class ParseError(RuntimeError):
+class MesError(RuntimeError):
+    """Base class for failures that carry a native C-ABI error code.
+
+    Subclasses ``RuntimeError``, so ``except RuntimeError`` keeps catching
+    every failure raised by this package except a connection failure, which
+    is a :class:`MesConnectionError` to match OS/socket conventions. The two
+    have no common base below ``Exception``; ``code`` is the attribute they
+    share, and branching on it is what saves a caller from parsing the
+    message text::
+
+        try:
+            engine.feed(chunk)
+        except MesError as err:
+            if err.code == MesErrorCode.CHECKSUM:
+                ...
+
+    Args:
+        message: Human-readable description of the failure.
+        code: The ``MES_ERR_*`` value the native layer reported. Defaults to
+            :attr:`MesErrorCode.INTERNAL` for instances built outside the
+            native error path.
+    """
+
+    code: int
+
+    def __init__(self, message: str, code: int = MesErrorCode.INTERNAL) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class MesConnectionError(ConnectionError):
+    """Raised when connecting to the server fails.
+
+    Subclasses the built-in ``ConnectionError``, so ``except ConnectionError``
+    and ``except OSError`` keep catching it: a failure to reach the server is
+    an OS-level failure, and this is the same category any other socket client
+    would raise. It declares the same ``code`` attribute as :class:`MesError`,
+    which is what lets one handler classify a failure from either category.
+
+    Args:
+        message: Human-readable description of the failure.
+        code: The ``MES_ERR_*`` value the native layer reported. Defaults to
+            :attr:`MesErrorCode.INTERNAL` for instances built outside the
+            native error path.
+    """
+
+    code: int
+
+    def __init__(self, message: str, code: int = MesErrorCode.INTERNAL) -> None:
+        # Passing the message alone keeps OSError from reading the arguments
+        # as an (errno, strerror) pair, which would rewrite str(error).
+        super().__init__(message)
+        self.code = code
+
+
+class ParseError(MesError):
     """Raised when a binlog event fails to parse (e.g. truncated header)."""
 
 
-class DecodeError(RuntimeError):
+class DecodeError(MesError):
     """Raised when row or column decoding fails for a well-formed event."""
 
 
-class ChecksumError(RuntimeError):
+class ChecksumError(MesError):
     """Raised when a CRC32 mismatch is detected on a binlog event."""
 
 
-def exception_for_rc(rc: int, message: str) -> RuntimeError:
+def exception_for_rc(rc: int, message: str) -> MesError:
     """Map a C-ABI error code to the matching typed exception instance.
 
     Shared by :class:`CdcEngine` and :class:`BinlogClient` so that the same
     error code raises the same exception type regardless of which surface
-    produced it. All returned exceptions subclass ``RuntimeError`` for
-    backward compatibility.
+    produced it. All returned exceptions subclass :class:`MesError`, and
+    therefore ``RuntimeError``, for backward compatibility.
 
     Args:
         rc: A ``MES_ERR_*`` error code.
@@ -292,7 +349,10 @@ def exception_for_rc(rc: int, message: str) -> RuntimeError:
 
     Returns:
         A ``ChecksumError`` / ``DecodeError`` / ``ParseError`` for those
-        categories, otherwise a plain ``RuntimeError``.
+        categories, otherwise a plain :class:`MesError`. Every returned
+        instance carries ``rc`` as its ``code``, including on the poll and
+        feed paths, so high-level retry policy never has to infer permanence
+        from text.
     """
     # Imported lazily to keep this module free of any native-library coupling
     # at import time.
@@ -305,14 +365,9 @@ def exception_for_rc(rc: int, message: str) -> RuntimeError:
     )
 
     if rc == MES_ERR_CHECKSUM:
-        error: RuntimeError = ChecksumError(message)
-    elif rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
-        error = DecodeError(message)
-    elif rc == MES_ERR_PARSE:
-        error = ParseError(message)
-    else:
-        error = RuntimeError(message)
-    # Keep the C ABI category on every error path (including poll/feed), so
-    # high-level retry policy never has to infer permanence from text.
-    error.code = rc  # type: ignore[attr-defined]
-    return error
+        return ChecksumError(message, rc)
+    if rc in (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW):
+        return DecodeError(message, rc)
+    if rc == MES_ERR_PARSE:
+        return ParseError(message, rc)
+    return MesError(message, rc)

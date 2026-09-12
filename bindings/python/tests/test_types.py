@@ -2,6 +2,8 @@
 
 import ctypes
 
+import pytest
+
 import mysql_event_stream
 from mysql_event_stream import (
     BinlogPosition,
@@ -22,6 +24,9 @@ from mysql_event_stream._ffi import (
 from mysql_event_stream.types import (
     ChecksumError,
     DecodeError,
+    MesConnectionError,
+    MesError,
+    MesErrorCode,
     ParseError,
     exception_for_rc,
 )
@@ -145,9 +150,9 @@ class TestExceptionForRc:
     def test_parse(self) -> None:
         assert isinstance(exception_for_rc(MES_ERR_PARSE, "x"), ParseError)
 
-    def test_other_falls_back_to_runtime_error(self) -> None:
+    def test_other_falls_back_to_the_coded_base(self) -> None:
         exc = exception_for_rc(MES_ERR_CONNECT, "x")
-        assert type(exc) is RuntimeError
+        assert type(exc) is MesError
 
     def test_all_subclass_runtime_error(self) -> None:
         for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
@@ -155,7 +160,114 @@ class TestExceptionForRc:
 
     def test_every_exception_carries_its_native_code(self) -> None:
         for code in (MES_ERR_CHECKSUM, MES_ERR_DECODE, MES_ERR_PARSE, MES_ERR_CONNECT):
-            assert exception_for_rc(code, "x").code == code  # type: ignore[attr-defined]
+            assert exception_for_rc(code, "x").code == code
+
+
+_MAPPED_CODES = (
+    MES_ERR_CHECKSUM,
+    MES_ERR_DECODE,
+    MES_ERR_DECODE_COLUMN,
+    MES_ERR_DECODE_ROW,
+    MES_ERR_PARSE,
+    MES_ERR_CONNECT,
+)
+
+
+class TestExceptionCompatibility:
+    """A handler written against the exception surface must keep working.
+
+    Sharing a base may only ever narrow what a caller sees: an existing
+    ``except`` clause has to catch the same codes it caught before, and the
+    only code whose type changes is the one that used to arrive uncategorized.
+    """
+
+    def test_runtime_error_still_catches_every_mapped_code(self) -> None:
+        for code in _MAPPED_CODES:
+            caught: RuntimeError | None = None
+            try:
+                raise exception_for_rc(code, "boom")
+            except RuntimeError as err:
+                caught = err
+            assert caught is not None, f"code {code} escaped an except RuntimeError handler"
+
+    def test_each_category_still_raises_its_own_type(self) -> None:
+        expected: dict[int, type[MesError]] = {
+            MES_ERR_CHECKSUM: ChecksumError,
+            MES_ERR_DECODE: DecodeError,
+            MES_ERR_DECODE_COLUMN: DecodeError,
+            MES_ERR_DECODE_ROW: DecodeError,
+            MES_ERR_PARSE: ParseError,
+        }
+        for code, category in expected.items():
+            assert type(exception_for_rc(code, "x")) is category
+
+    def test_a_category_handler_catches_only_its_own_codes(self) -> None:
+        decode_codes = (MES_ERR_DECODE, MES_ERR_DECODE_COLUMN, MES_ERR_DECODE_ROW)
+        for code in _MAPPED_CODES:
+            try:
+                raise exception_for_rc(code, "boom")
+            except ChecksumError:
+                assert code == MES_ERR_CHECKSUM
+            except DecodeError:
+                assert code in decode_codes
+            except ParseError:
+                assert code == MES_ERR_PARSE
+            except MesError:
+                assert code not in (MES_ERR_CHECKSUM, MES_ERR_PARSE, *decode_codes)
+
+    def test_the_fallback_code_reaches_a_handler_that_can_read_it(self) -> None:
+        """The uncategorized codes are the ones callers most need to classify."""
+        try:
+            raise exception_for_rc(MES_ERR_CONNECT, "boom")
+        except MesError as err:
+            assert err.code == MES_ERR_CONNECT
+
+    def test_the_message_stays_the_only_exception_argument(self) -> None:
+        exc = exception_for_rc(MES_ERR_PARSE, "boom")
+        assert str(exc) == "boom"
+        assert exc.args == ("boom",)
+
+    def test_an_error_built_without_a_code_reports_an_internal_one(self) -> None:
+        assert MesError("boom").code == MesErrorCode.INTERNAL
+        assert ParseError("boom").code == MesErrorCode.INTERNAL
+        assert MesConnectionError("boom").code == MesErrorCode.INTERNAL
+
+
+class TestConnectionErrorCategory:
+    """A connection failure stays where Python puts every other socket failure.
+
+    ``MesConnectionError`` declares the same ``code`` as ``MesError`` without
+    sharing a base with it. Joining the two hierarchies would make an existing
+    ``except RuntimeError`` clause start swallowing connection failures it was
+    never written to handle, which is why the split is pinned here.
+    """
+
+    def test_it_is_still_caught_as_a_connection_error(self) -> None:
+        with pytest.raises(ConnectionError) as excinfo:
+            raise MesConnectionError("refused", MES_ERR_CONNECT)
+        caught = excinfo.value
+        assert isinstance(caught, MesConnectionError)
+        assert caught.code == MES_ERR_CONNECT
+
+    def test_it_is_still_caught_as_an_os_error(self) -> None:
+        with pytest.raises(OSError) as excinfo:
+            raise MesConnectionError("refused", MES_ERR_CONNECT)
+        caught = excinfo.value
+        assert isinstance(caught, MesConnectionError)
+        assert caught.code == MES_ERR_CONNECT
+
+    def test_it_stays_out_of_the_runtime_error_hierarchy(self) -> None:
+        error = MesConnectionError("refused", MES_ERR_CONNECT)
+        assert not isinstance(error, RuntimeError)
+        assert not isinstance(error, MesError)
+
+    def test_the_message_is_not_read_as_an_errno_pair(self) -> None:
+        """Two arguments are how OSError spells (errno, strerror)."""
+        error = MesConnectionError("refused", MES_ERR_CONNECT)
+        assert str(error) == "refused"
+        assert error.args == ("refused",)
+        assert error.errno is None
+        assert error.strerror is None
 
 
 class TestClientConfig:
