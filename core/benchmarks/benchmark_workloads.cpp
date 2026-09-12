@@ -29,12 +29,15 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
 
 #ifndef _WIN32
 #include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "cdc_engine.h"
@@ -303,45 +306,106 @@ int EmitStreams(const std::string& dir) {
 #ifdef MES_BENCH_ALLOC_TRACKING
 /// Queue events without draining, so the reported peak is the memory the
 /// engine actually holds per pending event.
-void ReportMemory(size_t queued_events) {
-  std::cout << "mode=memory queued_events=" << queued_events << '\n';
-  for (const auto& w : BuildWorkloads()) {
-    if (!Selected(w)) continue;
-    const size_t iterations = std::max<size_t>(1, queued_events / w.rows_per_iteration);
-    const size_t rows = iterations * w.rows_per_iteration;
-    {
-      // Warm the row-column pool so its first-touch growth is not billed to
-      // the measured run.
-      mes::CdcEngine warmup;
-      for (size_t i = 0; i < 8; ++i) RunIteration(warmup, w);
-    }
-
-    mes::CdcEngine engine;
-    engine.SetMaxQueueSize(rows + w.rows_per_iteration);
-    mes::bench::ResetStats();
-    const auto before = mes::bench::Snapshot();
-    for (size_t i = 0; i < iterations; ++i) {
-      size_t offset = 0;
-      while (offset < w.bytes.size()) {
-        const size_t consumed = engine.Feed(w.bytes.data() + offset, w.bytes.size() - offset);
-        if (consumed == 0) break;
-        offset += consumed;
+void MeasureWorkload(const Workload& w, size_t queued_events) {
+  const size_t iterations = std::max<size_t>(1, queued_events / w.rows_per_iteration);
+  const size_t rows = iterations * w.rows_per_iteration;
+  {
+    // Warm the row-column pool so its first-touch growth is not billed to
+    // the measured run.
+    mes::CdcEngine warmup;
+    for (size_t i = 0; i < 8; ++i) {
+      if (!RunIteration(warmup, w)) {
+        std::cerr << "workload " << w.name << " did not decode as expected\n";
+        std::exit(2);
       }
     }
-    const auto after = mes::bench::Snapshot();
-    const double per_event =
-        static_cast<double>(after.live_bytes - before.live_bytes) / static_cast<double>(rows);
-    const double peak_per_event =
-        static_cast<double>(after.peak_live_bytes - before.live_bytes) / static_cast<double>(rows);
-    std::cout << std::fixed << std::setprecision(1) << "workload=" << w.name
-              << " columns=" << w.columns << " rows_per_event=" << w.rows_per_iteration
-              << " annotate_sql_bytes=" << w.annotate_sql_bytes
-              << " queued_bytes_per_event=" << per_event
-              << " peak_bytes_per_event=" << peak_per_event
-              << " allocs_per_event=" << static_cast<double>(after.alloc_count) / rows
-              << " total_bytes_per_event=" << static_cast<double>(after.total_bytes) / rows
-              << " resident_total_bytes=" << (after.live_bytes - before.live_bytes)
-              << " max_rss_bytes=" << MaxRssBytes() << '\n';
+  }
+
+  mes::CdcEngine engine;
+  engine.SetMaxQueueSize(rows + w.rows_per_iteration);
+  // Holding every event at once is the measurement, so neither bound may
+  // retire an event before the snapshot is taken. The byte budget charges
+  // each row event for the names and statement that produced it, which for a
+  // multi-row workload is many times the bytes fed, so it is lifted rather
+  // than sized from the input.
+  engine.SetMaxQueueBytes(std::numeric_limits<size_t>::max());
+  mes::bench::ResetStats();
+  const auto before = mes::bench::Snapshot();
+  for (size_t i = 0; i < iterations; ++i) {
+    size_t offset = 0;
+    while (offset < w.bytes.size()) {
+      const size_t consumed = engine.Feed(w.bytes.data() + offset, w.bytes.size() - offset);
+      if (consumed == 0) {
+        std::cerr << "workload " << w.name << " stopped consuming after " << offset << " of "
+                  << w.bytes.size() << " bytes on iteration " << i << '\n';
+        std::exit(2);
+      }
+      offset += consumed;
+    }
+  }
+  const auto after = mes::bench::Snapshot();
+  // Every figure below is an average over the events the engine is holding,
+  // so the divisor has to be what the queue actually contains rather than
+  // what the workload was expected to produce.
+  const size_t pending = engine.PendingEventCount();
+  if (pending != rows) {
+    std::cerr << "workload " << w.name << " holds " << pending << " events, expected " << rows
+              << '\n';
+    std::exit(2);
+  }
+  const double per_event =
+      static_cast<double>(after.live_bytes - before.live_bytes) / static_cast<double>(rows);
+  const double peak_per_event =
+      static_cast<double>(after.peak_live_bytes - before.live_bytes) / static_cast<double>(rows);
+  std::cout << std::fixed << std::setprecision(1) << "workload=" << w.name
+            << " columns=" << w.columns << " rows_per_event=" << w.rows_per_iteration
+            << " annotate_sql_bytes=" << w.annotate_sql_bytes
+            << " queued_bytes_per_event=" << per_event << " peak_bytes_per_event=" << peak_per_event
+            << " allocs_per_event=" << static_cast<double>(after.alloc_count) / rows
+            << " total_bytes_per_event=" << static_cast<double>(after.total_bytes) / rows
+            << " resident_total_bytes=" << (after.live_bytes - before.live_bytes)
+            << " max_rss_bytes=" << MaxRssBytes() << '\n';
+}
+
+/**
+ * Measure every selected workload, each in its own process.
+ *
+ * The row-column pool lives for the whole process and is never returned to the
+ * system, so a workload that runs after another reuses the blocks its
+ * predecessor released and is billed only for what the pool could not already
+ * satisfy. Measured in a shared process, the same workload reports a per-event
+ * figure several times smaller purely because of where it sits in the list.
+ * The pool has no reset, so isolation is the only way to make the figures
+ * comparable: the fork happens before this process has decoded anything, which
+ * gives every child the pool in the same empty state.
+ */
+void ReportMemory(size_t queued_events) {
+  std::cout << "mode=memory queued_events=" << queued_events << '\n';
+  std::cout.flush();
+  for (const auto& w : BuildWorkloads()) {
+    if (!Selected(w)) continue;
+#ifdef _WIN32
+    // No isolation primitive here, so one workload per invocation is the only
+    // way to get a figure that does not depend on what ran before it.
+    MeasureWorkload(w, queued_events);
+    return;
+#else
+    const pid_t child = fork();
+    if (child < 0) {
+      std::cerr << "workload " << w.name << " could not be isolated for measurement\n";
+      std::exit(2);
+    }
+    if (child == 0) {
+      MeasureWorkload(w, queued_events);
+      std::cout.flush();
+      _exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+      std::cerr << "workload " << w.name << " did not complete its measurement\n";
+      std::exit(2);
+    }
+#endif
   }
 }
 #endif

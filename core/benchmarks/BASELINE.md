@@ -121,61 +121,65 @@ columns here are comparable with each other; neither is comparable with an
 absolute rate from the table above.
 
 Queued memory for the same workloads is in the table below. Sharing removes the
-duplication but adds one control block per ANNOTATE_ROWS event, about 40 bytes;
-where an event carries exactly one row there is nothing to share and that 40
+duplication but adds one control block per ANNOTATE_ROWS event, about 56 bytes;
+where an event carries exactly one row there is nothing to share and that 56
 bytes is a net loss.
 
 ## Memory per queued event
 
 `build-bench/core/mes_benchmark_workloads_mem 10000`. The binary replaces global
 `operator new`, fills the engine queue without draining it, and reports the
-bytes still resident divided by the number of queued row events. `resident_total`
-is what 10,000 pending events actually hold. The measurement is deterministic:
-repeated runs give identical byte counts.
+bytes still resident divided by the number of queued row events, verified
+against the count the engine is actually holding rather than the count the
+workload was expected to produce. `resident_total` is what 10,000 pending events
+actually hold.
 
-The *copy* and *shared* byte columns are the ANNOTATE statement A/B pair, taken
-in one session from the same two binaries as the throughput comparison above.
-The **allocs/event column is a single figure re-measured on the finished tree**,
-not part of that pair: the temporal/DECIMAL formatting change landed after the
-A/B run and removed allocations the shared-statement work had nothing to do
-with, so carrying an A/B split there would attribute them to the wrong change.
-The byte columns are unaffected — re-measuring reproduces the *shared* column
-exactly.
+**Each workload is measured in its own process.** The row-column pool is created
+once per process and never returns memory to the system, so a workload that runs
+after another reuses the blocks its predecessor released and is billed only for
+what the pool could not already satisfy — sharing a process, `wide28_write_x50`
+reports 629 bytes/event against the 2,677 it reports alone. The pool has no
+reset, so the harness forks before its first decode and every workload starts
+from the same empty pool. Within that isolation the figures are deterministic
+and identical between a debug and a release build, because what is counted is
+allocated bytes rather than elapsed time.
 
-| Workload | bytes/event copy | bytes/event shared | allocs/event | 10k events copy | 10k events shared |
-|---|---:|---:|---:|---:|---:|
-| `int1_write_x1` | 274 | 265 | 0.1 | 2.7 MB | 2.7 MB |
-| `temporal7_write_x1` | 756 | 748 | 1.1 | 7.6 MB | 7.5 MB |
-| `strings7_write_x1` | 497 | 489 | 3.1 | 5.0 MB | 4.9 MB |
-| `wide28_write_x1` | 2,716 | 2,708 | 6.1 | 27.2 MB | 27.1 MB |
-| `wide28_write_x50` | 661 | 653 | 6.1 | 6.6 MB | 6.5 MB |
-| `wide28_update_x1` | 4,089 | 4,080 | 12.1 | 40.9 MB | 40.8 MB |
-| `wide28_update_x50` | 1,113 | 1,105 | 12.1 | 11.1 MB | 11.0 MB |
-| `annotate256_wide28_x1` | 922 | 962 | 8.1 | 9.2 MB | 9.6 MB |
-| `annotate256_wide28_x50` | 925 | 659 | 6.1 | 9.3 MB | 6.6 MB |
-| `annotate8k_wide28_x1` | 8,860 | 8,899 | 8.1 | 88.6 MB | 89.0 MB |
-| `annotate8k_wide28_x50` | 8,862 | 818 | 6.1 | 88.6 MB | 8.2 MB |
-| `annotate8k_wide28_x200` | 8,870 | 702 | 6.1 | 88.7 MB | 7.0 MB |
+| Workload | bytes/event | allocs/event | 10k events |
+|---|---:|---:|---:|
+| `int1_write_x1` | 241 | 0.0 | 2.4 MB |
+| `temporal7_write_x1` | 723 | 1.0 | 7.2 MB |
+| `strings7_write_x1` | 979 | 3.0 | 9.8 MB |
+| `wide28_write_x1` | 2,684 | 6.0 | 26.8 MB |
+| `wide28_write_x50` | 2,677 | 6.0 | 26.8 MB |
+| `wide28_update_x1` | 6,114 | 12.0 | 61.1 MB |
+| `wide28_update_x50` | 6,096 | 12.0 | 61.0 MB |
+| `annotate256_wide28_x1` | 2,996 | 8.0 | 30.0 MB |
+| `annotate256_wide28_x50` | 2,684 | 6.1 | 26.8 MB |
+| `annotate8k_wide28_x1` | 10,933 | 8.0 | 109.3 MB |
+| `annotate8k_wide28_x50` | 2,842 | 6.1 | 28.4 MB |
+| `annotate8k_wide28_x200` | 2,691 | 6.1 | 26.9 MB |
 
-Writing temporal and DECIMAL digits directly instead of through `std::snprintf`
-also removed one allocation per such column: `temporal7` fell from 2.1 to 1.1
-allocs/event and every `wide28` variant by 2.0, because the formatted value no
-longer outgrows its small-string buffer.
+Three effects are visible:
 
-Four further effects are visible:
+* **Row column storage dominates and cannot be amortised.** Every `wide28` write
+  workload lands within 7 bytes of 2,684 whatever its rows per event, because
+  each row owns its own column array however the events were framed. An UPDATE
+  pays twice that, 6,096-6,114, for holding a before and an after image.
+* **ANNOTATE SQL is charged per ROWS event, not per row.** At 8 KB the statement
+  adds its length divided by the row count on top of that baseline: 8,192/50 =
+  164 bytes at 50 rows and 41 at 200, so 2,842 and 2,691 against the 2,684 of
+  the same schema with no annotation.
+* **At one row per event there is nothing to share**, and the event instead pays
+  ~56 bytes and one allocation for the statement's control block: 2,996 and
+  10,933 are 2,684 plus the whole statement plus that overhead.
 
-* ANNOTATE SQL is now charged **per ROWS event**, not per row: at 8 KB the cost
-  falls from 8,862 to 818 bytes/event at 50 rows and to 702 at 200 rows, i.e.
-  statement length divided by the row count plus the no-annotate baseline. It
-  used to be identical at 1, 50 and 200 rows per event.
-* At exactly one row per event there is nothing to share, and the event pays
-  ~40 bytes and one allocation more for the shared statement's control block.
-  8,860 -> 8,899 bytes/event is the price of the 10.8x saving at 50 rows.
-* Every workload drops 8 bytes/event because a `shared_ptr` member is 8 bytes
-  smaller than the `std::string` it replaced.
-* The `_x1` variants pay for a fresh `TableMetadata` per event because each
-  event is preceded by its own TABLE_MAP; at 50 rows per event that cost is
-  amortised (2,716 -> 653 bytes/event).
+These are per-event costs, not a queue footprint: the measurement lifts the
+queue byte budget so that nothing is retired before the snapshot. It is that
+budget, not the entry count, that bounds a running engine. The figures show why
+the entry count alone could not: 10,000 events of `wide28_update` would be
+61 MB, and 109 MB if each also carried an 8 KB statement, so the same entry
+count spans a twenty-fold range of memory depending on the schema in front of
+it.
 
 ## Thread scaling
 
