@@ -153,7 +153,7 @@ declare -a summary_lines
 # with its per-target container lifecycle and its own tier reporting, so the two
 # copies have to be changed together.
 CTEST_EXECUTED_RE='^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed'
-PYTEST_EXECUTED_RE='^=+ .*[1-9][0-9]* passed'
+PYTEST_EXECUTED_RE='^=+ .*[1-9][0-9]* passed|^[1-9][0-9]* passed'
 VITEST_EXECUTED_RE='^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed'
 
 # Run one tier and decide its result. Kept as the single place that decision is
