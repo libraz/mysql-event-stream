@@ -522,9 +522,16 @@ class CdcEngine:
 
 
 def _convert_columns(
-    cols: ctypes.Array[MESColumn], count: int, name_cache: dict[bytes, str] | None = None
+    cols: ctypes.Array[MESColumn] | ctypes._Pointer[MESColumn],
+    count: int,
+    name_cache: dict[bytes, str] | None = None,
 ) -> dict[str, Any]:
-    """Convert C mes_column_t array to a Python dict."""
+    """Convert C mes_column_t array to a Python dict.
+
+    ``mes_event_t`` declares its column members as ``mes_column_t *``, so the
+    event path always passes a pointer; a fixed-size array indexes identically
+    and both are accepted.
+    """
     result: dict[str, Any] = {}
     window_at = _payload_window_at
     for i in range(count):
