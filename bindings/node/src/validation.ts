@@ -6,7 +6,7 @@ import {
   REQUIRED_TOGETHER_OPTIONS,
   STREAM_DEFAULTS,
 } from "./contract.js";
-import type { StreamConfig } from "./types.js";
+import type { MesError, StreamConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
 
 /**
@@ -23,9 +23,13 @@ export const REFUSAL_ERROR_NAME = "MesError";
  * name. The addon states the same presentation once in `MakeMesError()`, and
  * `tests/option-refusal.test.ts` drives one refused value per option through
  * both layers so neither can be changed alone.
+ *
+ * The result satisfies {@link MesError}, which is the one declaration of what
+ * an error from this package carries, so `isMesError()` narrows a refusal the
+ * same way it narrows a failure the addon raised.
  */
-function refused<E extends Error>(error: E): E & { code: number } {
-  const presented = error as E & { code: number };
+function refused<E extends Error>(error: E): E & MesError {
+  const presented = error as E & MesError;
   presented.code = MesErrorCode.InvalidArg;
   presented.name = REFUSAL_ERROR_NAME;
   return presented;

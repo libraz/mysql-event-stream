@@ -138,5 +138,6 @@ The `prepack` script swaps `README.md` with `README.npm.md` so npm shows user-fa
 | `CdcStream` | High-level async iterator (recommended) |
 | `LogLevel`, `setLogCallback`, `LogHandler` | Structured logging API and its handler type |
 | `MesErrorCode` | Stable native error-code enum |
+| `MesError`, `isMesError` | Declared shape of a thrown error and the guard that narrows a caught value to it |
 | `ServerFlavor`, `SslMode` | Server and TLS enums |
 | `ChangeEvent`, `ClientConfig`, `ColumnValue`, `EventType`, `PollResult`, `StreamConfig` | Public TypeScript types |

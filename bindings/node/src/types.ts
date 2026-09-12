@@ -8,7 +8,8 @@ export type EventType = "INSERT" | "UPDATE" | "DELETE";
  * Numeric error codes mirroring the C ABI `mes_error_t`. Errors thrown by the
  * native addon carry the matching value on their `code` property, so callers
  * can branch on category (e.g. `err.code === MesErrorCode.Auth`) instead of
- * matching message strings.
+ * matching message strings. {@link MesError} declares that property and
+ * {@link isMesError} narrows a caught value to it.
  */
 export const MesErrorCode = {
   Ok: 0,
@@ -32,6 +33,40 @@ export const MesErrorCode = {
 } as const;
 
 export type MesErrorCode = (typeof MesErrorCode)[keyof typeof MesErrorCode];
+
+/**
+ * The shape every error this package throws carries.
+ *
+ * An error from the native addon is a plain `Error`, `TypeError` or
+ * `RangeError` with `code` set on it, not an instance of a class this package
+ * owns, so there is nothing here for `instanceof` to test against. Narrow a
+ * caught value with {@link isMesError} instead.
+ *
+ * `name` holds a category string — `MesAuthError`, `MesDecodeError`,
+ * `MesParseError` and so on, `MesError` for a code with no category of its
+ * own. It reads well in a log line, but `code` is the value to branch on: it
+ * mirrors the C ABI's `mes_error_t` exactly, while a category groups several
+ * codes under one string.
+ */
+export interface MesError extends Error {
+  /** Which {@link MesErrorCode} the failure reports. */
+  code: MesErrorCode;
+}
+
+/**
+ * Narrow a caught value to {@link MesError}.
+ *
+ * `catch` binds its value as `unknown` under `strict`, so this is how a caller
+ * reaches `code` without a cast. It holds for a failure raised by the addon and
+ * for an argument this binding refuses before the call reaches the addon.
+ *
+ * The numeric test is what separates an error from this package from any other
+ * object carrying a `code` key — Node's own system errors spell theirs as a
+ * string such as `"ENOENT"`.
+ */
+export function isMesError(value: unknown): value is MesError {
+  return value instanceof Error && typeof (value as { code?: unknown }).code === "number";
+}
 
 /** SSL connection mode. */
 export const SslMode = {

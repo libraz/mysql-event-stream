@@ -11,7 +11,8 @@ export type {
   ClientConfig,
   ColumnValue,
   EventType,
+  MesError,
   PollResult,
   StreamConfig,
 } from "./types.js";
-export { MesErrorCode, ServerFlavor, SslMode } from "./types.js";
+export { isMesError, MesErrorCode, ServerFlavor, SslMode } from "./types.js";

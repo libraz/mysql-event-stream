@@ -180,6 +180,44 @@ before changing connection lifecycle state. `CdcStream` owns this whole
 sequence and `await stream.close()` is its corresponding idempotent cleanup, so
 use the client directly only when you own the event loop it runs on.
 
+## Error handling
+
+Every error this package throws carries a numeric `code` from `MesErrorCode`,
+which mirrors the C ABI and is what to branch on — message text is worded for
+the failure at hand and is not part of the API. `catch` binds its value as
+`unknown` under TypeScript's `strict`, so narrow it with `isMesError` to reach
+the code:
+
+```typescript
+import { isMesError, MesErrorCode } from "@libraz/mysql-event-stream";
+
+try {
+  for await (const event of stream) {
+    handle(event);
+  }
+} catch (error) {
+  if (isMesError(error) && error.code === MesErrorCode.Disconnected) {
+    await resumeFromCheckpoint();
+  } else {
+    throw error;
+  }
+}
+```
+
+`MesError` is the type the guard narrows to. It is an interface rather than a
+class: errors cross from the native addon as plain `Error`, `TypeError` and
+`RangeError` objects with `code` set on them, so `isMesError` is the check that
+works — `instanceof` has no class of ours to test against. An argument this
+binding refuses before the call reaches the addon carries the same shape, so
+one branch covers both. The built-in subclass is kept for argument refusals:
+`instanceof TypeError` holds for a wrongly-typed option and
+`instanceof RangeError` for one outside its accepted window.
+
+Errors also carry a `name` naming their category — `MesAuthError`,
+`MesConnectError`, `MesDecodeError` and so on, `MesError` where a code has no
+category of its own. It reads well in a log line, but a category groups several
+codes, so `code` is the finer-grained value.
+
 ## Thread Safety
 
 `CdcEngine` instances are single-owner objects. Do not call `feed()`,
