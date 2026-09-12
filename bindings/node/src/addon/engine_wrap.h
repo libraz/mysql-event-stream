@@ -46,9 +46,10 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   /**
    * @brief The JS string for the statement the last converted event annotated.
    *
-   * One ANNOTATE_ROWS statement covers every row of the ROWS event that
-   * follows it, and each of those rows arrives as its own C event carrying the
-   * same @c source_sql pointer, so a single entry serves the whole event.
+   * One ANNOTATE_ROWS statement covers every row of the statement it
+   * introduces -- which the server may split across several ROWS events -- and
+   * each of those rows arrives as its own C event carrying the same
+   * @c source_sql pointer, so a single entry serves all of them.
    * @c address is only a fast-path key: the core reuses that storage across
    * events, so @c bytes is compared before the cached string is reused.
    */

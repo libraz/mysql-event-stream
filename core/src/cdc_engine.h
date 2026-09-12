@@ -233,9 +233,10 @@ class CdcEngine {
   // it applies, so the filename is copied once per rotation rather than once per
   // row. Null until a ROTATE event supplies a filename.
   std::shared_ptr<const std::string> position_binlog_file_;
-  // Shared with every ChangeEvent decoded from the ROWS event this annotates,
-  // so an ANNOTATE_ROWS statement is stored once per event rather than once
-  // per row. Null when no annotation is in effect.
+  // Shared with every ChangeEvent the annotated statement produces, so an
+  // ANNOTATE_ROWS statement is stored once per statement rather than once per
+  // row -- and a statement the server split across several ROWS events is
+  // still stored once. Null when no annotation is in effect.
   std::shared_ptr<const std::string> pending_source_sql_;
   std::queue<ChangeEvent> event_queue_;
   // Raw-feed users, including CdcStream, must not accumulate an unbounded

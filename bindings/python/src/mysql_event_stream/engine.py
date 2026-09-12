@@ -626,9 +626,10 @@ def _convert_event(
     table = raw.table.decode("utf-8", errors="replace") if raw.table else ""
     binlog_file = raw.binlog_file.decode("utf-8", errors="replace") if raw.binlog_file else ""
 
-    # One ANNOTATE_ROWS statement annotates every row of the ROWS event that
-    # follows it, and each of those rows arrives as a separate C event carrying
-    # the same statement, so decoding it per row repeats identical work. The
+    # One ANNOTATE_ROWS statement annotates every row of the statement it
+    # introduces, which the server may split across several ROWS events, and
+    # each of those rows arrives as a separate C event carrying the same
+    # statement, so decoding it per row repeats identical work. The
     # cache is keyed on the statement bytes rather than on the C pointer: the
     # engine reuses its storage across events, so pointer identity would serve
     # the previous statement's text for a new statement at the same address.
