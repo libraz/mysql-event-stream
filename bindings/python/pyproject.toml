@@ -58,7 +58,7 @@ dev-dependencies = [
 [tool.rye.scripts]
 lint = "ruff check --fix ."
 format = "ruff format ."
-typecheck = "mypy src"
+typecheck = "mypy src tests"
 e2e = "pytest e2e/tests -v --timeout=120"
 
 [tool.hatch.build.targets.wheel]

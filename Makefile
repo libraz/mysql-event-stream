@@ -204,7 +204,7 @@ py-format:
 	cd bindings/python && rye run ruff format .
 
 py-typecheck:
-	cd bindings/python && rye run mypy src
+	cd bindings/python && rye run mypy src tests
 
 build-wheel: build
 	cd bindings/python && bash build_wheel.sh
