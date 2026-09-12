@@ -1,5 +1,7 @@
 """Tests for CdcEngine - the Python wrapper around libmes."""
 
+from __future__ import annotations
+
 import ctypes
 import inspect
 import re
@@ -417,7 +419,7 @@ def _make_string_column(data: bytes, col_name: bytes | None = None) -> MESColumn
     else:
         col.col_name = None
     # Keep references alive so buffers are not garbage collected
-    col._keep_alive = (buf, name_buf if col_name is not None else None)  # type: ignore[attr-defined]
+    col._keep_alive = (buf, name_buf if col_name is not None else None)
     return col
 
 
@@ -431,7 +433,7 @@ def _make_bytes_column(data: bytes) -> MESColumn:
     col.str_data = ctypes.cast(buf, ctypes.c_void_p).value
     col.str_len = len(data)
     col.col_name = None
-    col._keep_alive = (buf,)  # type: ignore[attr-defined]
+    col._keep_alive = (buf,)
     return col
 
 
@@ -444,7 +446,7 @@ class TestConvertEvent:
 
         with pytest.raises(ParseError, match="Unknown event type: 99") as error:
             _convert_event(raw)
-        assert error.value.code == 100
+        assert error.value.code == 100  # type: ignore[attr-defined]
 
     def test_undecodable_identifiers_substitute_instead_of_losing_the_event(self) -> None:
         """next_event() either returns an event or raises with a C ABI code.
@@ -768,10 +770,11 @@ class TestPositionTextIsNeverFatal:
         lib.mes_create.return_value = 0xBEEF
         lib.mes_get_position.return_value = MES_OK
 
+        # get_position() hands both out-parameters over as byref() handles.
         def fake_get_position(
             _handle: object,
-            file_ptr: object,
-            offset: object,
+            file_ptr: ctypes._CArgObject,
+            offset: ctypes._CArgObject,
         ) -> int:
             ctypes.cast(file_ptr, ctypes.POINTER(ctypes.c_char_p))[0] = b"binlog.\xff0007"
             ctypes.cast(offset, ctypes.POINTER(ctypes.c_uint64))[0] = 154
@@ -792,6 +795,9 @@ class TestNativeErrorCodes:
     The README tells callers to branch on ``.code`` rather than on the message
     text, so a bare ``RuntimeError`` from any of these paths is a broken
     promise, not a cosmetic difference.
+
+    ``exception_for_rc`` attaches ``code`` to the instance, so no exception
+    class declares it and the reads below are unchecked by construction.
     """
 
     @staticmethod
@@ -820,7 +826,7 @@ class TestNativeErrorCodes:
         engine = self._engine(lib)
         with pytest.raises(RuntimeError) as excinfo:
             call(engine)
-        assert excinfo.value.code == MES_ERR_INVALID_ARG
+        assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
         engine.close()
 
     def test_metadata_connection_failure_carries_the_code(self) -> None:
@@ -832,7 +838,7 @@ class TestNativeErrorCodes:
             pytest.raises(RuntimeError) as excinfo,
         ):
             engine.enable_metadata(host="127.0.0.1", port=3306)
-        assert excinfo.value.code == MES_ERR_AUTH
+        assert excinfo.value.code == MES_ERR_AUTH  # type: ignore[attr-defined]
         engine.close()
 
     def test_closed_engine_reports_invalid_argument(self, lib_path: str) -> None:
@@ -840,7 +846,7 @@ class TestNativeErrorCodes:
         engine.close()
         with pytest.raises(RuntimeError) as excinfo:
             engine.get_position()
-        assert excinfo.value.code == MES_ERR_INVALID_ARG
+        assert excinfo.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
 
 
 class TestSizeLimitDocumentation:

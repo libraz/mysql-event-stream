@@ -15,7 +15,8 @@ _HEADER_PATH = _REPO_ROOT / "core" / "include" / "mes.h"
 
 def load_binding_contract() -> dict[str, Any]:
     """Read ``core/contracts/bindings.json``, the source of truth both bindings mirror."""
-    return json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+    contract: dict[str, Any] = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+    return contract
 
 
 def load_header_field_doc(field: str) -> str:

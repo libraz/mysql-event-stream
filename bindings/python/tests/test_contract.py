@@ -134,7 +134,7 @@ def _config_for(start: dict[str, Any]) -> dict[str, Any]:
 
 def _position_for(option: dict[str, Any], position_class: str) -> int | None:
     """Return the offset a class stands for, derived from the contract's numbers."""
-    values = {
+    values: dict[str, int | None] = {
         "omitted": None,
         "range_minimum": option["min"],
         "below_floor": option["minWhenFileSet"] - 1,
@@ -279,7 +279,9 @@ class TestBindingContract:
         assert inspect.iscoroutinefunction(stream.close)
 
     @pytest.mark.parametrize("surface", [CdcStream, BinlogClient])
-    def test_materializes_exactly_the_contract_shared_option_defaults(self, surface: type) -> None:
+    def test_materializes_exactly_the_contract_shared_option_defaults(
+        self, surface: type[CdcStream] | type[BinlogClient]
+    ) -> None:
         parameters = inspect.signature(surface.__init__).parameters
         absent = DELIBERATELY_ABSENT_OPTIONS.get(surface.__name__, {})
         stated = {option["python"] for option in DEFAULTED_OPTIONS}

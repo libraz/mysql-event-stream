@@ -17,9 +17,9 @@ def test_all_exports() -> None:
 def test_ssl_mode_enum() -> None:
     from mysql_event_stream import SslMode
 
-    assert SslMode.DISABLED == 0
-    assert SslMode.PREFERRED == 1
-    assert SslMode.REQUIRED == 2
-    assert SslMode.VERIFY_CA == 3
-    assert SslMode.VERIFY_IDENTITY == 4
+    assert SslMode.DISABLED.value == 0
+    assert SslMode.PREFERRED.value == 1
+    assert SslMode.REQUIRED.value == 2
+    assert SslMode.VERIFY_CA.value == 3
+    assert SslMode.VERIFY_IDENTITY.value == 4
     assert isinstance(SslMode.DISABLED, int)

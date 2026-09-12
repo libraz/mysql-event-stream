@@ -74,11 +74,20 @@ def _out_of_range_values(option: str) -> tuple[int, ...]:
     return (minimum - 1, maximum + 1)
 
 
+def _override(option: str, value: object) -> dict[str, Any]:
+    """Build the single-keyword override for a contract option named at runtime.
+
+    The option name comes from the contract tables rather than from source, so
+    the keyword cannot be matched against a declared parameter here.
+    """
+    return {option: value}
+
+
 def _binlog_client_kwargs(option: str, value: object) -> None:
     """Construct a BinlogClient with one keyword option overridden."""
     with patch("mysql_event_stream.client.get_library") as get_library:
         try:
-            BinlogClient(**{option: value})
+            BinlogClient(**_override(option, value))
         except (TypeError, ValueError):
             assert not get_library.called, "libmes was loaded before the option was rejected"
             raise
@@ -87,7 +96,7 @@ def _binlog_client_kwargs(option: str, value: object) -> None:
 
 def _binlog_client_config(option: str, value: object) -> None:
     """Construct a BinlogClient from a pre-built ClientConfig."""
-    config = ClientConfig(**{option: value})  # type: ignore[arg-type]
+    config = ClientConfig(**_override(option, value))
     with patch("mysql_event_stream.client.get_library") as get_library:
         try:
             BinlogClient(config=config)
@@ -104,7 +113,7 @@ def _enable_metadata(option: str, value: object) -> None:
     with patch("mysql_event_stream.engine.get_library", return_value=lib):
         engine = CdcEngine()
     try:
-        engine.enable_metadata(**{option: value})
+        engine.enable_metadata(**_override(option, value))
     except (TypeError, ValueError):
         lib.mes_engine_set_metadata_conn.assert_not_called()
         raise

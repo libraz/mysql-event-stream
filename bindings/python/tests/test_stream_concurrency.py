@@ -16,11 +16,28 @@ from unittest.mock import patch
 import pytest
 
 from mysql_event_stream.stream import CdcStream
-from mysql_event_stream.types import PollResult
+from mysql_event_stream.types import BinlogPosition, ChangeEvent, EventType, PollResult
 
 # Upper bound for a double that parks a worker thread: keeps a regression from
 # hanging the suite instead of failing it.
 _BLOCK_TIMEOUT_S = 5.0
+
+
+def _change_event(table: str) -> ChangeEvent:
+    """Build a distinguishable event of the type the stream declares it yields.
+
+    A double yielding anything else would let a delivery assertion pass against
+    the double's own shape rather than against the iterated surface.
+    """
+    return ChangeEvent(
+        type=EventType.INSERT,
+        database="mes_test",
+        table=table,
+        before=None,
+        after={"id": 1},
+        timestamp=1735689600,
+        position=BinlogPosition(file="binlog.000001", offset=4),
+    )
 
 
 async def _wait_for(flag: threading.Event) -> None:
@@ -35,11 +52,11 @@ async def _wait_for(flag: threading.Event) -> None:
 class _FakeEngine:
     """Engine double recording which thread ran each native call."""
 
-    def __init__(self, events: list[object] | None = None) -> None:
+    def __init__(self, events: list[ChangeEvent] | None = None) -> None:
         # Events only become available once bytes have been fed, matching the
         # engine: nothing can be drained before a feed produced it.
         self._undecoded = list(events or [])
-        self._decoded: list[object] = []
+        self._decoded: list[ChangeEvent] = []
         self.feed_calls: list[bytes] = []
         self.feed_threads: list[int] = []
         self.next_event_threads: list[int] = []
@@ -53,7 +70,7 @@ class _FakeEngine:
         self._undecoded.clear()
         return len(chunk)
 
-    def next_event(self) -> object | None:
+    def next_event(self) -> ChangeEvent | None:
         self.next_event_threads.append(threading.get_ident())
         return self._decoded.pop(0) if self._decoded else None
 
@@ -172,7 +189,8 @@ class TestSingleIteration:
     @pytest.mark.timeout(20)
     async def test_second_entry_is_rejected_while_the_first_is_in_flight(self) -> None:
         client = _BlockingPollClient()
-        engine = _FakeEngine(events=["event"])
+        expected = _change_event("orders")
+        engine = _FakeEngine(events=[expected])
         stream = _started_stream(client, engine)
 
         first = asyncio.create_task(stream.__anext__())
@@ -194,7 +212,7 @@ class TestSingleIteration:
         assert engine.feed_calls == []
 
         client.release_poll.set()
-        assert await first == "event"
+        assert await first == expected
         await stream.close()
 
     @pytest.mark.timeout(20)
@@ -202,14 +220,15 @@ class TestSingleIteration:
         # The guard is scoped to concurrency: it must be released on every exit
         # path, or one delivered event would poison the stream for good.
         client = _FakeClient()
-        engine = _FakeEngine(events=["first", "second"])
+        expected = [_change_event("first"), _change_event("second")]
+        engine = _FakeEngine(events=list(expected))
         stream = _started_stream(client, engine)
 
         async for received in stream:
-            assert received == "first"
+            assert received == expected[0]
             break
         async for received in stream:
-            assert received == "second"
+            assert received == expected[1]
             break
 
         await stream.close()
@@ -272,12 +291,13 @@ class TestEventLoopOffloading:
     async def test_a_poll_batch_costs_one_dispatch_and_no_loop_side_marshalling(self) -> None:
         loop_thread = threading.get_ident()
         client = _FakeClient()
-        engine = _FakeEngine(events=["a", "b", "c"])
+        expected = [_change_event("a"), _change_event("b"), _change_event("c")]
+        engine = _FakeEngine(events=list(expected))
         stream = _started_stream(client, engine)
 
         delivered = [await stream.__anext__() for _ in range(3)]
 
-        assert delivered == ["a", "b", "c"]
+        assert delivered == expected
         assert client.poll_calls == 1
         assert len(engine.feed_calls) == 1
         assert engine.feed_threads and loop_thread not in engine.feed_threads

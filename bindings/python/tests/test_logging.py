@@ -25,10 +25,10 @@ def _oversized_event_header() -> bytes:
 
 class TestLogLevel:
     def test_values(self) -> None:
-        assert LogLevel.ERROR == 0
-        assert LogLevel.WARN == 1
-        assert LogLevel.INFO == 2
-        assert LogLevel.DEBUG == 3
+        assert LogLevel.ERROR.value == 0
+        assert LogLevel.WARN.value == 1
+        assert LogLevel.INFO.value == 2
+        assert LogLevel.DEBUG.value == 3
 
     def test_is_int(self) -> None:
         assert isinstance(LogLevel.WARN, int)

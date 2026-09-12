@@ -160,7 +160,9 @@ def test_ffi_mirrors_the_struct_layout_the_core_publishes() -> None:
             f"{mirror.__name__} is {ctypes.sizeof(mirror)} bytes where the core "
             f"publishes {c_name} as {sizes[c_name]}"
         )
-        mirrored = {name: getattr(mirror, name).offset for name, _type in mirror._fields_}
+        # A _fields_ entry is (name, type) or (name, type, bitwidth); only the
+        # name is needed to look the descriptor's offset up.
+        mirrored = {field[0]: getattr(mirror, field[0]).offset for field in mirror._fields_}
         assert mirrored == recorded, (
             f"{mirror.__name__} does not lay its fields out where the core publishes "
             f"{c_name}'s; every mirror must move in the same change as the struct"

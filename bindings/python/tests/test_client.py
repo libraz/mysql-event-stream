@@ -91,9 +91,9 @@ def test_poll_batch_copies_all_native_results(
 
     def poll_batch(
         handle: object,
-        results: ctypes.POINTER(MESPollResult),
+        results: ctypes._Pointer[MESPollResult],
         capacity: int,
-        result_count: ctypes.POINTER(ctypes.c_size_t),
+        result_count: ctypes._Pointer[ctypes.c_size_t],
     ) -> int:
         assert handle == 0xDEAD
         assert capacity == 4
@@ -135,9 +135,9 @@ def _batch_of(*errors: int) -> object:
 
     def poll_batch(
         _handle: object,
-        results: ctypes.POINTER(MESPollResult),
+        results: ctypes._Pointer[MESPollResult],
         _capacity: int,
-        result_count: ctypes.POINTER(ctypes.c_size_t),
+        result_count: ctypes._Pointer[ctypes.c_size_t],
     ) -> int:
         for index, error in enumerate(errors):
             results[index].error = error
