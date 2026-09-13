@@ -10,6 +10,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-13
+
+The C ABI gains four functions and one struct field, so `mes_abi_version()` now
+reports 3. The addition is laid out so that a binary built against the 1.6
+header keeps linking and running: `mes_poll_result_t` is still 32 bytes and its
+four original fields are still at offsets 0, 8, 16 and 24. The reverse does not
+hold — code built against the 1.7 header reads `checksum_enabled` at offset 28,
+which a 1.6 library never writes — and that is what the ABI version now refuses.
+
+Independent `CdcEngine` instances no longer share an allocator lock. Decoding
+the same workload on eight threads reaches 4.8-5.5x the single-thread rate,
+where it previously peaked at two threads and fell from there.
+
+### Added
+
+- **`mes_set_max_queue_bytes()` / `mes_get_max_queue_bytes()`** (C ABI, both
+  bindings) — the engine's queue byte budget is now reachable. `max_queue_size`
+  cannot express a memory limit, because what one entry costs depends on the
+  table it came from and any statement annotating it
+- **`mes_set_trailer_pre_verified()` / `mes_get_trailer_pre_verified()`** (C ABI,
+  both bindings) — declare that something upstream has already verified each
+  event's CRC32, so the engine does not compute it a second time. Nothing
+  verifies the promise: set it on an unvalidated stream and a corrupt event is
+  accepted in silence
+- **`checksum_enabled` on the poll result** (C ABI, both bindings) — the
+  framing an event was read under now travels with the event. A
+  `FORMAT_DESCRIPTION_EVENT` moves the client's framing while events read under
+  the previous value are still queued, so an engine fed those bytes must be
+  framed from the result rather than from the client's current view
+- **Declared error types** — Python exports `MesError`, `MesConnectionError`,
+  `ParseError`, `DecodeError` and `ChecksumError`, each carrying the native
+  `code`; Node exports the `MesError` shape and an `isMesError()` guard
+
+### Fixed
+
+- **Checksum framing was established by position rather than by verification** —
+  the trailer probe now decides from a CRC32 that matches, and framing is kept
+  per event instead of sampled once per stream
+- **Queue memory was bounded by entry count alone** — the engine and the client
+  queue are both bounded by the bytes they actually hold, and the table-map
+  registry by the bytes it retains
+- **Decode correctness** — DECIMAL groups are validated and decoded unsigned, a
+  BIT column declared wider than 64 bits is rejected, the packed-integer NULL
+  marker is rejected in length fields, and text-versus-bytes for character
+  columns is decided in one place
+- **Connection and stream lifetime** — a transport whose dump was abandoned is
+  retired, resumable dump errors and dead sockets are no longer hidden, a
+  restarted stream resumes from the published checkpoint, and the TLS SIGPIPE
+  guard is held for a whole read
+- **Credentials** — the metadata connection password is wiped at the C ABI and
+  the staged replication password in the Node addon
+- **Option validation** — both bindings refuse the same configuration, two
+  competing start modes are refused at construction, a start GTID naming no
+  transaction is rejected, and Node refuses a non-integer where it declares an
+  integer instead of truncating it
+- **Python** — native dispatch in `CdcStream` is serialized, the log callback is
+  detached at interpreter shutdown, client lifecycle calls no longer block, and
+  the library loaded is the one belonging to the running environment
+
+### Changed
+
+- **Row column arrays no longer come from a pooled memory resource.** Every row
+  in the process allocates from one stateless resource, which removes the lock
+  independent engines were contending on. Queued memory per event fell with it,
+  by up to 24% on the widest workload, because the pool rounded each column
+  array up to its block size
+- **An event's column names and annotating statement are shared rather than
+  copied per row**, and a DECIMAL is rendered from the digits it produces rather
+  than its declared width
+
+### Documentation
+
+- The measurement baseline records queued memory and thread scaling taken after
+  the allocator change
+- Both bindings document what the queue byte budget charges, the charset
+  fallback for both column families, and the type each declares the error code on
+
 ## [1.6.1] - 2026-08-15
 
 A correctness and hardening release. The C ABI is unchanged — no symbol, field,
@@ -538,7 +615,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/libraz/mysql-event-stream/compare/v1.4.0...v1.5.0
