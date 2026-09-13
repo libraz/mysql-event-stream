@@ -1,6 +1,6 @@
 # npm-check-updates configuration. Run `ncu` to list updates, `ncu -u` to apply.
-reject:
-  # TypeScript 7 (native port) drops lib/_tsc.js, which Yarn's builtin typescript
-  # compat patch requires; the install fails until Yarn ships a compatible patch.
-  # Revisit together with the pinned yarn version in packageManager.
-  - typescript
+#
+# Nothing is held right now: every dependency tracks latest. The empty list is
+# deliberate, so a later reader knows the holds were checked rather than
+# forgotten. `npmMinimalAgeGate` is 0 in .yarnrc.yml, so no `cooldown` is needed.
+reject: []
