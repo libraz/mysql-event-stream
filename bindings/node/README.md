@@ -1,27 +1,23 @@
-# mysql-event-stream — Node.js Binding
+# mysql-event-stream — Node.js binding
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
 [![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream?logo=npm)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
-[![License](https://img.shields.io/github/license/libraz/mysql-event-stream)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen?logo=node.js)](https://nodejs.org/)
 [![MySQL](https://img.shields.io/badge/MySQL-8.4%2B-blue?logo=mysql)](https://dev.mysql.com/)
 [![MariaDB](https://img.shields.io/badge/MariaDB-10.11%2B-003545?logo=mariadb)](https://mariadb.org/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mysql-event-stream)
 
-Native N-API binding for the mysql-event-stream CDC engine (MySQL 8.4+ and MariaDB 10.11+). Wraps the C++ core as a Node.js addon using cmake-js.
+Native N-API binding for the mysql-event-stream CDC engine, built with cmake-js.
 
-> **npm users**: See the [npm README](README.npm.md) for installation and usage.
+This file is for working on the binding. Users of the published package want the [npm README](README.npm.md), and the API is documented in [docs/en/node-api.md](../../docs/en/node-api.md).
 
-## Development
-
-### Prerequisites
+## Prerequisites
 
 - Node.js 22+
-- Yarn 4.18.0 (pinned by `packageManager` in `package.json`)
+- Yarn (pinned by `packageManager` in `package.json`)
 - CMake 3.20+
 - C++17 compiler (GCC 9+ or Clang 10+)
-- OpenSSL development libraries
-- zlib development libraries
+- OpenSSL and zlib development libraries
 
 ```bash
 # macOS
@@ -31,111 +27,52 @@ brew install cmake openssl zlib
 sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 ```
 
-### Build
+## Build, test, lint
 
 ```bash
 yarn install
-yarn build          # Native addon + TypeScript
-yarn build:native   # Native addon only
+yarn build          # native addon + TypeScript
+yarn build:native   # native addon only
+
+yarn test           # unit tests (Vitest)
+yarn test:e2e       # E2E tests (requires the Docker MySQL from bindings/node/e2e/docker)
+yarn typecheck
+
+yarn check          # Biome
+yarn check:fix
 ```
 
-### Test
+The E2E containers here (`mes_node_test_mysql` / `mes_node_test_mariadb`, host port 13307) are separate from the core tier's, so the two suites do not displace each other.
 
-```bash
-yarn test           # Unit tests (Vitest)
-yarn test:e2e       # E2E tests (requires Docker MySQL)
-```
-
-### Lint
-
-```bash
-yarn check          # Biome check
-yarn check:fix      # Auto-fix
-```
-
-## Architecture
+## Layout
 
 ```
 src/
   addon/              # C++ N-API addon
     engine_wrap.cpp   #   CdcEngine wrapper
     client_wrap.cpp   #   BinlogClient wrapper
-    addon.cpp         #   Module registration
-  index.ts            # Package entry point
-  engine.ts           # CdcEngine TypeScript wrapper
-  client.ts           # BinlogClient TypeScript wrapper
+    addon.cpp         #   module registration
+  index.ts            # package entry point
+  engine.ts           # CdcEngine wrapper
+  client.ts           # BinlogClient wrapper
   stream.ts           # CdcStream async iterator
-  types.ts            # Public type definitions
+  contract.ts         # shared defaults and the retry classification
+  types.ts            # public type definitions
 ```
 
-The native addon statically links the C++ core (protocol layer, CDC engine, BinlogClient) together with OpenSSL and zlib. The TypeScript layer provides typed wrappers and the `CdcStream` async iterator.
-
-## Lifecycle
-
-`new BinlogClient(config)` connects and validates configuration immediately;
-connection errors are thrown by the constructor. Call `start()` before polling,
-then call `destroy()` when finished. `destroy()` is idempotent. Only one
-`poll()` may be in flight; use `BinlogClient.stop()` to cancel it before
-changing connection lifecycle state. `CdcStream` owns this sequence and `await stream.close()` is
-the corresponding idempotent cleanup operation.
-
-## Thread Safety
-
-`CdcEngine` instances are single-owner objects. Do not call `feed()`,
-`nextEvent()`, `reset()`, or filter/configuration methods concurrently on the
-same engine instance. Use one engine per worker/task or serialize access
-externally.
-
-`BinlogClient` / `CdcStream` use an internal reader thread. Polling/iteration and
-connection lifecycle calls are single-owner operations. `BinlogClient.stop()` is
-the any-thread cancellation path and may be called from another thread to unblock
-a pending `poll()`. `CdcStream` has no `stop` method: cancel it with
-`await stream.close()` from the task that owns the stream, which interrupts the
-native poll first and then finalizes the iterator.
-
-Each active stream has one blocking native poll worker. `pollBatch()` amortizes
-that handoff by draining up to 64 queued events after the first result, but the
-worker still occupies a libuv thread-pool slot while idle. Node defaults to four
-slots; for more than four concurrently idle streams, set `UV_THREADPOOL_SIZE`
-before starting Node (for example, `UV_THREADPOOL_SIZE=16 node app.mjs`).
-
-## MySQL binlog configuration
-
-The connection validator requires the following MySQL settings. Copy this into
-your `my.cnf` (or its included configuration file) and restart MySQL after
-changing it:
-
-```ini
-[mysqld]
-log_bin=ON
-gtid_mode=ON
-binlog_format=ROW
-binlog_row_image=FULL
-binlog_transaction_compression=OFF
-binlog_row_value_options=""
-```
-
-`binlog_row_value_options` must not contain `PARTIAL_JSON`. MariaDB is checked
-for the equivalent required row format and rejects `log_bin_compress=ON`.
+The addon statically links the C++ core — protocol layer, engine, client — together with OpenSSL and zlib. The TypeScript layer adds typed wrappers, option validation, and the `CdcStream` async iterator.
 
 ## Publishing
 
-Publishing is automated via GitHub Actions on `v*.*.*` tags. The workflow:
-
-1. Builds and tests the C++ core
-2. Builds and tests the Node.js binding
-3. Creates a GitHub Release
-4. Publishes to npm with `--provenance`
-
-The `prepack` script swaps `README.md` with `README.npm.md` so npm shows user-facing documentation.
+Automated by GitHub Actions on a `v*.*.*` tag: build and test the core, build and test the binding, create a GitHub Release, publish to npm with `--provenance`. The `prepack` script swaps `README.md` for `README.npm.md` so the registry shows the user-facing page.
 
 ## Exports
 
 | Export | Description |
 |--------|-------------|
-| `CdcEngine` | Low-level binlog byte parser |
-| `BinlogClient` | MySQL binlog replication client |
-| `CdcStream` | High-level async iterator (recommended) |
+| `CdcStream` | High-level async iterator of `ChangeEvent` (recommended) |
+| `BinlogClient` | Connection and raw event bytes |
+| `CdcEngine` | Binlog byte decoder |
 | `LogLevel`, `setLogCallback`, `LogHandler` | Structured logging API and its handler type |
 | `MesErrorCode` | Stable native error-code enum |
 | `MesError`, `isMesError` | Declared shape of a thrown error and the guard that narrows a caught value to it |
