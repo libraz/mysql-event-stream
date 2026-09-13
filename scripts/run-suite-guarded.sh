@@ -48,7 +48,13 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
-if ! grep -qE "$executed_re" "$output"; then
+# A runner that detects CI colours its summary, and the escape sequences land
+# between the very tokens the patterns above match on: vitest prints the line
+# as ESC[2m<spaces>Tests ESC[22m ESC[1mESC[32m352 passed, so neither the
+# leading whitespace nor the space before the count is where it appears to be.
+# Strip the sequences from the copy rather than spelling them in every pattern,
+# which would have to be repeated for each runner and each colour it chooses.
+if ! sed $'s/\033\\[[0-9;]*[A-Za-z]//g' "$output" | grep -qE "$executed_re"; then
     echo "[$runner] no test executed; the run recorded no passing test" >&2
     exit 1
 fi
