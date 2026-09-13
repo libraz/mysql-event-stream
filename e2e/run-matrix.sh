@@ -152,7 +152,10 @@ declare -a summary_lines
 # driver runs. This driver keeps its own copy because it interleaves the check
 # with its per-target container lifecycle and its own tier reporting, so the two
 # copies have to be changed together.
-CTEST_EXECUTED_RE='^[[:space:]]*[0-9]+/[0-9]+ Test #[0-9]+: .* Passed'
+# ctest right-aligns the test number to the width of the highest one in the
+# selection, so the gap after "Test" is one space or several depending on what
+# else ran.
+CTEST_EXECUTED_RE='^[[:space:]]*[0-9]+/[0-9]+ Test +#[0-9]+: .* Passed'
 PYTEST_EXECUTED_RE='^=+ .*[1-9][0-9]* passed|^[1-9][0-9]* passed'
 VITEST_EXECUTED_RE='^[[:space:]]*Tests[[:space:]]+[1-9][0-9]* passed'
 
@@ -172,7 +175,10 @@ run_tier() {
     if [[ "$status" -ne 0 ]]; then
         echo "  [$tier] FAIL: the test runner exited $status"
         result=1
-    elif ! grep -Eq "$executed_re" "$output"; then
+    # A runner that detects CI colours its summary, and the escape sequences
+    # land between the very tokens the patterns match on, so they are stripped
+    # from the copy rather than spelled out in each pattern.
+    elif ! sed $'s/\033\\[[0-9;]*[A-Za-z]//g' "$output" | grep -Eq "$executed_re"; then
         echo "  [$tier] FAIL: no test executed; the run recorded no passing test"
         result=1
     fi
