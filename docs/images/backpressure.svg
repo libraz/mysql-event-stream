@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">Where a slow consumer is absorbed</title>
+  <desc id="dsc">The source sends a binlog dump to a reader thread, which enqueues events into a bounded EventQueue that the consumer drains. A dashed path loops from the queue back to the reader thread, showing that a full queue stops the reader and lets the TCP window close. The queue is bounded both by an entry count and by a byte budget.</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .box   { fill:#ffffff; stroke:#d5d6d1 }
+    .slot  { fill:#ffffff; stroke:#d5d6d1 }
+    .used  { fill:#2c6e8f; fill-opacity:.18; stroke:#2c6e8f; stroke-opacity:.5 }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    .back  { fill:none; stroke:#8a6a1f; stroke-width:1.4; stroke-dasharray:6 5 }
+    .ahb   { fill:#8a6a1f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .lbl   { font-size:10px; fill:#6e7781; letter-spacing:.09em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    .warn  { font-size:10.5px; fill:#8a6a1f }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10px; fill:#8a6a1f }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d} .slot{fill:#161b22;stroke:#30363d}
+      .used{fill:#7fb3d5;stroke:#7fb3d5}
+      .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5}
+      .back{stroke:#d9b45c} .ahb{fill:#d9b45c} .warn{fill:#d9b45c} .mono{fill:#d9b45c}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+    <marker id="b" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ahb" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="300" rx="12"/>
+
+  <path class="back" d="M 585 58 V 34 H 314 V 54" marker-end="url(#b)"/>
+  <text class="warn" x="450" y="28" text-anchor="middle">a full queue stops the reader, the TCP window closes, and the source waits</text>
+
+  <rect class="box" x="36" y="62" width="150" height="88" rx="8"/>
+  <text class="lbl" x="52" y="86">SOURCE</text>
+  <text class="h" x="52" y="108">MySQL / MariaDB</text>
+  <text class="s" x="52" y="132">sends the binlog dump</text>
+
+  <rect class="box" x="226" y="62" width="176" height="88" rx="8"/>
+  <text class="lbl" x="242" y="86">READER</text>
+  <text class="h" x="242" y="108">reader thread</text>
+  <text class="s" x="242" y="132">reads, frames, enqueues</text>
+
+  <rect class="box" x="442" y="62" width="286" height="88" rx="8"/>
+  <text class="lbl" x="458" y="84">EVENTQUEUE</text>
+  <rect class="used" x="458" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="486" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="514" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="542" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="570" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="598" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="626" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="654" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="682" y="94" width="24" height="26" rx="4"/>
+  <text class="s" x="458" y="140">one entry holds its payload and its checkpoint</text>
+
+  <rect class="box" x="768" y="62" width="156" height="88" rx="8"/>
+  <text class="lbl" x="784" y="86">CONSUMER</text>
+  <text class="h" x="784" y="108">your loop</text>
+  <text class="s" x="784" y="132">poll() or for await</text>
+
+  <path class="ln" d="M 188 106 H 222" marker-end="url(#a)"/>
+  <path class="ln" d="M 404 106 H 438" marker-end="url(#a)"/>
+  <path class="ln" d="M 730 106 H 764" marker-end="url(#a)"/>
+
+  <text class="s" x="442" y="186">Two bounds, and whichever is reached first is the one that stops the reader:</text>
+  <text class="mono" x="442" y="208">max_queue_size</text>
+  <text class="s" x="536" y="208">10,000 entries by default</text>
+  <text class="mono" x="442" y="226">max_queue_bytes</text>
+  <text class="s" x="544" y="226">48 MiB by default</text>
+
+  <text class="s" x="36" y="186">An entry count alone cannot express a</text>
+  <text class="s" x="36" y="203">memory limit, because what one event</text>
+  <text class="s" x="36" y="220">costs depends on the table it came from</text>
+  <text class="s" x="36" y="237">and on any statement annotating it.</text>
+
+  <text class="s" x="480" y="272" text-anchor="middle">A full queue waits; only a single event larger than the whole byte budget fails, with code 301.</text>
+</svg>

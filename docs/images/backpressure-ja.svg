@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">遅いコンシューマーをどこで吸収するか</title>
+  <desc id="dsc">ソースが binlog ダンプを読み取りスレッドへ送り、読み取りスレッドが有界の EventQueue に積み、コンシューマーがそれを取り出します。キューから読み取りスレッドへ戻る破線は、キューが満杯になると読み取りが止まり TCP ウィンドウが閉じることを表します。キューは件数とバイト数の両方で上限が定まります。</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .box   { fill:#ffffff; stroke:#d5d6d1 }
+    .slot  { fill:#ffffff; stroke:#d5d6d1 }
+    .used  { fill:#2c6e8f; fill-opacity:.18; stroke:#2c6e8f; stroke-opacity:.5 }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    .back  { fill:none; stroke:#8a6a1f; stroke-width:1.4; stroke-dasharray:6 5 }
+    .ahb   { fill:#8a6a1f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .lbl   { font-size:10px; fill:#6e7781; letter-spacing:.04em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    .warn  { font-size:10.5px; fill:#8a6a1f }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10px; fill:#8a6a1f }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .box{fill:#161b22;stroke:#30363d} .slot{fill:#161b22;stroke:#30363d}
+      .used{fill:#7fb3d5;stroke:#7fb3d5}
+      .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5}
+      .back{stroke:#d9b45c} .ahb{fill:#d9b45c} .warn{fill:#d9b45c} .mono{fill:#d9b45c}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+    <marker id="b" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ahb" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="300" rx="12"/>
+
+  <path class="back" d="M 585 58 V 34 H 314 V 54" marker-end="url(#b)"/>
+  <text class="warn" x="450" y="28" text-anchor="middle">キューが埋まると読み取りが止まり、TCP ウィンドウが閉じ、ソース側が待ちます</text>
+
+  <rect class="box" x="36" y="62" width="150" height="88" rx="8"/>
+  <text class="lbl" x="52" y="86">ソース</text>
+  <text class="h" x="52" y="108">MySQL / MariaDB</text>
+  <text class="s" x="52" y="132">binlog ダンプを送出</text>
+
+  <rect class="box" x="226" y="62" width="176" height="88" rx="8"/>
+  <text class="lbl" x="242" y="86">リーダー</text>
+  <text class="h" x="242" y="108">読み取りスレッド</text>
+  <text class="s" x="242" y="132">読んで、切り出して、積む</text>
+
+  <rect class="box" x="442" y="62" width="286" height="88" rx="8"/>
+  <text class="lbl" x="458" y="84">EVENTQUEUE</text>
+  <rect class="used" x="458" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="486" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="514" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="542" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="570" y="94" width="24" height="26" rx="4"/>
+  <rect class="used" x="598" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="626" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="654" y="94" width="24" height="26" rx="4"/>
+  <rect class="slot" x="682" y="94" width="24" height="26" rx="4"/>
+  <text class="s" x="458" y="140">1 件はペイロードとチェックポイントを保持します</text>
+
+  <rect class="box" x="768" y="62" width="156" height="88" rx="8"/>
+  <text class="lbl" x="784" y="86">コンシューマー</text>
+  <text class="h" x="784" y="108">あなたのループ</text>
+  <text class="s" x="784" y="132">poll() または for await</text>
+
+  <path class="ln" d="M 188 106 H 222" marker-end="url(#a)"/>
+  <path class="ln" d="M 404 106 H 438" marker-end="url(#a)"/>
+  <path class="ln" d="M 730 106 H 764" marker-end="url(#a)"/>
+
+  <text class="s" x="442" y="186">上限は 2 つあり、先に到達したほうが読み取りを止めます。</text>
+  <text class="mono" x="442" y="208">max_queue_size</text>
+  <text class="s" x="536" y="208">既定は 10,000 件</text>
+  <text class="mono" x="442" y="226">max_queue_bytes</text>
+  <text class="s" x="544" y="226">既定は 48 MiB</text>
+
+  <text class="s" x="36" y="186">件数だけではメモリ量を表せません。</text>
+  <text class="s" x="36" y="203">1 件あたりの費用は、どのテーブルか</text>
+  <text class="s" x="36" y="220">ら来たかと、それを注記する文がある</text>
+  <text class="s" x="36" y="237">かどうかで変わるからです。</text>
+
+  <text class="s" x="480" y="272" text-anchor="middle">キューが満杯なら待つだけです。バイト予算そのものを超える単一イベントだけが、コード 301 で失敗します。</text>
+</svg>

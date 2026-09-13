@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">各層と、それぞれが受け持つもの</title>
+  <desc id="dsc">下から順にプロトコル層、クライアント層、エンジン層、C ABI の 4 つの帯が積み重なり、それぞれ扱う範囲と所在ディレクトリを示します。右側のカードは各言語のバインディングで、C ABI の帯から矢印でつながります。左端の上向き矢印は、各層がひとつ下の層の上に構築されることを表します。</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .grp   { fill:#eceee9 }
+    .chip  { fill:#ffffff; stroke:#d5d6d1 }
+    .card  { fill:#ffffff; stroke:#2c6e8f }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:12.5px }
+    .lbl   { font-size:11px; fill:#6e7781; letter-spacing:.04em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10.5px; fill:#8a6a1f }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117} .grp{fill:#12171d}
+      .chip{fill:#161b22;stroke:#30363d} .card{fill:#161b22;stroke:#7fb3d5}
+      .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5} .mono{fill:#d9b45c}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="360" rx="12"/>
+
+  <path class="ln" d="M 48 304 V 48" marker-end="url(#a)"/>
+  <text class="lbl" x="34" y="174" text-anchor="middle" transform="rotate(-90 34 174)">各層はひとつ下の層の上に構築される</text>
+
+  <rect class="grp" x="62" y="44" width="560" height="59" rx="8"/>
+  <text class="lbl" x="76" y="63">C ABI</text>
+  <text class="mono" x="164" y="63">core/include/mes.h</text>
+  <rect class="chip" x="76" y="72" width="86" height="24" rx="5"/>
+  <text class="s" x="119" y="89" text-anchor="middle">mes_engine_t</text>
+  <rect class="chip" x="170" y="72" width="86" height="24" rx="5"/>
+  <text class="s" x="213" y="89" text-anchor="middle">mes_client_t</text>
+  <rect class="chip" x="264" y="72" width="80" height="24" rx="5"/>
+  <text class="s" x="304" y="89" text-anchor="middle">mes_event_t</text>
+  <rect class="chip" x="352" y="72" width="80" height="24" rx="5"/>
+  <text class="s" x="392" y="89" text-anchor="middle">mes_error_t</text>
+
+  <rect class="grp" x="62" y="111" width="560" height="59" rx="8"/>
+  <text class="lbl" x="76" y="130">エンジン</text>
+  <text class="mono" x="164" y="130">core/src</text>
+  <rect class="chip" x="76" y="139" width="84" height="24" rx="5"/>
+  <text class="s" x="118" y="156" text-anchor="middle">フィード緩衝</text>
+  <rect class="chip" x="168" y="139" width="84" height="24" rx="5"/>
+  <text class="s" x="210" y="156" text-anchor="middle">イベント解析</text>
+  <rect class="chip" x="260" y="139" width="84" height="24" rx="5"/>
+  <text class="s" x="302" y="156" text-anchor="middle">チェックサム</text>
+  <rect class="chip" x="352" y="139" width="136" height="24" rx="5"/>
+  <text class="s" x="420" y="156" text-anchor="middle">TABLE_MAP レジストリ</text>
+  <rect class="chip" x="496" y="139" width="74" height="24" rx="5"/>
+  <text class="s" x="533" y="156" text-anchor="middle">行デコーダ</text>
+
+  <rect class="grp" x="62" y="178" width="560" height="59" rx="8"/>
+  <text class="lbl" x="76" y="197">クライアント</text>
+  <text class="mono" x="164" y="197">core/src/client</text>
+  <rect class="chip" x="76" y="206" width="86" height="24" rx="5"/>
+  <text class="s" x="119" y="223" text-anchor="middle">BinlogClient</text>
+  <rect class="chip" x="170" y="206" width="94" height="24" rx="5"/>
+  <text class="s" x="217" y="223" text-anchor="middle">読み取りスレッド</text>
+  <rect class="chip" x="272" y="206" width="80" height="24" rx="5"/>
+  <text class="s" x="312" y="223" text-anchor="middle">EventQueue</text>
+  <rect class="chip" x="360" y="206" width="124" height="24" rx="5"/>
+  <text class="s" x="422" y="223" text-anchor="middle">ConnectionValidator</text>
+  <rect class="chip" x="492" y="206" width="52" height="24" rx="5"/>
+  <text class="s" x="518" y="223" text-anchor="middle">再接続</text>
+
+  <rect class="grp" x="62" y="245" width="560" height="59" rx="8"/>
+  <text class="lbl" x="76" y="264">プロトコル</text>
+  <text class="mono" x="164" y="264">core/src/protocol</text>
+  <rect class="chip" x="76" y="273" width="84" height="24" rx="5"/>
+  <text class="s" x="118" y="290" text-anchor="middle">TCP と TLS</text>
+  <rect class="chip" x="168" y="273" width="96" height="24" rx="5"/>
+  <text class="s" x="216" y="290" text-anchor="middle">認証プラグイン</text>
+  <rect class="chip" x="272" y="273" width="72" height="24" rx="5"/>
+  <text class="s" x="308" y="290" text-anchor="middle">COM_QUERY</text>
+  <rect class="chip" x="352" y="273" width="98" height="24" rx="5"/>
+  <text class="s" x="401" y="290" text-anchor="middle">binlog ダンプ</text>
+  <rect class="chip" x="458" y="273" width="96" height="24" rx="5"/>
+  <text class="s" x="506" y="290" text-anchor="middle">先読みバッファ</text>
+
+  <path class="ln" d="M 624 73 H 666" marker-end="url(#a)"/>
+
+  <rect class="card" x="672" y="44" width="264" height="260" rx="8"/>
+  <text class="lbl" x="688" y="72">バインディング</text>
+  <text class="mono" x="688" y="92">bindings/</text>
+  <text class="s" x="688" y="120">同じエンジンとクライアントを、</text>
+  <text class="s" x="688" y="135">各言語の流儀で名付けたものです。</text>
+  <rect class="chip" x="688" y="152" width="74" height="28" rx="5"/>
+  <text class="s" x="725" y="170" text-anchor="middle">C / C++</text>
+  <rect class="chip" x="770" y="152" width="74" height="28" rx="5"/>
+  <text class="s" x="807" y="170" text-anchor="middle">Node.js</text>
+  <rect class="chip" x="852" y="152" width="74" height="28" rx="5"/>
+  <text class="s" x="889" y="170" text-anchor="middle">Python</text>
+  <text class="s" x="688" y="206">C/C++ からは libmes をリンクし、</text>
+  <text class="s" x="688" y="221">Node は N-API アドオンを読み込み、</text>
+  <text class="s" x="688" y="236">Python は ctypes で libmes を開きます。</text>
+  <text class="s" x="688" y="264">3 つの表面は共通の振る舞い契約で</text>
+  <text class="s" x="688" y="279">同じ規則に縛られます。</text>
+
+  <text class="s" x="480" y="330" text-anchor="middle">プロトコル層より上は相手がソケットであることを知りません。エンジンは与えられたバイト列をデコードするだけです。</text>
+</svg>

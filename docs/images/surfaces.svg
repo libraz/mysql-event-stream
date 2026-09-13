@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" width="960" height="320" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">The three surfaces, and which one to reach for</title>
+  <desc id="dsc">Three cards. CdcEngine decodes binlog bytes from any source. BinlogClient owns the connection and hands back raw event bytes. A dashed enclosure groups those two and an arrow leads to the third card, CdcStream, which wires them together and is the default entry point.</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .card  { fill:#ffffff; stroke:#d5d6d1 }
+    .pick  { fill:#ffffff; stroke:#2c6e8f }
+    .encl  { fill:none; stroke:#b6b7b1; stroke-dasharray:6 5 }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .lbl   { font-size:10px; fill:#6e7781; letter-spacing:.09em }
+    .pl    { font-size:10px; fill:#2c6e8f; letter-spacing:.09em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .card{fill:#161b22;stroke:#30363d} .pick{fill:#161b22;stroke:#7fb3d5}
+      .encl{stroke:#484f58} .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5} .pl{fill:#7fb3d5}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="320" rx="12"/>
+
+  <rect class="encl" x="24" y="40" width="608" height="236" rx="10"/>
+  <text class="s" x="616" y="268" text-anchor="end">the two halves, driven by hand</text>
+
+  <rect class="card" x="36" y="52" width="272" height="200" rx="8"/>
+  <text class="lbl" x="52" y="76">BYTES IN, EVENTS OUT</text>
+  <text class="h" x="52" y="98">CdcEngine</text>
+  <text class="s" x="52" y="126">feed() takes binlog bytes from</text>
+  <text class="s" x="52" y="143">anywhere: a file, a queue, a client.</text>
+  <text class="s" x="52" y="167">It owns no socket and no thread.</text>
+  <text class="s" x="52" y="191">Column names arrive only through</text>
+  <text class="s" x="52" y="208">a metadata connection you enable.</text>
+  <text class="s" x="52" y="232">Replay and offline decode live here.</text>
+
+  <rect class="card" x="348" y="52" width="272" height="200" rx="8"/>
+  <text class="lbl" x="364" y="76">TRANSPORT ONLY</text>
+  <text class="h" x="364" y="98">BinlogClient</text>
+  <text class="s" x="364" y="126">Connects, authenticates and asks</text>
+  <text class="s" x="364" y="143">for the dump.</text>
+  <text class="s" x="364" y="167">poll() hands back one event as raw</text>
+  <text class="s" x="364" y="184">bytes, with the framing it was read</text>
+  <text class="s" x="364" y="201">under.</text>
+  <text class="s" x="364" y="225">Nothing is decoded, so the bytes</text>
+  <text class="s" x="364" y="242">can be routed somewhere else.</text>
+
+  <path class="ln" d="M 634 164 H 654" marker-end="url(#a)"/>
+
+  <rect class="pick" x="660" y="40" width="276" height="236" rx="8"/>
+  <text class="pl" x="676" y="64">START HERE</text>
+  <text class="h" x="676" y="86">CdcStream</text>
+  <text class="s" x="676" y="114">An async iterator of ChangeEvent.</text>
+  <text class="s" x="676" y="138">It opens the connection, resolves</text>
+  <text class="s" x="676" y="155">column names, applies the filters,</text>
+  <text class="s" x="676" y="172">reconnects with backoff and</text>
+  <text class="s" x="676" y="189">publishes a checkpoint per event.</text>
+  <text class="s" x="676" y="213">Reach for one of the halves only</text>
+  <text class="s" x="676" y="230">when you need to own it yourself.</text>
+
+  <text class="s" x="480" y="302" text-anchor="middle">All three produce the same ChangeEvent, and the same error codes describe a failure in any of them.</text>
+</svg>

@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" width="960" height="320" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">3 つの表面と、どれを選ぶか</title>
+  <desc id="dsc">カードが 3 枚あります。CdcEngine は任意の供給元の binlog バイト列をデコードします。BinlogClient は接続を保持し、イベントの生バイト列を返します。この 2 枚を破線で囲み、そこから矢印で 3 枚目の CdcStream につながります。CdcStream は両者を結線した既定の入口です。</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .card  { fill:#ffffff; stroke:#d5d6d1 }
+    .pick  { fill:#ffffff; stroke:#2c6e8f }
+    .encl  { fill:none; stroke:#b6b7b1; stroke-dasharray:6 5 }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .lbl   { font-size:10px; fill:#6e7781; letter-spacing:.04em }
+    .pl    { font-size:10px; fill:#2c6e8f; letter-spacing:.04em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .card{fill:#161b22;stroke:#30363d} .pick{fill:#161b22;stroke:#7fb3d5}
+      .encl{stroke:#484f58} .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5} .pl{fill:#7fb3d5}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="320" rx="12"/>
+
+  <rect class="encl" x="24" y="40" width="608" height="236" rx="10"/>
+  <text class="s" x="616" y="268" text-anchor="end">手動で駆動する 2 つの半分</text>
+
+  <rect class="card" x="36" y="52" width="272" height="200" rx="8"/>
+  <text class="lbl" x="52" y="76">バイト列を入れ、イベントを取り出す</text>
+  <text class="h" x="52" y="98">CdcEngine</text>
+  <text class="s" x="52" y="126">feed() は任意の供給元の binlog</text>
+  <text class="s" x="52" y="143">バイト列を受け取ります。</text>
+  <text class="s" x="52" y="167">ソケットもスレッドも持ちません。</text>
+  <text class="s" x="52" y="191">カラム名は、明示的に有効化した</text>
+  <text class="s" x="52" y="208">メタデータ接続からのみ得られます。</text>
+  <text class="s" x="52" y="232">再生やオフラインのデコード向けです。</text>
+
+  <rect class="card" x="348" y="52" width="272" height="200" rx="8"/>
+  <text class="lbl" x="364" y="76">トランスポートのみ</text>
+  <text class="h" x="364" y="98">BinlogClient</text>
+  <text class="s" x="364" y="126">接続し、認証し、ダンプを</text>
+  <text class="s" x="364" y="143">要求します。</text>
+  <text class="s" x="364" y="167">poll() は 1 イベント分の生バイト列を</text>
+  <text class="s" x="364" y="184">読まれたときのフレーミングとともに</text>
+  <text class="s" x="364" y="201">返します。</text>
+  <text class="s" x="364" y="225">デコードは行わないので、バイト列</text>
+  <text class="s" x="364" y="242">を別の経路へ回せます。</text>
+
+  <path class="ln" d="M 634 164 H 654" marker-end="url(#a)"/>
+
+  <rect class="pick" x="660" y="40" width="276" height="236" rx="8"/>
+  <text class="pl" x="676" y="64">まずはここから</text>
+  <text class="h" x="676" y="86">CdcStream</text>
+  <text class="s" x="676" y="114">ChangeEvent の非同期イテレータです。</text>
+  <text class="s" x="676" y="138">接続を開き、カラム名を解決し、</text>
+  <text class="s" x="676" y="155">フィルタを適用し、バックオフ付き</text>
+  <text class="s" x="676" y="172">で再接続し、イベントごとに</text>
+  <text class="s" x="676" y="189">チェックポイントを公開します。</text>
+  <text class="s" x="676" y="213">半分ずつを自分で持つ必要がある場</text>
+  <text class="s" x="676" y="230">合だけ、他の 2 つを選びます。</text>
+
+  <text class="s" x="480" y="302" text-anchor="middle">3 つとも同じ ChangeEvent を返し、どの失敗も同じエラーコードで表されます。</text>
+</svg>

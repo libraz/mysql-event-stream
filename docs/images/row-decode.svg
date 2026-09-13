@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="ttl dsc">
+  <title id="ttl">How a row event becomes a ChangeEvent</title>
+  <desc id="dsc">A strip of binlog events across the top, with TABLE_MAP and WRITE_ROWS highlighted. Below, a card for the TABLE_MAP event listing the table identity and column metadata it registers, an arrow to a card for the ROWS event listing the bitmaps and packed row values it carries, and an arrow to the resulting ChangeEvent.</desc>
+
+  <style>
+    .bg    { fill:#f7f7f5 }
+    .card  { fill:#ffffff; stroke:#d5d6d1 }
+    .out   { fill:#ffffff; stroke:#2c6e8f }
+    .chip  { fill:#ffffff; stroke:#d5d6d1 }
+    .mark  { fill:#2c6e8f; fill-opacity:.12; stroke:#2c6e8f; stroke-opacity:.55 }
+    .ln    { fill:none; stroke:#2c6e8f; stroke-width:1.4 }
+    .ah    { fill:#2c6e8f }
+    .rule  { fill:none; stroke:#d5d6d1 }
+    text   { font-family:Inter,"Helvetica Neue","Hiragino Sans","Noto Sans JP",Arial,sans-serif; fill:#1f2328 }
+    .h     { font-size:13px }
+    .lbl   { font-size:10px; fill:#6e7781; letter-spacing:.09em }
+    .s     { font-size:10.5px; fill:#6e7781 }
+    .flow  { font-size:10.5px; fill:#2c6e8f }
+    .mono  { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:10px; fill:#1f2328 }
+    @media (prefers-color-scheme: dark) {
+      .bg{fill:#0d1117}
+      .card{fill:#161b22;stroke:#30363d} .out{fill:#161b22;stroke:#7fb3d5} .chip{fill:#161b22;stroke:#30363d}
+      .mark{fill:#7fb3d5;stroke:#7fb3d5} .rule{stroke:#30363d}
+      .ln{stroke:#7fb3d5} .ah{fill:#7fb3d5} .flow{fill:#7fb3d5}
+      text{fill:#e6edf3} .lbl{fill:#8b949e} .s{fill:#8b949e} .mono{fill:#e6edf3}
+    }
+  </style>
+
+  <defs>
+    <marker id="a" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+      <path class="ah" d="M0,0 L9,4.5 L0,9 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="960" height="360" rx="12"/>
+
+  <text class="lbl" x="42" y="40">THE STREAM, IN ORDER</text>
+
+  <rect class="chip" x="42" y="50" width="76" height="30" rx="5"/>
+  <text class="mono" x="80" y="69" text-anchor="middle">GTID</text>
+  <rect class="chip" x="126" y="50" width="90" height="30" rx="5"/>
+  <text class="mono" x="171" y="69" text-anchor="middle">QUERY</text>
+  <rect class="mark" x="224" y="50" width="124" height="30" rx="5"/>
+  <text class="mono" x="286" y="69" text-anchor="middle">TABLE_MAP</text>
+  <rect class="mark" x="356" y="50" width="132" height="30" rx="5"/>
+  <text class="mono" x="422" y="69" text-anchor="middle">WRITE_ROWS</text>
+  <rect class="chip" x="496" y="50" width="62" height="30" rx="5"/>
+  <text class="mono" x="527" y="69" text-anchor="middle">XID</text>
+
+  <text class="s" x="580" y="60">A ROWS event names its table by id only, so the</text>
+  <text class="s" x="580" y="76">TABLE_MAP that defined that id has to arrive first.</text>
+
+  <text class="flow" x="368" y="108" text-anchor="middle">column layout</text>
+  <text class="flow" x="712" y="108" text-anchor="middle">decoded rows</text>
+
+  <rect class="card" x="42" y="116" width="310" height="170" rx="8"/>
+  <text class="lbl" x="58" y="140">REGISTERS</text>
+  <text class="h" x="58" y="162">TABLE_MAP_EVENT</text>
+  <text class="s" x="58" y="188">table id, database name, table name</text>
+  <text class="s" x="58" y="205">one type byte per column, plus its metadata</text>
+  <text class="s" x="58" y="222">nullability bitmap</text>
+  <path class="rule" d="M 58 236 H 336"/>
+  <text class="s" x="58" y="256">Optional metadata, when the server logs it:</text>
+  <text class="s" x="58" y="273">SIGNEDNESS, COLUMN_CHARSET, COLUMN_NAME</text>
+
+  <rect class="card" x="386" y="116" width="310" height="170" rx="8"/>
+  <text class="lbl" x="402" y="140">CARRIES</text>
+  <text class="h" x="402" y="162">ROWS_EVENT</text>
+  <text class="s" x="402" y="188">table id, resolved against the registry</text>
+  <text class="s" x="402" y="205">columns-present bitmap</text>
+  <text class="s" x="402" y="222">per row: a NULL bitmap, then the values</text>
+  <text class="s" x="402" y="239">that are not NULL, packed end to end</text>
+  <path class="rule" d="M 402 253 H 680"/>
+  <text class="s" x="402" y="273">An UPDATE carries two images for each row.</text>
+
+  <rect class="out" x="730" y="116" width="188" height="170" rx="8"/>
+  <text class="lbl" x="746" y="140">PRODUCES</text>
+  <text class="h" x="746" y="162">ChangeEvent</text>
+  <text class="s" x="746" y="188">database, table</text>
+  <text class="s" x="746" y="205">before, after</text>
+  <text class="s" x="746" y="222">timestamp, position</text>
+  <text class="s" x="746" y="239">namesResolved</text>
+  <text class="s" x="746" y="256">sourceSql (MariaDB)</text>
+
+  <path class="ln" d="M 354 201 H 382" marker-end="url(#a)"/>
+  <path class="ln" d="M 698 201 H 726" marker-end="url(#a)"/>
+
+  <text class="s" x="42" y="318">A ROWS event whose TABLE_MAP was never seen cannot be decoded, so a resumed stream starts at a transaction boundary.</text>
+  <text class="s" x="42" y="336">Without COLUMN_NAME metadata the keys fall back to "0", "1", … unless a metadata connection resolves them.</text>
+</svg>
