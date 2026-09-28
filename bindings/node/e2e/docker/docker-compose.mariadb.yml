@@ -1,6 +1,6 @@
 services:
   mariadb:
-    image: mariadb:${MARIADB_VERSION:-11.4}
+    image: mariadb:${MARIADB_VERSION:-11.8}
     container_name: mes_node_test_mariadb
     ports:
       - "13307:3306"

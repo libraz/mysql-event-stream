@@ -7,7 +7,7 @@
 | サーバー | バージョン |
 | --- | --- |
 | MySQL | 8.4 LTS と 9.x の Innovation リリース |
-| MariaDB | 10.11 以降。10.11 と 11.4 でテスト |
+| MariaDB | 10.11 以降。10.11・11.8・12.3 でテスト |
 
 フレーバーは接続時に検出され、`flavor` / `client.flavor` で参照できます。MariaDB は MySQL といくつかの点で異なり、パーサーはそれを明示的に扱います。[MariaDB](mariadb.md)を参照してください。
 

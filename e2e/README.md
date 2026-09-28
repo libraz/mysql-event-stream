@@ -14,8 +14,8 @@ Node.js suite uses its own container, so the two never collide on a port.
 
 ## CI and release gates
 
-- Pull requests run all three surfaces against MySQL 8.4 and MariaDB 11.4.
-- The scheduled workflow runs the full MySQL 8.4/9.1 and MariaDB 10.11/11.4
+- Pull requests run all three surfaces against MySQL 8.4 and MariaDB 11.8.
+- The scheduled workflow runs the full MySQL 8.4/9.7 and MariaDB 10.11/11.8/12.3
   matrix.
 - Tag publication calls the same full workflow first; Node prebuilds and Python
   wheels declare that E2E job as a dependency, so no registry publication can
@@ -26,7 +26,7 @@ Node.js suite uses its own container, so the two never collide on a port.
 ## Quick start
 
 ```bash
-# All suites, all DB versions (mysql 8.4/9.1, mariadb 10.11/11.4)
+# All suites, all DB versions (mysql 8.4/9.7, mariadb 10.11/11.8/12.3)
 ./e2e/run-matrix.sh
 ```
 
@@ -42,9 +42,9 @@ tail -f /tmp/e2e_matrix.txt
 
 ```bash
 ./e2e/run-matrix.sh --only mysql:8.4                  # single target
-./e2e/run-matrix.sh --only mysql:8.4,mariadb:11.4     # a couple of targets
+./e2e/run-matrix.sh --only mysql:8.4,mariadb:11.8     # a couple of targets
 ./e2e/run-matrix.sh --cpp-only                        # one suite only
-./e2e/run-matrix.sh --python-only --only mariadb:11.4 # one suite, one target
+./e2e/run-matrix.sh --python-only --only mariadb:11.8 # one suite, one target
 ./e2e/run-matrix.sh --skip-node                       # all but one suite
 ./e2e/run-matrix.sh -- -R "Binlog"                    # extra ctest args (C++)
 ```

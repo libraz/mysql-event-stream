@@ -7,7 +7,7 @@ The client validates the source's configuration during `connect()` and refuses t
 | Server | Versions |
 | --- | --- |
 | MySQL | 8.4 LTS and the 9.x Innovation releases |
-| MariaDB | 10.11 and later; tested against 10.11 and 11.4 |
+| MariaDB | 10.11 and later; tested against 10.11, 11.8 and 12.3 |
 
 The flavour is detected at connect time and reported by `flavor` / `client.flavor`. MariaDB diverges from MySQL in several places the parser handles explicitly — see [MariaDB](mariadb.md).
 

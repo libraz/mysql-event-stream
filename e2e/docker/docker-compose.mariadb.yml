@@ -3,7 +3,7 @@
 # C++ E2E tests work unchanged (just swap the container).
 services:
   mariadb:
-    image: mariadb:${MARIADB_VERSION:-11.4}
+    image: mariadb:${MARIADB_VERSION:-11.8}
     container_name: mes_test_mariadb
     ports:
       - "13308:3306"

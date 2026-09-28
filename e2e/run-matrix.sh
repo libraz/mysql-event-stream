@@ -8,7 +8,7 @@
 # Usage:
 #   ./e2e/run-matrix.sh                                # All suites, all targets
 #   ./e2e/run-matrix.sh --only mysql:8.4               # Single target
-#   ./e2e/run-matrix.sh --only mysql:8.4,mariadb:11.4  # Multiple targets
+#   ./e2e/run-matrix.sh --only mysql:8.4,mariadb:11.8  # Multiple targets
 #   ./e2e/run-matrix.sh --cpp-only                     # C++ E2E only
 #   ./e2e/run-matrix.sh --node-only                    # Node.js E2E only
 #   ./e2e/run-matrix.sh --python-only                  # Python E2E only
@@ -99,7 +99,7 @@ done
 
 # Default: all targets
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-    TARGETS=("mysql:8.4" "mysql:9.1" "mariadb:10.11" "mariadb:11.4")
+    TARGETS=("mysql:8.4" "mysql:9.7" "mariadb:10.11" "mariadb:11.8" "mariadb:12.3")
 fi
 
 # Pre-flight checks
