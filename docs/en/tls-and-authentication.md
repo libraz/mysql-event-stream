@@ -38,7 +38,7 @@ stream = CdcStream(
 
 ## Authentication plugins
 
-The native client implements MySQL's `caching_sha2_password` and `mysql_native_password`. A server-requested plugin outside that pair fails with an authentication error rather than falling back to something weaker.
+The native client implements MySQL's `caching_sha2_password` and `mysql_native_password`. The server's greeting names its default plugin, not necessarily the account's, so a greeting naming a plugin outside that pair is not itself fatal: the client answers with `caching_sha2_password` regardless and lets the server's own `AuthSwitchRequest` name the account's real plugin. Authentication only fails once the server has had that chance and still cannot be satisfied.
 
 `caching_sha2_password` is the default on MySQL 8.4 and the only option on 9.x.
 

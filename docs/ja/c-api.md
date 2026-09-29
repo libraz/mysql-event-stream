@@ -8,7 +8,7 @@
 
 ## 不変条件
 
-- `mes_engine_t` と `mes_client_t` は**スレッドセーフではありません**。別スレッドから呼べる入口は `mes_client_stop()` だけです。
+- `mes_engine_t` と `mes_client_t` は**スレッドセーフではありません**。`mes_client_t` には 8 つの例外があります。`mes_client_stop()`（別スレッドから呼んで、ブロック中の `mes_client_poll()` や `mes_client_start()` を中断させる）と、オブザーバ群の `mes_client_is_connected()`、`mes_client_is_streaming()`、`mes_client_checksum_enabled()`、`mes_client_queued_bytes()`、`mes_client_crc_errors()`、`mes_client_last_error()`、`mes_client_current_gtid()` です。後者はオーナースレッドが `mes_client_destroy()` 以外の呼び出しの最中でも、別スレッドからサンプリングできます。この一覧とヘッダが食い違う場合は、`mes.h` の関数ごとの `@threadsafety` 注釈が正です。
 - `mes_next_event()` が返すイベントポインタは、そのエンジンに対する次の `mes_feed()` / `mes_next_event()` / `mes_reset()` **までの間だけ**有効です。`mes_client_poll()` のデータも次の呼び出しまでです。呼び出しをまたいで保持するものはコピーしてください。
 - ライブラリが返す `const char*` は必ず非 NULL です。値が不明なときは `""` になります。
 
@@ -90,7 +90,7 @@ typedef struct {
   uint32_t           after_count;
   uint32_t           timestamp;
   const char*        binlog_file;    /* 最初の ROTATE イベントまでは "" */
-  uint64_t           binlog_offset;  /* 次のイベントのオフセット。再開はここから */
+  uint64_t           binlog_offset;  /* 次のイベントのオフセット。安全に再開できるのはトランザクション境界だけ */
   int                names_resolved;
   const char*        source_sql;     /* MariaDB の ANNOTATE_ROWS、なければ "" */
 } mes_event_t;
@@ -123,7 +123,7 @@ mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size
 uint32_t    mes_get_max_event_size(mes_engine_t* engine);
 ```
 
-いずれも `0` を渡すと既定値に戻ります。`MES_DEFAULT_QUEUE_SIZE`（10,000）、`MES_DEFAULT_QUEUE_BYTES`（48 MiB）、そしてイベントサイズは 1 GiB のハードリミットです。[バックプレッシャーと上限](backpressure.md)を参照してください。
+キューの上限は `0` を渡すとコンパイル時の既定値に戻ります。`MES_DEFAULT_QUEUE_SIZE`（10,000）と `MES_DEFAULT_QUEUE_BYTES`（48 MiB）です。`mes_set_max_event_size(engine, 0)` はこれと違い、既定値には戻らず 1 GiB のハードリミットまで引き上げます。新規に作ったエンジンの初期値は 64 MiB で、このハードリミットよりも、`mes_client_get_max_event_size()` の初期値である 32 MiB よりも小さい値です。[バックプレッシャーと上限](backpressure.md)を参照してください。
 
 ### フレーミング
 
@@ -165,7 +165,7 @@ typedef enum { MES_START_AT_CURRENT = 0, MES_START_AT_GTID = 1,
                MES_START_AT_POSITION = 2 } mes_start_position_mode_t;
 ```
 
-`mes_client_config_t` は `host`、`port`、`user`、`password`、`server_id`、`start_gtid`、`connect_timeout_s`、`read_timeout_s`、4 つの TLS フィールド、`max_queue_size`、`allow_public_key_retrieval`、`start_position_mode`、`binlog_file`、`binlog_position` を持ちます。ゼロ初期化した config は慣例どおりの既定値、つまり TLS 無効とサーバーの現在位置からの開始を意味します。
+`mes_client_config_t` は `host`、`port`、`user`、`password`、`server_id`、`start_gtid`、`connect_timeout_s`、`read_timeout_s`、4 つの TLS フィールド、`max_queue_size`、`allow_public_key_retrieval`、`start_position_mode`、`binlog_file`、`binlog_position` を持ちます。ほとんどのフィールドはゼロ初期化のままでも安全に既定動作になります。TLS 無効、サーバーの現在位置からの開始、そして `connect_timeout_s` / `read_timeout_s` / `max_queue_size` はコンパイル時の既定値です。唯一の例外が `server_id` で、`mes_client_connect()` はゼロを拒否するため、プロセスごとに一意な明示的な値が常に必要です。
 
 ```c
 mes_client_t* mes_client_create(void);
@@ -177,7 +177,7 @@ void        mes_client_stop(mes_client_t* client);      /* 別スレッドから
 void        mes_client_disconnect(mes_client_t* client);
 ```
 
-`mes_client_connect()` はサーバーの設定を検証し、必須の設定が誤っていれば `MES_ERR_VALIDATION` で失敗します。破棄では停止を要求し、実行中の poll が終わるまで待ちます。
+`mes_client_connect()` はサーバーの設定を検証し、必須の設定が誤っていれば `MES_ERR_VALIDATION` で失敗します。`mes_client_destroy()` 自体は停止も待機も行わない、単なる解放処理です。poll している可能性のあるすべてのスレッドで `mes_client_stop()` を呼び、`mes_client_poll()`（または `mes_client_start()`）の戻りを確認してから `mes_client_destroy()` を呼んでください。poll が実行中のまま破棄すると use-after-free になります。
 
 ### ポーリング
 
@@ -192,10 +192,12 @@ typedef struct {
 
 mes_poll_result_t mes_client_poll(mes_client_t* client);
 mes_error_t       mes_client_poll_batch(mes_client_t* client, mes_poll_result_t* results,
-                                        size_t max_results, size_t* count);
+                                        size_t capacity, size_t* result_count);
 ```
 
 `error` と `is_heartbeat` は直交していて、1 つの結果で両方が立つことはありません。ハートビートは健全な無音区間です。ダンプが何も生まなかったことを、サーバーがそう伝えています。`checksum_enabled` に意味があるのは `data` が非 NULL のときだけです。
+
+`mes_client_poll_batch()` は 1 件をブロックして待ち、その後すでにキューにある分を続けて取り出します。書き込むのは最大 `capacity` 件で、件数は `result_count` に格納されます。戻り値が表すのは呼び出し自体の妥当性だけです（`MES_OK`、`MES_ERR_NULL_ARG`、あるいは `capacity` がゼロのときの `MES_ERR_INVALID_ARG`）。ストリームの終端条件は、関数自体は `MES_OK` を返したまま、最後に書き込まれた要素の `error` フィールドに現れます。その要素より前に書き込まれた結果は先に消費側へ届けてください。GTID チェックポイントはバッチ全体を消費したものとして進むため、それらを捨てるとイベントが恒久的に失われます。
 
 ### イントロスペクション
 
@@ -222,23 +224,25 @@ size_t      mes_client_get_max_queue_bytes(mes_client_t* client);
 ```c
 mes_engine_t* engine = mes_create();
 size_t offset = 0;
-while (offset < len) {
-    size_t consumed = 0;
-    if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
-        /* mes_reset() を呼んでから、デコード済みのイベントを吐き出す */
-        break;
-    }
-    offset += consumed;
-
+while (offset < len || mes_has_events(engine)) {
     const mes_event_t* event;
     while (mes_next_event(engine, &event) == MES_OK) {
         printf("%s.%s type=%d\n", event->database, event->table, event->type);
     }
 
-    /* 何も消費せず、吐き出すものも残っていないなら、末尾は不完全なイベント。
-       data + offset から data + len までを保持し、次のチャンクと一緒に
-       feed し直す。オフセット 0 から feed し直してはいけない。 */
-    if (consumed == 0) break;
+    if (offset < len) {
+        size_t consumed = 0;
+        if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
+            /* mes_reset() を呼んでから、デコード済みのイベントを吐き出す */
+            break;
+        }
+        offset += consumed;
+
+        /* 何も消費せず、キューにも何も残っていないなら、末尾は不完全なイベント。
+           data + offset から data + len までを保持し、次のチャンクと一緒に
+           feed し直す。オフセット 0 から feed し直してはいけない。 */
+        if (consumed == 0 && !mes_has_events(engine)) break;
+    }
 }
 mes_destroy(engine);
 ```

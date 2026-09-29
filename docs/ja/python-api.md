@@ -15,8 +15,6 @@ from mysql_event_stream import (
     ChangeEvent,
     ChecksumError,
     ClientConfig,
-    ColumnType,
-    ColumnValue,
     DecodeError,
     EventType,
     LogLevel,
@@ -31,7 +29,7 @@ from mysql_event_stream import (
 )
 ```
 
-コンストラクタはいずれもキーワード引数だけを受け取ります。
+`CdcStream` と `BinlogClient` のコンストラクタはキーワード引数だけを受け取ります。`CdcEngine(lib_path=None)` はそうではなく、`lib_path` は位置引数としてもキーワード引数としても渡せます。
 
 ## CdcStream
 
@@ -48,7 +46,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `CdcStream(**options)` | 最初の反復時ではなく、ここでオプションを検証します。 |
 | `configure(**overrides)` | 反復が始まる前にオプションを差し替えます。始まったあとは例外を送出します。 |
 | `await close()` / `await aclose()` | ネイティブの poll を中断し、イテレータを終了させます。冪等です。 |
-| `current_gtid: str` | 配信済みでコミットされたチェックポイント。`close()` のあとも残ります。 |
+| `current_gtid: str` | 配送済みのイベントのうち、最後の poll で返した分より前をすべて含むチェックポイント。`close()` の後も同じ値を読めます。最後に配送したイベントは含まれず、再開すると再び配送されます。 |
 
 ### オプション
 
@@ -59,7 +57,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `user` | `"root"` | |
 | `password` | `""` | |
 | `server_id` | `1` | レプリカ識別子。プロセスごとに一意でなければなりません。[サーバー設定](server-setup.md#レプリカ識別子)を参照してください。 |
-| `start_gtid` | `None` | `None` ならサーバーの現在のセットをスナップショットします。`""` なら空のセットから始めます。 |
+| `start_gtid` | `None` | `None` ならサーバーの現在のセットをスナップショットします。`""` は空のセットを要求します。実際に先頭から始まるのは、取得元が何もパージしていない場合だけです。[チェックポイントと復旧](checkpoints.md#正確な位置から始める)を参照してください。 |
 | `start_binlog_file` | `None` | `start_binlog_position` と合わせて、ファイルとオフセットを指定した開始になります。`start_gtid` とは併用できません。 |
 | `start_binlog_position` | `0` | 4 から `UINT32_MAX` まで。`start_binlog_file` が必要です。 |
 | `connect_timeout_s` | `10` | |
@@ -131,6 +129,8 @@ with CdcEngine() as engine:
 ## ChangeEvent
 
 凍結された dataclass で、`type`、`database`、`table`、`before`、`after`、`timestamp`、`position`、`names_resolved`、`source_sql` を持ちます。`before` と `after` は `dict[str, Any] | None` です。[変更イベント](change-events.md)と[カラム値](column-values.md)を参照してください。
+
+`ColumnType` と `ColumnValue` はインポートはできますが非推奨です。カラム値を手作業で組み立てる呼び出し元のために残された旧来の組で、`ChangeEvent` がこれらを返すことはなく、Node バインディングにも対応するものはありません。
 
 ## エラー
 

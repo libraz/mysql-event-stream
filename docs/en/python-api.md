@@ -15,8 +15,6 @@ from mysql_event_stream import (
     ChangeEvent,
     ChecksumError,
     ClientConfig,
-    ColumnType,
-    ColumnValue,
     DecodeError,
     EventType,
     LogLevel,
@@ -31,7 +29,7 @@ from mysql_event_stream import (
 )
 ```
 
-Every constructor takes keyword arguments only.
+`CdcStream` and `BinlogClient` take keyword arguments only. `CdcEngine(lib_path=None)` does not — `lib_path` is positional-or-keyword.
 
 ## CdcStream
 
@@ -48,7 +46,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `CdcStream(**options)` | Validates the options here rather than at first iteration. |
 | `configure(**overrides)` | Replaces options before iteration starts; raises afterwards. |
 | `await close()` / `await aclose()` | Interrupts the native poll, then finalizes the iterator. Idempotent. |
-| `current_gtid: str` | The delivered, committed checkpoint. Survives `close()`. |
+| `current_gtid: str` | The checkpoint covering every event delivered up to, but not including, the last poll result. Readable and unchanged after `close()`, but excludes the last delivered event, which is redelivered on the next resume. |
 
 ### Options
 
@@ -59,7 +57,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `user` | `"root"` | |
 | `password` | `""` | |
 | `server_id` | `1` | Replica identity. Must be unique per process — see [Server setup](server-setup.md#replica-identity). |
-| `start_gtid` | `None` | `None` snapshots the server's current set; `""` starts from the empty set. |
+| `start_gtid` | `None` | `None` snapshots the server's current set; `""` requests the empty set, which only actually starts from the beginning when the source has purged nothing — see [Checkpoints and recovery](checkpoints.md#starting-somewhere-exact). |
 | `start_binlog_file` | `None` | With `start_binlog_position`, an exact file/offset start. Cannot be combined with `start_gtid`. |
 | `start_binlog_position` | `0` | 4 through `UINT32_MAX`. Requires `start_binlog_file`. |
 | `connect_timeout_s` | `10` | |
@@ -131,6 +129,8 @@ The engine holds native state, so scope it with `with` rather than waiting for t
 ## ChangeEvent
 
 A frozen dataclass: `type`, `database`, `table`, `before`, `after`, `timestamp`, `position`, `names_resolved`, `source_sql`. `before` and `after` are `dict[str, Any] | None`. See [Change events](change-events.md) and [Column values](column-values.md).
+
+`ColumnType` and `ColumnValue`, importable but deprecated, are a legacy pair for callers that still construct column values manually; no `ChangeEvent` ever returns one, and neither has a counterpart in the Node binding.
 
 ## Errors
 

@@ -22,10 +22,11 @@ Every failure carries a stable numeric code from the C ABI's `mes_error_t`. Bran
 | 200–202 | Row decode failure | Do not retry unchanged input. |
 | 301 (event queue) | An event larger than the whole queue byte budget | Raise `maxQueueBytes` / `max_queue_bytes`; do not retry unchanged input. |
 | 301 (query result) | A side query — configuration validation, GTID lookup, column metadata — retained more than 100,000 rows or 64 MiB | The caps are compile-time constants and the failure closes the connection; reconnect before querying again. |
-| 400–401 | Connection or authentication failure | Retry a transient connection failure; fix the credentials for 401. |
-| 402 | Server configuration validation failure | Fix the [server configuration](server-setup.md); do not retry. |
-| 403–404 | Stream transport ended | Reconnect from the persisted [checkpoint](checkpoints.md). |
-| 405 | Requested GTID was purged | Choose a new snapshot point; do not retry. |
+| 400 | Connection failure — the handshake, an ERR packet in place of the server's greeting, or a transport failure before authentication | Retry; usually transient. |
+| 401 | Authentication failure — the server answered the credentials with an ERR packet | Fix the credentials; do not retry. |
+| 402 | Server configuration validation failure — the server answered and a required setting is wrong or missing | Fix the [server configuration](server-setup.md); do not retry. A dropped connection during that same check surfaces as 403 instead, and is retryable. |
+| 403–404 | Stream transport ended, including a connection dropped while `mes_client_connect()` was validating server configuration | Reconnect from the persisted [checkpoint](checkpoints.md). |
+| 405 | The server confirmed the requested GTIDs were purged | Choose a new snapshot point; do not retry. A "fatal error reading binlog" the server does not attribute to a purge (a stale position, a missing log) surfaces as 403 instead. |
 
 `CdcStream` applies this division itself: it reconnects on a transport failure and surfaces everything in the "do not retry" column immediately.
 
@@ -72,5 +73,7 @@ except (MesError, MesConnectionError) as exc:
     else:
         raise
 ```
+
+An out-of-range or wrongly-typed option — an unknown config key, a negative queue size, a library that fails to load — is refused before it ever reaches the native layer, but still as a `TypeError` or `ValueError` (so `except TypeError` / `except ValueError` keep working) with `code` set to `MesErrorCode.INVALID_ARG`, the same code the C ABI itself returns for a bad argument.
 
 Both bindings export `MesErrorCode`. In C, `mes_error_string()` returns the canonical short description for a numeric code.

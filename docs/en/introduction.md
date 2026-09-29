@@ -22,7 +22,7 @@ Every binding exposes the same three objects. Which one to use depends on how mu
 
 `BinlogClient` owns the connection and nothing else. `poll()` returns one event's raw bytes together with the framing they were read under. Use it when the bytes are going somewhere other than straight into a decoder — a queue, a file, another process.
 
-`CdcEngine` decodes. `feed()` takes binlog bytes from any source and `nextEvent()` drains the decoded events. It opens no socket and starts no thread, so it is also what a replay tool or an offline decoder is built on.
+`CdcEngine` decodes. `feed()` takes binlog bytes from any source, starting at an event boundary, and `nextEvent()` drains the decoded events. It opens no socket and starts no thread, so it is also what a replay tool or an offline decoder is built on — skip a raw binlog file's leading 4-byte magic number first.
 
 All three produce the same `ChangeEvent`, and a failure in any of them is described by the same numeric error code.
 

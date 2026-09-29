@@ -21,7 +21,7 @@
 
 ## イベントサイズ
 
-`maxEventSize` / `max_event_size` は、クライアントとパーサーの両方で binlog イベント 1 件に上限を掛けます。既定は 32 MiB で、`0` は 1 GiB のハード上限になります。
+`maxEventSize` / `max_event_size` は、クライアントとパーサーの両方で binlog イベント 1 件に上限を掛けます。`BinlogClient` / `CdcStream` の既定は 32 MiB、単体の `CdcEngine` の既定は 64 MiB です。`0` はどちらの既定にも戻さず、1 GiB のハード上限まで引き上げます。
 
 上げるときは `maxQueueBytes` も一緒に上げてください。バイト予算の全体より大きいイベントはキューに入れられません。キューの条件のうち、待たずに失敗するのはこれだけです。接続は破棄され、poll は `Binlog event exceeds max_queue_bytes` を伴うコード 301 を返します。
 
@@ -31,15 +31,17 @@
 
 ```typescript
 let offset = 0;
-while (offset < chunk.length) {
-  const consumed = engine.feed(chunk.subarray(offset));
-  offset += consumed;
+while (offset < chunk.length || engine.hasEvents()) {
   for (let e = engine.nextEvent(); e !== null; e = engine.nextEvent()) handle(e);
-  if (consumed === 0) break; // 末尾に不完全なイベントが残っている
+  if (offset < chunk.length) {
+    const consumed = engine.feed(chunk.subarray(offset));
+    offset += consumed;
+    if (consumed === 0 && !engine.hasEvents()) break; // 末尾に不完全なイベントが残っている
+  }
 }
 ```
 
-キューが空の状態で `consumed` が 0 なら、末尾は不完全なイベントです。そのバイト列を保持し、次のチャンクの先頭に付けてください。オフセット 0 から送り直してはいけません。エンジンは不完全なイベントをすでに保持しているので、同じバイト列を送ると状態が壊れます。
+キューが空の状態で `consumed` が 0 なら、末尾は不完全なイベントです。両者を見分けるのは、先にキューを空にしてから判定するからで、キューが満杯であっても 1 回の `feed()` は 0 を返すことがあります。そのバイト列を保持し、次のチャンクの先頭に付けてください。オフセット 0 から送り直してはいけません。エンジンは不完全なイベントをすでに保持しているので、同じバイト列を送ると状態が壊れます。
 
 ## クエリ結果の上限
 

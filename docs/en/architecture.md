@@ -32,7 +32,7 @@ The engine has no network and no thread of its own. It decodes whatever bytes it
 
 Two invariants a binding author will otherwise get wrong:
 
-- `mes_engine_t` and `mes_client_t` are not thread-safe. `mes_client_stop()` is the single entry point callable from another thread.
+- `mes_engine_t` and `mes_client_t` are not thread-safe, with eight exceptions on `mes_client_t`: `mes_client_stop()` and the observers `mes_client_is_connected()`, `mes_client_is_streaming()`, `mes_client_checksum_enabled()`, `mes_client_queued_bytes()`, `mes_client_crc_errors()`, `mes_client_last_error()` and `mes_client_current_gtid()`, all callable from another thread. See the [C API](c-api.md#invariants).
 - Event pointers from `mes_next_event()` are valid only until the next `mes_feed()`, `mes_next_event()` or `mes_reset()`, and `mes_client_poll()` data only until the next poll.
 
 Additions are laid out so that a binary built against an older header keeps linking and running; the reverse is what the ABI version refuses.

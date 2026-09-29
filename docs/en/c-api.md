@@ -8,7 +8,7 @@ The published surface is `core/include/mes.h`. A C or C++ program links `libmes`
 
 ## Invariants
 
-- `mes_engine_t` and `mes_client_t` are **not thread-safe**. `mes_client_stop()` is the only entry point callable from another thread.
+- `mes_engine_t` and `mes_client_t` are **not thread-safe**. `mes_client_t` has eight exceptions: `mes_client_stop()` (interrupts a blocking `mes_client_poll()` or `mes_client_start()` from another thread) and the observers `mes_client_is_connected()`, `mes_client_is_streaming()`, `mes_client_checksum_enabled()`, `mes_client_queued_bytes()`, `mes_client_crc_errors()`, `mes_client_last_error()` and `mes_client_current_gtid()`, which may be sampled from another thread while the owner thread is inside any call except `mes_client_destroy()`. `mes.h`'s per-function `@threadsafety` annotation is authoritative if this list and the header ever disagree.
 - An event pointer from `mes_next_event()` is valid **only until** the next `mes_feed()`, `mes_next_event()` or `mes_reset()` on that engine. `mes_client_poll()` data is valid only until the next poll. Copy anything that has to outlive the call.
 - Every `const char*` the library returns is non-NULL. An unknown value is `""`.
 
@@ -90,7 +90,7 @@ typedef struct {
   uint32_t           after_count;
   uint32_t           timestamp;
   const char*        binlog_file;    /* "" until the first ROTATE event */
-  uint64_t           binlog_offset;  /* offset of the next event; resume from this */
+  uint64_t           binlog_offset;  /* offset of the next event; safe to resume from only at a transaction boundary */
   int                names_resolved;
   const char*        source_sql;     /* MariaDB ANNOTATE_ROWS, or "" */
 } mes_event_t;
@@ -123,7 +123,7 @@ mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size
 uint32_t    mes_get_max_event_size(mes_engine_t* engine);
 ```
 
-`0` restores the default in each case: `MES_DEFAULT_QUEUE_SIZE` (10,000), `MES_DEFAULT_QUEUE_BYTES` (48 MiB), and the 1 GiB hard cap for the event size. See [Backpressure and limits](backpressure.md).
+`0` restores the compiled-in default for the queue bounds: `MES_DEFAULT_QUEUE_SIZE` (10,000) and `MES_DEFAULT_QUEUE_BYTES` (48 MiB). `mes_set_max_event_size(engine, 0)` is different: it raises the ceiling to the 1 GiB hard cap rather than restoring a default. A freshly created engine starts at 64 MiB, below both that hard cap and `mes_client_get_max_event_size()`'s own 32 MiB starting value. See [Backpressure and limits](backpressure.md).
 
 ### Framing
 
@@ -165,7 +165,7 @@ typedef enum { MES_START_AT_CURRENT = 0, MES_START_AT_GTID = 1,
                MES_START_AT_POSITION = 2 } mes_start_position_mode_t;
 ```
 
-`mes_client_config_t` carries `host`, `port`, `user`, `password`, `server_id`, `start_gtid`, `connect_timeout_s`, `read_timeout_s`, the four TLS fields, `max_queue_size`, `allow_public_key_retrieval`, `start_position_mode`, `binlog_file` and `binlog_position`. A zero-initialized config means the conventional defaults: TLS disabled, and a start at the server's current position.
+`mes_client_config_t` carries `host`, `port`, `user`, `password`, `server_id`, `start_gtid`, `connect_timeout_s`, `read_timeout_s`, the four TLS fields, `max_queue_size`, `allow_public_key_retrieval`, `start_position_mode`, `binlog_file` and `binlog_position`. Most fields default safely when left zero-initialized: TLS disabled, a start at the server's current position, `connect_timeout_s`/`read_timeout_s`/`max_queue_size` at their compiled-in defaults. `server_id` is the one exception — `mes_client_connect()` rejects zero, so it always needs an explicit, per-process-unique value.
 
 ```c
 mes_client_t* mes_client_create(void);
@@ -177,7 +177,7 @@ void        mes_client_stop(mes_client_t* client);      /* callable from another
 void        mes_client_disconnect(mes_client_t* client);
 ```
 
-`mes_client_connect()` validates the server's configuration and fails with `MES_ERR_VALIDATION` when a required setting is wrong. Destruction requests a stop and waits for an in-flight poll to finish.
+`mes_client_connect()` validates the server's configuration and fails with `MES_ERR_VALIDATION` when a required setting is wrong. `mes_client_destroy()` does not stop or wait for anything itself — it is a bare deallocation. Call `mes_client_stop()` and observe `mes_client_poll()` (or `mes_client_start()`) return on every thread that might be polling before calling `mes_client_destroy()`; destroying while a poll is in flight is a use-after-free.
 
 ### Polling
 
@@ -192,10 +192,12 @@ typedef struct {
 
 mes_poll_result_t mes_client_poll(mes_client_t* client);
 mes_error_t       mes_client_poll_batch(mes_client_t* client, mes_poll_result_t* results,
-                                        size_t max_results, size_t* count);
+                                        size_t capacity, size_t* result_count);
 ```
 
 `error` and `is_heartbeat` are orthogonal, and a single result has at most one of them set. A heartbeat is a healthy silent interval: the dump produced nothing, so the server said so. `checksum_enabled` is meaningful only while `data` is non-NULL.
+
+`mes_client_poll_batch()` blocks for one result, then drains whatever else is already queued, writing at most `capacity` results and storing the count in `result_count`. Its return value reports only whether the call itself was well formed (`MES_OK`, `MES_ERR_NULL_ARG`, or `MES_ERR_INVALID_ARG` for a zero `capacity`) — a terminal stream condition arrives in the `error` field of the last written element while the function itself still returns `MES_OK`. Deliver the results written before that element to the consumer first; the GTID checkpoint advances as if the whole batch had been consumed, so discarding them loses events permanently.
 
 ### Introspection
 
@@ -222,23 +224,25 @@ size_t      mes_client_get_max_queue_bytes(mes_client_t* client);
 ```c
 mes_engine_t* engine = mes_create();
 size_t offset = 0;
-while (offset < len) {
-    size_t consumed = 0;
-    if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
-        /* call mes_reset(), then drain the events already decoded */
-        break;
-    }
-    offset += consumed;
-
+while (offset < len || mes_has_events(engine)) {
     const mes_event_t* event;
     while (mes_next_event(engine, &event) == MES_OK) {
         printf("%s.%s type=%d\n", event->database, event->table, event->type);
     }
 
-    /* Nothing consumed and nothing left to drain: the tail is a partial event.
-       Keep data + offset through data + len and re-feed it with the next
-       chunk. Never re-feed from offset 0. */
-    if (consumed == 0) break;
+    if (offset < len) {
+        size_t consumed = 0;
+        if (mes_feed(engine, data + offset, len - offset, &consumed) != MES_OK) {
+            /* call mes_reset(), then drain the events already decoded */
+            break;
+        }
+        offset += consumed;
+
+        /* Nothing consumed and nothing queued: the tail is a partial event.
+           Keep data + offset through data + len and re-feed it with the next
+           chunk. Never re-feed from offset 0. */
+        if (consumed == 0 && !mes_has_events(engine)) break;
+    }
 }
 mes_destroy(engine);
 ```

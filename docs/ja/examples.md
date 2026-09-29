@@ -119,7 +119,7 @@ try {
 
 ## 別の経路で届いたバイト列をデコードする
 
-エンジンは、バイト列の出どころを問いません。
+エンジンは、バイト列の出どころを問いません。ただしイベント境界から始まっている必要があります。生の binlog ファイルは先頭に 4 バイトのマジックナンバーがあり、これ自体はイベントではないので、最初の `feed()` の前に読み飛ばしてください。
 
 ```python
 from mysql_event_stream import CdcEngine
@@ -128,19 +128,21 @@ with CdcEngine() as engine:
     engine.set_checksum_enabled(True)  # このバイト列が書かれたときのフレーミング
 
     with open("captured.binlog", "rb") as fh:
+        fh.read(4)  # ファイル先頭のマジックナンバー。イベントではない
         pending = b""
         while chunk := fh.read(1 << 20):
             buffer = pending + chunk
             offset = 0
-            while offset < len(buffer):
-                consumed = engine.feed(buffer[offset:])
-                offset += consumed
-
+            while offset < len(buffer) or engine.has_events():
                 while (event := engine.next_event()) is not None:
                     print(event.type, event.database, event.table)
 
-                if consumed == 0:
-                    break
+                if offset < len(buffer):
+                    consumed = engine.feed(buffer[offset:])
+                    offset += consumed
+
+                    if consumed == 0 and not engine.has_events():
+                        break
             pending = buffer[offset:]
 ```
 
@@ -158,4 +160,4 @@ setLogCallback((level, message) => {
 }, LogLevel.Info);
 ```
 
-コールバックはネイティブの読み取りスレッド上で実行されることがあるので、メッセージをロガーへ渡したらすぐ戻ってください。そこからクライアントやエンジンを呼び返してはいけません。[ロギング](logging.md)を参照してください。
+Node はすべてのレコードを JS のイベントループへ回すため、これは常にそちら側で実行されます。それでも、メッセージをロガーへ渡したらすぐ戻ってください。そこからクライアントやエンジンを呼び返してはいけません。[ロギング](logging.md)を参照してください。

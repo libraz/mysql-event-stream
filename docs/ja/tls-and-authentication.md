@@ -38,7 +38,7 @@ stream = CdcStream(
 
 ## 認証プラグイン
 
-ネイティブクライアントは MySQL の `caching_sha2_password` と `mysql_native_password` を実装しています。サーバーがこの 2 つ以外のプラグインを要求した場合は、より弱い方式にフォールバックせず認証エラーになります。
+ネイティブクライアントは MySQL の `caching_sha2_password` と `mysql_native_password` を実装しています。サーバーの挨拶が名乗るのはサーバー側の既定プラグインであって、必ずしもそのアカウントのものではありません。そのため挨拶がこの 2 つ以外のプラグインを名乗っていても、それだけでは致命的ではありません。クライアントはとりあえず `caching_sha2_password` で応答し、サーバー自身が返す `AuthSwitchRequest` にアカウントの実際のプラグインを名乗らせます。認証が失敗するのは、その機会を経てもなお成立しなかった場合だけです。
 
 `caching_sha2_password` は MySQL 8.4 の既定であり、9.x では唯一の選択肢です。
 

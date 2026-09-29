@@ -36,7 +36,7 @@ for await (const event of stream) { /* ... */ }
 | `new CdcStream(config: StreamConfig)` | 最初の反復時ではなく、ここで設定全体を検証します。綴り誤りがあったときに、誰も指定していない既定値のままストリームが動き出すことはありません。 |
 | `configure(overrides: Partial<StreamConfig>): void` | 反復が始まる前にオプションを差し替えます。始まったあとは例外を投げます。同時に指定しなければならないオプションは、更新後の設定に対して判定します。 |
 | `close(): Promise<void>` | ネイティブの poll を中断し、イテレータを終了させます。冪等です。 |
-| `currentGtid: string` | 配信済みでコミットされたチェックポイント。`close()` のあとも残ります。 |
+| `currentGtid: string` | 配送済みのイベントのうち、最後の poll で返した分より前をすべて含むチェックポイント。`close()` の後も同じ値を読めます。最後に配送したイベントは含まれず、再開すると再び配送されます。 |
 
 1 つのストリームで反復できるのは 1 回だけです。同じオブジェクトに 2 回目の `for await` をかけると例外になります。
 
@@ -61,7 +61,7 @@ for await (const event of stream) { /* ... */ }
 | `user?: string` | `"root"` | |
 | `password?: string` | `""` | |
 | `serverId?: number` | `1` | レプリカ識別子。プロセスごとに一意でなければなりません。[サーバー設定](server-setup.md#レプリカ識別子)を参照してください。 |
-| `startGtid?: string` | — | 省略するとサーバーの現在のセットをスナップショットします。`""` なら空のセットから始めます。 |
+| `startGtid?: string` | — | 省略するとサーバーの現在のセットをスナップショットします。`""` は空のセットを要求します。実際に先頭から始まるのは、取得元が何もパージしていない場合だけです。[チェックポイントと復旧](checkpoints.md#正確な位置から始める)を参照してください。 |
 | `startBinlogFile?: string` | — | `startBinlogPosition` と合わせて、ファイルとオフセットを指定した開始になります。`startGtid` とは併用できません。 |
 | `startBinlogPosition?: number` | — | 4 以上。`startBinlogFile` が必要です。 |
 | `connectTimeoutS?: number` | `10` | |
@@ -106,6 +106,7 @@ interface PollResult {
 | メンバー | 説明 |
 | --- | --- |
 | `new CdcEngine()` | |
+| `static create(): Promise<CdcEngine>` | `new CdcEngine()` と同じですが、旧来の非同期ファクトリから移行する呼び出し元のために解決済みの `Promise` で包みます。 |
 | `feed(data: Uint8Array): number` | 消費したバイト数を返します。キューが満杯になると早めに止まります。 |
 | `nextEvent(): ChangeEvent \| null` | キューが空なら `null`。 |
 | `hasEvents(): boolean` | |
@@ -131,7 +132,7 @@ interface PollResult {
 setLogCallback(handler: LogHandler | null, level: LogLevel = LogLevel.Warn): void;
 ```
 
-プロセス全体に効き、ハンドラはネイティブのリーダースレッド上で実行されることがあります。ハンドラ自体がプロセスや Worker を生かし続けることはありません。
+プロセス全体に効きます。メッセージはコアのリーダースレッドからスレッドセーフ関数を介して JS のイベントループへ回されるため、ハンドラは常に環境の JS スレッド上で実行され、ネイティブのリーダースレッド上では実行されません。ハンドラ自体がプロセスや Worker を生かし続けることはありません。
 
 ネイティブ側の配送は未処理 256 件で頭打ちになります。JavaScript スレッドが遅れると超過分は失われ、次に届くレコードの前に `event=node_log_queue_overflow dropped=N` が入ります。ハンドラが不要になったら `setLogCallback(null)` を呼んでください。
 

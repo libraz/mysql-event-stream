@@ -69,6 +69,6 @@ UV_THREADPOOL_SIZE=16 node app.mjs
 
 ## C ABI では
 
-`mes_engine_t` と `mes_client_t` はスレッドセーフではありません。別のスレッドから呼べるエントリポイントは `mes_client_stop()` だけです。
+`mes_engine_t` と `mes_client_t` はスレッドセーフではありません。`mes_client_t` には 8 つの例外があります。`mes_client_stop()` と、オブザーバ群の `mes_client_is_connected()`、`mes_client_is_streaming()`、`mes_client_checksum_enabled()`、`mes_client_queued_bytes()`、`mes_client_crc_errors()`、`mes_client_last_error()`、`mes_client_current_gtid()` は、いずれも別スレッドから呼べます。`mes_client_destroy()` 以外の呼び出しが進行中でもどれが安全かは [C API](c-api.md#不変条件)を参照してください。
 
 `mes_next_event()` が返すイベントのポインタが有効なのは、次の `mes_feed()`、`mes_next_event()`、`mes_reset()` までです。`mes_client_poll()` のデータは次の poll までです。呼び出しより長く保持するものはコピーしてください。[C API](c-api.md)を参照してください。

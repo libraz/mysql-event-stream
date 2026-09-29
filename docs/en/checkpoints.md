@@ -32,7 +32,7 @@ async with CdcStream(
         save_checkpoint(stream.current_gtid)
 ```
 
-`currentGtid` / `current_gtid` is the last checkpoint the reader committed. It survives the scope that closed the stream, so it can also be persisted once after the loop — including after a `break`. `BinlogClient` carries the same pair under the same names.
+`currentGtid` / `current_gtid` covers every event delivered up to, but not including, the last `poll()` / `poll_batch()` result — `stop()`, `close()`, `disconnect()` and `destroy()` never advance it further. It stays readable and unchanged after the stream closes, so it can also be persisted once after the loop, including after a `break`, but the last delivered event or batch is excluded and is redelivered on the next resume: at-least-once, not exactly-once. `BinlogClient` carries the same pair under the same names.
 
 ## At-least-once, and what that costs you
 
@@ -50,7 +50,7 @@ Three start modes exist, and a configuration picks one.
 | Mode | How to ask for it |
 | --- | --- |
 | The server's current position | Omit `startGtid` and the binlog file/offset pair. |
-| A GTID set | `startGtid` / `start_gtid`. An empty string starts from the empty set, which is everything the server still has. |
+| A GTID set | `startGtid` / `start_gtid`. An empty string requests the empty set — everything the server still has, but only when nothing has been purged. It goes through the same [purged-GTID preflight](#purged-positions) as any other requested set, so a source with a non-empty `gtid_purged` fails it too. |
 | A binlog file and offset | `startBinlogFile` with `startBinlogPosition` (4 or greater — the first event begins after the file's 4-byte magic number). |
 
 The two explicit modes cannot be combined: they name different start points and only one can be honoured. An offset naming no file is refused at configuration time rather than accepted and dropped.

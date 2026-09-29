@@ -18,8 +18,10 @@ event=binlog_error type=event_exceeds_queue_byte_budget max_queue_bytes=50331648
 ```typescript
 import { LogLevel, setLogCallback } from "@libraz/mysql-event-stream";
 
+const levelNames = ["error", "warn", "info", "debug"];
+
 setLogCallback((level, message) => {
-  logger.log(LogLevel[level] ?? "info", message);
+  logger.log(levelNames[level] ?? "info", message);
 }, LogLevel.Info);
 
 setLogCallback(null); // remove
@@ -45,7 +47,7 @@ mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
 
 The callback is process-wide, not per engine or per client — it matches the C ABI, where one callback serves the whole loaded library.
 
-It can run on the native reader thread. Do not call `stop()`, `close()`, `poll()` or any other client or engine operation from inside it; hand the message to your logger and return.
+For the C ABI and Python, it can run on the native reader thread — do not call `stop()`, `close()`, `poll()` or any other client or engine operation from inside it; hand the message to your logger and return. Node marshals every record onto the JS event loop thread through a thread-safe function first, so a Node handler always runs there instead and does not need that restriction, though it should still return quickly.
 
 An exception raised inside the callback is swallowed. A logging handler must never interrupt stream processing, so a broken handler costs log records rather than events.
 

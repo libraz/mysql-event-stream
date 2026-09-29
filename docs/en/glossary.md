@@ -22,7 +22,7 @@ The server's log of every change to its data, written for replication and recove
 
 ### binlog position
 
-A binlog filename and a byte offset. The offset on an event is the offset of the *next* event, which is what a resume starts from.
+A binlog filename and a byte offset. The offset on an event is the offset of the *next* event. Every row of one `ROWS_EVENT` shares it, so it is not a per-row resume point, and it is only safe to resume from at a transaction boundary (after the `XID`/`COMMIT` event) — mid-transaction, the next `ROWS_EVENT` arrives without its `TABLE_MAP` and fails to decode.
 
 ### CDC (Change Data Capture)
 

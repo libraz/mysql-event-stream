@@ -66,7 +66,7 @@ An `UPDATE` arrives with both images of the row:
 }
 ```
 
-`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source — a file, a queue, another process — with no socket and no thread of its own.
+`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source — a file, a queue, another process — with no socket and no thread of its own. Bytes must start at an event boundary; a raw binlog file opens with a 4-byte magic number that has to be skipped first.
 
 ## Install
 

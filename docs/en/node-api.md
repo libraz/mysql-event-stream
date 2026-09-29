@@ -36,7 +36,7 @@ for await (const event of stream) { /* ... */ }
 | `new CdcStream(config: StreamConfig)` | Validates the whole config here rather than at first iteration, so a typo cannot leave the stream on a default nobody asked for. |
 | `configure(overrides: Partial<StreamConfig>): void` | Replaces options before iteration starts; throws afterwards. Options that must be supplied together are judged against the configuration the update produces. |
 | `close(): Promise<void>` | Interrupts the native poll, then finalizes the iterator. Idempotent. |
-| `currentGtid: string` | The delivered, committed checkpoint. Survives `close()`. |
+| `currentGtid: string` | The checkpoint covering every event delivered up to, but not including, the last poll result. Readable and unchanged after `close()`, but excludes the last delivered event, which is redelivered on the next resume. |
 
 One stream supports one iteration; a second `for await` over the same object throws.
 
@@ -61,7 +61,7 @@ Extends `ClientConfig` with:
 | `user?: string` | `"root"` | |
 | `password?: string` | `""` | |
 | `serverId?: number` | `1` | Replica identity. Must be unique per process — see [Server setup](server-setup.md#replica-identity). |
-| `startGtid?: string` | — | Omitted snapshots the server's current set; `""` starts from the empty set. |
+| `startGtid?: string` | — | Omitted snapshots the server's current set; `""` requests the empty set, which only actually starts from the beginning when the source has purged nothing — see [Checkpoints and recovery](checkpoints.md#starting-somewhere-exact). |
 | `startBinlogFile?: string` | — | With `startBinlogPosition`, an exact file/offset start. Cannot be combined with `startGtid`. |
 | `startBinlogPosition?: number` | — | 4 or greater. Requires `startBinlogFile`. |
 | `connectTimeoutS?: number` | `10` | |
@@ -106,6 +106,7 @@ Frame the engine from `checksumEnabled` on the result, not from `client.checksum
 | Member | Description |
 | --- | --- |
 | `new CdcEngine()` | |
+| `static create(): Promise<CdcEngine>` | Same as `new CdcEngine()`, wrapped in a resolved `Promise` for callers migrating from an older async factory. |
 | `feed(data: Uint8Array): number` | Returns bytes consumed. Stops early on a full queue. |
 | `nextEvent(): ChangeEvent \| null` | `null` when the queue is empty. |
 | `hasEvents(): boolean` | |
@@ -131,7 +132,7 @@ An error from the addon is a plain `Error`, `TypeError` or `RangeError` with a n
 setLogCallback(handler: LogHandler | null, level: LogLevel = LogLevel.Warn): void;
 ```
 
-Process-wide, and the handler can run on the native reader thread. It does not by itself keep a process or a Worker alive.
+Process-wide. Messages are marshalled from the core's reader thread onto the JS event loop through a thread-safe function, so the handler always runs on the environment's JS thread, never the native reader thread. It does not by itself keep a process or a Worker alive.
 
 Native delivery is bounded to 256 pending records. A JavaScript thread that falls behind loses the excess, and the next delivered record is preceded by `event=node_log_queue_overflow dropped=N`. Call `setLogCallback(null)` when the handler is no longer needed.
 

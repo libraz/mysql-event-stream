@@ -32,7 +32,7 @@ MySQL のワイヤプロトコルは OpenSSL の上に直接実装していま�
 
 バインディングの作者が、明記しなければ取り違える不変条件が 2 つあります。
 
-- `mes_engine_t` と `mes_client_t` はスレッドセーフではありません。別スレッドから呼べる唯一の入口は `mes_client_stop()` です。
+- `mes_engine_t` と `mes_client_t` はスレッドセーフではありません。ただし `mes_client_t` には 8 つの例外があり、`mes_client_stop()` と、オブザーバ群の `mes_client_is_connected()`、`mes_client_is_streaming()`、`mes_client_checksum_enabled()`、`mes_client_queued_bytes()`、`mes_client_crc_errors()`、`mes_client_last_error()`、`mes_client_current_gtid()` はいずれも別スレッドから呼べます。[C API](c-api.md#不変条件)を参照してください。
 - `mes_next_event()` が返すイベントポインタは、次の `mes_feed()`、`mes_next_event()`、`mes_reset()` までしか有効ではなく、`mes_client_poll()` のデータは次の poll までしか有効ではありません。
 
 追加は、古いヘッダでビルドされたバイナリがそのままリンクして動き続けるように配置します。逆向きは ABI バージョンが拒否します。

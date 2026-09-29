@@ -21,7 +21,7 @@ The byte budget charges each queued wire payload plus the GTID checkpoint held w
 
 ## Event size
 
-`maxEventSize` / `max_event_size` bounds a single binlog event for both the client and the parser. The default is 32 MiB; `0` resolves to the 1 GiB hard cap.
+`maxEventSize` / `max_event_size` bounds a single binlog event for both the client and the parser. `BinlogClient` / `CdcStream` default to 32 MiB; a standalone `CdcEngine` defaults to 64 MiB. `0` does not restore either default — it raises the ceiling to the 1 GiB hard cap.
 
 Raise `maxQueueBytes` alongside it. An event larger than the whole byte budget can never be queued, and that is the one queue condition that fails rather than waits: the connection is retired and the poll reports code 301 with `Binlog event exceeds max_queue_bytes`.
 
@@ -31,15 +31,17 @@ Raise `maxQueueBytes` alongside it. An event larger than the whole byte budget c
 
 ```typescript
 let offset = 0;
-while (offset < chunk.length) {
-  const consumed = engine.feed(chunk.subarray(offset));
-  offset += consumed;
+while (offset < chunk.length || engine.hasEvents()) {
   for (let e = engine.nextEvent(); e !== null; e = engine.nextEvent()) handle(e);
-  if (consumed === 0) break; // partial event at the tail
+  if (offset < chunk.length) {
+    const consumed = engine.feed(chunk.subarray(offset));
+    offset += consumed;
+    if (consumed === 0 && !engine.hasEvents()) break; // partial event at the tail
+  }
 }
 ```
 
-A `consumed` of zero with an empty queue means the tail is an incomplete event. Keep those bytes and prepend them to the next chunk. Never re-feed from offset zero: the engine already holds the partial event, and replaying the bytes corrupts its state.
+A `consumed` of zero with an empty queue means the tail is an incomplete event — draining first is what tells the two apart, since a full queue can also make a single `feed()` call return zero. Keep those bytes and prepend them to the next chunk. Never re-feed from offset zero: the engine already holds the partial event, and replaying the bytes corrupts its state.
 
 ## Query result caps
 

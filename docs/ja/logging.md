@@ -18,8 +18,10 @@ event=binlog_error type=event_exceeds_queue_byte_budget max_queue_bytes=50331648
 ```typescript
 import { LogLevel, setLogCallback } from "@libraz/mysql-event-stream";
 
+const levelNames = ["error", "warn", "info", "debug"];
+
 setLogCallback((level, message) => {
-  logger.log(LogLevel[level] ?? "info", message);
+  logger.log(levelNames[level] ?? "info", message);
 }, LogLevel.Info);
 
 setLogCallback(null); // 解除
@@ -45,7 +47,7 @@ mes_set_log_callback(my_log, MES_LOG_INFO, NULL);
 
 コールバックはプロセス全体に 1 つで、エンジンごと・クライアントごとではありません。ロードされたライブラリ全体を 1 つのコールバックが受け持つ C ABI に合わせた形です。
 
-このコールバックはネイティブのリーダースレッド上で走ることがあります。中から `stop()`、`close()`、`poll()` をはじめとするクライアントやエンジンの操作を呼び出してはいけません。メッセージを自分のロガーに渡して戻ります。
+C ABI と Python では、このコールバックはネイティブのリーダースレッド上で走ることがあります。中から `stop()`、`close()`、`poll()` をはじめとするクライアントやエンジンの操作を呼び出してはいけません。メッセージを自分のロガーに渡して戻ります。Node はスレッドセーフ関数を介してすべてのレコードを JS のイベントループへ回すため、Node のハンドラは常にそちら側で走り、この制約はありません。ただし、すぐに戻るべきなのは変わりません。
 
 コールバックの中で送出された例外は握り潰されます。ログのハンドラがストリーム処理を中断してはならないので、壊れたハンドラが失うのはイベントではなくログレコードです。
 

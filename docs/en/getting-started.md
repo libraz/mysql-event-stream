@@ -63,7 +63,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-An `UPDATE` on that database now prints both images of the row:
+An `UPDATE` on that database now prints both images of the row. `event.type` is the string `"UPDATE"` in Node; in Python it is the `EventType.UPDATE` enum member, not a string — compare it with `==`, not against `"UPDATE"`.
 
 ```json
 {
@@ -84,7 +84,7 @@ If the keys come back as `"0"`, `"1"`, `"2"` instead of column names, the server
 
 ## Decoding bytes you already have
 
-`CdcEngine` takes binlog bytes from anywhere. `feed()` returns how many bytes it consumed and stops early once its queue is full, so the loop drains the queue and re-feeds the unconsumed tail.
+`CdcEngine` takes binlog bytes from anywhere, as long as they start at an event boundary — a raw binlog file opens with a 4-byte magic number that has to be skipped first. `feed()` returns how many bytes it consumed and stops early once its queue is full, so the loop drains the queue and re-feeds the unconsumed tail.
 
 ```typescript
 import { CdcEngine } from "@libraz/mysql-event-stream";
@@ -92,17 +92,19 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 try {
   let offset = 0;
-  while (offset < chunk.length) {
-    const consumed = engine.feed(chunk.subarray(offset));
-    offset += consumed;
-
+  while (offset < chunk.length || engine.hasEvents()) {
     for (let event = engine.nextEvent(); event !== null; event = engine.nextEvent()) {
       console.log(event.type, event.database, event.table);
     }
 
-    // Nothing consumed and nothing left to drain: the tail is a partial event.
-    // Keep chunk.subarray(offset) and prepend it to the next chunk.
-    if (consumed === 0) break;
+    if (offset < chunk.length) {
+      const consumed = engine.feed(chunk.subarray(offset));
+      offset += consumed;
+
+      // Nothing consumed and nothing queued: the tail is a partial event.
+      // Keep chunk.subarray(offset) and prepend it to the next chunk.
+      if (consumed === 0 && !engine.hasEvents()) break;
+    }
   }
 } finally {
   engine.destroy();
@@ -114,17 +116,18 @@ from mysql_event_stream import CdcEngine
 
 with CdcEngine() as engine:
     offset = 0
-    while offset < len(chunk):
-        consumed = engine.feed(chunk[offset:])
-        offset += consumed
-
+    while offset < len(chunk) or engine.has_events():
         while (event := engine.next_event()) is not None:
             print(event.type, event.database, event.table)
 
-        # Nothing consumed and nothing left to drain: the tail is a partial
-        # event. Keep chunk[offset:] and prepend it to the next chunk.
-        if consumed == 0:
-            break
+        if offset < len(chunk):
+            consumed = engine.feed(chunk[offset:])
+            offset += consumed
+
+            # Nothing consumed and nothing queued: the tail is a partial
+            # event. Keep chunk[offset:] and prepend it to the next chunk.
+            if consumed == 0 and not engine.has_events():
+                break
 ```
 
 Never re-feed from offset zero after a short feed. The engine holds the partial event it has already accepted, and replaying those bytes corrupts its state.

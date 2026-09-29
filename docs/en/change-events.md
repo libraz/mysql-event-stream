@@ -6,7 +6,7 @@ A `ChangeEvent` describes one row that changed. A statement touching fifty rows 
 
 | Node.js | Python | Meaning |
 | --- | --- | --- |
-| `type` | `type` | `"INSERT"`, `"UPDATE"` or `"DELETE"`. |
+| `type` | `type` | Node: the string `"INSERT"`, `"UPDATE"` or `"DELETE"`. Python: the `EventType` enum member `EventType.INSERT`, `EventType.UPDATE` or `EventType.DELETE` — compare with `==`, not against a string. |
 | `database` | `database` | Database the row lives in. |
 | `table` | `table` | Table the row lives in. |
 | `before` | `before` | The row as it was. `null` / `None` for an `INSERT`. |

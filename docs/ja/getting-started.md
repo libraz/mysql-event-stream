@@ -63,7 +63,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-これで、そのデータベースへの `UPDATE` が行の前後両方のイメージを出力します。
+これで、そのデータベースへの `UPDATE` が行の前後両方のイメージを出力します。`event.type` は Node では文字列 `"UPDATE"` ですが、Python では `EventType.UPDATE` という enum のメンバーであって文字列ではありません。`"UPDATE"` と比べるのではなく `==` で比較してください。
 
 ```json
 {
@@ -84,7 +84,7 @@ asyncio.run(main())
 
 ## 手元にあるバイト列をデコードする
 
-`CdcEngine` は、入手元を問わず binlog のバイト列を受け取ります。`feed()` は消費したバイト数を返し、キューが埋まると途中で止まるので、ループ側でキューを空にしてから、消費されなかった末尾を渡し直します。
+`CdcEngine` は、入手元を問わず binlog のバイト列を受け取りますが、イベント境界から始まっている必要があります。生の binlog ファイルは先頭に 4 バイトのマジックナンバーがあるので、先に読み飛ばしてください。`feed()` は消費したバイト数を返し、キューが埋まると途中で止まるので、ループ側でキューを空にしてから、消費されなかった末尾を渡し直します。
 
 ```typescript
 import { CdcEngine } from "@libraz/mysql-event-stream";
@@ -92,17 +92,19 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 try {
   let offset = 0;
-  while (offset < chunk.length) {
-    const consumed = engine.feed(chunk.subarray(offset));
-    offset += consumed;
-
+  while (offset < chunk.length || engine.hasEvents()) {
     for (let event = engine.nextEvent(); event !== null; event = engine.nextEvent()) {
       console.log(event.type, event.database, event.table);
     }
 
-    // 何も消費されず、取り出すものも残っていないなら、末尾は不完全なイベントです。
-    // chunk.subarray(offset) を保持して、次のチャンクの先頭に付けてください。
-    if (consumed === 0) break;
+    if (offset < chunk.length) {
+      const consumed = engine.feed(chunk.subarray(offset));
+      offset += consumed;
+
+      // 何も消費されず、キューにも何も残っていないなら、末尾は不完全なイベントです。
+      // chunk.subarray(offset) を保持して、次のチャンクの先頭に付けてください。
+      if (consumed === 0 && !engine.hasEvents()) break;
+    }
   }
 } finally {
   engine.destroy();
@@ -114,17 +116,18 @@ from mysql_event_stream import CdcEngine
 
 with CdcEngine() as engine:
     offset = 0
-    while offset < len(chunk):
-        consumed = engine.feed(chunk[offset:])
-        offset += consumed
-
+    while offset < len(chunk) or engine.has_events():
         while (event := engine.next_event()) is not None:
             print(event.type, event.database, event.table)
 
-        # 何も消費されず、取り出すものも残っていないなら、末尾は不完全な
-        # イベントです。chunk[offset:] を保持して次のチャンクの先頭に付けます。
-        if consumed == 0:
-            break
+        if offset < len(chunk):
+            consumed = engine.feed(chunk[offset:])
+            offset += consumed
+
+            # 何も消費されず、キューにも何も残っていないなら、末尾は不完全な
+            # イベントです。chunk[offset:] を保持して次のチャンクの先頭に付けます。
+            if consumed == 0 and not engine.has_events():
+                break
 ```
 
 短く消費されたあとに、オフセット 0 から渡し直してはいけません。エンジンは受け取り済みの不完全なイベントを保持しているので、同じバイト列を再生すると状態が壊れます。

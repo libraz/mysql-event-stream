@@ -6,7 +6,7 @@
 
 | Node.js | Python | 意味 |
 | --- | --- | --- |
-| `type` | `type` | `"INSERT"`、`"UPDATE"`、`"DELETE"` のいずれか。 |
+| `type` | `type` | Node: 文字列 `"INSERT"`、`"UPDATE"`、`"DELETE"` のいずれか。Python: `EventType` enum のメンバー `EventType.INSERT`、`EventType.UPDATE`、`EventType.DELETE` のいずれかです。比較は文字列ではなく enum のメンバーと `==` で行います。 |
 | `database` | `database` | 行が属するデータベース。 |
 | `table` | `table` | 行が属するテーブル。 |
 | `before` | `before` | 変更前の行。`INSERT` では `null` / `None`。 |

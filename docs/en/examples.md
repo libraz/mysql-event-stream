@@ -119,7 +119,7 @@ try {
 
 ## Decoding bytes that arrived some other way
 
-The engine does not care where its bytes came from.
+The engine does not care where its bytes came from, as long as they start at an event boundary. A raw binlog file opens with a 4-byte magic number that is not itself an event, so skip it before the first `feed()`.
 
 ```python
 from mysql_event_stream import CdcEngine
@@ -128,19 +128,21 @@ with CdcEngine() as engine:
     engine.set_checksum_enabled(True)  # the framing these bytes were written under
 
     with open("captured.binlog", "rb") as fh:
+        fh.read(4)  # the file's leading magic number, not an event
         pending = b""
         while chunk := fh.read(1 << 20):
             buffer = pending + chunk
             offset = 0
-            while offset < len(buffer):
-                consumed = engine.feed(buffer[offset:])
-                offset += consumed
-
+            while offset < len(buffer) or engine.has_events():
                 while (event := engine.next_event()) is not None:
                     print(event.type, event.database, event.table)
 
-                if consumed == 0:
-                    break
+                if offset < len(buffer):
+                    consumed = engine.feed(buffer[offset:])
+                    offset += consumed
+
+                    if consumed == 0 and not engine.has_events():
+                        break
             pending = buffer[offset:]
 ```
 
@@ -158,4 +160,4 @@ setLogCallback((level, message) => {
 }, LogLevel.Info);
 ```
 
-The callback can run on the native reader thread, so hand the message to your logger and return — do not call back into a client or engine from it. See [Logging](logging.md).
+Node marshals every record onto the JS event loop thread, so this always runs there — but still hand the message to your logger and return rather than calling back into a client or engine from it. See [Logging](logging.md).

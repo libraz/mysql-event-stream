@@ -32,7 +32,7 @@ async with CdcStream(
         save_checkpoint(stream.current_gtid)
 ```
 
-`currentGtid` / `current_gtid` は、リーダーが最後にコミットしたチェックポイントです。ストリームを閉じたスコープを抜けても値は残るので、ループの後で 1 回だけ保存することもできます（`break` で抜けた場合も同じです）。`BinlogClient` も同じ名前で同じ組を持ちます。
+`currentGtid` / `current_gtid` は、配送済みのイベントのうち、最後の `poll()` / `poll_batch()` で返した分より前をすべて含みます。`stop()`、`close()`、`disconnect()`、`destroy()` を呼んでも値は進みません。ストリームを閉じた後も同じ値を読めるので、ループの後で 1 回だけ保存してもかまいません（`break` で抜けた場合も同じです）。ただし最後に配送したイベントやバッチはこの値に含まれず、再開すると再び配送されます。保証は at-least-once で、exactly-once ではありません。`BinlogClient` も同じ名前で同じ組を持ちます。
 
 ## at-least-once と、その代償
 
@@ -50,7 +50,7 @@ async with CdcStream(
 | モード | 指定方法 |
 | --- | --- |
 | サーバーの現在位置 | `startGtid` と binlog ファイル・オフセットの組を省略する。 |
-| GTID セット | `startGtid` / `start_gtid`。空文字列は空のセットから始まり、サーバーに残っているすべてが対象になる。 |
+| GTID セット | `startGtid` / `start_gtid`。空文字列は空のセットを要求する。サーバーに残っているすべてが対象になるのは、何もパージされていない場合だけである。ほかの GTID セットと同じ[パージ済みの位置のプリフライト](#パージ済みの位置)を通るため、`gtid_purged` が空でない取得元ではこれも失敗する。 |
 | binlog ファイルとオフセット | `startBinlogFile` と `startBinlogPosition`（4 以上。最初のイベントはファイル先頭 4 バイトのマジックナンバーの後から始まる）。 |
 
 明示的な 2 つのモードは併用できません。指す開始位置が別々で、片方しか反映できないためです。ファイルを伴わないオフセットは、受け付けて黙って捨てるのではなく、設定の時点で拒否されます。
