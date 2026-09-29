@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of mysql-event-s
 
 ## Available Versions
 
-- [v1.7.0](v1.7.0.md) - Latest release (2026-09-13) - queue byte budget and pre-verified trailers reachable from the C ABI, checksum framing carried on the poll result, independent engines no longer share an allocator lock, declared error types on both bindings (additive ABI change, version 3)
+- [v1.7.1](v1.7.1.md) - Latest release (2026-09-29) - opted-in full authentication over unverified TLS works, connect and auth error codes narrowed to what happened, checkpoints stay behind delivery on both bindings, Node metadata connect off the event loop, docs tree in English and Japanese (no ABI change)
+- [v1.7.0](v1.7.0.md) - 2026-09-13 - queue byte budget and pre-verified trailers reachable from the C ABI, checksum framing carried on the poll result, independent engines no longer share an allocator lock, declared error types on both bindings (additive ABI change, version 3)
 - [v1.6.1](v1.6.1.md) - 2026-08-15 - MariaDB ANNOTATE_ROWS actually requested so `source_sql` arrives, checkpoints no longer run ahead of delivery, ENUM/SET/VECTOR charset index space corrected, stop interrupts start, shared binding contract (no ABI change)
 - [v1.6.0](v1.6.0.md) - 2026-07-29 - Batched polling, explicit start positions, purged-GTID detection, tagged GTIDs, charset-aware column typing; unrepresentable events and partial row images now fail instead of being skipped (ABI version 2)
 - [v1.5.0](v1.5.0.md) - 2026-07-15 - Client flow control: byte-budgeted backpressure, client-side event-size clamp, streaming/checksum introspection, delivery-acknowledged GTID; prebuilt Node packages and Python wheels

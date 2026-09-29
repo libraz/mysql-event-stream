@@ -10,6 +10,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-29
+
+A correctness release. The C ABI is unchanged — `mes_abi_version()` still
+reports 3 and no symbol, field or enum value moved — but several error codes now
+say what actually happened, which a caller matching on a specific code will
+notice. The documentation moved out of the READMEs into an English and Japanese
+tree under `docs/`.
+
+### Fixed
+
+- **Opted-in full authentication over unverified TLS always failed** — with
+  `caching_sha2_password` on a cold cache, `ssl_mode` preferred or required, and
+  `allow_public_key_retrieval` set, the client asked for the RSA key, which the
+  server reads as the password once TLS is up. The password is now sent over the
+  TLS session, and the refusal message no longer suggests a path that cannot work
+- **Connect and authentication error codes** — transport and pre-credential
+  failures during the handshake report `MES_ERR_CONNECT`; `MES_ERR_AUTH` is
+  reserved for a credential the server rejected. Connect-time validation passes
+  the query's own code through (a lost transport is `MES_ERR_STREAM`) instead of
+  forcing `MES_ERR_VALIDATION`, and server error 1236 maps to
+  `MES_ERR_GTID_PURGED` only when the server confirms a purge
+- **An unsupported plugin in the greeting** is left to the server's AuthSwitch
+  instead of failing locally
+- **Stream lifecycle** — terminal-error handling is shared by start, poll and
+  batch poll, including a disconnect during the start drain window; closing the
+  descriptor is serialized against `mes_client_stop()`; the TLS read/write
+  timeout applies per stall rather than across the whole call
+- **Engine state** — ANNOTATE_ROWS text is cleared at the statement end, and the
+  last returned event is released on engine teardown
+- **Metadata lookups** — the reconnect throttle is measured from the end of the
+  attempt, so a slow connect no longer re-arms a blocking attempt on every
+  TABLE_MAP; cached column names are served while the metadata connection is
+  down; negative entries, including a column-count mismatch, expire after 30
+  seconds so a later GRANT or a transient error is retried without waiting for
+  DDL
+- **Checkpoints on both bindings** — `CdcStream` never polls while undrained
+  bytes remain, so the reported checkpoint no longer skips undelivered rows, and
+  a feed failure still delivers the events decoded before it
+- **Node** — the metadata connection is opened on the thread pool instead of
+  blocking the event loop at start and on every reconnect; client options refuse
+  out-of-range `serverId` and timeouts and unknown keys; `enableMetadata`
+  refuses stream-only keys such as `includeTables`; filter arrays are copied, so
+  mutating the caller's array cannot change a later reconnect; an unknown event
+  type maps to `MES_ERR_PARSE`
+- **Python** — a bare string passed as a filter is refused instead of becoming a
+  per-character filter, and `""` or `0` no longer mean "no filter"; `configure()`
+  accepts `None` for the filter options as a reset; every argument rejection
+  carries `INVALID_ARG`; `connect()` raises `MesConnectionError` only for
+  connection codes; closing during a start or reconnect no longer latches the
+  client; a library-load failure is permanent rather than retried
+- **Both bindings** propagate `maxQueueBytes` to the engine, bound the queue
+  limits at `Number.MAX_SAFE_INTEGER`, and refuse an empty `startBinlogFile` at
+  construction
+- **Examples** — the Python examples stop on SIGINT/SIGTERM while a poll is
+  blocked, and the Node and Python examples connect to the local test server on
+  a cold password cache
+
+### Changed
+
+- **Error codes** — callers matching `MES_ERR_AUTH`, `MES_ERR_VALIDATION` or
+  `MES_ERR_GTID_PURGED` should expect the narrower meanings described above
+- **Stricter option validation** — Node refuses unknown client option keys, and
+  Python refuses filter values it previously coerced
+
+### Documentation
+
+- Add `docs/en` and `docs/ja`, 21 mirrored pages each covering setup, events,
+  column names, filtering, checkpoints, backpressure, threading, TLS and
+  authentication, logging, errors, MariaDB, performance and every API surface,
+  with hand-authored SVG diagrams
+- Reduce the root and binding READMEs to an overview that links into the tree
+- Correct the error-code table, the checkpoint semantics after close, which C ABI
+  entry points are thread-safe, the metadata lookup timeout bound, and when the
+  metadata error callback fires
+
 ## [1.7.0] - 2026-09-13
 
 The C ABI gains four functions and one struct field, so `mes_abi_version()` now
@@ -615,7 +690,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.7.1...HEAD
+[1.7.1]: https://github.com/libraz/mysql-event-stream/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/libraz/mysql-event-stream/compare/v1.5.0...v1.6.0

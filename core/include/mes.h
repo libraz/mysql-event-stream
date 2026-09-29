@@ -47,7 +47,7 @@ extern "C" {
 
 #define MES_VERSION_MAJOR 1
 #define MES_VERSION_MINOR 7
-#define MES_VERSION_PATCH 0
+#define MES_VERSION_PATCH 1
 #define MES_ABI_VERSION 3
 
 /** @brief Human-readable library version, composed from MES_VERSION_MAJOR,
