@@ -19,6 +19,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -509,6 +511,13 @@ class PacketPeer {
     port_ = ntohs(address.sin_port);
 
     thread_ = std::thread([this, responder = std::move(respond)] {
+#if !defined(SO_NOSIGPIPE)
+      // A client that aborts the handshake must not let a server write raise SIGPIPE.
+      sigset_t pipe_set;
+      sigemptyset(&pipe_set);
+      sigaddset(&pipe_set, SIGPIPE);
+      pthread_sigmask(SIG_BLOCK, &pipe_set, nullptr);
+#endif
       const int peer = accept(listener_, nullptr, nullptr);
       if (peer < 0) return;
 #if defined(SO_NOSIGPIPE)
@@ -941,6 +950,13 @@ class TlsPeer {
     port_ = ntohs(address.sin_port);
 
     thread_ = std::thread([this, responder = std::move(respond)] {
+#if !defined(SO_NOSIGPIPE)
+      // A client that aborts the handshake must not let a server write raise SIGPIPE.
+      sigset_t pipe_set;
+      sigemptyset(&pipe_set);
+      sigaddset(&pipe_set, SIGPIPE);
+      pthread_sigmask(SIG_BLOCK, &pipe_set, nullptr);
+#endif
       const int peer = accept(listener_, nullptr, nullptr);
       if (peer < 0) return;
 #if defined(SO_NOSIGPIPE)
