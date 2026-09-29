@@ -4,16 +4,8 @@
 import { BinlogClient } from "./client.js";
 import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";
-import type { ChangeEvent, StreamConfig } from "./types.js";
+import type { ChangeEvent, PollResult, StreamConfig } from "./types.js";
 import { invalidArgument, validateStreamOptions, withStreamDefaults } from "./validation.js";
-
-/** Concatenate two byte arrays into a new Uint8Array. */
-function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
 
 /** A run of bytes together with the checksum framing they were read under. */
 interface FramedBytes {
@@ -22,16 +14,38 @@ interface FramedBytes {
 }
 
 /**
- * Append `data` to the pending runs, extending the last one when they share a
- * framing and starting a new run when they do not.
+ * Group a poll batch's results into runs of bytes sharing the same checksum
+ * framing, each run concatenated once rather than grown one result at a time.
+ * Consecutive events read under the same framing are one byte stream and are
+ * fed as one; a framing change starts a new run, because the engine frames
+ * whatever it is given with a single flag and the events on either side of the
+ * change need different ones.
  */
-function appendFramed(pending: FramedBytes[], data: Uint8Array, checksumEnabled: boolean): void {
-  const tail = pending.at(-1);
-  if (tail !== undefined && tail.checksumEnabled === checksumEnabled) {
-    tail.bytes = concatBytes(tail.bytes, data);
-    return;
+function groupFramedResults(results: readonly PollResult[]): FramedBytes[] {
+  const groups: FramedBytes[] = [];
+  let run: Uint8Array[] = [];
+  let framing: boolean | null = null;
+  const flush = (): void => {
+    if (run.length === 0) return;
+    const bytes = new Uint8Array(run.reduce((total, chunk) => total + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of run) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    groups.push({ bytes, checksumEnabled: framing as boolean });
+    run = [];
+  };
+  for (const result of results) {
+    if (!result.data) continue;
+    if (framing !== result.checksumEnabled) {
+      flush();
+      framing = result.checksumEnabled;
+    }
+    run.push(result.data);
   }
-  pending.push({ bytes: data, checksumEnabled });
+  flush();
+  return groups;
 }
 
 /** Extract the numeric `code` an addon error carries, if any. */
@@ -168,6 +182,12 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     this.engine = new CdcEngine();
     this.engine.setMaxEventSize(this.config.maxEventSize ?? STREAM_DEFAULTS.maxEventSize);
     this.engine.setMaxQueueSize(this.config.maxQueueSize ?? STREAM_DEFAULTS.maxQueueSize);
+    this.engine.setMaxQueueBytes(this.config.maxQueueBytes ?? STREAM_DEFAULTS.maxQueueBytes);
+    // The client's reader thread already verified every queued event's CRC32
+    // before it reached pollBatch(), so the engine frames the trailer without
+    // computing it a second time. Set once: state_machine's reset() does not
+    // clear this flag, so it holds across every reconnect on this engine.
+    this.engine.setTrailerPreVerified(true);
     this.applyFilters();
     this.enableMetadataSafe();
 
@@ -195,44 +215,68 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           this.client.start();
 
           while (!this.closed) {
-            const results = await this.client.pollBatch();
-            // The native checkpoint advances as events leave the client queue,
-            // so the whole batch shares one value. Read it once here instead of
-            // once per decoded row.
-            this.cacheCurrentGtid();
-            for (const result of results) {
-              if (result.data) appendFramed(pending, result.data, result.checksumEnabled);
+            // The next poll promotes the native checkpoint over every byte the
+            // previous one returned (it covers up to, but not including, the
+            // last pollBatch result), so it never runs while bytes from an
+            // earlier batch are still unfed: doing so would report a
+            // checkpoint covering events the consumer has not received yet.
+            if (pending.length === 0) {
+              const results = await this.client.pollBatch();
+              // The native checkpoint advances as events leave the client
+              // queue, so the whole batch shares one value. Read it once here
+              // instead of once per decoded row.
+              this.cacheCurrentGtid();
+              pending.push(...groupFramedResults(results));
+            }
 
-              for (let head = pending[0]; head !== undefined; head = pending[0]) {
-                // Stated per segment rather than tracked, because the engine
-                // also moves this flag itself when a FORMAT_DESCRIPTION_EVENT
-                // passes through it. What the segment was read under is the
-                // only value that is known here.
-                this.engine!.setChecksumEnabled(head.checksumEnabled);
-                const consumed = this.engine!.feed(head.bytes);
-                const partial = consumed < head.bytes.length;
-                if (partial) {
-                  head.bytes = head.bytes.subarray(consumed);
-                } else {
-                  pending.shift();
-                }
-
+            for (let head = pending[0]; head !== undefined; head = pending[0]) {
+              // Stated per segment rather than tracked, because the engine
+              // also moves this flag itself when a FORMAT_DESCRIPTION_EVENT
+              // passes through it. What the segment was read under is the
+              // only value that is known here.
+              this.engine!.setChecksumEnabled(head.checksumEnabled);
+              let consumed: number;
+              try {
+                consumed = this.engine!.feed(head.bytes);
+              } catch (feedError) {
+                // The engine's parse state is undefined after a failed feed;
+                // reset() is the only call it accepts next, and it retains
+                // whatever was already decoded. Deliver that before the
+                // failure reaches the caller, mirroring the Python binding's
+                // _feed_and_drain. The remaining unfed bytes are dropped: a
+                // reconnect refetches from the last cached checkpoint, which
+                // this batch has not advanced past yet.
+                this.engine!.reset();
                 for (
                   let ev = this.engine!.nextEvent();
                   ev !== null;
                   ev = this.engine!.nextEvent()
                 ) {
-                  // A decoded event is the only progress signal that can reset
-                  // retry accounting. Framing metadata may be received before
-                  // the same permanently undecodable event on every reconnect.
                   reconnectAttempts = 0;
                   yield ev;
                 }
-                // The engine did not take this run whole, which is queue
-                // backpressure: hold what is left -- and everything behind it,
-                // so order is kept -- until the next batch brings more bytes.
-                if (partial) break;
+                pending.length = 0;
+                throw feedError;
               }
+              const partial = consumed < head.bytes.length;
+              if (partial) {
+                head.bytes = head.bytes.subarray(consumed);
+              } else {
+                pending.shift();
+              }
+
+              for (let ev = this.engine!.nextEvent(); ev !== null; ev = this.engine!.nextEvent()) {
+                // A decoded event is the only progress signal that can reset
+                // retry accounting. Framing metadata may be received before
+                // the same permanently undecodable event on every reconnect.
+                reconnectAttempts = 0;
+                yield ev;
+              }
+              // The engine did not take this run whole, which is queue
+              // backpressure: hold what is left -- and everything behind it,
+              // so order is kept -- and retry it alone on the next iteration,
+              // before polling for more.
+              if (partial) break;
             }
           }
         } catch (err) {

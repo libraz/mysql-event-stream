@@ -26,27 +26,37 @@ class TestInsert:
         assert ev.type == EventType.INSERT
         assert ev.before is None
         assert ev.after is not None
-        assert len(ev.after) >= 2
 
-        # Column name assertions (items: id, name, value)
-        assert "id" in ev.after
-        assert "name" in ev.after
-        assert "value" in ev.after
+        # The after-image must equal the literal value the INSERT wrote --
+        # "col" in ev.after would pass for null or a value in the wrong column.
+        assert ev.after["id"] == row_id
+        assert ev.after["name"] == "test_item"
+        assert ev.after["value"] == 42
 
     def test_insert_multiple_rows(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
-        """Multiple INSERTs produce multiple INSERT ChangeEvents."""
-        mysql.insert("items", name="item_a", value=1)
-        mysql.insert("items", name="item_b", value=2)
-        mysql.insert("items", name="item_c", value=3)
+        """Multiple INSERTs produce multiple INSERT ChangeEvents, each carrying its own row."""
+        row_ids = [
+            mysql.insert("items", name="item_a", value=1),
+            mysql.insert("items", name="item_b", value=2),
+            mysql.insert("items", name="item_c", value=3),
+        ]
 
         events = collector.wait_for_events(table="items", event_type=EventType.INSERT, count=3)
         assert len(events) == 3
+
+        for ev, row_id, name, value in zip(
+            events, row_ids, ["item_a", "item_b", "item_c"], [1, 2, 3], strict=True
+        ):
+            assert ev.after is not None
+            assert ev.after["id"] == row_id
+            assert ev.after["name"] == name
+            assert ev.after["value"] == value
 
     def test_insert_with_various_types(
         self, mysql: MysqlClient, collector: StreamingCollector
     ) -> None:
         """INSERT into users table with various column types."""
-        mysql.insert(
+        row_id = mysql.insert(
             "users",
             name="Alice",
             email="alice@example.com",
@@ -61,14 +71,13 @@ class TestInsert:
 
         ev = events[0]
         assert ev.after is not None
-        assert len(ev.after) > 0
 
-        # Column name assertions (users table)
-        assert "id" in ev.after
-        assert "name" in ev.after
-        assert "email" in ev.after
-        assert "age" in ev.after
-        assert "balance" in ev.after
-        assert "score" in ev.after
-        assert "is_active" in ev.after
-        assert "bio" in ev.after
+        # Each column must equal the literal value the INSERT wrote.
+        assert ev.after["id"] == row_id
+        assert ev.after["name"] == "Alice"
+        assert ev.after["email"] == "alice@example.com"
+        assert ev.after["age"] == 30
+        assert ev.after["balance"] == "1234.56"
+        assert ev.after["score"] == 3.14
+        assert ev.after["is_active"] == 1
+        assert ev.after["bio"] == "Hello, world!"

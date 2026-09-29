@@ -10,6 +10,8 @@ import threading
 import weakref
 from pathlib import Path
 
+from .types import exception_for_rc, mes_validation_error
+
 
 class MESColumn(ctypes.Structure):
     """Maps to mes_column_t."""
@@ -294,17 +296,19 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
     event_size = ctypes.sizeof(MESEvent)
     expected_event = lib.mes_sizeof_event()
     if event_size != expected_event:
-        raise RuntimeError(
+        raise exception_for_rc(
+            MES_ERR_INVALID_ARG,
             f"MESEvent size mismatch: ctypes={event_size}, "
-            f"libmes={expected_event}. ABI incompatibility detected."
+            f"libmes={expected_event}. ABI incompatibility detected.",
         )
 
     column_size = ctypes.sizeof(MESColumn)
     expected_column = lib.mes_sizeof_column()
     if column_size != expected_column:
-        raise RuntimeError(
+        raise exception_for_rc(
+            MES_ERR_INVALID_ARG,
             f"MESColumn size mismatch: ctypes={column_size}, "
-            f"libmes={expected_column}. ABI incompatibility detected."
+            f"libmes={expected_column}. ABI incompatibility detected.",
         )
 
     # The two structs a caller allocates rather than receives have no C-side
@@ -328,15 +332,17 @@ def _verify_struct_sizes(lib: ctypes.CDLL) -> None:
         ):
             actual = ctypes.sizeof(mirror)
             if actual != expected:
-                raise RuntimeError(
+                raise exception_for_rc(
+                    MES_ERR_INVALID_ARG,
                     f"{name} size mismatch: got {actual}, expected {expected}. "
-                    "ABI incompatibility detected."
+                    "ABI incompatibility detected.",
                 )
             mirrored = {field[0]: getattr(mirror, field[0]).offset for field in mirror._fields_}
             if mirrored != offsets:
-                raise RuntimeError(
+                raise exception_for_rc(
+                    MES_ERR_INVALID_ARG,
                     f"{name} field offsets {mirrored} do not match the published "
-                    f"layout {offsets}. ABI incompatibility detected."
+                    f"layout {offsets}. ABI incompatibility detected.",
                 )
 
 
@@ -351,10 +357,17 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
         Loaded ctypes.CDLL with typed function signatures.
 
     Raises:
-        OSError: If the library cannot be found or loaded.
+        OSError: If the library cannot be found or loaded; ``code`` is
+            :attr:`MesErrorCode.INVALID_ARG`.
+        MesError: If the library's ABI does not match this binding.
     """
-    path = lib_path or _find_library()
-    lib = ctypes.CDLL(path)
+    try:
+        path = lib_path or _find_library()
+        lib = ctypes.CDLL(path)
+    except OSError as err:
+        # Every attempt fails the same way, so the code marks it as permanent.
+        mes_validation_error(err)
+        raise
 
     lib.mes_version.restype = ctypes.c_char_p
     lib.mes_version.argtypes = []
@@ -364,9 +377,10 @@ def load_library(lib_path: str | None = None) -> ctypes.CDLL:
     if abi_version != MES_ABI_VERSION:
         raw_version = lib.mes_version()
         version = raw_version.decode("utf-8", errors="replace") if raw_version else "unknown"
-        raise RuntimeError(
+        raise exception_for_rc(
+            MES_ERR_INVALID_ARG,
             f"libmes ABI {abi_version} (version {version}) is incompatible with "
-            f"this binding (requires ABI {MES_ABI_VERSION})"
+            f"this binding (requires ABI {MES_ABI_VERSION})",
         )
 
     # mes_create

@@ -20,12 +20,17 @@ from ._contract import (
     REQUIRED_TOGETHER_OPTIONS,
     UNSET_OPTION_VALUES,
 )
+from .types import mes_validation_error
 
 #: Options whose value must be a string.
 _STRING_OPTIONS = frozenset({"host", "user", "password", "ssl_ca", "ssl_cert", "ssl_key"})
 
 #: Options whose value must be a string or ``None``.
 _OPTIONAL_STRING_OPTIONS = frozenset({"start_gtid", "start_binlog_file", "lib_path"})
+
+#: Optional-string options that, once supplied, must not be empty. A file/offset
+#: start naming no file has no position a server could start from.
+_NON_EMPTY_STRING_OPTIONS = frozenset({"start_binlog_file"})
 
 #: Options whose value must be a list of strings.
 _STRING_LIST_OPTIONS = frozenset({"include_databases", "include_tables", "exclude_tables"})
@@ -47,37 +52,40 @@ def validate_option(key: str, value: object) -> None:
     Raises:
         TypeError: If ``key`` is not a recognized option, or ``value`` does not
             match the type the contract declares for it.
-        ValueError: If an integer option falls outside its accepted range.
+        ValueError: If an integer option falls outside its accepted range, or an
+            option that has to name something is supplied empty.
     """
     if key in OPTION_RANGES:
         minimum, maximum = OPTION_RANGES[key]
         if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"{key} must be an integer")
+            raise mes_validation_error(TypeError(f"{key} must be an integer"))
         if value < minimum or (maximum is not None and value > maximum):
             upper = "unbounded" if maximum is None else str(maximum)
-            raise ValueError(f"{key} must be between {minimum} and {upper}")
+            raise mes_validation_error(ValueError(f"{key} must be between {minimum} and {upper}"))
         return
     if key in _STRING_OPTIONS:
         if not isinstance(value, str):
-            raise TypeError(f"{key} must be a string")
+            raise mes_validation_error(TypeError(f"{key} must be a string"))
         return
     if key in _OPTIONAL_STRING_OPTIONS:
         if value is not None and not isinstance(value, str):
-            raise TypeError(f"{key} must be a string or None")
+            raise mes_validation_error(TypeError(f"{key} must be a string or None"))
+        if value == "" and key in _NON_EMPTY_STRING_OPTIONS:
+            raise mes_validation_error(ValueError(f"{key} must name a binlog file"))
         return
     if key in _STRING_LIST_OPTIONS:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise TypeError(f"{key} must be a list of strings")
+            raise mes_validation_error(TypeError(f"{key} must be a list of strings"))
         return
     if key in _BOOL_OPTIONS:
         if not isinstance(value, bool):
-            raise TypeError(f"{key} must be a bool")
+            raise mes_validation_error(TypeError(f"{key} must be a bool"))
         return
     if key in _CALLBACK_OPTIONS:
         if value is not None and not callable(value):
-            raise TypeError(f"{key} must be callable or None")
+            raise mes_validation_error(TypeError(f"{key} must be callable or None"))
         return
-    raise TypeError(f"Unknown config key: {key!r}")
+    raise mes_validation_error(TypeError(f"Unknown config key: {key!r}"))
 
 
 def _is_supplied(options: Mapping[str, object], key: str) -> bool:
@@ -107,7 +115,9 @@ def _validate_required_together(options: Mapping[str, object]) -> None:
         unset = [key for key in pair if not _is_supplied(options, key)]
         if len(unset) in (0, len(pair)):
             continue
-        raise ValueError(f"{pair[0]} and {pair[1]} are required together, and {unset[0]} is unset")
+        raise mes_validation_error(
+            ValueError(f"{pair[0]} and {pair[1]} are required together, and {unset[0]} is unset")
+        )
 
 
 def _validate_mutually_exclusive(options: Mapping[str, object]) -> None:
@@ -126,7 +136,7 @@ def _validate_mutually_exclusive(options: Mapping[str, object]) -> None:
     for pair in MUTUALLY_EXCLUSIVE_OPTIONS:
         if not all(_is_supplied(options, key) for key in pair):
             continue
-        raise ValueError(f"{pair[0]} and {pair[1]} cannot be combined")
+        raise mes_validation_error(ValueError(f"{pair[0]} and {pair[1]} cannot be combined"))
 
 
 def _validate_conditional_minimums(options: Mapping[str, object]) -> None:
@@ -151,8 +161,10 @@ def _validate_conditional_minimums(options: Mapping[str, object]) -> None:
             continue
         maximum = OPTION_RANGES[key].maximum
         upper = "unbounded" if maximum is None else str(maximum)
-        raise ValueError(
-            f"{key} must be {floor.minimum} through {upper} when {floor.companion} is set"
+        raise mes_validation_error(
+            ValueError(
+                f"{key} must be {floor.minimum} through {upper} when {floor.companion} is set"
+            )
         )
 
 
@@ -170,7 +182,8 @@ def validate_options(
     Raises:
         TypeError: If any key is unrecognized or any value has the wrong type.
         ValueError: If an integer option falls outside its accepted range, if
-            one option of a required-together pair is supplied alone, if two
+            an option that has to name something is supplied empty, if one
+            option of a required-together pair is supplied alone, if two
             options naming competing start modes are supplied together, or if a
             value is below the floor its companion brings into force.
     """

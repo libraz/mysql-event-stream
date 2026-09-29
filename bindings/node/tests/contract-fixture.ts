@@ -6,6 +6,8 @@
 import { readFileSync } from "node:fs";
 
 const HEADER_URL = new URL("../../../core/include/mes.h", import.meta.url);
+const CONFIG_PARSER_URL = new URL("../src/addon/config_parser.h", import.meta.url);
+const CLIENT_WRAP_URL = new URL("../src/addon/client_wrap.cpp", import.meta.url);
 
 export interface ContractOption {
   canonical: string;
@@ -143,4 +145,60 @@ export function loadHeaderFieldDoc(field: string): string {
   const text = doc.join(" ");
   if (text === "") throw new Error(`mes.h does not document ${field}`);
   return text;
+}
+
+/** Parse a numeric C++ literal such as `32u * 1024u * 1024u`, stripping the `u`/`U` unsigned suffix so it can be evaluated. */
+function parseNumericLiteral(expression: string): number {
+  const cleaned = expression.replace(/[uU]/g, "").trim();
+  if (!/^[\d\s*+\-()]+$/.test(cleaned)) {
+    throw new Error(`not a numeric literal: ${expression}`);
+  }
+  return Function(`"use strict"; return (${cleaned});`)() as number;
+}
+
+export interface DirectClientDefaults {
+  port: number;
+  serverId: number;
+  connectTimeoutS: number;
+  readTimeoutS: number;
+  maxEventSize: number;
+  maxQueueBytes: number;
+}
+
+/**
+ * Default values the native addon's config parser materializes for options
+ * left unset, read from source rather than restated. `config_parser.h` and
+ * `client_wrap.cpp` are what the direct `BinlogClient` and
+ * `CdcEngine.enableMetadata` entry points parse, so these are what has to
+ * agree with `STREAM_DEFAULTS` for that path to stay in step with `CdcStream`.
+ */
+export function loadDirectClientDefaults(): DirectClientDefaults {
+  const configParser = readFileSync(CONFIG_PARSER_URL, "utf8");
+  const clientWrap = readFileSync(CLIENT_WRAP_URL, "utf8");
+  const header = readFileSync(HEADER_URL, "utf8");
+
+  const fromConfigParser = (name: string): number => {
+    const match = configParser.match(new RegExp(`constexpr \\w+ ${name} = ([^;]+);`));
+    if (match === null) throw new Error(`config_parser.h does not declare ${name}`);
+    return parseNumericLiteral(match[1] as string);
+  };
+
+  const maxEventSizeMatch = clientWrap.match(/uint32_t max_event_size = ([^;]+);/);
+  if (maxEventSizeMatch === null) {
+    throw new Error("client_wrap.cpp does not declare a max_event_size default");
+  }
+  if (!clientWrap.includes("= MES_DEFAULT_QUEUE_BYTES;")) {
+    throw new Error("client_wrap.cpp no longer defaults maxQueueBytes to MES_DEFAULT_QUEUE_BYTES");
+  }
+  const queueBytesMatch = header.match(/#define MES_DEFAULT_QUEUE_BYTES \(([^)]+)\)/);
+  if (queueBytesMatch === null) throw new Error("mes.h does not define MES_DEFAULT_QUEUE_BYTES");
+
+  return {
+    port: fromConfigParser("kDefaultPort"),
+    serverId: fromConfigParser("kDefaultServerId"),
+    connectTimeoutS: fromConfigParser("kDefaultConnectTimeoutS"),
+    readTimeoutS: fromConfigParser("kDefaultReadTimeoutS"),
+    maxEventSize: parseNumericLiteral(maxEventSizeMatch[1] as string),
+    maxQueueBytes: parseNumericLiteral(queueBytesMatch[1] as string),
+  };
 }

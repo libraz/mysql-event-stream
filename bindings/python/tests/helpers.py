@@ -96,6 +96,58 @@ def build_table_map_body(
     return bytes(parts)
 
 
+def build_column_table_map_body(
+    table_id: int, db: str, table_name: str, column_type: int, metadata: bytes
+) -> bytes:
+    """Build a TABLE_MAP_EVENT body with one nullable column of any type.
+
+    Args:
+        table_id: Table ID (48-bit).
+        db: Database name.
+        table_name: Table name.
+        column_type: MYSQL_TYPE_* code of the column.
+        metadata: The column's type metadata, at most 250 bytes.
+
+    Returns:
+        Binary event body.
+    """
+    parts = bytearray(_write_u48_le(table_id))
+    parts.extend(b"\x00\x00")
+    parts.append(len(db))
+    parts.extend(db.encode("ascii"))
+    parts.append(0)
+    parts.append(len(table_name))
+    parts.extend(table_name.encode("ascii"))
+    parts.append(0)
+    parts.append(1)  # column_count
+    parts.append(column_type)
+    parts.append(len(metadata))
+    parts.extend(metadata)
+    parts.append(0x01)  # null_bitmap: nullable
+    return bytes(parts)
+
+
+def build_column_write_rows_body(table_id: int, payload: bytes | None) -> bytes:
+    """Build a WRITE_ROWS_EVENT V2 body with one column, NULL when ``payload`` is None.
+
+    Args:
+        table_id: Table ID (must match a preceding TABLE_MAP).
+        payload: The column's wire bytes, or None for SQL NULL.
+
+    Returns:
+        Binary event body.
+    """
+    parts = bytearray(_write_u48_le(table_id))
+    parts.extend(b"\x00\x00")
+    parts.extend(struct.pack("<H", 2))  # var_header_len (V2)
+    parts.append(1)  # column_count
+    parts.append(0x01)  # columns_present bitmap
+    parts.append(0x01 if payload is None else 0x00)  # null_bitmap
+    if payload is not None:
+        parts.extend(payload)
+    return bytes(parts)
+
+
 def build_write_rows_body(table_id: int, value: int) -> bytes:
     """Build a WRITE_ROWS_EVENT V2 body with a single INT value.
 

@@ -82,8 +82,11 @@ export const OPTION_RANGES = {
   connectTimeoutS: { min: 0, max: 4294967295 },
   readTimeoutS: { min: 0, max: 4294967295 },
   sslMode: { min: 0, max: 4 },
-  maxQueueSize: { min: 0, max: null },
-  maxQueueBytes: { min: 0, max: null },
+  // Bounded at Number.MAX_SAFE_INTEGER rather than left unbounded: a value
+  // past it is already imprecise as a JS number, and a size_t-width value
+  // read from it converts without wrapping for everything this range accepts.
+  maxQueueSize: { min: 0, max: Number.MAX_SAFE_INTEGER },
+  maxQueueBytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
   maxEventSize: { min: 0, max: 4294967295 },
   maxReconnectAttempts: { min: 0, max: null },
   startBinlogPosition: { min: 0, max: 4294967295 },

@@ -24,6 +24,7 @@ from ._ffi import (
     MES_LOG_WARN,
     get_library,
 )
+from .types import mes_validation_error
 
 __all__ = ["LogLevel", "set_log_callback"]
 
@@ -99,10 +100,12 @@ def _validate_log_level(level: int) -> None:
     record ever matches, which looks identical to never installing a handler.
     """
     if isinstance(level, bool) or not isinstance(level, int):
-        raise TypeError("level must be an integer")
+        raise mes_validation_error(TypeError("level must be an integer"))
     if level < LOG_LEVEL_MIN or level > LOG_LEVEL_MAX:
-        raise ValueError(
-            f"level must be an integer between {LOG_LEVEL_MIN} and {LOG_LEVEL_MAX}, got {level}"
+        raise mes_validation_error(
+            ValueError(
+                f"level must be an integer between {LOG_LEVEL_MIN} and {LOG_LEVEL_MAX}, got {level}"
+            )
         )
 
 
@@ -129,7 +132,8 @@ def set_log_callback(
             callback should be configured. Defaults to the standard loader.
 
     Raises:
-        TypeError: If ``level`` is not an integer.
+        TypeError: If ``callback`` is neither callable nor ``None``, or
+            ``level`` is not an integer.
         ValueError: If ``level`` is not one of the four ``LogLevel`` values.
 
     Note:
@@ -143,6 +147,10 @@ def set_log_callback(
     """
     global _active_handler
 
+    # Checked before installing: a handler that cannot be called would fail
+    # inside the dispatch, where failures are swallowed.
+    if callback is not None and not callable(callback):
+        raise mes_validation_error(TypeError("callback must be callable or None"))
     _validate_log_level(level)
     lib = get_library(lib_path)
     with _callback_lock:

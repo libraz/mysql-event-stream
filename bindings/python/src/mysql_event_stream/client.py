@@ -11,6 +11,7 @@ from ._contract import (
     POLL_BATCH_MIN_MAX_EVENTS,
 )
 from ._ffi import (
+    MES_ERR_CONNECT,
     MES_ERR_INVALID_ARG,
     MES_OK,
     MESClientConfig,
@@ -22,11 +23,14 @@ from ._options import validate_option, validate_options
 from .types import (
     ClientConfig,
     MesConnectionError,
-    MesError,
     PollResult,
     ServerFlavor,
     exception_for_rc,
+    mes_validation_error,
 )
+
+#: The C ABI's connection-error range, raised from connect() as MesConnectionError.
+_CONNECTION_ERROR_CODES = range(MES_ERR_CONNECT, MES_ERR_CONNECT + 100)
 
 
 def validate_poll_batch_size(max_events: int) -> None:
@@ -37,9 +41,11 @@ def validate_poll_batch_size(max_events: int) -> None:
         or max_events < POLL_BATCH_MIN_MAX_EVENTS
         or max_events > POLL_BATCH_MAX_MAX_EVENTS
     ):
-        raise ValueError(
-            "max_events must be an integer between "
-            f"{POLL_BATCH_MIN_MAX_EVENTS} and {POLL_BATCH_MAX_MAX_EVENTS}"
+        raise mes_validation_error(
+            ValueError(
+                "max_events must be an integer between "
+                f"{POLL_BATCH_MIN_MAX_EVENTS} and {POLL_BATCH_MAX_MAX_EVENTS}"
+            )
         )
 
 
@@ -188,7 +194,7 @@ class BinlogClient:
         # argument error or a wrapped-around fixed-width integer.
         validate_option("lib_path", lib_path)
         if resolved.server_id == 0:
-            raise ValueError("server_id must be non-zero")
+            raise mes_validation_error(ValueError("server_id must be non-zero"))
         validate_options(
             {
                 "host": resolved.host,
@@ -247,27 +253,28 @@ class BinlogClient:
         """Connect to MySQL server and validate configuration.
 
         Raises:
-            MesConnectionError: If connection or validation fails. It is a
-                ``ConnectionError``, and its ``code`` carries the native
-                error category.
-            MesError: If the client has been closed or a size limit is
-                rejected; ``code`` carries the native error category.
+            MesConnectionError: If connection or validation fails with a
+                connection-range code (400-499). It is a ``ConnectionError``,
+                and its ``code`` carries the native error category.
+            MesError: If the client has been closed, a size limit is
+                rejected, or the native layer refuses the configuration with
+                any other code; the subclass is the one ``exception_for_rc``
+                maps that code to, and ``code`` carries it.
         """
         if self._config.max_event_size < 0 or self._config.max_event_size > 0xFFFFFFFF:
-            raise ValueError(
-                f"max_event_size must fit in uint32, got {self._config.max_event_size}"
+            raise mes_validation_error(
+                ValueError(f"max_event_size must fit in uint32, got {self._config.max_event_size}")
             )
         if self._config.max_queue_bytes < 0:
-            raise ValueError(
-                f"max_queue_bytes must be non-negative, got {self._config.max_queue_bytes}"
+            raise mes_validation_error(
+                ValueError(
+                    f"max_queue_bytes must be non-negative, got {self._config.max_queue_bytes}"
+                )
             )
-        # The pair, the floor and the start modes that exclude each other are
-        # enforced by __init__, against the contract's own numbers, for keyword
-        # arguments and a pre-built ClientConfig alike. Restating any of them
-        # here would be a second copy free to drift, so what is left is a named
-        # file having to name something, which no option range can express.
-        if self._config.start_binlog_file == "":
-            raise ValueError("start_binlog_file must name a binlog file")
+        # The pair, the floor, the start modes that exclude each other and a
+        # named file having to name something are enforced by __init__, for
+        # keyword arguments and a pre-built ClientConfig alike. Restating any of
+        # them here would be a second copy free to drift.
         # Keep explicit references to encoded bytes so they are not
         # garbage-collected before the C call completes (matters on
         # non-CPython runtimes like PyPy).
@@ -335,8 +342,11 @@ class BinlogClient:
             if rc != MES_OK:
                 error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
-                # Stable native error category used by the stream retry policy.
-                raise MesConnectionError(f"{base_msg}: {error_msg}", rc)
+                # Failing to reach or negotiate with the server is an OS-level
+                # failure; any other code is classified as it is everywhere.
+                if rc in _CONNECTION_ERROR_CODES:
+                    raise MesConnectionError(f"{base_msg}: {error_msg}", rc)
+                raise exception_for_rc(rc, f"{base_msg}: {error_msg}")
 
     def start(self) -> None:
         """Start binlog streaming.
@@ -351,8 +361,7 @@ class BinlogClient:
             if rc != MES_OK:
                 error_msg = self.last_error
                 base_msg = _error_message(self._lib, rc)
-                # Stable native error category used by the stream retry policy.
-                raise MesError(f"{base_msg}: {error_msg}", rc)
+                raise exception_for_rc(rc, f"{base_msg}: {error_msg}")
 
     def poll(self) -> PollResult:
         """Poll for next binlog event (blocking).

@@ -5,8 +5,10 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import time
 import tomllib
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -21,6 +23,8 @@ from mysql_event_stream._ffi import (
     get_library,
     load_library,
 )
+from mysql_event_stream.stream import CdcStream
+from mysql_event_stream.types import MesErrorCode
 
 
 def _image_address(lib: ctypes.CDLL) -> int:
@@ -123,6 +127,25 @@ class TestAnExplicitOverride:
         monkeypatch.setenv("MES_LIB_PATH", str(tmp_path / "absent" / _platform_lib_name()))
         with pytest.raises(OSError, match="does not exist"):
             _find_library()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_library_ends_a_stream_on_its_first_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The load fails identically on every attempt, so retrying it only
+        # delays the error by the whole backoff schedule.
+        monkeypatch.setenv("MES_LIB_PATH", str(tmp_path / "absent" / _platform_lib_name()))
+        monkeypatch.setattr(_ffi, "_loaded_lib", None)
+        stream = CdcStream(host="127.0.0.1")
+        with patch("mysql_event_stream.stream.asyncio.sleep", new=AsyncMock()) as sleep:
+            started = time.monotonic()
+            with pytest.raises(OSError, match="does not exist") as failure:
+                await stream.__anext__()
+            elapsed = time.monotonic() - started
+
+        assert getattr(failure.value, "code", None) == MesErrorCode.INVALID_ARG
+        sleep.assert_not_awaited()
+        assert elapsed < 1.0
 
 
 def test_the_resolved_library_belongs_to_the_environment_running_the_suite() -> None:

@@ -180,23 +180,54 @@ inline bool ParseClientConfig(Napi::Env env, Napi::Object config, mes_client_con
   }
   cfg.password = strings.password.c_str();
 
+  // Read as int64 so the refusal can state the value the caller passed and a
+  // negative input is not first silently wrapped into a large positive one,
+  // the same reason port is read this way rather than through the unsigned
+  // 32-bit accessor.
   Napi::Value read_timeout_v = config.Get("readTimeoutS");
   if (read_timeout_v.IsNumber()) {
-    cfg.read_timeout_s = read_timeout_v.As<Napi::Number>().Uint32Value();
+    int64_t read_timeout_s = read_timeout_v.As<Napi::Number>().Int64Value();
+    if (read_timeout_s < 0 || read_timeout_s > UINT32_MAX) {
+      mes_node::MakeMesError(env,
+                             "readTimeoutS must be between 0 and " + std::to_string(UINT32_MAX) +
+                                 ", got " + std::to_string(read_timeout_s),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+          .ThrowAsJavaScriptException();
+      return false;
+    }
+    cfg.read_timeout_s = static_cast<uint32_t>(read_timeout_s);
   } else {
     cfg.read_timeout_s = kDefaultReadTimeoutS;
   }
 
   Napi::Value server_id_v = config.Get("serverId");
   if (server_id_v.IsNumber()) {
-    cfg.server_id = server_id_v.As<Napi::Number>().Uint32Value();
+    int64_t server_id = server_id_v.As<Napi::Number>().Int64Value();
+    if (server_id < 1 || server_id > UINT32_MAX) {
+      mes_node::MakeMesError(env,
+                             "serverId must be between 1 and " + std::to_string(UINT32_MAX) +
+                                 ", got " + std::to_string(server_id),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+          .ThrowAsJavaScriptException();
+      return false;
+    }
+    cfg.server_id = static_cast<uint32_t>(server_id);
   } else {
     cfg.server_id = kDefaultServerId;
   }
 
   Napi::Value connect_timeout_v = config.Get("connectTimeoutS");
   if (connect_timeout_v.IsNumber()) {
-    cfg.connect_timeout_s = connect_timeout_v.As<Napi::Number>().Uint32Value();
+    int64_t connect_timeout_s = connect_timeout_v.As<Napi::Number>().Int64Value();
+    if (connect_timeout_s < 0 || connect_timeout_s > UINT32_MAX) {
+      mes_node::MakeMesError(env,
+                             "connectTimeoutS must be between 0 and " + std::to_string(UINT32_MAX) +
+                                 ", got " + std::to_string(connect_timeout_s),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+          .ThrowAsJavaScriptException();
+      return false;
+    }
+    cfg.connect_timeout_s = static_cast<uint32_t>(connect_timeout_s);
   } else {
     cfg.connect_timeout_s = kDefaultConnectTimeoutS;
   }

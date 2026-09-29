@@ -61,7 +61,7 @@ An `UPDATE` arrives with both images of the row:
 }
 ```
 
-`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source with no socket and no thread of its own:
+`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source with no socket and no thread of its own. Bytes must start at an event boundary; a raw binlog file opens with a 4-byte magic number that has to be skipped first:
 
 ```typescript
 import { CdcEngine } from "@libraz/mysql-event-stream";
@@ -69,15 +69,17 @@ import { CdcEngine } from "@libraz/mysql-event-stream";
 const engine = new CdcEngine();
 try {
   let offset = 0;
-  while (offset < chunk.length) {
-    const consumed = engine.feed(chunk.subarray(offset));
-    offset += consumed;
+  while (offset < chunk.length || engine.hasEvents()) {
     for (let e = engine.nextEvent(); e !== null; e = engine.nextEvent()) {
       console.log(e.type, e.database, e.table);
     }
-    // Nothing consumed and nothing left to drain: the tail is a partial event.
-    // Keep chunk.subarray(offset) and prepend it to the next chunk.
-    if (consumed === 0) break;
+    if (offset < chunk.length) {
+      const consumed = engine.feed(chunk.subarray(offset));
+      offset += consumed;
+      // Nothing consumed and nothing queued: the tail is a partial event.
+      // Keep chunk.subarray(offset) and prepend it to the next chunk.
+      if (consumed === 0 && !engine.hasEvents()) break;
+    }
   }
 } finally {
   engine.destroy();

@@ -84,6 +84,15 @@ export const OPTION_TYPES = {
   onMetadataError: "callback",
 } as const satisfies Record<keyof StreamConfig, OptionType>;
 
+/**
+ * String options that, once supplied, must not be empty. A file/offset start
+ * naming no file has no position a server could start from, so an empty
+ * string is refused here rather than reaching the native layer's own check on
+ * first iteration -- which is what the constructor's whole-config validation
+ * promises.
+ */
+const NON_EMPTY_STRING_OPTIONS: ReadonlySet<string> = new Set(["startBinlogFile"]);
+
 /** How each declared type is tested, and how it is named in the error. */
 const TYPE_CHECKS: Record<OptionType, { describe: string; accepts(value: unknown): boolean }> = {
   integer: {
@@ -223,6 +232,8 @@ export function validateStreamOptions(
     validateOptionType(key, type, value);
     if (type === "integer") {
       validateIntegerRange(key, value as number);
+    } else if (value === "" && NON_EMPTY_STRING_OPTIONS.has(key)) {
+      throw invalidArgument(`${key} must name a binlog file`);
     }
   }
   const effective = { ...base, ...supplied } as Record<string, unknown>;

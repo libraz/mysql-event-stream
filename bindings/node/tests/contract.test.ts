@@ -26,6 +26,7 @@ import {
   type ContractOptionPair,
   companionOptions,
   loadBindingContract,
+  loadDirectClientDefaults,
   loadHeaderFieldDoc,
   type StartPosition,
 } from "./contract-fixture.js";
@@ -272,6 +273,24 @@ describe("binding contract", () => {
         .map((option) => [option.node, option.default]),
     );
     expect({ ...STREAM_DEFAULTS }).toEqual(expected);
+  });
+
+  it("materializes the same defaults on the direct BinlogClient/enableMetadata path", () => {
+    // CdcStream fills unset options from STREAM_DEFAULTS before it ever reaches
+    // the addon, but a caller using BinlogClient or CdcEngine.enableMetadata
+    // directly leaves them unset and relies on config_parser.h/client_wrap.cpp
+    // to materialize the same values. Nothing else compares that native path
+    // against the contract, so a future default changed on one side alone
+    // would otherwise diverge unnoticed.
+    const direct = loadDirectClientDefaults();
+    expect(direct).toEqual({
+      port: STREAM_DEFAULTS.port,
+      serverId: STREAM_DEFAULTS.serverId,
+      connectTimeoutS: STREAM_DEFAULTS.connectTimeoutS,
+      readTimeoutS: STREAM_DEFAULTS.readTimeoutS,
+      maxEventSize: STREAM_DEFAULTS.maxEventSize,
+      maxQueueBytes: STREAM_DEFAULTS.maxQueueBytes,
+    });
   });
 
   it("enforces the contract's shared option ranges", () => {

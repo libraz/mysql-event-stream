@@ -86,6 +86,12 @@ class _FakeEngine:
     def set_max_queue_size(self, _size: int) -> None:
         return None
 
+    def set_max_queue_bytes(self, _size: int) -> None:
+        return None
+
+    def set_trailer_pre_verified(self, _pre_verified: bool) -> None:
+        return None
+
     def set_checksum_enabled(self, _enabled: bool) -> None:
         return None
 
@@ -105,8 +111,8 @@ class _FakeEngine:
 class _BlockingFeedEngine(_FakeEngine):
     """Engine double that parks a worker thread inside ``feed()``."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, events: list[ChangeEvent] | None = None) -> None:
+        super().__init__(events)
         self.entered_feed = threading.Event()
         self.release_feed = threading.Event()
         self.feed_returned = False
@@ -255,6 +261,8 @@ class TestCloseWaitsForWorkers:
 
         assert engine.closed
         assert not engine.destroyed_during_feed
+        # The feed ends by itself; the client is stopped only by its own close.
+        assert client.stop_calls == 0
         with contextlib.suppress(BaseException):
             await iterating
 
@@ -282,6 +290,108 @@ class TestCloseWaitsForWorkers:
 
         assert engine.closed
         assert not engine.destroyed_during_feed
+
+
+class TestCancelledAwaitResumes:
+    """Cancelling one await abandons the wait, never the stream."""
+
+    @pytest.mark.timeout(20)
+    async def test_timed_out_awaits_resume_the_in_flight_poll(self) -> None:
+        client = _BlockingPollClient()
+        expected = _change_event("orders")
+        engine = _FakeEngine(events=[expected])
+        stream = _started_stream(client, engine)
+
+        for _ in range(3):
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(stream.__anext__(), 0.05)
+
+        # Nothing stopped the client, charged a retry, or issued a second poll.
+        assert client.stop_calls == 0
+        assert stream._reconnect_attempts == 0
+        assert client.poll_calls == 1
+
+        client.release_poll.set()
+        assert await asyncio.wait_for(stream.__anext__(), _BLOCK_TIMEOUT_S) == expected
+        assert client.poll_calls == 1
+        await stream.close()
+
+    @pytest.mark.timeout(20)
+    async def test_a_cancelled_await_resumes_the_in_flight_feed(self) -> None:
+        client = _FakeClient()
+        expected = _change_event("orders")
+        engine = _BlockingFeedEngine(events=[expected])
+        stream = _started_stream(client, engine)
+
+        iterating = asyncio.create_task(stream.__anext__())
+        await _wait_for(engine.entered_feed)
+        iterating.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await iterating
+
+        engine.release_feed.set()
+        assert await asyncio.wait_for(stream.__anext__(), _BLOCK_TIMEOUT_S) == expected
+        # The polled bytes were fed once, by the dispatch the cancel abandoned.
+        assert engine.feed_calls == [b"\x01\x02"]
+        assert client.poll_calls == 1
+        assert client.stop_calls == 0
+        await stream.close()
+
+
+class _PromoteOnStopClient(_FakeClient):
+    """Client double that promotes the last polled batch's checkpoint on stop().
+
+    A poll promotes the previous batch, as the native client does; promoting on
+    stop() as well is the worst case, under which a stop issued while that
+    batch is still being fed would cover rows no consumer has received.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_gtid = "uuid:1"
+        self._delivered = ""
+
+    def poll(self) -> PollResult:
+        if self._delivered:
+            self.current_gtid = self._delivered
+        self._delivered = "uuid:1-2"
+        return super().poll()
+
+    def stop(self) -> None:
+        super().stop()
+        if self._delivered:
+            self.current_gtid = self._delivered
+
+
+class TestCheckpointDuringFeed:
+    """A checkpoint read while a batch is being fed never covers that batch."""
+
+    @pytest.mark.timeout(20)
+    @pytest.mark.parametrize("cancel_first", [False, True], ids=["close", "cancel-then-close"])
+    async def test_close_during_a_feed_keeps_the_checkpoint_behind_it(
+        self, cancel_first: bool
+    ) -> None:
+        client = _PromoteOnStopClient()
+        engine = _BlockingFeedEngine(events=[_change_event("orders")])
+        stream = _started_stream(client, engine)
+
+        iterating = asyncio.create_task(stream.__anext__())
+        await _wait_for(engine.entered_feed)
+        if cancel_first:
+            iterating.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await iterating
+
+        closing = asyncio.create_task(stream.close())
+        await asyncio.sleep(0.05)
+        engine.release_feed.set()
+        await asyncio.wait_for(closing, _BLOCK_TIMEOUT_S)
+        with contextlib.suppress(BaseException):
+            await iterating
+
+        # The batch's row never reached the consumer, so the checkpoint the
+        # stream retains stays at the one before it.
+        assert stream.current_gtid == "uuid:1"
 
 
 class TestEventLoopOffloading:

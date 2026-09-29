@@ -99,17 +99,21 @@ class StreamingCollector:
             predicate: Custom filter function.
 
         Returns:
-            List of matching ChangeEvent objects.
+            Every matching ChangeEvent collected so far, so a caller asserting an
+            exact count sees a duplicate rather than having it trimmed away.
 
         Raises:
+            Exception: The stream's terminal error, as soon as one is seen.
             TimeoutError: If not enough events arrive within timeout.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if self._error is not None:
+                raise self._error
             with self._lock:
                 matching = self._filter_events(table, event_type, predicate)
                 if len(matching) >= count:
-                    return matching[:count]
+                    return matching
             time.sleep(0.05)
 
         with self._lock:

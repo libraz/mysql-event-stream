@@ -35,6 +35,8 @@ const mocks = vi.hoisted(() => ({
   checksumImpl: vi.fn(),
   maxEventSizeImpl: vi.fn(),
   maxQueueSizeImpl: vi.fn(),
+  maxQueueBytesImpl: vi.fn(),
+  trailerPreVerifiedImpl: vi.fn(),
   includeDatabasesImpl: vi.fn(),
   includeTablesImpl: vi.fn(),
   excludeTablesImpl: vi.fn(),
@@ -88,6 +90,12 @@ vi.mock("../src/engine.js", () => ({
     }
     setMaxQueueSize(maxQueueSize: number): void {
       mocks.maxQueueSizeImpl(maxQueueSize);
+    }
+    setMaxQueueBytes(maxQueueBytes: number): void {
+      mocks.maxQueueBytesImpl(maxQueueBytes);
+    }
+    setTrailerPreVerified(preVerified: boolean): void {
+      mocks.trailerPreVerifiedImpl(preVerified);
     }
     setIncludeDatabases(databases: string[]): void {
       mocks.includeDatabasesImpl(databases);
@@ -348,10 +356,11 @@ describe("CdcStream", () => {
     await next;
   });
 
-  it("propagates one event-size limit to the client and raw engine", async () => {
+  it("propagates the byte and event-size limits to both the client and raw engine", async () => {
     mocks.clientCtor.mockClear();
     mocks.maxEventSizeImpl.mockClear();
     mocks.maxQueueSizeImpl.mockClear();
+    mocks.maxQueueBytesImpl.mockClear();
     mocks.pollImpl.mockReset();
     mocks.pollImpl.mockImplementation(
       () =>
@@ -375,7 +384,33 @@ describe("CdcStream", () => {
       );
       expect(mocks.maxEventSizeImpl).toHaveBeenCalledWith(128 * 1024 * 1024);
       expect(mocks.maxQueueSizeImpl).toHaveBeenCalledWith(0);
+      // The engine's own queue-byte budget, distinct from the client's, has to
+      // receive the same configured value or the documented "raise it through
+      // the stream config and both stages honor it" contract is broken.
+      expect(mocks.maxQueueBytesImpl).toHaveBeenCalledWith(512 * 1024 * 1024);
     });
+    await stream.close();
+    await next;
+  });
+
+  it("tells the engine the client already verified every event's CRC32", async () => {
+    // client_wrap's reader thread validates the trailer before an event ever
+    // reaches pollBatch(), so a stream-driven engine should never redo that
+    // check. Set once: state_machine's reset() does not clear the flag, so it
+    // has to hold without being reasserted on every reconnect.
+    mocks.trailerPreVerifiedImpl.mockClear();
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }), 5),
+        ),
+    );
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.trailerPreVerifiedImpl).toHaveBeenCalledWith(true));
+    expect(mocks.trailerPreVerifiedImpl).toHaveBeenCalledTimes(1);
     await stream.close();
     await next;
   });
@@ -413,7 +448,7 @@ describe("CdcStream", () => {
   });
 
   describe("partial feed consumption", () => {
-    it("re-feeds unconsumed bytes on the next poll so no data is lost", async () => {
+    it("retries unconsumed bytes on their own before polling again, so no data is lost", async () => {
       mocks.clientCtor.mockClear();
       mocks.startImpl.mockReset();
       mocks.startImpl.mockImplementation(() => {});
@@ -421,8 +456,9 @@ describe("CdcStream", () => {
       mocks.pollImpl.mockReset();
 
       // First poll yields 10 bytes; the engine consumes only 4 (backpressure).
-      // Second poll yields 6 more bytes. The leftover 6 from poll #1 must be
-      // prepended, so the engine should see a 12-byte chunk on the second feed.
+      // Second poll yields 6 more bytes. The leftover 6 from poll #1 has to be
+      // retried on its own -- polling again while it is still unfed would
+      // report a checkpoint covering it before the consumer ever sees it.
       const first = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
       const second = new Uint8Array([10, 11, 12, 13, 14, 15]);
       mocks.pollImpl
@@ -441,8 +477,10 @@ describe("CdcStream", () => {
         );
 
       const fedChunks: Uint8Array[] = [];
+      const pollCallsAtFeed: number[] = [];
       mocks.feedImpl.mockImplementation((chunk: Uint8Array) => {
         fedChunks.push(chunk.slice());
+        pollCallsAtFeed.push(mocks.pollImpl.mock.calls.length);
         // Consume 4 bytes on the first feed, everything on later feeds.
         return fedChunks.length === 1 ? 4 : chunk.length;
       });
@@ -456,11 +494,51 @@ describe("CdcStream", () => {
       await nextPromise.catch(() => {});
 
       const fed = fedChunks.map((chunk) => Array.from(chunk));
-      expect(fed.length).toBeGreaterThanOrEqual(2);
+      expect(fed.length).toBeGreaterThanOrEqual(3);
       // First feed: the raw 10-byte chunk.
       expect(fed[0]).toEqual(Array.from(first));
-      // Second feed: leftover 6 bytes (4..9) prepended to the new 6 bytes.
-      expect(fed[1]).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+      // Second feed: the leftover 6 bytes (4..9), retried alone -- the second
+      // poll has not run yet.
+      expect(fed[1]).toEqual([4, 5, 6, 7, 8, 9]);
+      expect(pollCallsAtFeed[1]).toBe(1);
+      // Third feed: the second poll's own bytes, fed only once the leftover
+      // was fully drained.
+      expect(fed[2]).toEqual(Array.from(second));
+    });
+
+    it("delivers events decoded before a feed failure, then propagates the failure", async () => {
+      mocks.clientCtor.mockReset();
+      mocks.startImpl.mockReset();
+      mocks.startImpl.mockImplementation(() => {});
+      mocks.pollImpl.mockReset();
+      mocks.pollImpl.mockResolvedValueOnce({
+        data: new Uint8Array([1, 2, 3]),
+        isHeartbeat: false,
+        checksumEnabled: true,
+      });
+      mocks.feedImpl.mockReset();
+      mocks.feedImpl.mockImplementation(() => {
+        throw new Error("corrupt event");
+      });
+      mocks.nextEventImpl.mockReset();
+      const first = rowEvent({ database: "db1" });
+      const second = rowEvent({ database: "db2" });
+      mocks.nextEventImpl
+        .mockReturnValueOnce(first)
+        .mockReturnValueOnce(second)
+        .mockReturnValue(null);
+
+      const stream = new CdcStream({ host: "127.0.0.1", maxReconnectAttempts: 0 });
+      const delivered: ChangeEvent[] = [];
+      await expect(async () => {
+        for await (const event of stream) {
+          delivered.push(event);
+        }
+      }).rejects.toThrow("corrupt event");
+
+      // Both events the engine had already decoded -- reachable only via
+      // reset() -- are delivered before the failure that ended the batch is.
+      expect(delivered).toEqual([first, second]);
     });
   });
 
@@ -513,6 +591,47 @@ describe("CdcStream", () => {
           }
         }).rejects.toThrow("permanent stream error");
 
+        expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
+        expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+        await stream.close();
+      },
+    );
+
+    it.each([...NON_RETRYABLE_ERROR_CODES])(
+      "fails fast on a permanent feed error (%i), without reconnecting",
+      async (code) => {
+        mocks.clientCtor.mockReset();
+        mocks.startImpl.mockReset();
+        mocks.startImpl.mockImplementation(() => {});
+        mocks.pollImpl.mockReset();
+        mocks.pollImpl.mockResolvedValue({
+          data: new Uint8Array([1]),
+          isHeartbeat: false,
+          checksumEnabled: true,
+        });
+        mocks.feedImpl.mockReset();
+        mocks.feedImpl.mockImplementation(() => {
+          const err: Error & { code?: number } = new Error("permanent feed error");
+          err.code = code;
+          throw err;
+        });
+        mocks.nextEventImpl.mockReset();
+        mocks.nextEventImpl.mockReturnValue(null);
+
+        const stream = new CdcStream({
+          host: "127.0.0.1",
+          maxReconnectAttempts: 10,
+        });
+        await expect(async () => {
+          for await (const _ of stream) {
+            // no events expected
+          }
+        }).rejects.toThrow("permanent feed error");
+
+        // A code in NON_RETRYABLE_ERROR_CODES ends the stream on the first
+        // occurrence -- one connection attempt, no reconnect-driven backoff --
+        // whether the failure originated in start()/poll() or, as here, in the
+        // engine's feed() path.
         expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
         expect(mocks.startImpl).toHaveBeenCalledTimes(1);
         await stream.close();

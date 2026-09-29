@@ -48,7 +48,7 @@ describe("Column type handling", () => {
   });
 
   it("NULL column values are correctly detected", async () => {
-    await mysql.insert("users", { name: "NullUser" });
+    const rowId = await mysql.insert("users", { name: "NullUser" });
 
     const events = await collector.waitForEvents({
       table: "users",
@@ -60,16 +60,18 @@ describe("Column type handling", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     const ev = events[0]!;
     expect(ev.after).not.toBeNull();
-    const nullValues = Object.values(ev.after!).filter((v) => v === null);
-    expect(nullValues.length).toBeGreaterThan(0);
-
-    // Column key assertions (users table)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
+    // Exactly the columns the INSERT left NULL decode as null; a shifted NULL
+    // bitmap would null a written column or leave an unwritten one non-null.
+    expect(ev.after!.id).toBe(rowId);
+    expect(ev.after!.name).toBe("NullUser");
+    expect(ev.after!.is_active).toBe(1);
+    for (const column of ["email", "age", "balance", "score", "bio", "avatar"]) {
+      expect(ev.after![column]).toBeNull();
+    }
   });
 
   it("INT column values are decoded as integers", async () => {
-    await mysql.insert("items", { name: "int_test", value: 2147483647 });
+    const intRowId = await mysql.insert("items", { name: "int_test", value: 2147483647 });
 
     const events = await collector.waitForEvents({
       table: "items",
@@ -83,14 +85,16 @@ describe("Column type handling", () => {
     expect(ev.after).not.toBeNull();
     expect(typeof ev.after!.value).toBe("number");
 
-    // Column key assertions (items: id, name, value)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
+    expect(ev.after!.id).toBe(intRowId);
+    expect(ev.after!.name).toBe("int_test");
     expect(ev.after!.value).toBe(2147483647);
   });
 
   it("UTF-8 strings including CJK characters are correctly decoded", async () => {
-    await mysql.insert("items", { name: "\u65E5\u672C\u8A9E\u30C6\u30B9\u30C8", value: 1 });
+    const utf8RowId = await mysql.insert("items", {
+      name: "\u65E5\u672C\u8A9E\u30C6\u30B9\u30C8",
+      value: 1,
+    });
 
     const events = await collector.waitForEvents({
       table: "items",
@@ -102,16 +106,17 @@ describe("Column type handling", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     const ev = events[0]!;
     expect(ev.after).not.toBeNull();
-    expect(String(ev.after!.name)).toContain("\u65E5\u672C\u8A9E");
-
-    // Column key assertions (items: id, name, value)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.value).toBeDefined();
+    expect(ev.after!.id).toBe(utf8RowId);
+    expect(ev.after!.name).toBe("\u65E5\u672C\u8A9E\u30C6\u30B9\u30C8");
+    expect(ev.after!.value).toBe(1);
   });
 
   it("DOUBLE, DECIMAL, and temporal columns use their documented types", async () => {
-    await mysql.insert("users", { name: "DoubleUser", balance: "1234.56", score: 3.14159 });
+    const doubleRowId = await mysql.insert("users", {
+      name: "DoubleUser",
+      balance: "1234.56",
+      score: 3.14159,
+    });
 
     const events = await collector.waitForEvents({
       table: "users",
@@ -128,10 +133,10 @@ describe("Column type handling", () => {
     expect(typeof ev.after!.created_at).toBe("string");
     expect(typeof ev.after!.updated_at).toBe("string");
 
-    // Column key assertions (users table)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.score).toBeDefined();
+    expect(ev.after!.id).toBe(doubleRowId);
+    expect(ev.after!.name).toBe("DoubleUser");
+    expect(ev.after!.score).toBeCloseTo(3.14159);
+    expect(ev.after!.balance).toBe("1234.56");
   });
 
   it("distinguishes BINARY bytes from LONGTEXT", async () => {

@@ -42,11 +42,11 @@ async def run() -> None:
             await save_checkpoint(stream.current_gtid)
 ```
 
-An `UPDATE` arrives with both images of the row:
+An `UPDATE` arrives with both images of the row. `type` is the `EventType.UPDATE` enum member, not the string `"UPDATE"` — compare it with `==`, not against a string:
 
 ```python
 ChangeEvent(
-    type="UPDATE",
+    type=EventType.UPDATE,
     database="shop",
     table="items",
     before={"id": 8, "name": "Widget", "value": 42},
@@ -58,7 +58,7 @@ ChangeEvent(
 )
 ```
 
-`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source with no socket and no thread of its own:
+`CdcStream` is the surface most applications want. Under it, `BinlogClient` owns the connection and hands back raw event bytes, and `CdcEngine` decodes binlog bytes from any source with no socket and no thread of its own. Bytes must start at an event boundary; a raw binlog file opens with a 4-byte magic number that has to be skipped first:
 
 ```python
 from mysql_event_stream import CdcEngine
@@ -67,17 +67,18 @@ from mysql_event_stream import CdcEngine
 # garbage collector to release it.
 with CdcEngine() as engine:
     offset = 0
-    while offset < len(chunk):
-        consumed = engine.feed(chunk[offset:])
-        offset += consumed
-
+    while offset < len(chunk) or engine.has_events():
         while (event := engine.next_event()) is not None:
             print(event.type, event.database, event.table)
 
-        # Nothing consumed and nothing left to drain: the tail is a partial
-        # event. Keep chunk[offset:] and prepend it to the next chunk.
-        if consumed == 0:
-            break
+        if offset < len(chunk):
+            consumed = engine.feed(chunk[offset:])
+            offset += consumed
+
+            # Nothing consumed and nothing queued: the tail is a partial
+            # event. Keep chunk[offset:] and prepend it to the next chunk.
+            if consumed == 0 and not engine.has_events():
+                break
 ```
 
 ## Server requirements

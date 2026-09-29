@@ -13,12 +13,15 @@ from mysql_event_stream._ffi import (
     MES_ERR_AUTH,
     MES_ERR_DISCONNECTED,
     MES_ERR_INVALID_ARG,
+    MES_ERR_NULL_ARG,
+    MES_ERR_PARSE,
+    MES_ERR_QUEUE_FULL,
     MES_ERR_STREAM,
     MES_OK,
     MESPollResult,
 )
 from mysql_event_stream.client import BinlogClient
-from mysql_event_stream.types import MesConnectionError, MesError, ServerFlavor
+from mysql_event_stream.types import MesConnectionError, MesError, ServerFlavor, exception_for_rc
 
 from .abi_fixture import load_abi_enums
 
@@ -271,6 +274,35 @@ def test_a_failed_connect_carries_the_code_without_leaving_the_os_error_category
     client.close()
 
 
+@pytest.mark.parametrize(
+    "code", [MES_ERR_NULL_ARG, MES_ERR_INVALID_ARG, MES_ERR_PARSE, MES_ERR_QUEUE_FULL]
+)
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
+def test_a_non_connection_code_raises_the_same_type_from_every_method(
+    mock_load: MagicMock, mock_load_client: MagicMock, code: int
+) -> None:
+    """Outside the connection range, the type follows the code, not the method."""
+    lib = MagicMock()
+    mock_load.return_value = lib
+    lib.mes_client_set_max_event_size.return_value = MES_OK
+    lib.mes_client_set_max_queue_bytes.return_value = MES_OK
+    lib.mes_client_connect.return_value = code
+    lib.mes_client_start.return_value = code
+    lib.mes_client_poll.return_value.error = code
+    client = _make_client(lib)
+    expected = type(exception_for_rc(code, ""))
+
+    raised = []
+    for method in (client.connect, client.start, client.poll):
+        with pytest.raises(MesError) as excinfo:
+            method()
+        assert excinfo.value.code == code
+        raised.append(type(excinfo.value))
+    assert raised == [expected] * 3
+    client.close()
+
+
 class TestClientClose:
     """Verify that close() calls stop, disconnect, and destroy in order."""
 
@@ -469,7 +501,7 @@ class TestClientClose:
                 start_binlog_position=4,
             )
         with pytest.raises(ValueError, match="must name a binlog file"):
-            BinlogClient(start_binlog_file="", start_binlog_position=4).connect()
+            BinlogClient(start_binlog_file="", start_binlog_position=4)
         # Below the floor the companion file brings into force, refused at
         # construction before a connection is attempted at all.
         with pytest.raises(ValueError, match="start_binlog_position must be 4 through"):

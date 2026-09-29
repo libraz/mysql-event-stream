@@ -9,7 +9,7 @@ import { CdcStream } from "../src/stream.js";
 import type { ClientConfig, StreamConfig } from "../src/types.js";
 import { MesErrorCode } from "../src/types.js";
 import { OPTION_TYPES, type OptionType, REFUSAL_ERROR_NAME } from "../src/validation.js";
-import { loadBindingContract } from "./contract-fixture.js";
+import { acceptedMinimum, loadBindingContract } from "./contract-fixture.js";
 
 /**
  * How a refused option value presents itself to a caller. These three are what
@@ -156,9 +156,7 @@ const WRONG_TYPE_VALUES: Record<OptionType, unknown> = {
  * One value outside the window its option accepts, with the entry points that
  * check that window. The list is exact in both directions: an entry point named
  * here must refuse the value, and one that could carry the option but is not
- * named must not refuse it as an argument — the native metadata connection
- * parses a client config without applying the queue and start-position limits
- * a client applies at connect.
+ * named must not refuse it as an argument.
  */
 interface RangeCase {
   key: string;
@@ -192,23 +190,68 @@ const RANGE_CASES: readonly RangeCase[] = [
   {
     key: "maxQueueSize",
     value: -1,
-    refusedBy: ["stream constructor", "stream configure", "client constructor", "engine setter"],
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+      "engine setter",
+    ],
+  },
+  {
+    key: "maxQueueSize",
+    value: Number.MAX_SAFE_INTEGER + 1,
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+      "engine setter",
+    ],
   },
   {
     key: "maxEventSize",
     value: 2 ** 32,
-    refusedBy: ["stream constructor", "stream configure", "client constructor", "engine setter"],
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+      "engine setter",
+    ],
   },
   {
     key: "maxQueueBytes",
     value: -1,
-    refusedBy: ["stream constructor", "stream configure", "client constructor", "engine setter"],
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+      "engine setter",
+    ],
+  },
+  {
+    key: "maxQueueBytes",
+    value: Number.MAX_SAFE_INTEGER + 1,
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+      "engine setter",
+    ],
   },
   {
     key: "startBinlogPosition",
     value: 3,
     companions: { startBinlogFile: "binlog.000001" },
-    refusedBy: ["stream constructor", "stream configure", "client constructor"],
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+    ],
   },
 ];
 
@@ -290,6 +333,24 @@ describe("refused option values", () => {
           );
         }
       }
+    }
+  });
+
+  it("refuses an empty startBinlogFile the same way on every entry point that sees it", () => {
+    // An empty file names no position a server could start from. Refused here
+    // rather than deferred to the native connect() reached on first iteration,
+    // matching what the constructor's whole-config validation promises.
+    const options = {
+      startBinlogFile: "",
+      startBinlogPosition: acceptedMinimum("startBinlogPosition"),
+    };
+    for (const entry of ENTRY_POINTS) {
+      if (!entry.reaches("startBinlogFile")) continue;
+      const label = `startBinlogFile = "" via ${entry.id}`;
+      expect(
+        refusalFrom(() => entry.apply("startBinlogFile", options)),
+        label,
+      ).toEqual(refusal("RangeError"));
     }
   });
 

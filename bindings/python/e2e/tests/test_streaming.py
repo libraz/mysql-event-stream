@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from conftest import MYSQL_HOST, MYSQL_PASSWORD, MYSQL_PORT, MYSQL_USER
 from lib.mysql_client import MysqlClient
+from lib.streaming_collector import StreamingCollector
 
 from mysql_event_stream import CdcEngine, LogLevel, set_log_callback
 from mysql_event_stream._ffi import get_library
@@ -157,3 +158,29 @@ class TestBinlogClient:
             pytest.raises(ConnectionError),
         ):
             client.connect()
+
+
+@pytest.mark.streaming
+class TestStreamingCollector:
+    """The collector every DML test relies on must report what the stream did."""
+
+    def test_a_stream_failure_ends_the_wait_with_that_failure(
+        self, collector: StreamingCollector, mysql: MysqlClient
+    ) -> None:
+        dump_threads = [
+            row["Id"]
+            for row in mysql.execute("SHOW PROCESSLIST")
+            if str(row["Command"]).startswith("Binlog Dump")
+        ]
+        assert dump_threads, "the collector's dump thread is not on the server"
+        for thread_id in dump_threads:
+            mysql.execute(f"KILL {int(thread_id)}")
+
+        started = time.monotonic()
+        with pytest.raises(Exception) as failure:
+            collector.wait_for_events(table="items", timeout=30)
+
+        # The stream's own error, raised once seen -- not a timeout 30 s later.
+        assert not isinstance(failure.value, TimeoutError)
+        assert getattr(failure.value, "code", None) is not None
+        assert time.monotonic() - started < 15

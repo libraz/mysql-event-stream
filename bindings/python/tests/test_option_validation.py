@@ -34,7 +34,9 @@ from mysql_event_stream._options import (
 )
 from mysql_event_stream.client import BinlogClient
 from mysql_event_stream.engine import CdcEngine
-from mysql_event_stream.types import ClientConfig
+from mysql_event_stream.logging import set_log_callback
+from mysql_event_stream.stream import CdcStream
+from mysql_event_stream.types import ClientConfig, MesErrorCode
 
 # Values that violate each declared type. bool is listed under "integer"
 # deliberately: Python's bool is an int subclass, so accepting it would let
@@ -189,19 +191,21 @@ class TestEveryEntryPointRejectsWrongTypes:
         # Guard the generator itself: a silently emptied table would make every
         # case below pass by never running.
         assert len(WRONG_TYPE_CASES) == 188
-        assert len(OUT_OF_RANGE_CASES) == 42
+        assert len(OUT_OF_RANGE_CASES) == 46
 
     @pytest.mark.parametrize("case", WRONG_TYPE_CASES, ids=_case_id)
     def test_rejects_a_wrong_typed_value(self, case: tuple[EntryPoint, str, object]) -> None:
         entry, option, value = case
-        with pytest.raises(TypeError, match=option):
+        with pytest.raises(TypeError, match=option) as refused:
             entry.invoke(option, value)
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
 
     @pytest.mark.parametrize("case", OUT_OF_RANGE_CASES, ids=_case_id)
     def test_rejects_an_out_of_range_integer(self, case: tuple[EntryPoint, str, object]) -> None:
         entry, option, value = case
-        with pytest.raises(ValueError, match=option):
+        with pytest.raises(ValueError, match=option) as refused:
             entry.invoke(option, value)
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
 
 
 class TestValidOptionsStillReachTheNativeLayer:
@@ -287,6 +291,68 @@ class TestRejectionHappensBeforeConnect:
                 BinlogClient(max_queue_bytes=-1)
             get_library.assert_not_called()
 
+    def test_an_oversized_queue_limit_never_reaches_the_ctypes_field(self) -> None:
+        """A value past the contract's max would otherwise wrap in the c_size_t field."""
+        for oversized in (2**64, 2**64 + 1):
+            with patch("mysql_event_stream.client.get_library") as get_library:
+                with pytest.raises(ValueError, match="max_queue_size must be between 0"):
+                    BinlogClient(max_queue_size=oversized)
+                with pytest.raises(ValueError, match="max_queue_bytes must be between 0"):
+                    BinlogClient(max_queue_bytes=oversized)
+                get_library.assert_not_called()
+
+            with pytest.raises(ValueError, match="max_queue_size must be between 0"):
+                CdcStream(max_queue_size=oversized)
+            stream = CdcStream()
+            with pytest.raises(ValueError, match="max_queue_bytes must be between 0"):
+                stream.configure(max_queue_bytes=oversized)
+
+    def test_an_empty_binlog_file_is_refused_by_the_call_that_took_it(self) -> None:
+        with patch("mysql_event_stream.client.get_library") as get_library:
+            with pytest.raises(ValueError, match="start_binlog_file must name a binlog file"):
+                BinlogClient(start_binlog_file="", start_binlog_position=4)
+            get_library.assert_not_called()
+        with pytest.raises(ValueError, match="start_binlog_file must name a binlog file"):
+            CdcStream(start_binlog_file="", start_binlog_position=4)
+        stream = CdcStream()
+        with pytest.raises(ValueError, match="start_binlog_file must name a binlog file"):
+            stream.configure(start_binlog_file="", start_binlog_position=4)
+        assert stream._start_binlog_file is None
+
     def test_zero_server_id_keeps_its_dedicated_message(self) -> None:
         with pytest.raises(ValueError, match="server_id must be non-zero"):
             BinlogClient(server_id=0)
+
+
+# Refusals raised outside the per-option matrix: whole-configuration rules,
+# dedicated checks, and the arguments of calls that take no option mapping.
+_OTHER_REFUSALS: dict[str, Callable[[], object]] = {
+    "zero_server_id": lambda: BinlogClient(server_id=0),
+    "required_together": lambda: CdcStream(start_binlog_position=4),
+    "mutually_exclusive": lambda: CdcStream(
+        start_gtid="uuid:1", start_binlog_file="binlog.000001", start_binlog_position=4
+    ),
+    "conditional_minimum": lambda: CdcStream(
+        start_binlog_file="binlog.000001", start_binlog_position=1
+    ),
+    "configure_unknown_key": lambda: CdcStream().configure(no_such_option=1),
+    "empty_binlog_file": lambda: BinlogClient(start_binlog_file="", start_binlog_position=4),
+    "poll_batch_size": lambda: BinlogClient.__new__(BinlogClient).poll_batch(0),
+    "log_level_type": lambda: set_log_callback(None, "WARN"),  # type: ignore[arg-type]
+    "log_level_range": lambda: set_log_callback(None, 99),  # type: ignore[arg-type]
+    "engine_queue_size": lambda: CdcEngine().set_max_queue_size(-1),
+    "engine_queue_bytes_type": lambda: CdcEngine().set_max_queue_bytes("1"),  # type: ignore[arg-type]
+    "engine_event_size": lambda: CdcEngine().set_max_event_size(1 << 32),
+    "engine_checksum_flag": lambda: CdcEngine().set_checksum_enabled(1),  # type: ignore[arg-type]
+    "engine_pre_verified_flag": lambda: CdcEngine().set_trailer_pre_verified(1),  # type: ignore[arg-type]
+}
+
+
+class TestEveryRefusalCarriesTheInvalidArgumentCode:
+    """A refused argument is classifiable by ``code`` like any native failure."""
+
+    @pytest.mark.parametrize("refusal", list(_OTHER_REFUSALS), ids=str)
+    def test_refusal_carries_the_invalid_argument_code(self, refusal: str) -> None:
+        with pytest.raises((TypeError, ValueError)) as refused:
+            _OTHER_REFUSALS[refusal]()
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG

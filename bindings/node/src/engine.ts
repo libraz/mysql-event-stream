@@ -4,7 +4,7 @@
 import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { REFUSAL_ERROR_NAME } from "./validation.js";
+import { REFUSAL_ERROR_NAME, validateStreamOptions } from "./validation.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -214,9 +214,17 @@ export class CdcEngine {
     this.engine!.setExcludeTables(tables);
   }
 
-  /** Enable metadata queries for column name resolution. */
+  /**
+   * Enable metadata queries for column name resolution.
+   *
+   * Validated the same way `CdcStream` validates its own config: an unknown
+   * key, a wrongly-typed value, or an out-of-range one is rejected here rather
+   * than reaching the native addon, since this entry point does not go through
+   * a stream that would have validated it already.
+   */
   enableMetadata(config: ClientConfig): void {
     this.ensureNotDestroyed();
+    validateStreamOptions(config);
     this.engine!.enableMetadata(config);
   }
 

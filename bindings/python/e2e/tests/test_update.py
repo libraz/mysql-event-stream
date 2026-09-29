@@ -28,19 +28,21 @@ class TestUpdate:
         assert ev.before is not None
         assert ev.after is not None
 
-        # Column name assertions (items: id, name, value)
-        assert "id" in ev.before
-        assert "name" in ev.before
-        assert "value" in ev.before
-        assert "id" in ev.after
-        assert "name" in ev.after
-        assert "value" in ev.after
+        # Each image must equal the literal value the triggering DML wrote --
+        # "col" in ev.before would pass for null, a swapped before/after
+        # image, or a value landing in the wrong column.
+        assert ev.before["id"] == row_id
+        assert ev.before["name"] == "original"
+        assert ev.before["value"] == 10
+        assert ev.after["id"] == row_id
+        assert ev.after["name"] == "updated"
+        assert ev.after["value"] == 20
 
     def test_update_multiple_columns(
         self, mysql: MysqlClient, collector: StreamingCollector
     ) -> None:
         """UPDATE that changes multiple columns in the users table."""
-        mysql.insert(
+        row_id = mysql.insert(
             "users",
             name="Bob",
             email="bob@example.com",
@@ -62,10 +64,14 @@ class TestUpdate:
         assert ev.after is not None
         assert len(ev.before) == len(ev.after)
 
-        # Column name assertions (users table)
-        assert "id" in ev.before
-        assert "name" in ev.before
-        assert "id" in ev.after
-        assert "name" in ev.after
-        assert "email" in ev.after
-        assert "age" in ev.after
+        # Each image must equal the literal value the triggering DML wrote.
+        # The untouched columns (id, name) must carry the same value in both
+        # images; only email and age were named in the UPDATE.
+        assert ev.before["id"] == row_id
+        assert ev.before["name"] == "Bob"
+        assert ev.before["email"] == "bob@example.com"
+        assert ev.before["age"] == 25
+        assert ev.after["id"] == row_id
+        assert ev.after["name"] == "Bob"
+        assert ev.after["email"] == "bob_new@example.com"
+        assert ev.after["age"] == 26

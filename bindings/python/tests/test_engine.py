@@ -23,9 +23,9 @@ from mysql_event_stream._ffi import (
     MESEvent,
 )
 from mysql_event_stream.engine import (
-    _SOURCE_SQL_CACHE_MAX,
     _convert_columns,
     _convert_event,
+    _SourceSqlCache,
 )
 
 from .helpers import (
@@ -53,6 +53,20 @@ class TestEngineLifecycle:
         engine = CdcEngine(lib_path=lib_path)
         engine.close()
         engine.close()  # Should not crash
+
+    def test_finalizing_a_half_built_engine_raises_nothing(self) -> None:
+        # The library load fails before __init__ assigns a single attribute.
+        with (
+            patch("mysql_event_stream.engine.get_library", side_effect=OSError("no libmes")),
+            pytest.raises(OSError, match="no libmes"),
+        ):
+            CdcEngine()
+        half_built = CdcEngine.__new__(CdcEngine)
+        unraisable: list[object] = []
+        with patch("sys.unraisablehook", new=unraisable.append):
+            half_built.__del__()
+            del half_built
+        assert unraisable == []
 
     def test_error_after_close(self, lib_path: str) -> None:
         engine = CdcEngine(lib_path=lib_path)
@@ -725,20 +739,23 @@ def test_column_name_cache_is_reused_across_rows() -> None:
     assert cache[b"id"] is cached_name
 
 
-class _StatementCache(dict[bytes, str]):
+class _StatementCache(_SourceSqlCache):
     """Source-SQL cache that records every statement decoded into it.
 
-    A statement is decoded only on a miss and stored immediately after, so the
-    recorded keys are exactly the decodes the conversion performed.
+    A decode replaces the stored bytes object, so a replacement observed across
+    one lookup is exactly one decode the conversion performed.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.decoded: list[bytes] = []
 
-    def __setitem__(self, key: bytes, value: str) -> None:
-        self.decoded.append(key)
-        super().__setitem__(key, value)
+    def get(self, address: int) -> str:
+        before = self.raw
+        text = super().get(address)
+        if self.raw is not before:
+            self.decoded.append(self.raw)
+        return text
 
 
 def _make_annotated_event(source_sql: bytes | None) -> MESEvent:
@@ -783,6 +800,18 @@ class TestSourceSqlDecoding:
         assert [event.source_sql for event in events] == [statement.decode()] * 3
         assert cache.decoded == [statement]
         assert all(event.source_sql is events[0].source_sql for event in events)
+
+    def test_a_repeated_statement_is_compared_in_place_not_copied(self) -> None:
+        statement = b"INSERT INTO users (id) VALUES " + b", ".join(b"(1)" for _ in range(4096))
+        cache = _StatementCache()
+
+        with patch("mysql_event_stream.engine.ctypes.string_at", wraps=ctypes.string_at) as copy:
+            events = [
+                _convert_event(_make_annotated_event(statement), None, cache) for _ in range(5)
+            ]
+
+        assert [event.source_sql for event in events] == [statement.decode()] * 5
+        assert copy.call_count == 1
 
     def test_new_statement_is_not_served_the_previous_one(self) -> None:
         first_statement = b"UPDATE users SET name = 'a' WHERE id = 1"
@@ -830,16 +859,6 @@ class TestSourceSqlDecoding:
 
         assert event.source_sql == ""
         assert cache.decoded == []
-
-    def test_cache_is_bounded(self) -> None:
-        cache: dict[bytes, str] = {}
-
-        for i in range(_SOURCE_SQL_CACHE_MAX + 1):
-            statement = f"INSERT INTO users (id) VALUES ({i})".encode()
-            event = _convert_event(_make_annotated_event(statement), None, cache)
-            assert event.source_sql == statement.decode()
-
-        assert len(cache) <= _SOURCE_SQL_CACHE_MAX
 
     def test_engine_decodes_the_statement_once_per_row_event(self, lib_path: str) -> None:
         statement = b"INSERT INTO users (id) VALUES (10), (20), (30)"

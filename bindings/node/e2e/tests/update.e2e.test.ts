@@ -74,17 +74,19 @@ describe("UPDATE events", () => {
     expect(ev.before).not.toBeNull();
     expect(ev.after).not.toBeNull();
 
-    // Column key assertions (items: id, name, value)
-    expect(ev.before!.id).toBeDefined();
-    expect(ev.before!.name).toBeDefined();
-    expect(ev.before!.value).toBeDefined();
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.value).toBeDefined();
+    // Each image must equal the literal value the triggering DML wrote --
+    // toBeDefined() would pass for null, a swapped before/after image, or a
+    // value landing in the wrong column.
+    expect(ev.before!.id).toBe(rowId);
+    expect(ev.before!.name).toBe("original");
+    expect(ev.before!.value).toBe(10);
+    expect(ev.after!.id).toBe(rowId);
+    expect(ev.after!.name).toBe("updated");
+    expect(ev.after!.value).toBe(20);
   });
 
   it("UPDATE multiple columns in users table", async () => {
-    await mysql.insert("users", {
+    const rowId = await mysql.insert("users", {
       name: "Bob",
       email: "bob@example.com",
       age: 25,
@@ -110,12 +112,16 @@ describe("UPDATE events", () => {
     expect(ev.after).not.toBeNull();
     expect(Object.keys(ev.before!).length).toBe(Object.keys(ev.after!).length);
 
-    // Column key assertions (users table)
-    expect(ev.before!.id).toBeDefined();
-    expect(ev.before!.name).toBeDefined();
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.email).toBeDefined();
-    expect(ev.after!.age).toBeDefined();
+    // Each image must equal the literal value the triggering DML wrote. The
+    // untouched columns (id, name) must carry the same value in both images;
+    // only email and age were named in the UPDATE.
+    expect(ev.before!.id).toBe(rowId);
+    expect(ev.before!.name).toBe("Bob");
+    expect(ev.before!.email).toBe("bob@example.com");
+    expect(ev.before!.age).toBe(25);
+    expect(ev.after!.id).toBe(rowId);
+    expect(ev.after!.name).toBe("Bob");
+    expect(ev.after!.email).toBe("bob_new@example.com");
+    expect(ev.after!.age).toBe(26);
   });
 });

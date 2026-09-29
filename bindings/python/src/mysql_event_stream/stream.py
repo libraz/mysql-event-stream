@@ -7,6 +7,8 @@ import contextlib
 import random
 from collections import deque
 from collections.abc import Callable
+from itertools import groupby
+from operator import itemgetter
 from typing import Any, ParamSpec, TypeVar, cast
 
 from ._contract import (
@@ -190,6 +192,9 @@ class CdcStream:
         # engine or client handle is tracked here, so close() has exactly one
         # thing to wait for before destroying either handle.
         self._native_task: asyncio.Task[Any] | None = None
+        # The call the in-flight dispatch is running, so an iteration resumed
+        # after a cancelled await takes over its result instead of stopping it.
+        self._native_call: tuple[object, ...] | None = None
         # True while __anext__ is running. The handles have a single owner, so a
         # second concurrent consumer is refused rather than served.
         self._iterating = False
@@ -200,6 +205,9 @@ class CdcStream:
         # Bytes the engine has not taken yet, each run paired with the checksum
         # framing the client read it under.
         self._pending: list[tuple[bool, bytes]] = []
+        # The feed failure that ended the last batch, raised once the events
+        # decoded before it have been delivered.
+        self._feed_error: Exception | None = None
         # Retains the last non-empty checkpoint after close() releases the
         # native client, so it stays readable once the `async with` scope ends.
         self._last_gtid = ""
@@ -271,7 +279,9 @@ class CdcStream:
         Every call onto the engine or client handle goes through here, so close()
         has a single slot to wait on. The task awaiting the result can be
         cancelled; the worker thread cannot, so the slot is released only once
-        that thread has actually returned from the native call.
+        that thread has actually returned from the native call. Requesting the
+        call a cancelled await left in flight takes over its result rather than
+        issuing it a second time.
 
         Args:
             func: The native call to run off the event loop.
@@ -281,10 +291,15 @@ class CdcStream:
         Returns:
             Whatever ``func`` returned.
         """
-        # A predecessor abandoned by a cancelled await may still hold the handle.
-        await self._quiesce_native_calls()
-        dispatch = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-        self._native_task = dispatch
+        call = (func, *args, *kwargs.items())
+        dispatch = getattr(self, "_native_task", None)
+        if dispatch is None or getattr(self, "_native_call", None) != call:
+            # A predecessor abandoned by a cancelled await may still hold the
+            # handle.
+            await self._quiesce_native_calls()
+            dispatch = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+            self._native_task = dispatch
+            self._native_call = call
         try:
             # Shielded: cancelling the consumer must not cancel the dispatch,
             # because the worker thread would keep running regardless and the
@@ -293,6 +308,7 @@ class CdcStream:
         finally:
             if dispatch.done() and self._native_task is dispatch:
                 self._native_task = None
+                self._native_call = None
 
     async def _quiesce_native_calls(self) -> None:
         """Wait until no worker thread is inside a native call on our handles.
@@ -305,15 +321,20 @@ class CdcStream:
         dispatch = getattr(self, "_native_task", None)
         if dispatch is None:
             return
-        if self._client is not None:
-            # stop() is the only client entry point callable while another
-            # thread is inside the client, and it is what unblocks poll().
+        call = getattr(self, "_native_call", None)
+        feeding = call is not None and call[0] == self._feed_and_drain
+        # stop() is the only client entry point callable while another thread
+        # is inside the client, and it is what unblocks poll(). A feed is on
+        # the engine and ends by itself; stopping the client under it could
+        # settle the checkpoint over rows the consumer has not received.
+        if self._client is not None and not feeding:
             self._client.stop()
         while not dispatch.done():
             with contextlib.suppress(BaseException):
                 await asyncio.shield(dispatch)
         if getattr(self, "_native_task", None) is dispatch:
             self._native_task = None
+            self._native_call = None
 
     def _ready_queue(self) -> deque[ChangeEvent]:
         """Return the buffer holding the events the last feed decoded."""
@@ -325,7 +346,7 @@ class CdcStream:
 
     def _feed_and_drain(
         self, segments: list[tuple[bool, bytes]]
-    ) -> tuple[list[tuple[bool, bytes]], list[ChangeEvent]]:
+    ) -> tuple[list[tuple[bool, bytes]], list[ChangeEvent], Exception | None]:
         """Feed one poll batch into the engine and decode everything it queued.
 
         Runs as a single worker dispatch. Parsing and the per-column ctypes
@@ -338,15 +359,20 @@ class CdcStream:
         applying backpressure, and feeding past it would decode later events
         ahead of the ones still waiting.
 
+        A feed failure is returned rather than raised, together with every event
+        decoded ahead of the failing one, so those events reach the consumer
+        before the failure does.
+
         Args:
             segments: Framing flag and bytes for each run of events, in the
                 order the client produced them.
 
         Returns:
-            The segments still to be fed, and the decoded events.
+            The segments still to be fed, the decoded events, and the feed
+            failure if one ended the batch.
 
         Raises:
-            RuntimeError: If the engine is gone, or the engine call fails.
+            RuntimeError: If the engine is gone.
         """
         engine = self._engine
         if engine is None:
@@ -354,12 +380,20 @@ class CdcStream:
         events: list[ChangeEvent] = []
         for index, (checksum_enabled, chunk) in enumerate(segments):
             engine.set_checksum_enabled(checksum_enabled)
-            consumed = engine.feed(chunk)
+            try:
+                consumed = engine.feed(chunk)
+            except Exception as feed_error:
+                # Reset is the only call the engine accepts after a failed feed;
+                # the events decoded before the failing one stay queued across it.
+                engine.reset()
+                while (event := engine.next_event()) is not None:
+                    events.append(event)
+                return [], events, feed_error
             while (event := engine.next_event()) is not None:
                 events.append(event)
             if consumed < len(chunk):
-                return [(checksum_enabled, chunk[consumed:]), *segments[index + 1 :]], events
-        return [], events
+                return [(checksum_enabled, chunk[consumed:]), *segments[index + 1 :]], events, None
+        return [], events, None
 
     async def __anext__(self) -> ChangeEvent:
         # Note: close() is safe to call during iteration. It sets
@@ -396,6 +430,10 @@ class CdcStream:
             try:
                 await self._start()
             except Exception as err:
+                # A failure caused by close() stopping the dispatch is the
+                # shutdown the caller asked for, not one to retry or report.
+                if self._closed:
+                    raise StopAsyncIteration from err
                 await self._consume_retry(err)
                 await self._wait_for_backoff()
                 if self._closed:
@@ -414,6 +452,13 @@ class CdcStream:
                     self._reconnect_attempts = 0
                     return ready.popleft()
 
+                # A feed failure surfaces only once the events decoded ahead of
+                # it have all been delivered.
+                feed_error = getattr(self, "_feed_error", None)
+                if feed_error is not None:
+                    self._feed_error = None
+                    raise feed_error
+
                 # Explicit checks over `assert`: _start() guarantees both are
                 # set when it returns normally, but assertions vanish under
                 # `python -O` and we want a clear error if an internal
@@ -423,45 +468,47 @@ class CdcStream:
                 if client is None or self._engine is None:
                     raise RuntimeError("Internal error: stream not properly started")
 
-                # Real clients use one blocking batch call followed by a
-                # non-blocking queue drain; lightweight test doubles that only
-                # implement poll() remain supported.
-                poll_method: Callable[[], PollResult | list[PollResult]]
-                if callable(getattr(type(client), "poll_batch", None)):
-                    poll_method = client.poll_batch
+                if self._pending:
+                    # The next poll promotes the native checkpoint over every
+                    # byte the previous one returned, so it waits until those
+                    # bytes have been fed and their events delivered.
+                    segments = self._pending
                 else:
-                    poll_method = client.poll
-                polled: PollResult | list[PollResult] = await self._dispatch(poll_method)
-                results = [polled] if isinstance(polled, PollResult) else list(polled)
-                # Consecutive events read under the same framing are one byte
-                # stream and are fed as one; a framing change starts a new
-                # segment, because the engine frames whatever it is given with
-                # a single flag and the events on either side of the change
-                # need different ones.
-                segments = self._pending
-                for result in results:
-                    if not result.data:
-                        continue
-                    if segments and segments[-1][0] == result.checksum_enabled:
-                        segments[-1] = (result.checksum_enabled, segments[-1][1] + result.data)
+                    # Real clients use one blocking batch call followed by a
+                    # non-blocking queue drain; lightweight test doubles that
+                    # only implement poll() remain supported.
+                    poll_method: Callable[[], PollResult | list[PollResult]]
+                    if callable(getattr(type(client), "poll_batch", None)):
+                        poll_method = client.poll_batch
                     else:
-                        segments.append((result.checksum_enabled, result.data))
-                if not segments:
-                    continue
+                        poll_method = client.poll
+                    polled: PollResult | list[PollResult] = await self._dispatch(poll_method)
+                    results = [polled] if isinstance(polled, PollResult) else list(polled)
+                    # Consecutive events read under the same framing are one
+                    # byte stream and are fed as one; a framing change starts a
+                    # new segment, because the engine frames whatever it is
+                    # given with a single flag and the events on either side of
+                    # the change need different ones.
+                    framed = [
+                        (result.checksum_enabled, result.data) for result in results if result.data
+                    ]
+                    segments = [
+                        (checksum_enabled, b"".join(data for _, data in run))
+                        for checksum_enabled, run in groupby(framed, key=itemgetter(0))
+                    ]
+                    if not segments:
+                        continue
+                    # Held here until fed, so a feed whose await is cancelled
+                    # is resumed from the same bytes.
+                    self._pending = segments
                 # One dispatch per poll batch: feeding every segment and
                 # draining the events they produced costs a single worker
                 # handoff however many rows the batch carried.
-                self._pending, events = await self._dispatch(self._feed_and_drain, segments)
+                self._pending, events, feed_error = await self._dispatch(
+                    self._feed_and_drain, segments
+                )
                 ready.extend(events)
-            except asyncio.CancelledError:
-                # We stop awaiting the dispatch, but the worker thread keeps
-                # blocking inside the C poll(). Signal the C layer to unblock it
-                # so the thread can exit and release its pool slot. The dispatch
-                # stays tracked, so close() still waits for that thread to leave
-                # the handle before destroying it.
-                if self._client is not None:
-                    self._client.stop()
-                raise
+                self._feed_error = feed_error
             except Exception as err:
                 if self._closed:
                     raise StopAsyncIteration from err
@@ -615,6 +662,7 @@ class CdcStream:
         self._engine.reset()
         self._engine.set_max_event_size(self._max_event_size)
         self._engine.set_max_queue_size(self._max_queue_size)
+        self._engine.set_max_queue_bytes(self._max_queue_bytes)
         self._apply_filters()
         # Metadata is optional; column names fall back to indices.
         try:
@@ -650,6 +698,8 @@ class CdcStream:
 
     async def _wait_for_backoff(self) -> None:
         """Wait for jittered backoff, interruptible by close()."""
+        if self._closed:
+            return
         delay = backoff_delay_ms(self._reconnect_attempts, random.random()) / 1000.0
         task = asyncio.create_task(asyncio.sleep(delay))
         self._backoff_task = task
@@ -689,6 +739,12 @@ class CdcStream:
         self._engine = CdcEngine(lib_path=self._lib_path)
         self._engine.set_max_event_size(self._max_event_size)
         self._engine.set_max_queue_size(self._max_queue_size)
+        self._engine.set_max_queue_bytes(self._max_queue_bytes)
+        # The client's reader thread already verified every queued event's
+        # CRC32 before it reached poll_batch(), so the engine frames the
+        # trailer without computing it a second time. Set once: the engine's
+        # reset() (called on every reconnect) does not clear this flag.
+        self._engine.set_trailer_pre_verified(True)
         self._apply_filters()
         try:
             try:

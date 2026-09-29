@@ -159,9 +159,12 @@ Napi::Value EngineWrap::NextEvent(const Napi::CallbackInfo& info) {
   int type_idx = static_cast<int>(event->type);
   if (type_idx < 0 || static_cast<size_t>(type_idx) >= kEventTypeCount) {
     // An event type outside mes_event_type_t means this addon and the core it
-    // is linked against disagree, which no reconnect can repair: report it as a
-    // decode failure so the retry policy treats it as permanent.
-    mes_node::MakeMesError(env, "Unknown event type: " + std::to_string(type_idx), MES_ERR_DECODE)
+    // is linked against disagree, which no reconnect can repair. mes.h
+    // classifies any type code no supported server emits as MES_ERR_PARSE, so
+    // a newly introduced event type is loud rather than lossy; MES_ERR_DECODE
+    // is documented there as a reserved legacy code superseded by
+    // MES_ERR_DECODE_ROW, not the classification for this case.
+    mes_node::MakeMesError(env, "Unknown event type: " + std::to_string(type_idx), MES_ERR_PARSE)
         .ThrowAsJavaScriptException();
     return env.Undefined();
   }
@@ -276,10 +279,11 @@ void EngineWrap::SetMaxQueueSize(const Napi::CallbackInfo& info) {
   }
 
   int64_t max_size = info[0].As<Napi::Number>().Int64Value();
-  if (max_size < 0) {
-    mes_node::MakeMesError(
-        env, "maxQueueSize must be between 0 and unbounded, got " + std::to_string(max_size),
-        MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+  if (max_size < 0 || max_size > kMaxSafeInteger) {
+    mes_node::MakeMesError(env,
+                           "maxQueueSize must be between 0 and " + std::to_string(kMaxSafeInteger) +
+                               ", got " + std::to_string(max_size),
+                           MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
         .ThrowAsJavaScriptException();
     return;
   }
@@ -307,11 +311,12 @@ void EngineWrap::SetMaxQueueBytes(const Napi::CallbackInfo& info) {
   }
 
   int64_t max_queue_bytes = info[0].As<Napi::Number>().Int64Value();
-  if (max_queue_bytes < 0) {
-    mes_node::MakeMesError(
-        env,
-        "maxQueueBytes must be between 0 and unbounded, got " + std::to_string(max_queue_bytes),
-        MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+  if (max_queue_bytes < 0 || max_queue_bytes > kMaxSafeInteger) {
+    mes_node::MakeMesError(env,
+                           "maxQueueBytes must be between 0 and " +
+                               std::to_string(kMaxSafeInteger) + ", got " +
+                               std::to_string(max_queue_bytes),
+                           MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
         .ThrowAsJavaScriptException();
     return;
   }

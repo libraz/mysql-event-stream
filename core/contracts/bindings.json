@@ -259,7 +259,7 @@
       "type": "integer",
       "default": 0,
       "min": 0,
-      "max": null
+      "max": 9007199254740991
     },
     {
       "canonical": "maxQueueBytes",
@@ -268,7 +268,7 @@
       "type": "integer",
       "default": 50331648,
       "min": 0,
-      "max": null
+      "max": 9007199254740991
     },
     {
       "canonical": "maxEventSize",

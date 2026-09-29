@@ -86,8 +86,13 @@ OPTION_RANGES: dict[str, OptionRange] = {
     "connect_timeout_s": OptionRange(0, 4294967295),
     "read_timeout_s": OptionRange(0, 4294967295),
     "ssl_mode": OptionRange(0, 4),
-    "max_queue_size": OptionRange(0, None),
-    "max_queue_bytes": OptionRange(0, None),
+    # Bounded at sys.maxsize's 2**53-1 sibling (Node's Number.MAX_SAFE_INTEGER)
+    # rather than left unbounded: the contract is shared with a binding whose
+    # only numeric type cannot represent an integer past it exactly, and a
+    # size_t-width value converts without wrapping for everything this range
+    # accepts.
+    "max_queue_size": OptionRange(0, 9007199254740991),
+    "max_queue_bytes": OptionRange(0, 9007199254740991),
     "max_event_size": OptionRange(0, 4294967295),
     "max_reconnect_attempts": OptionRange(0, None),
     "start_binlog_position": OptionRange(0, 4294967295),

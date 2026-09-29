@@ -26,7 +26,13 @@ from ._ffi import (
     load_client_library,
 )
 from ._options import validate_option, validate_options
-from .types import BinlogPosition, ChangeEvent, EventType, exception_for_rc
+from .types import (
+    BinlogPosition,
+    ChangeEvent,
+    EventType,
+    exception_for_rc,
+    mes_validation_error,
+)
 
 # ctypes' ``from_buffer`` deliberately rejects immutable bytes. CPython does
 # guarantee that a bytes object's storage is contiguous and stable for its
@@ -60,11 +66,42 @@ def _borrow_bytes(data: bytes) -> Any:
 _PAYLOAD_WINDOW_BYTES = 1 << 16
 _payload_window_at: Callable[[int], Any] = (ctypes.c_char * _PAYLOAD_WINDOW_BYTES).from_address
 
-# Cached ANNOTATE_ROWS statements are whole SQL texts rather than identifiers,
-# so the ceiling is far below the column-name cache's: every row of one ROWS
-# event is drained before the next statement appears, which is all the reuse
-# window this has to cover.
-_SOURCE_SQL_CACHE_MAX = 64
+# The process's C library compares a cached statement against native memory in
+# place; copying and hashing it per row would cost Python-side work
+# proportional to the statement for every row it annotates.
+_libc = ctypes.CDLL(None)
+_strlen = _libc.strlen
+_strlen.restype = ctypes.c_size_t
+_strlen.argtypes = [ctypes.c_void_p]
+_memcmp = _libc.memcmp
+_memcmp.restype = ctypes.c_int
+_memcmp.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+_SOURCE_SQL_OFFSET = MESEvent.source_sql.offset
+
+
+class _SourceSqlCache:
+    """The last ANNOTATE_ROWS statement converted, with the bytes it came from.
+
+    Every row of one statement is drained before the next statement appears, so
+    one entry covers the reuse. A hit is decided by the bytes, not the address:
+    the engine may hold a new statement where the last one lived.
+    """
+
+    __slots__ = ("raw", "text")
+
+    def __init__(self) -> None:
+        self.raw = b""
+        self.text = ""
+
+    def get(self, address: int) -> str:
+        """Return the statement at ``address``, decoding it only if it changed."""
+        length = _strlen(address)
+        if length == 0:
+            return ""
+        if length != len(self.raw) or _memcmp(address, self.raw, length) != 0:
+            self.raw = ctypes.string_at(address, length)
+            self.text = self.raw.decode("utf-8", errors="replace")
+        return self.text
 
 
 def _raise_for_rc(rc: int, op: str) -> None:
@@ -113,7 +150,7 @@ class CdcEngine:
         self._lib = get_library(lib_path)
         self._client_lib_loaded = False
         self._column_name_cache: dict[bytes, str] = {}
-        self._source_sql_cache: dict[bytes, str] = {}
+        self._source_sql_cache = _SourceSqlCache()
         self._handle: int | None = self._lib.mes_create()
         if self._handle is None:
             raise exception_for_rc(MES_ERR_INVALID_ARG, "Failed to create CDC engine")
@@ -131,8 +168,9 @@ class CdcEngine:
         self.close()
 
     def __del__(self) -> None:
-        # Guard against interpreter shutdown where self._lib may be None
-        if self._lib is not None:
+        # __init__ can fail before any attribute is assigned, and interpreter
+        # shutdown may have cleared self._lib; neither leaves a handle to free.
+        if getattr(self, "_handle", None) is not None and getattr(self, "_lib", None) is not None:
             self.close()
 
     def _check_open(self) -> None:
@@ -253,9 +291,11 @@ class CdcEngine:
         """
         self._check_open()
         if isinstance(max_size, bool) or not isinstance(max_size, int):
-            raise TypeError(f"max_size must be an integer, got {type(max_size).__name__}")
+            raise mes_validation_error(
+                TypeError(f"max_size must be an integer, got {type(max_size).__name__}")
+            )
         if max_size < 0:
-            raise ValueError(f"max_size must be non-negative, got {max_size}")
+            raise mes_validation_error(ValueError(f"max_size must be non-negative, got {max_size}"))
         rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_queue_size")
@@ -284,11 +324,15 @@ class CdcEngine:
         """
         self._check_open()
         if isinstance(max_queue_bytes, bool) or not isinstance(max_queue_bytes, int):
-            raise TypeError(
-                f"max_queue_bytes must be an integer, got {type(max_queue_bytes).__name__}"
+            raise mes_validation_error(
+                TypeError(
+                    f"max_queue_bytes must be an integer, got {type(max_queue_bytes).__name__}"
+                )
             )
         if max_queue_bytes < 0:
-            raise ValueError(f"max_queue_bytes must be non-negative, got {max_queue_bytes}")
+            raise mes_validation_error(
+                ValueError(f"max_queue_bytes must be non-negative, got {max_queue_bytes}")
+            )
         rc = self._lib.mes_set_max_queue_bytes(self._handle, max_queue_bytes)
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_queue_bytes")
@@ -326,11 +370,13 @@ class CdcEngine:
         """
         self._check_open()
         if isinstance(max_event_size, bool) or not isinstance(max_event_size, int):
-            raise TypeError(
-                f"max_event_size must be an integer, got {type(max_event_size).__name__}"
+            raise mes_validation_error(
+                TypeError(f"max_event_size must be an integer, got {type(max_event_size).__name__}")
             )
         if max_event_size < 0 or max_event_size > 0xFFFFFFFF:
-            raise ValueError(f"max_event_size must fit in uint32, got {max_event_size}")
+            raise mes_validation_error(
+                ValueError(f"max_event_size must fit in uint32, got {max_event_size}")
+            )
         rc = self._lib.mes_set_max_event_size(self._handle, max_event_size)
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_event_size")
@@ -361,7 +407,9 @@ class CdcEngine:
         """
         self._check_open()
         if not isinstance(enabled, bool):
-            raise TypeError(f"enabled must be bool, got {type(enabled).__name__}")
+            raise mes_validation_error(
+                TypeError(f"enabled must be bool, got {type(enabled).__name__}")
+            )
         rc = self._lib.mes_set_checksum_enabled(self._handle, int(enabled))
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_checksum_enabled")
@@ -393,7 +441,9 @@ class CdcEngine:
         """
         self._check_open()
         if not isinstance(pre_verified, bool):
-            raise TypeError(f"pre_verified must be bool, got {type(pre_verified).__name__}")
+            raise mes_validation_error(
+                TypeError(f"pre_verified must be bool, got {type(pre_verified).__name__}")
+            )
         rc = self._lib.mes_set_trailer_pre_verified(self._handle, int(pre_verified))
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_trailer_pre_verified")
@@ -687,7 +737,7 @@ def _convert_columns(
 def _convert_event(
     raw: MESEvent,
     name_cache: dict[bytes, str] | None = None,
-    source_sql_cache: dict[bytes, str] | None = None,
+    source_sql_cache: _SourceSqlCache | None = None,
 ) -> ChangeEvent:
     """Convert C mes_event_t to Python ChangeEvent.
 
@@ -719,21 +769,14 @@ def _convert_event(
     binlog_file = raw.binlog_file.decode("utf-8", errors="replace") if raw.binlog_file else ""
 
     # One ANNOTATE_ROWS statement annotates every row of the statement it
-    # introduces, which the server may split across several ROWS events, and
-    # each of those rows arrives as a separate C event carrying the same
-    # statement, so decoding it per row repeats identical work. The
-    # cache is keyed on the statement bytes rather than on the C pointer: the
-    # engine reuses its storage across events, so pointer identity would serve
-    # the previous statement's text for a new statement at the same address.
-    raw_sql = raw.source_sql or b""
-    if raw_sql and source_sql_cache is not None:
-        source_sql = source_sql_cache.get(raw_sql)
-        if source_sql is None:
-            if len(source_sql_cache) >= _SOURCE_SQL_CACHE_MAX:
-                source_sql_cache.clear()
-            source_sql = raw_sql.decode("utf-8", errors="replace")
-            source_sql_cache[raw_sql] = source_sql
+    # introduces, and each of those rows arrives as a separate C event carrying
+    # the same statement, so it is read through the pointer rather than the
+    # field, which would copy it per row.
+    if source_sql_cache is not None:
+        address = ctypes.c_void_p.from_address(ctypes.addressof(raw) + _SOURCE_SQL_OFFSET).value
+        source_sql = source_sql_cache.get(address) if address else ""
     else:
+        raw_sql = raw.source_sql
         source_sql = raw_sql.decode("utf-8", errors="replace") if raw_sql else ""
 
     return ChangeEvent(

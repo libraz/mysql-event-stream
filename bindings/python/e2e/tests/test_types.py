@@ -15,18 +15,19 @@ class TestColumnTypes:
 
     def test_null_value(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """NULL column values are correctly detected."""
-        mysql.insert("users", name="NullUser")
+        row_id = mysql.insert("users", name="NullUser")
 
         events = collector.wait_for_events(table="users", event_type=EventType.INSERT)
 
         ev = events[0]
         assert ev.after is not None
-        null_vals = [v for v in ev.after.values() if v is None]
-        assert len(null_vals) > 0
-
-        # Column name assertions (users table)
-        assert "id" in ev.after
-        assert "name" in ev.after
+        # Exactly the columns the INSERT left NULL decode as None; a shifted NULL
+        # bitmap would null a written column or leave an unwritten one non-null.
+        assert ev.after["id"] == row_id
+        assert ev.after["name"] == "NullUser"
+        assert ev.after["is_active"] == 1
+        for column in ("email", "age", "balance", "score", "bio", "avatar"):
+            assert ev.after[column] is None, column
 
     def test_integer_types(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """INT and BIGINT columns are decoded as integer values."""
@@ -54,7 +55,7 @@ class TestColumnTypes:
 
     def test_double_value(self, mysql: MysqlClient, collector: StreamingCollector) -> None:
         """DOUBLE column values are decoded correctly."""
-        mysql.insert("users", name="DoubleUser", balance="1234.56", score=3.14159)
+        row_id = mysql.insert("users", name="DoubleUser", balance="1234.56", score=3.14159)
 
         events = collector.wait_for_events(table="users", event_type=EventType.INSERT)
 
@@ -67,11 +68,7 @@ class TestColumnTypes:
         assert ev.after["balance"] == "1234.56"
         assert isinstance(ev.after["created_at"], str)
         assert isinstance(ev.after["updated_at"], str)
-
-        # Column name assertions (users table)
-        assert "id" in ev.after
-        assert "name" in ev.after
-        assert "score" in ev.after
+        assert ev.after["id"] == row_id
 
     def test_binary_and_longtext_types(
         self, mysql: MysqlClient, collector: StreamingCollector

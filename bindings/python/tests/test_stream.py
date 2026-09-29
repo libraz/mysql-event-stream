@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
 
 import pytest
 
 from mysql_event_stream._contract import NON_RETRYABLE_ERROR_CODES
 from mysql_event_stream._ffi import (
+    MES_ERR_CONNECT,
     MES_ERR_DISCONNECTED,
     MES_ERR_GTID_PURGED,
     MES_ERR_GTID_TAGGED_UNSUPPORTED,
@@ -355,6 +357,71 @@ class TestStreamStartFailure:
         assert stream._engine is None
 
 
+class TestEngineConfiguration:
+    """The engine must receive every limit the documented config shares with the client."""
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_start_propagates_the_queue_byte_budget_to_the_engine(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        mock_client_cls.return_value = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+
+        stream = CdcStream(host="127.0.0.1", max_queue_bytes=512 * 1024 * 1024)
+        await stream._start()
+
+        # The engine's own queue-byte budget, distinct from the client's, has
+        # to receive the same configured value or the documented "raise it
+        # through the stream config and both stages honor it" contract breaks.
+        mock_engine.set_max_queue_bytes.assert_called_once_with(512 * 1024 * 1024)
+        await stream.close()
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_start_tells_the_engine_the_client_already_verified_every_crc32(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
+    ) -> None:
+        # client.py's reader thread validates the trailer before an event ever
+        # reaches poll()/poll_batch(), so a stream-driven engine should never
+        # redo that check.
+        mock_client_cls.return_value = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+
+        stream = CdcStream(host="127.0.0.1")
+        await stream._start()
+
+        mock_engine.set_trailer_pre_verified.assert_called_once_with(True)
+        await stream.close()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_reapplies_the_queue_byte_budget(self) -> None:
+        # set_max_event_size/set_max_queue_size are already reapplied here on
+        # every reconnect (the engine is reset, not recreated); the byte
+        # budget has to follow the same shape.
+        stream = CdcStream(host="127.0.0.1", max_queue_bytes=512 * 1024 * 1024)
+        previous_client = MagicMock()
+        previous_client.current_gtid = ""
+        stream._client = previous_client
+        stream._engine = MagicMock()
+
+        with (
+            patch.object(stream, "_wait_for_backoff", new=AsyncMock()),
+            patch("mysql_event_stream.stream.BinlogClient", return_value=MagicMock()),
+            patch("asyncio.to_thread", new=AsyncMock()),
+        ):
+            await stream._reconnect()
+
+        stream._engine.set_max_queue_bytes.assert_called_once_with(512 * 1024 * 1024)
+        # reset() does not clear trailer_pre_verified, so reconnect must not
+        # reassert what _start() already set once.
+        stream._engine.set_trailer_pre_verified.assert_not_called()
+
+
 class TestReconnectAttempts:
     """Verify reconnect attempt counting.
 
@@ -458,6 +525,7 @@ class TestReconnectAttempts:
         stream._started = True
         stream._max_reconnect_attempts = 1
         stream._reconnect_attempts = 0
+        stream._pending = []
 
         mock_client = MagicMock()
         mock_engine = MagicMock()
@@ -492,6 +560,7 @@ class TestReconnectAttempts:
         stream._started = True
         stream._max_reconnect_attempts = 2
         stream._reconnect_attempts = 0
+        stream._pending = []
 
         mock_engine = MagicMock()
         mock_engine.next_event.return_value = None
@@ -526,6 +595,7 @@ class TestReconnectAttempts:
         stream._started = True
         stream._max_reconnect_attempts = 1
         stream._reconnect_attempts = 0
+        stream._pending = []
         stream._backoff_task = None
         stream._native_task = None
 
@@ -562,6 +632,7 @@ class TestReconnectAttempts:
         stream._started = True
         stream._max_reconnect_attempts = 0
         stream._reconnect_attempts = 0
+        stream._pending = []
 
         mock_client = MagicMock()
         mock_engine = MagicMock()
@@ -615,6 +686,7 @@ class TestReconnectAttempts:
         stream._started = True
         stream._max_reconnect_attempts = 3
         stream._reconnect_attempts = 0
+        stream._pending = []
         stream._backoff_task = None
         stream._native_task = None
 
@@ -648,6 +720,91 @@ class TestReconnectAttempts:
 
         assert backoff.done()
         assert stream._backoff_task is None
+
+
+def _connect_blocked_until_stopped() -> tuple[MagicMock, threading.Event]:
+    """Build a client whose connect() blocks until stop(), then fails like one.
+
+    That is what a native connect to an unresponsive endpoint does when another
+    thread stops the client.
+    """
+    entered = threading.Event()
+    stopped = threading.Event()
+    client = MagicMock()
+
+    def connect() -> None:
+        entered.set()
+        stopped.wait(5)
+        raise MesConnectionError("connection refused", MES_ERR_CONNECT)
+
+    client.connect.side_effect = connect
+    client.stop.side_effect = stopped.set
+    return client, entered
+
+
+class TestCloseDuringConnect:
+    """close() ends the iteration without a retry, a backoff, or an error."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_reconnect_attempts", [0, 10])
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_close_during_the_initial_connect(
+        self,
+        mock_client_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        max_reconnect_attempts: int,
+    ) -> None:
+        client, entered = _connect_blocked_until_stopped()
+        mock_client_cls.return_value = client
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=max_reconnect_attempts)
+
+        iteration = asyncio.create_task(stream.__anext__())
+        await asyncio.to_thread(entered.wait, 5)
+        with patch("mysql_event_stream.stream.asyncio.sleep", new=AsyncMock()) as sleep:
+            await stream.close()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iteration, 5)
+
+        sleep.assert_not_awaited()
+        assert mock_client_cls.call_count == 1
+        assert stream._reconnect_attempts == 0
+
+    @pytest.mark.asyncio
+    async def test_close_before_iterating(self) -> None:
+        stream = CdcStream(host="127.0.0.1")
+        await stream.close()
+        with (
+            patch.object(CdcStream, "_start", new=AsyncMock()) as start,
+            pytest.raises(StopAsyncIteration),
+        ):
+            await stream.__anext__()
+        start.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.backoff_delay_ms", return_value=0)
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_close_during_a_reconnect_connect(
+        self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock, _: MagicMock
+    ) -> None:
+        dropped = MagicMock(spec=["connect", "start", "poll", "stop", "close", "current_gtid"])
+        dropped.current_gtid = ""
+        dropped.poll.side_effect = MesConnectionError("dropped", MES_ERR_DISCONNECTED)
+        successor, entered = _connect_blocked_until_stopped()
+        mock_client_cls.side_effect = [dropped, successor]
+        stream = CdcStream(host="127.0.0.1")
+
+        iteration = asyncio.create_task(stream.__anext__())
+        await asyncio.to_thread(entered.wait, 5)
+        with patch("mysql_event_stream.stream.asyncio.sleep", new=AsyncMock()) as sleep:
+            await stream.close()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iteration, 5)
+
+        sleep.assert_not_awaited()
+        assert mock_client_cls.call_count == 2
+        assert stream._reconnect_attempts == 1
 
 
 class TestRetryClassification:
@@ -756,6 +913,53 @@ class TestEngineFailures:
         assert stream._closed
 
     @pytest.mark.asyncio
+    async def test_feed_failure_surfaces_after_the_events_decoded_before_it(self) -> None:
+        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
+        client.poll.return_value = [
+            PollResult(b"good", False, False),
+            PollResult(b"more-bad", False, True),
+        ]
+        engine = MagicMock()
+        first, second = MagicMock(), MagicMock()
+        queued: list[MagicMock] = []
+        parse_error = exception_for_rc(MES_ERR_PARSE, "unsupported event")
+
+        def feed(chunk: bytes) -> int:
+            if chunk == b"good":
+                queued.append(first)
+                return len(chunk)
+            # The failing segment still decoded an event ahead of the bad one.
+            queued.append(second)
+            raise parse_error
+
+        def next_event() -> MagicMock | None:
+            return queued.pop(0) if queued else None
+
+        engine.feed.side_effect = feed
+        engine.next_event.side_effect = next_event
+        engine.reset.side_effect = lambda: None
+
+        stream = CdcStream(host="127.0.0.1")
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+        delivered: list[object] = []
+
+        with (
+            patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)),
+            pytest.raises(type(parse_error), match="unsupported event"),
+        ):
+            async for event in stream:
+                delivered.append(event)
+
+        assert delivered == [first, second]
+        # The engine is reset before the events queued ahead of the failure are
+        # drained, the only call the feed contract allows after a failure.
+        assert engine.reset.call_count == 1
+        assert client.poll.call_count == 1
+        assert stream._closed
+
+    @pytest.mark.asyncio
     async def test_feed_retains_unconsumed_packet_suffix(self) -> None:
         client = MagicMock()
         client.poll.return_value = PollResult(b"abcdef", False, True)
@@ -775,6 +979,90 @@ class TestEngineFailures:
         # The suffix is kept with the framing it arrived under, so the bytes the
         # engine has not taken yet are still fed as what they are.
         assert stream._pending == [(True, b"cdef")]
+
+    @pytest.mark.asyncio
+    async def test_never_polls_while_unfed_bytes_remain(self) -> None:
+        # Each poll promotes the native checkpoint over everything the previous
+        # poll returned, so the bytes the engine refused under backpressure have
+        # to be fed and their events delivered before the next poll runs.
+        stream = CdcStream(host="127.0.0.1")
+        calls: list[str] = []
+        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
+
+        def poll() -> PollResult:
+            assert not stream._pending
+            assert not stream._ready_events
+            calls.append("poll")
+            return PollResult(b"abcdef", False, True)
+
+        client.poll.side_effect = poll
+        engine = MagicMock()
+        first, second, third = MagicMock(), MagicMock(), MagicMock()
+        engine.next_event.side_effect = [first, None, second, None, third, None]
+
+        def feed(chunk: bytes) -> int:
+            calls.append(f"feed:{chunk.decode()}")
+            return 2 if chunk == b"abcdef" else len(chunk)
+
+        engine.feed.side_effect = feed
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)):
+            assert await stream.__anext__() is first
+            assert await stream.__anext__() is second
+            assert await stream.__anext__() is third
+
+        assert calls == ["poll", "feed:abcdef", "feed:cdef", "poll", "feed:abcdef"]
+
+    @pytest.mark.asyncio
+    async def test_reconnect_never_skips_rows_left_unfed(self) -> None:
+        # A native client promotes the previous batch's checkpoint when the next
+        # poll starts. Polling while the second transaction's bytes were still
+        # unfed would resume past it and discard them with the connection.
+        promoted = ""
+        polls = 0
+        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
+
+        def poll() -> PollResult:
+            nonlocal promoted, polls
+            polls += 1
+            if polls == 1:
+                return PollResult(b"tx1tx2", False, True)
+            promoted = "uuid:1-2"
+            raise MesConnectionError("dropped", MES_ERR_DISCONNECTED)
+
+        client.poll.side_effect = poll
+        type(client).current_gtid = PropertyMock(side_effect=lambda: promoted)
+        engine = MagicMock()
+        tx1, tx2 = MagicMock(), MagicMock()
+        engine.next_event.side_effect = [tx1, None, tx2, None]
+        engine.feed.side_effect = lambda chunk: 3 if chunk == b"tx1tx2" else len(chunk)
+
+        stream = CdcStream(host="127.0.0.1")
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+        delivered_at_reconnect: list[int] = []
+        delivered = 0
+
+        async def reconnect() -> None:
+            delivered_at_reconnect.append(delivered)
+            await stream.close()
+
+        with (
+            patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)),
+            patch.object(stream, "_reconnect", side_effect=reconnect),
+        ):
+            async for event in stream:
+                assert event is (tx1, tx2)[delivered]
+                delivered += 1
+
+        # Both transactions reached the consumer before the poll that promoted
+        # a checkpoint covering them failed and triggered the reconnect.
+        assert delivered_at_reconnect == [2]
+        assert stream.current_gtid == "uuid:1-2"
 
     @pytest.mark.asyncio
     async def test_feed_frames_each_result_under_the_flag_it_carried(self) -> None:

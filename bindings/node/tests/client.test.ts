@@ -39,7 +39,7 @@ describe("BinlogClient", () => {
     } catch (error) {
       expect(error).toMatchObject({
         code: MesErrorCode.InvalidArg,
-        message: "serverId must be non-zero",
+        message: "serverId must be between 1 and 4294967295, got 0",
       });
       return;
     }
@@ -201,7 +201,7 @@ describe("BinlogClient", () => {
 
   it("rejects invalid byte and event limits before connecting", () => {
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxQueueBytes: -1 })).toThrow(
-      /maxQueueBytes must be between 0 and unbounded, got -1/,
+      /maxQueueBytes must be between 0 and 9007199254740991, got -1/,
     );
     expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, maxEventSize: -1 })).toThrow(
       /maxEventSize must be between 0 and 4294967295, got -1/,
@@ -214,6 +214,23 @@ describe("BinlogClient", () => {
     } catch (error) {
       expect(error).toMatchObject({ code: MesErrorCode.InvalidArg });
       expect(error).toHaveProperty("message", expect.stringMatching(/sslMode must be an integer/));
+      return;
+    }
+    throw new Error("expected validation error");
+  });
+
+  it("rejects an unrecognized config key before connecting, instead of ignoring it", () => {
+    try {
+      new BinlogClient({
+        host: "127.0.0.1",
+        port: 19999,
+        notAnOption: 1,
+      } as never);
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: MesErrorCode.InvalidArg,
+        message: "Unknown config key: notAnOption",
+      });
       return;
     }
     throw new Error("expected validation error");

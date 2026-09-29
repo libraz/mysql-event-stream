@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
-from typing import Any
+from typing import Any, TypeVar
 
 
 class EventType(Enum):
@@ -346,6 +346,29 @@ class DecodeError(MesError):
 
 class ChecksumError(MesError):
     """Raised when a CRC32 mismatch is detected on a binlog event."""
+
+
+_Refusal = TypeVar("_Refusal", TypeError, ValueError, OSError)
+
+
+def mes_validation_error(error: _Refusal) -> _Refusal:
+    """Present a refused argument the way every other failure is presented.
+
+    The built-in class is kept, so ``except TypeError``, ``except ValueError``
+    and ``except OSError`` still hold; ``code`` is set to
+    :attr:`MesErrorCode.INVALID_ARG`, so a handler branching on ``code``
+    classifies a refusal like any native failure. Every argument refusal in
+    this package, a library that cannot be loaded included, is built through
+    here.
+
+    Args:
+        error: The exception describing the refusal.
+
+    Returns:
+        ``error`` itself, carrying ``code``.
+    """
+    error.code = MesErrorCode.INVALID_ARG  # type: ignore[attr-defined]
+    return error
 
 
 def exception_for_rc(rc: int, message: str) -> MesError:

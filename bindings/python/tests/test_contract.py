@@ -40,6 +40,7 @@ from mysql_event_stream._contract import (
 )
 from mysql_event_stream._options import validate_option, validate_options
 from mysql_event_stream.client import BinlogClient, validate_poll_batch_size
+from mysql_event_stream.engine import CdcEngine
 from mysql_event_stream.logging import set_log_callback
 from mysql_event_stream.stream import CdcStream
 
@@ -277,6 +278,17 @@ class TestBindingContract:
         stream = CdcStream(host="127.0.0.1")
         assert inspect.iscoroutinefunction(stream.aclose)
         assert inspect.iscoroutinefunction(stream.close)
+
+    def test_enable_metadata_materializes_the_contract_defaults_itself(self) -> None:
+        # enable_metadata is called directly, not only through CdcStream, and
+        # declares its own keyword defaults rather than inheriting a caller's,
+        # so each one has to equal the contract's.
+        parameters = inspect.signature(CdcEngine.enable_metadata).parameters
+        defaults = {option["python"]: option["default"] for option in DEFAULTED_OPTIONS}
+        declared = {name: p.default for name, p in parameters.items() if name != "self"}
+
+        assert declared.keys() <= defaults.keys(), "every parameter is a defaulted contract option"
+        assert declared == {name: defaults[name] for name in declared}
 
     @pytest.mark.parametrize("surface", [CdcStream, BinlogClient])
     def test_materializes_exactly_the_contract_shared_option_defaults(

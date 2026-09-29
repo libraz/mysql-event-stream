@@ -65,16 +65,19 @@ describe("INSERT events", () => {
     expect(ev.type).toBe("INSERT");
     expect(ev.before).toBeNull();
     expect(ev.after).not.toBeNull();
-    // Column key assertions (items: id, name, value)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.value).toBeDefined();
+    // The after-image must equal the literal value the INSERT wrote --
+    // toBeDefined() would pass for null or a value in the wrong column.
+    expect(ev.after!.id).toBe(rowId);
+    expect(ev.after!.name).toBe("test_item");
+    expect(ev.after!.value).toBe(42);
   });
 
-  it("multiple INSERTs produce multiple INSERT ChangeEvents", async () => {
-    await mysql.insert("items", { name: "item_a", value: 1 });
-    await mysql.insert("items", { name: "item_b", value: 2 });
-    await mysql.insert("items", { name: "item_c", value: 3 });
+  it("multiple INSERTs produce multiple INSERT ChangeEvents, each carrying its own row", async () => {
+    const rowIds = [
+      await mysql.insert("items", { name: "item_a", value: 1 }),
+      await mysql.insert("items", { name: "item_b", value: 2 }),
+      await mysql.insert("items", { name: "item_c", value: 3 }),
+    ];
 
     const events = await collector.waitForEvents({
       table: "items",
@@ -84,10 +87,20 @@ describe("INSERT events", () => {
     });
 
     expect(events).toHaveLength(3);
+    const rows = [
+      { name: "item_a", value: 1 },
+      { name: "item_b", value: 2 },
+      { name: "item_c", value: 3 },
+    ];
+    events.forEach((ev, index) => {
+      expect(ev.after!.id).toBe(rowIds[index]);
+      expect(ev.after!.name).toBe(rows[index]!.name);
+      expect(ev.after!.value).toBe(rows[index]!.value);
+    });
   });
 
   it("INSERT with various column types", async () => {
-    await mysql.insert("users", {
+    const rowId = await mysql.insert("users", {
       name: "Alice",
       email: "alice@example.com",
       age: 30,
@@ -107,14 +120,14 @@ describe("INSERT events", () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     const ev = events[0]!;
     expect(ev.after).not.toBeNull();
-    // Column key assertions (users table)
-    expect(ev.after!.id).toBeDefined();
-    expect(ev.after!.name).toBeDefined();
-    expect(ev.after!.email).toBeDefined();
-    expect(ev.after!.age).toBeDefined();
-    expect(ev.after!.balance).toBeDefined();
-    expect(ev.after!.score).toBeDefined();
-    expect(ev.after!.is_active).toBeDefined();
-    expect(ev.after!.bio).toBeDefined();
+    // Each column must equal the literal value the INSERT wrote.
+    expect(ev.after!.id).toBe(rowId);
+    expect(ev.after!.name).toBe("Alice");
+    expect(ev.after!.email).toBe("alice@example.com");
+    expect(ev.after!.age).toBe(30);
+    expect(ev.after!.balance).toBe("1234.56");
+    expect(ev.after!.score).toBe(3.14);
+    expect(ev.after!.is_active).toBe(1);
+    expect(ev.after!.bio).toBe("Hello, world!");
   });
 });

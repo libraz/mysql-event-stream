@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import mysql_event_stream.logging as logmod
-from mysql_event_stream import CdcEngine, LogLevel, ParseError, set_log_callback
+from mysql_event_stream import CdcEngine, LogLevel, MesErrorCode, ParseError, set_log_callback
 
 
 def _oversized_event_header() -> bytes:
@@ -47,6 +47,18 @@ class TestSetLogCallback:
         set_log_callback(handler, LogLevel.DEBUG)
         assert logmod._stable_callback is stable
         assert logmod._active_handler is handler
+
+    @pytest.mark.parametrize("handler", ["not callable", 1, object()])
+    def test_rejects_a_handler_that_cannot_be_called(self, handler: object) -> None:
+        def installed(level: LogLevel, message: str) -> None:
+            pass
+
+        set_log_callback(installed)
+        with pytest.raises(TypeError, match="callback must be callable") as refused:
+            set_log_callback(handler)  # type: ignore[arg-type]
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+        # Refused before installing, so the working handler stays in place.
+        assert logmod._active_handler is installed
 
     def test_detach_clears_handler_but_retains_trampoline(self) -> None:
         stable = logmod._stable_callback

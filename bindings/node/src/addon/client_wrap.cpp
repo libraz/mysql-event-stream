@@ -348,13 +348,15 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Value max_queue_size_v = config.Get("maxQueueSize");
   if (max_queue_size_v.IsNumber()) {
     // max_queue_size is size_t (64-bit) in the C ABI. Read via Int64Value() to
-    // avoid silently truncating large values, then reject anything negative.
+    // avoid silently truncating large values, then reject anything negative
+    // or past what a JS number represents exactly.
     int64_t max_queue_size = max_queue_size_v.As<Napi::Number>().Int64Value();
-    if (max_queue_size < 0) {
-      mes_node::MakeMesError(
-          env,
-          "maxQueueSize must be between 0 and unbounded, got " + std::to_string(max_queue_size),
-          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+    if (max_queue_size < 0 || max_queue_size > kMaxSafeInteger) {
+      mes_node::MakeMesError(env,
+                             "maxQueueSize must be between 0 and " +
+                                 std::to_string(kMaxSafeInteger) + ", got " +
+                                 std::to_string(max_queue_size),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
@@ -385,10 +387,11 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
   Napi::Value max_queue_bytes_v = config.Get("maxQueueBytes");
   if (max_queue_bytes_v.IsNumber()) {
     int64_t raw = max_queue_bytes_v.As<Napi::Number>().Int64Value();
-    if (raw < 0) {
-      mes_node::MakeMesError(
-          env, "maxQueueBytes must be between 0 and unbounded, got " + std::to_string(raw),
-          MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+    if (raw < 0 || raw > kMaxSafeInteger) {
+      mes_node::MakeMesError(env,
+                             "maxQueueBytes must be between 0 and " +
+                                 std::to_string(kMaxSafeInteger) + ", got " + std::to_string(raw),
+                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }

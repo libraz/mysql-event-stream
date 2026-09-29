@@ -520,6 +520,8 @@ const REFUSED_ARGUMENTS: Array<{ method: string; argument: unknown; label: strin
   { method: "setExcludeTables", argument: [1], label: "an array of non-strings" },
   { method: "enableMetadata", argument: 42, label: "a non-object config" },
   { method: "enableMetadata", argument: { port: "3306" }, label: "a wrongly-typed option" },
+  { method: "enableMetadata", argument: { notAnOption: 1 }, label: "an unrecognized key" },
+  { method: "enableMetadata", argument: { serverId: 0 }, label: "an out-of-range option" },
 ];
 
 describe("CdcEngine error codes", () => {
@@ -557,13 +559,14 @@ describe("CdcEngine error codes", () => {
   it("codes a decoded event whose type the addon does not know", async () => {
     engine = await CdcEngine.create();
     // The engine cannot be driven to produce an unknown type through the wire
-    // format, so the value the addon branches on is what gets checked: the
-    // refusal must be a decode failure, which the retry policy treats as
-    // permanent, rather than an uncoded error it would retry.
+    // format, so the value the addon branches on is what gets checked: mes.h
+    // classifies a type code no supported server emits as a parse failure
+    // (matching the Python binding), and the retry policy treats it as
+    // permanent either way.
     const source = readFileSync(new URL("../src/addon/engine_wrap.cpp", import.meta.url), "utf8");
     const throwSite = source.match(/"Unknown event type: " \+ std::to_string\(type_idx\),\s*(\w+)/);
     expect(throwSite, "the addon reports an unknown event type").not.toBeNull();
-    expect((throwSite as RegExpMatchArray)[1]).toBe("MES_ERR_DECODE");
+    expect((throwSite as RegExpMatchArray)[1]).toBe("MES_ERR_PARSE");
   });
 
   it("builds every addon error through the helper that attaches a code", () => {
