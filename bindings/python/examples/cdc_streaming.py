@@ -112,13 +112,18 @@ def print_event(event: ChangeEvent) -> None:
 
 # --- Main loop ---
 
-running = True
 
+def install_shutdown_handlers(stream: CdcStream) -> None:
+    """Close the stream on SIGINT/SIGTERM, which also ends a poll blocked on an idle server."""
+    loop = asyncio.get_running_loop()
+    closing: list[asyncio.Task[None]] = []
 
-def handle_signal(_sig: int, _frame: object) -> None:
-    global running
-    running = False
-    print(f"\n{DIM}Shutting down...{RESET}")
+    def on_signal() -> None:
+        print(f"\n{DIM}Shutting down...{RESET}")
+        closing.append(asyncio.ensure_future(stream.close()))
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, on_signal)
 
 
 def find_lib_path() -> str:
@@ -156,21 +161,23 @@ def find_lib_path() -> str:
 async def async_main(args: argparse.Namespace, lib_path: str) -> None:
     total_events = 0
 
-    async for event in CdcStream(
+    async with CdcStream(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
+        # Local test server only; use verified TLS (ssl_mode/ssl_ca) in production.
+        allow_public_key_retrieval=True,
         server_id=args.server_id,
         start_gtid=args.gtid,
         lib_path=lib_path,
-    ):
-        if not running:
-            break
-        if args.table and event.table != args.table:
-            continue
-        print_event(event)
-        total_events += 1
+    ) as stream:
+        install_shutdown_handlers(stream)
+        async for event in stream:
+            if args.table and event.table != args.table:
+                continue
+            print_event(event)
+            total_events += 1
 
     print(f"\n{DIM}Total events: {total_events}{RESET}")
 
@@ -186,9 +193,6 @@ def main() -> None:
     )
     parser.add_argument("--server-id", type=int, default=2, help="Replica server ID")
     args = parser.parse_args()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
 
     lib_path = find_lib_path()
 

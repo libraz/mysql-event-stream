@@ -168,14 +168,19 @@ HANDLERS: dict[str, Callable[[ChangeEvent], None]] = {
 
 # --- Main ---
 
-running = True
 total_events = 0
 
 
-def handle_signal(_sig: int, _frame: object) -> None:
-    """Handle termination signals."""
-    global running
-    running = False
+def install_shutdown_handlers(stream: CdcStream) -> None:
+    """Close the stream on SIGINT/SIGTERM, which also ends a poll blocked on an idle server."""
+    loop = asyncio.get_running_loop()
+    closing: list[asyncio.Task[None]] = []
+
+    def on_signal() -> None:
+        closing.append(asyncio.ensure_future(stream.close()))
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, on_signal)
 
 
 def find_lib_path() -> str:
@@ -206,27 +211,26 @@ async def async_main(lib_path: str) -> None:
     """Stream CDC events and dispatch to table-specific handlers."""
     global total_events
 
-    async for event in CdcStream(
+    async with CdcStream(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
         user=MYSQL_USER,
         password=MYSQL_PASSWORD,
+        # Local test server only; use verified TLS (ssl_mode/ssl_ca) in production.
+        allow_public_key_retrieval=True,
         server_id=3,
         lib_path=lib_path,
-    ):
-        if not running:
-            break
-        handler = HANDLERS.get(event.table)
-        if handler:
-            handler(event)
-            total_events += 1
+    ) as stream:
+        install_shutdown_handlers(stream)
+        async for event in stream:
+            handler = HANDLERS.get(event.table)
+            if handler:
+                handler(event)
+                total_events += 1
 
 
 def main() -> None:
     """Entry point for the cache invalidation example."""
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
     lib_path = find_lib_path()
 
     print("Cache Invalidation Example")
