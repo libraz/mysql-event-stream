@@ -220,7 +220,12 @@ typedef struct {
   /** @brief Active binlog filename, or "" until the first ROTATE event is seen
    *  (ROTATE carries the filename). Until then only binlog_offset is meaningful. */
   const char* binlog_file;
-  /** @brief Offset of the next event after this change; resume from this value. */
+  /** @brief Offset just past the binlog event that carried this change.
+   *
+   * Every row of one ROWS event shares it, so it is not a per-row resume
+   * point. A resume from it is safe only at a transaction boundary (after the
+   * XID/COMMIT event): mid-transaction the next ROWS event arrives without its
+   * TABLE_MAP and fails to decode. */
   uint64_t binlog_offset;
   /** @brief 1 if column names were resolved for this event's table, 0 if not.
    *
@@ -762,7 +767,11 @@ MES_API void mes_client_destroy(mes_client_t* client);
 
 /** @brief Connect to MySQL server with given configuration.
  *  @return MES_OK, MES_ERR_NULL_ARG, MES_ERR_INVALID_ARG, MES_ERR_CONNECT,
- *          MES_ERR_AUTH, or MES_ERR_VALIDATION.
+ *          MES_ERR_AUTH, MES_ERR_VALIDATION, MES_ERR_STREAM, or
+ *          MES_ERR_QUEUE_FULL. MES_ERR_VALIDATION means the server answered:
+ *          a required setting is wrong or missing, or the query was refused.
+ *          A transport failure while reading those settings returns
+ *          MES_ERR_STREAM instead, and an oversized answer MES_ERR_QUEUE_FULL.
  *  @threadsafety Single-owner thread. Must not be called concurrently with
  *                any other mes_client_* function on the same client
  *                (except mes_client_stop()).

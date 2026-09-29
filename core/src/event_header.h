@@ -99,6 +99,8 @@ inline constexpr uint8_t kBinlogChecksumAlgOff = 0;
 inline constexpr uint8_t kBinlogChecksumAlgCrc32 = 1;
 /// LOG_EVENT_ARTIFICIAL_F: set on the synthetic ROTATE sent at dump start.
 inline constexpr uint16_t kLogEventArtificialFlag = 0x0020;
+/// STMT_END_F in a ROWS event's post-header flags: last ROWS event of a statement.
+inline constexpr uint16_t kRowsEventStmtEndFlag = 0x0001;
 
 enum class BinlogChecksumAlgorithm : uint8_t {
   kUnknown,

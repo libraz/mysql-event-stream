@@ -391,6 +391,41 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlCoversEveryRowsEventOfOneStatement) {
   EXPECT_EQ(third.SourceSql(), next_stmt);
 }
 
+// Two statements in one transaction with no control event between them: the
+// first annotated, the second not. STMT_END_F on the first statement's last
+// ROWS event is the only boundary, and the second statement's rows must not be
+// attributed to the first statement's SQL.
+TEST(CdcEngineMariaDBTest, AnnotateRowsSqlEndsWithTheStatementsLastRowsEvent) {
+  CdcEngine engine;
+  const std::string sql = "INSERT INTO users VALUES (1)";
+  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
+                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                              BuildTableMapBody(42, "testdb", "users"));
+  std::vector<uint8_t> last_rows = BuildWriteRowsBody(42, 1);
+  last_rows[6] = static_cast<uint8_t>(kRowsEventStmtEndFlag);  // flags follow the 6-byte table id
+  auto annotated_write =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150, last_rows);
+  auto next_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 200,
+                                   BuildTableMapBody(42, "testdb", "users"));
+  auto unannotated_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                      250, BuildWriteRowsBody(42, 2));
+  auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 275, {});
+  for (const auto* event :
+       {&annotate, &table_map, &annotated_write, &next_table_map, &unannotated_write, &xid}) {
+    ASSERT_EQ(engine.Feed(event->data(), event->size()), event->size());
+  }
+
+  ChangeEvent first;
+  ChangeEvent second;
+  ASSERT_TRUE(engine.NextEvent(&first));
+  ASSERT_TRUE(engine.NextEvent(&second));
+  ASSERT_EQ(second.after.columns.size(), 1u);
+  EXPECT_EQ(second.after.columns[0].int_val, 2);
+  EXPECT_EQ(first.SourceSql(), sql);
+  EXPECT_TRUE(second.SourceSql().empty());
+}
+
 // An event with no annotation must not hold an allocation for the empty case.
 TEST(CdcEngineMariaDBTest, EventsWithoutAnnotateRowsHoldNoStatement) {
   CdcEngine engine;
@@ -1254,6 +1289,124 @@ TEST(CdcEngineTest, UnsupportedEventTypesFailDistinctlyFromUnknownOnes) {
     EXPECT_EQ(engine.CurrentPosition().offset, 0u);
     EXPECT_NE(g_last_error_log.find("event=unsupported_binlog_event"), std::string::npos);
   }
+}
+
+/**
+ * @brief Every type code 0-255 lands in the class the engine's table assigns it.
+ *
+ * The table in CdcEngine::ProcessEvent sorts every code into decoded, skipped,
+ * refused or default. A code that drifts from skipped to default stalls a
+ * stream; one that drifts the other way advances a checkpoint past a change.
+ * Decoded codes need well-formed bodies and are covered by their own tests.
+ */
+TEST(CdcEngineTest, EveryTypeCodeIsClassifiedAsItsTableSays) {
+  enum class Class { kDecoded, kSkipped, kRefused, kUnknown };
+  const auto expected_class = [](int code) {
+    switch (code) {
+      case 2:
+      case 4:
+      case 19:
+      case 23:
+      case 24:
+      case 25:
+      case 30:
+      case 31:
+      case 32:
+      case 160:
+        return Class::kDecoded;
+      case 3:
+      case 5:
+      case 9:
+      case 11:
+      case 13:
+      case 14:
+      case 15:
+      case 16:
+      case 17:
+      case 18:
+      case 27:
+      case 28:
+      case 29:
+      case 33:
+      case 34:
+      case 35:
+      case 36:
+      case 37:
+      case 38:
+      case 41:
+      case 42:
+      case 161:
+      case 162:
+      case 163:
+      case 164:
+        return Class::kSkipped;
+      case 26:
+      case 39:
+      case 40:
+      case 165:
+      case 166:
+      case 167:
+      case 168:
+      case 169:
+      case 170:
+      case 171:
+      case 172:
+        return Class::kRefused;
+      default:
+        return Class::kUnknown;
+    }
+  };
+
+  for (int code = 0; code <= 255; ++code) {
+    const Class klass = expected_class(code);
+    if (klass == Class::kDecoded) continue;
+    SCOPED_TRACE(code);
+    CdcEngine engine;
+    const auto event = BuildEvent(static_cast<uint8_t>(code), 1000, 640, {0x01, 0x02, 0x03, 0x04});
+
+    ScopedErrorLogCapture capture;
+    engine.Feed(event.data(), event.size());
+    EXPECT_FALSE(engine.HasEvents());
+    if (klass == Class::kSkipped) {
+      EXPECT_FALSE(engine.IsError()) << g_last_error_log;
+      EXPECT_EQ(engine.CurrentPosition().offset, 640u);
+      continue;
+    }
+    EXPECT_EQ(engine.ErrorCode(), MES_ERR_PARSE);
+    EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+    const std::string record =
+        std::string(klass == Class::kRefused ? "event=unsupported_binlog_event"
+                                             : "event=unknown_binlog_event") +
+        " type_code=" + std::to_string(code);
+    EXPECT_NE(g_last_error_log.find(record), std::string::npos) << g_last_error_log;
+  }
+}
+
+// A TABLE_MAP may declare a column type no decoder knows. It parses (an unknown
+// type is taken to carry no metadata), but the row that follows cannot be
+// walked, so the ROWS event must fail without emitting anything and without
+// moving the resume position past itself.
+TEST(CdcEngineTest, AnUnknownColumnTypeFailsItsRowsEventWithoutEmitting) {
+  const std::string db = "testdb";
+  const std::string table = "users";
+  std::vector<uint8_t> table_map_body = BuildTableMapBody(42, db, table);
+  // table id, flags, both length-prefixed NUL-terminated names, column count.
+  const size_t type_index = 6 + 2 + (1 + db.size() + 1) + (1 + table.size() + 1) + 1;
+  ASSERT_EQ(table_map_body[type_index], 0x03) << "the builder's INT column moved";
+  table_map_body[type_index] = 0x0E;
+  const auto table_map =
+      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+                                BuildWriteRowsBody(42, 7));
+
+  CdcEngine engine;
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_FALSE(engine.IsError());
+  engine.Feed(write.data(), write.size());
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_EQ(engine.CurrentPosition().offset, 100u);
 }
 
 TEST(CdcEngineTest, MultipleEvents) {

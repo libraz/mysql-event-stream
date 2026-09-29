@@ -30,6 +30,7 @@
 #include "client/gtid_encoder.h"
 #include "crc32.h"
 #include "event_header.h"
+#include "logger.h"
 #include "mariadb_gtid.h"
 #include "protocol/mysql_binlog_stream.h"
 
@@ -143,6 +144,9 @@ class ScriptedMysqlPeer {
     /// the global variable no longer holds: the first event is read under one
     /// framing and the descriptor that follows establishes another.
     kStreamEventAheadOfTheFormatDescription,
+    /// Hang up instead of answering Connect()'s first SHOW VARIABLES, the way
+    /// a connection reset in the middle of validation looks to the client.
+    kHangUpDuringValidation,
   };
 
   /// ER_SERVER_SHUTDOWN: ends a dump without implying anything about the
@@ -334,6 +338,7 @@ class ScriptedMysqlPeer {
       // SHOW VARIABLES is issued only by Connect(); the first query that is not
       // one marks the start of stream setup.
       const bool is_validation_query = query.rfind("SHOW VARIABLES", 0) == 0;
+      if (is_validation_query && mode == Mode::kHangUpDuringValidation) break;
       if (connect_phase && !is_validation_query) {
         connect_phase = false;
         if (mode == Mode::kStallDuringStartStream) {
@@ -400,9 +405,14 @@ class ScriptedMysqlPeer {
     return payload;
   }
 
-  /// ERR packet for a source that ends the dump but keeps the session.
+  /// ERR packet for a source that ends the dump but keeps the session. A 1236
+  /// carries the text MySQL 8.4 sends for a purged interval, the one message
+  /// that makes the code mean a purge.
   static std::vector<uint8_t> BuildStreamError(uint16_t error_code) {
-    return BuildErrorPacket(error_code, "the source ended the dump");
+    return BuildErrorPacket(error_code, error_code == 1236
+                                            ? "Cannot replicate because the source purged "
+                                              "required binary logs."
+                                            : "the source ended the dump");
   }
 
   /** @brief Stop answering and hold the connection until the client hangs up. */
@@ -791,6 +801,36 @@ TEST(BinlogClientLifecycle, AStreamSetupFailureThatClosesTheSocketReportsDisconn
   }
 }
 
+/**
+ * @brief Connect() reports a failed validation round trip as what it was.
+ *
+ * MES_ERR_VALIDATION tells the caller the server is misconfigured, and the
+ * bindings treat it as not worth retrying. A transport that dies while the
+ * settings are being read says nothing about them, so it has to keep the
+ * transport's own, retryable code; a server that answers with a refusal is
+ * still a validation failure.
+ */
+TEST(BinlogClientLifecycle, ConnectKeepsTheCodeOfAValidationQueryThatFailed) {
+  {
+    SCOPED_TRACE("connection dropped while reading a setting");
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kHangUpDuringValidation);
+    BinlogClient client;
+    EXPECT_EQ(client.Connect(PeerConfig(peer, 2)), MES_ERR_STREAM) << client.GetLastError();
+    EXPECT_FALSE(client.IsConnected());
+  }
+  {
+    SCOPED_TRACE("server refused to report a setting");
+    ScriptedMysqlPeer::StatementScript script;
+    script["SHOW VARIABLES WHERE Variable_name = 'log_bin'"] =
+        ScriptedMysqlPeer::Rejection(kUnknownSystemVariable);
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream, {},
+                           ScriptedMysqlPeer::kDefaultDumpError, kMySQLVersion, script);
+    BinlogClient client;
+    EXPECT_EQ(client.Connect(PeerConfig(peer, 2)), MES_ERR_VALIDATION) << client.GetLastError();
+    EXPECT_FALSE(client.IsConnected());
+  }
+}
+
 TEST(BinlogClientLifecycle, StartStreamRejectsAQueueBudgetBelowOneMaxSizedEvent) {
   ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStallDuringStartStream);
   BinlogClient client;
@@ -911,6 +951,120 @@ TEST(BinlogClientLifecycle, RestartAfterAStreamErrorResumesFromTheDeliveredCheck
 
   client.Stop();
   client.Disconnect();
+}
+
+/**
+ * @brief A start in the drain window is refused until the terminal error is polled.
+ *
+ * A dump the server ended leaves the socket open so the stream can be restarted
+ * over it, but until the consumer has polled the error that ended it, the
+ * stream is over rather than running. Reporting MES_OK there would tell a
+ * supervisor a new stream had started, and its next poll would return the old
+ * stream's error instead.
+ */
+TEST(BinlogClientLifecycle, StartInTheDrainWindowReportsDisconnectedUntilTheErrorIsPolled) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError, MakeWireEvent(256));
+  BinlogClient client;
+  ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // Event, heartbeat and error sentinel all queued: the reader has ended.
+  ASSERT_TRUE(WaitForQueuedEvents(client, 3, seconds(3)));
+  ASSERT_TRUE(client.IsStreaming());
+  ASSERT_FALSE(client.IsConnected());
+  ASSERT_TRUE(BinlogClientTestAccess::TransportUsable(client))
+      << "the server-ended dump is expected to leave the session usable";
+
+  EXPECT_EQ(client.StartStream(), MES_ERR_DISCONNECTED) << client.GetLastError();
+  // The refusal leaves the queued results for the consumer to drain.
+  EXPECT_TRUE(client.IsStreaming());
+  EXPECT_EQ(BinlogClientTestAccess::QueuedEvents(client), 3u);
+
+  EXPECT_EQ(client.Poll().error, MES_OK);
+  EXPECT_TRUE(client.Poll().is_heartbeat);
+  EXPECT_EQ(client.Poll().error, MES_ERR_STREAM) << client.GetLastError();
+  EXPECT_FALSE(client.IsStreaming());
+
+  // Once the error is delivered the same session restarts, and the restarted
+  // stream reports the transport it is running on as connected.
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(peer.WaitForDumpRequests(2, seconds(3)));
+  EXPECT_TRUE(client.IsStreaming());
+
+  client.Stop();
+  client.Disconnect();
+}
+
+/** @brief Every log record whose text contains @p needle, captured from all threads. */
+class CapturedLog {
+ public:
+  explicit CapturedLog(std::string needle) : needle_(std::move(needle)) {
+    LogConfig::SetCallback(&CapturedLog::Record, MES_LOG_DEBUG, this);
+  }
+  ~CapturedLog() { LogConfig::SetCallback(nullptr, MES_LOG_ERROR, nullptr); }
+
+  CapturedLog(const CapturedLog&) = delete;
+  CapturedLog& operator=(const CapturedLog&) = delete;
+
+  std::vector<std::string> Records() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_;
+  }
+
+ private:
+  static void Record(mes_log_level_t, const char* message, void* userdata) {
+    auto* self = static_cast<CapturedLog*>(userdata);
+    const std::string text(message);
+    if (text.find(self->needle_) == std::string::npos) return;
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    self->records_.push_back(text);
+  }
+
+  const std::string needle_;
+  mutable std::mutex mutex_;
+  std::vector<std::string> records_;
+};
+
+/**
+ * @brief Poll() and PollBatch() report the same terminal error the same way.
+ *
+ * The error that ends a stream reaches the consumer through Poll(), or through
+ * PollBatch() behind events already buffered; operators watch for its
+ * binlog_error record, so which call happened to drain it must not decide
+ * whether the record is written or what it says.
+ */
+TEST(BinlogClientLifecycle, PollAndPollBatchLogTheTerminalErrorIdentically) {
+  const auto terminal_records = [](bool batch) {
+    CapturedLog log("poll_error");
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError, MakeWireEvent(256));
+    BinlogClient client;
+    EXPECT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+    EXPECT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+    EXPECT_TRUE(WaitForQueuedEvents(client, 3, seconds(3)));
+
+    mes_error_t terminal = MES_OK;
+    if (batch) {
+      // The error sits behind the event and the heartbeat, so it is found
+      // mid-batch rather than as the first result.
+      std::vector<PollResult> results;
+      EXPECT_EQ(client.PollBatch(8, &results), 3u);
+      if (!results.empty()) terminal = results.back().error;
+    } else {
+      for (int poll = 0; poll < 3; ++poll) terminal = client.Poll().error;
+    }
+    EXPECT_EQ(terminal, MES_ERR_STREAM);
+    EXPECT_FALSE(client.IsStreaming());
+    client.Stop();
+    client.Disconnect();
+    return log.Records();
+  };
+
+  const std::vector<std::string> polled = terminal_records(false);
+  const std::vector<std::string> batched = terminal_records(true);
+  ASSERT_EQ(polled.size(), 1u);
+  ASSERT_EQ(batched.size(), 1u);
+  EXPECT_NE(polled[0].find("binlog_error"), std::string::npos) << polled[0];
+  EXPECT_EQ(batched[0], polled[0]);
 }
 
 /**

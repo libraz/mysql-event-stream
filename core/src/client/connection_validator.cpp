@@ -70,6 +70,7 @@ detail::VariableValue QueryVariable(protocol::MysqlConnection* conn, const char*
   const mes_error_t query_error =
       protocol::ExecuteQuery(conn->Socket(), query, &qr, &err, conn->DeprecateEofNegotiated());
   result.error_message = std::move(err);
+  result.query_error = query_error;
   result.status = detail::ClassifyVariableQueryResult(query_error, qr);
   if (result.status == detail::VariableQueryStatus::kFound) {
     result.value = qr.rows[0].values[1];
@@ -102,7 +103,9 @@ ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* contex
   auto check_equal = [&](const char* var_name, const char* expected) {
     const VariableValue query = lookup(context, var_name);
     if (query.status != VariableQueryStatus::kFound) {
-      result.error = MES_ERR_VALIDATION;
+      // A failed round trip is not a verdict on the setting; keep its own code.
+      result.error =
+          query.status == VariableQueryStatus::kQueryError ? query.query_error : MES_ERR_VALIDATION;
       if (query.status == VariableQueryStatus::kNotFound) {
         std::snprintf(result.message, sizeof(result.message), "Variable %s not found", var_name);
       } else {
@@ -123,7 +126,8 @@ ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* contex
     const VariableValue query = lookup(context, var_name);
     if (query.status == VariableQueryStatus::kNotFound) return true;
     if (query.status != VariableQueryStatus::kFound) {
-      result.error = MES_ERR_VALIDATION;
+      result.error =
+          query.status == VariableQueryStatus::kQueryError ? query.query_error : MES_ERR_VALIDATION;
       std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s", var_name,
                     query.error_message.empty() ? "unknown error" : query.error_message.c_str());
       return false;

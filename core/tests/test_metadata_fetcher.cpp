@@ -3,10 +3,20 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 #include "client/column_name_source.h"
 #include "client/metadata_fetcher.h"
@@ -130,6 +140,147 @@ TEST(MetadataFetcherCacheTest, UnresolvableTablesAreChargedForTheirIdentifiers) 
 
   fetcher.InvalidateCache("database", "table");
   EXPECT_EQ(fetcher.RetainedBytes(), 0u);
+}
+
+#ifndef _WIN32
+
+/**
+ * @brief Loopback MySQL server that accepts any login and answers every
+ *        COM_QUERY with a fixed one-row SHOW COLUMNS result, counting queries.
+ */
+class ShowColumnsPeer {
+ public:
+  ShowColumnsPeer() {
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    EXPECT_EQ(bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(listen(listener_, 1), 0);
+    socklen_t length = sizeof(address);
+    EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    port_ = ntohs(address.sin_port);
+    thread_ = std::thread([this] { Serve(); });
+  }
+
+  ~ShowColumnsPeer() {
+    if (thread_.joinable()) thread_.join();
+    if (listener_ >= 0) close(listener_);
+  }
+
+  ShowColumnsPeer(const ShowColumnsPeer&) = delete;
+  ShowColumnsPeer& operator=(const ShowColumnsPeer&) = delete;
+
+  uint16_t port() const { return port_; }
+  int queries() const { return queries_.load(std::memory_order_acquire); }
+
+ private:
+  static constexpr uint8_t kComQuery = 0x03;
+
+  void Serve() {
+    const int peer = accept(listener_, nullptr, nullptr);
+    if (peer < 0) return;
+    std::vector<uint8_t> command;
+    if (SendPacket(peer, 0, Handshake()) && ReadPacket(peer, &command) &&
+        SendPacket(peer, 2, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00})) {
+      while (ReadPacket(peer, &command) && !command.empty() && command[0] == kComQuery) {
+        queries_.fetch_add(1, std::memory_order_acq_rel);
+        SendOneColumnRow(peer);
+      }
+    }
+    close(peer);
+  }
+
+  // One row, (Field, Type) = ("id", "int"): a live table of one column.
+  static void SendOneColumnRow(int peer) {
+    uint8_t sequence = 1;
+    if (!SendPacket(peer, sequence++, {2})) return;
+    for (const std::string column : {"Field", "Type"}) {
+      std::vector<uint8_t> definition;
+      for (const std::string& part :
+           {std::string("def"), std::string(), std::string(), std::string(), column}) {
+        definition.push_back(static_cast<uint8_t>(part.size()));
+        definition.insert(definition.end(), part.begin(), part.end());
+      }
+      if (!SendPacket(peer, sequence++, definition)) return;
+    }
+    if (!SendPacket(peer, sequence++, {0xFE, 0x00, 0x00, 0x02, 0x00})) return;
+    if (!SendPacket(peer, sequence++, {2, 'i', 'd', 3, 'i', 'n', 't'})) return;
+    SendPacket(peer, sequence, {0xFE, 0x00, 0x00, 0x02, 0x00});
+  }
+
+  // Protocol41 + SecureConnection + PluginAuth, mysql_native_password.
+  static std::vector<uint8_t> Handshake() {
+    std::vector<uint8_t> payload{10};
+    const std::string version = "8.4.0";
+    payload.insert(payload.end(), version.begin(), version.end());
+    payload.push_back(0);
+    payload.insert(payload.end(), 4, 1);
+    for (uint8_t i = 0; i < 8; ++i) payload.push_back(static_cast<uint8_t>('a' + i));
+    payload.insert(payload.end(), {0, 0x00, 0x82, 45, 0x02, 0x00, 0x08, 0x00, 21});
+    payload.insert(payload.end(), 10, 0);
+    for (uint8_t i = 0; i < 12; ++i) payload.push_back(static_cast<uint8_t>('A' + i));
+    payload.push_back(0);
+    const std::string plugin = "mysql_native_password";
+    payload.insert(payload.end(), plugin.begin(), plugin.end());
+    payload.push_back(0);
+    return payload;
+  }
+
+  static bool SendPacket(int peer, uint8_t sequence, const std::vector<uint8_t>& payload) {
+    const size_t size = payload.size();
+    std::vector<uint8_t> packet = {static_cast<uint8_t>(size), static_cast<uint8_t>(size >> 8),
+                                   static_cast<uint8_t>(size >> 16), sequence};
+    packet.insert(packet.end(), payload.begin(), payload.end());
+    return send(peer, packet.data(), packet.size(), 0) == static_cast<ssize_t>(packet.size());
+  }
+
+  static bool ReadPacket(int peer, std::vector<uint8_t>* payload) {
+    uint8_t header[4]{};
+    if (recv(peer, header, sizeof(header), MSG_WAITALL) != static_cast<ssize_t>(sizeof(header))) {
+      return false;
+    }
+    const size_t size = static_cast<size_t>(header[0]) | (static_cast<size_t>(header[1]) << 8) |
+                        (static_cast<size_t>(header[2]) << 16);
+    payload->assign(size, 0);
+    return size == 0 ||
+           recv(peer, payload->data(), size, MSG_WAITALL) == static_cast<ssize_t>(size);
+  }
+
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::atomic<int> queries_{0};
+  std::thread thread_;
+};
+
+#endif  // _WIN32
+
+TEST(MetadataFetcherQueryTest, AColumnCountMismatchIsQueriedOncePerTableMapCount) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A backlog replayed across an ALTER TABLE carries TABLE_MAPs whose column
+  // count the live table no longer has, one per row event. The answer cannot
+  // change until the schema does, so asking again per event only turns a
+  // cache hit into a network round trip.
+  ShowColumnsPeer peer;
+  {
+    MetadataFetcher fetcher;
+    ASSERT_EQ(fetcher.Connect("127.0.0.1", peer.port(), "user", "", 2, 2), MES_OK);
+    for (int event = 0; event < 3; ++event) {
+      EXPECT_TRUE(fetcher.FetchColumnInfo("db", "t", 2).empty());
+    }
+    EXPECT_EQ(peer.queries(), 1);
+
+    // Another count is another question, and invalidation asks again.
+    EXPECT_EQ(fetcher.FetchColumnInfo("db", "t", 1).size(), 1u);
+    EXPECT_EQ(peer.queries(), 2);
+    fetcher.InvalidateCache("db", "t");
+    EXPECT_TRUE(fetcher.FetchColumnInfo("db", "t", 2).empty());
+    EXPECT_EQ(peer.queries(), 3);
+  }
+#endif
 }
 
 }  // namespace

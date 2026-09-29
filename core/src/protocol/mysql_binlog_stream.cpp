@@ -3,6 +3,8 @@
 
 #include "protocol/mysql_binlog_stream.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -28,9 +30,25 @@ constexpr uint8_t kComBinlogDumpGtid = 0x1E;
 constexpr uint16_t kBinlogThroughGtid = 0x04;
 
 /// ER_SOURCE_FATAL_ERROR_READING_BINLOG: the server gave up on the dump.
-/// The code is shared between a purged GTID interval and several recoverable
-/// file/position conditions, so its meaning depends on how the dump started.
+/// The code covers a purged GTID interval and many unrelated causes (stale
+/// offset, missing or corrupt log, oversized event), so only the start mode
+/// together with the message text identifies a purge.
 constexpr uint16_t kErrFatalErrorReadingBinlog = 1236;
+
+/**
+ * @brief Whether a 1236 message reports that the requested GTIDs are gone.
+ *
+ * MySQL says the source "purged required binary logs" (8.4) or "has purged
+ * binary logs containing GTIDs" (8.0); MariaDB says the GTID "is not in the
+ * master's binlog" or that required files "have been purged".
+ */
+bool ReportsPurgedGtids(const std::string& message) {
+  std::string lower(message);
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lower.find("purged") != std::string::npos ||
+         lower.find("not in the master's binlog") != std::string::npos;
+}
 
 }  // namespace
 
@@ -121,12 +139,9 @@ mes_error_t BinlogStream::FetchEvent(SocketHandle* sock, std::vector<uint8_t>* b
         .Field("error_code", static_cast<uint64_t>(err_code))
         .Field("message", msg)
         .Error();
-    // On a GTID dump this code means the requested interval has been purged,
-    // which reconnecting cannot recover. The same code on a file/position dump
-    // reports a stale offset or a missing log file instead -- recoverable by
-    // restarting from a valid offset -- so only the GTID case may claim the
-    // unrecoverable classification.
-    if (err_code == kErrFatalErrorReadingBinlog && position_from_gtid_) {
+    // A purged interval is unrecoverable by reconnecting; every other cause
+    // of this code is not, so the message has to confirm the purge.
+    if (err_code == kErrFatalErrorReadingBinlog && position_from_gtid_ && ReportsPurgedGtids(msg)) {
       return MES_ERR_GTID_PURGED;
     }
     return MES_ERR_STREAM;

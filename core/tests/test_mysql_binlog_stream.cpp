@@ -215,15 +215,15 @@ std::vector<uint8_t> BuildErrPacket(uint16_t error_code, const std::string& mess
 #endif  // _WIN32
 
 /**
- * @brief The unrecoverable classification follows the start mode, not the
- *        command byte or the server's error code alone.
+ * @brief The unrecoverable classification needs a GTID start and a purge message.
  *
- * The server reports a purged GTID interval and a stale file/offset under one
- * error code, and MariaDB starts a GTID dump with the same command a
- * file/position dump uses. Only the start mode separates them, so all three
- * inputs that reach the mapping are enumerated rather than sampled.
+ * The server reports a purged GTID interval, a stale file/offset and several
+ * other dump failures under one error code, and MariaDB starts a GTID dump with
+ * the same command a file/position dump uses. Only the start mode together with
+ * the message separates a purge from the rest, so every combination of command,
+ * start mode, error code and message is enumerated rather than sampled.
  */
-TEST(BinlogStreamServerErrorTest, PurgedPositionIsClaimedOnlyForAGtidStart) {
+TEST(BinlogStreamServerErrorTest, PurgedPositionIsClaimedOnlyForAGtidStartThatReportsAPurge) {
 #ifdef _WIN32
   GTEST_SKIP() << "local socket test is POSIX-only";
 #else
@@ -232,44 +232,67 @@ TEST(BinlogStreamServerErrorTest, PurgedPositionIsClaimedOnlyForAGtidStart) {
   constexpr bool kGtidCommand[] = {true, false};
   constexpr bool kPositionFromGtid[] = {true, false};
   constexpr uint16_t kServerErrors[] = {kFatalErrorReadingBinlog, kServerShutdown};
+  struct Message {
+    const char* text;
+    bool reports_purge;
+  };
+  const Message kMessages[] = {
+      {"Cannot replicate because the source purged required binary logs. Replicate the missing "
+       "transactions from elsewhere, or provision a new replica from backup.",
+       true},
+      {"The replica is connecting using CHANGE REPLICATION SOURCE TO SOURCE_AUTO_POSITION = 1, "
+       "but the source has purged binary logs containing GTIDs that the replica requires.",
+       true},
+      {"Error: connecting slave requested to start from GTID 0-1-100, which is not in the "
+       "master's binlog",
+       true},
+      {"Could not find GTID state requested by slave in any binlog files. Probably the slave "
+       "state is too old and required binlog files have been purged.",
+       true},
+      {"log event entry exceeded max_allowed_packet; Increase max_allowed_packet on source", false},
+      {"binlog truncated in the middle of event; consider out of disk space on source", false},
+  };
 
   for (const bool gtid_command : kGtidCommand) {
     for (const bool position_from_gtid : kPositionFromGtid) {
       for (const uint16_t server_error : kServerErrors) {
-        SCOPED_TRACE(std::string("command=") + (gtid_command ? "dump_gtid" : "dump") +
-                     " position_from_gtid=" + (position_from_gtid ? "true" : "false") +
-                     " server_error=" + std::to_string(server_error));
+        for (const Message& message : kMessages) {
+          SCOPED_TRACE(std::string("command=") + (gtid_command ? "dump_gtid" : "dump") +
+                       " position_from_gtid=" + (position_from_gtid ? "true" : "false") +
+                       " server_error=" + std::to_string(server_error) +
+                       " message=" + message.text);
 
-        const std::string server_message = "the source gave up on the dump";
-        DumpRequestPeer peer(BuildErrPacket(server_error, server_message));
+          DumpRequestPeer peer(BuildErrPacket(server_error, message.text));
 
-        SocketHandle socket;
-        ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+          SocketHandle socket;
+          ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
 
-        BinlogStreamConfig config;
-        config.position_from_gtid = position_from_gtid;
-        if (gtid_command) config.gtid_encoded.assign(8, 0);
-        BinlogStream stream;
-        ASSERT_EQ(gtid_command ? stream.Start(&socket, config)
-                               : stream.StartComBinlogDump(&socket, config),
-                  MES_OK);
+          BinlogStreamConfig config;
+          config.position_from_gtid = position_from_gtid;
+          if (gtid_command) config.gtid_encoded.assign(8, 0);
+          BinlogStream stream;
+          ASSERT_EQ(gtid_command ? stream.Start(&socket, config)
+                                 : stream.StartComBinlogDump(&socket, config),
+                    MES_OK);
 
-        std::vector<uint8_t> buffer;
-        BinlogEventPacket result;
-        const mes_error_t rc = stream.FetchEvent(&socket, &buffer, &result, 1024);
+          std::vector<uint8_t> buffer;
+          BinlogEventPacket result;
+          const mes_error_t rc = stream.FetchEvent(&socket, &buffer, &result, 1024);
 
-        // Both halves of the exchange have to have happened, otherwise the
-        // returned code would describe a transport failure instead of the
-        // mapping under test.
-        const std::vector<uint8_t> request = peer.Request();
-        ASSERT_FALSE(request.empty()) << "no start command reached the peer";
-        EXPECT_EQ(request[0], gtid_command ? 0x1Eu : 0x12u);
-        ASSERT_EQ(result.server_error_code, server_error) << "the ERR packet was not parsed";
-        EXPECT_EQ(result.error_message,
-                  "MySQL server error " + std::to_string(server_error) + ": " + server_message);
+          // Both halves of the exchange have to have happened, otherwise the
+          // returned code would describe a transport failure instead of the
+          // mapping under test.
+          const std::vector<uint8_t> request = peer.Request();
+          ASSERT_FALSE(request.empty()) << "no start command reached the peer";
+          EXPECT_EQ(request[0], gtid_command ? 0x1Eu : 0x12u);
+          ASSERT_EQ(result.server_error_code, server_error) << "the ERR packet was not parsed";
+          EXPECT_EQ(result.error_message,
+                    "MySQL server error " + std::to_string(server_error) + ": " + message.text);
 
-        const bool purged = position_from_gtid && server_error == kFatalErrorReadingBinlog;
-        EXPECT_EQ(rc, purged ? MES_ERR_GTID_PURGED : MES_ERR_STREAM);
+          const bool purged = position_from_gtid && server_error == kFatalErrorReadingBinlog &&
+                              message.reports_purge;
+          EXPECT_EQ(rc, purged ? MES_ERR_GTID_PURGED : MES_ERR_STREAM);
+        }
       }
     }
   }

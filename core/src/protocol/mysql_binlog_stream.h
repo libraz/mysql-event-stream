@@ -125,10 +125,10 @@ class BinlogStream {
    * defined (callers should treat it as scratch in that case).
    *
    * MES_ERR_GTID_PURGED is returned only for a server error whose meaning is
-   * a purged GTID interval, which requires the dump to have been started from
-   * a GTID set (BinlogStreamConfig::position_from_gtid). On a file/position
-   * dump the same server error code carries an unrelated, recoverable
-   * condition, so it is reported as MES_ERR_STREAM.
+   * a purged GTID interval: error 1236 on a dump started from a GTID set
+   * (BinlogStreamConfig::position_from_gtid) whose message reports the purge.
+   * Any other 1236 -- a file/position dump, or a GTID dump failing for another
+   * reason -- is reported as MES_ERR_STREAM.
    *
    * @param sock    Socket handle used in Start()
    * @param buffer  Caller-owned scratch buffer reused across calls

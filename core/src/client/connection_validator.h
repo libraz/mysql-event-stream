@@ -42,6 +42,8 @@ struct VariableValue {
   VariableQueryStatus status = VariableQueryStatus::kQueryError;
   std::string value;
   std::string error_message;
+  /** Why the lookup failed when status is kQueryError; validation returns it unchanged. */
+  mes_error_t query_error = MES_ERR_INVALID_ARG;
 };
 
 using VariableLookup = VariableValue (*)(void* context, const char* variable_name);
@@ -76,8 +78,9 @@ class ConnectionValidator {
    * @brief Validate server configuration
    * @param conn Active MySQL connection
    * @param flavor Server flavor, which selects the flavor-specific checks
-   * @return ValidationResult carrying MES_OK, or MES_ERR_VALIDATION and the
-   *         message naming the setting that failed
+   * @return ValidationResult carrying MES_OK; MES_ERR_VALIDATION and the
+   *         message naming the setting that failed; or, when a query itself
+   *         failed, the code ExecuteQuery() returned (e.g. MES_ERR_STREAM)
    */
   static ValidationResult Validate(protocol::MysqlConnection* conn,
                                    ServerFlavor flavor = ServerFlavor::kMySQL);

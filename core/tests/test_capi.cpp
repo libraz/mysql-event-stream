@@ -289,6 +289,53 @@ TEST(CApi, InsertEvent) {
   mes_destroy(engine);
 }
 
+/**
+ * @brief Each call that invalidates a returned event also releases it.
+ *
+ * A drain loop always ends on MES_ERR_NO_EVENT, so an engine that only stopped
+ * exposing the last row there would keep its payload -- up to a whole decoded
+ * BLOB/JSON value -- resident until the next row arrives. The returned pointer
+ * addresses a view the engine owns, so reading that view after each boundary
+ * shows whether the row behind it was let go.
+ */
+TEST(CApi, EveryInvalidatingCallReleasesTheDeliveredEvent) {
+  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+                             BuildTableMapBody(1, "testdb", "users"));
+  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+                             BuildWriteRowsBody(1, 42));
+  std::vector<uint8_t> stream;
+  stream.insert(stream.end(), tm_event.begin(), tm_event.end());
+  stream.insert(stream.end(), wr_event.begin(), wr_event.end());
+
+  enum class Boundary { kNoEvent, kFeed, kReset };
+  for (const Boundary boundary : {Boundary::kNoEvent, Boundary::kFeed, Boundary::kReset}) {
+    SCOPED_TRACE(static_cast<int>(boundary));
+    auto* engine = mes_create();
+    size_t consumed = 0;
+    ASSERT_EQ(mes_feed(engine, stream.data(), stream.size(), &consumed), MES_OK);
+    const mes_event_t* event = nullptr;
+    ASSERT_EQ(mes_next_event(engine, &event), MES_OK);
+    ASSERT_EQ(event->after_count, 1u);
+    const mes_event_t* view = event;
+
+    switch (boundary) {
+      case Boundary::kNoEvent:
+        EXPECT_EQ(mes_next_event(engine, &event), MES_ERR_NO_EVENT);
+        break;
+      case Boundary::kFeed:
+        EXPECT_EQ(mes_feed(engine, nullptr, 0, &consumed), MES_OK);
+        break;
+      case Boundary::kReset:
+        EXPECT_EQ(mes_reset(engine), MES_OK);
+        break;
+    }
+    EXPECT_EQ(view->after_count, 0u);
+    EXPECT_EQ(view->after_columns, nullptr);
+    EXPECT_EQ(view->database, nullptr);
+    mes_destroy(engine);
+  }
+}
+
 // mes_event_t.source_sql is a NUL-terminated pointer valid until the next
 // mes_feed/mes_next_event/mes_reset, whether or not the row was annotated.
 TEST(CApi, SourceSqlIsNulTerminatedForAnnotatedAndPlainEvents) {

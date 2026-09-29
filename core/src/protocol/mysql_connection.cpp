@@ -50,6 +50,11 @@ constexpr uint8_t kComQuit = 0x01;
 static const std::string kPluginNativePassword = "mysql_native_password";
 static const std::string kPluginCachingSha2Password = "caching_sha2_password";
 
+/** @brief Whether this client can compute a response for @p plugin. */
+static bool IsSupportedAuthPlugin(const std::string& plugin) {
+  return plugin == kPluginNativePassword || plugin == kPluginCachingSha2Password;
+}
+
 MysqlConnection::MysqlConnection() = default;
 
 MysqlConnection::~MysqlConnection() { Disconnect(); }
@@ -106,10 +111,16 @@ mes_error_t MysqlConnection::Connect(const std::string& host, uint16_t port,
     return rc;
   }
 
-  // Step 4: Send handshake response (with optional TLS upgrade)
+  // Step 4: Send handshake response (with optional TLS upgrade). The greeting
+  // names the server's default plugin, not the account's; an unsupported
+  // default is answered with caching_sha2_password so the server can still
+  // accept it or switch the account to the plugin it actually requires.
   auth_switch_count_ = 0;
-  rc = SendHandshakeResponse(user, password, server_info_.auth_plugin_name, server_info_.auth_data,
-                             ssl_mode, ssl_ca, ssl_cert, ssl_key, host);
+  const std::string& initial_plugin = IsSupportedAuthPlugin(server_info_.auth_plugin_name)
+                                          ? server_info_.auth_plugin_name
+                                          : kPluginCachingSha2Password;
+  rc = SendHandshakeResponse(user, password, initial_plugin, server_info_.auth_data, ssl_mode,
+                             ssl_ca, ssl_cert, ssl_key, host);
   if (rc != MES_OK) {
     socket_ = SocketHandle();
     return rc;
@@ -181,11 +192,11 @@ namespace detail {
 
 mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerHandshake* out,
                                         std::string* error) {
-  if (out == nullptr) return MES_ERR_AUTH;
+  if (out == nullptr) return MES_ERR_CONNECT;
 
   if (len < 4) {
     if (error) *error = "Server handshake packet too short";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
 
   size_t pos = 0;
@@ -194,14 +205,14 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   out->protocol_version = data[pos++];
   if (out->protocol_version != 10) {
     if (error) *error = "Unsupported protocol version: " + std::to_string(out->protocol_version);
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
 
   // Server version: NUL-terminated string
   const uint8_t* nul = static_cast<const uint8_t*>(std::memchr(data + pos, 0, len - pos));
   if (nul == nullptr) {
     if (error) *error = "Invalid handshake: missing server version terminator";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   out->server_version.assign(reinterpret_cast<const char*>(data + pos),
                              reinterpret_cast<const char*>(nul));
@@ -211,14 +222,14 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   uint64_t conn_id = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 4, &conn_id)) {
     if (error) *error = "Invalid handshake: truncated connection ID";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   out->connection_id = static_cast<uint32_t>(conn_id);
 
   // auth_plugin_data_part_1 (8 bytes)
   if (pos + 8 > len) {
     if (error) *error = "Invalid handshake: truncated auth data part 1";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   out->auth_data.assign(data + pos, data + pos + 8);
   pos += 8;
@@ -226,7 +237,7 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   // Filler (1 byte, 0x00)
   if (pos + 1 > len) {
     if (error) *error = "Invalid handshake: truncated filler";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   pos += 1;
 
@@ -234,14 +245,14 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   uint64_t cap_lower_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_lower_raw)) {
     if (error) *error = "Invalid handshake: truncated capabilities lower";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   uint32_t cap_lower = static_cast<uint32_t>(cap_lower_raw);
 
   // Charset (1 byte)
   if (pos + 1 > len) {
     if (error) *error = "Invalid handshake: truncated charset";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   out->charset = data[pos++];
 
@@ -249,7 +260,7 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   uint64_t status_flags_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &status_flags_raw)) {
     if (error) *error = "Invalid handshake: truncated status flags";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   out->status_flags = static_cast<uint16_t>(status_flags_raw);
 
@@ -257,7 +268,7 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   uint64_t cap_upper_raw = 0;
   if (!ReadFixedIntChecked(data, len, &pos, 2, &cap_upper_raw)) {
     if (error) *error = "Invalid handshake: truncated capabilities upper";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   uint32_t cap_upper = static_cast<uint32_t>(cap_upper_raw);
 
@@ -266,14 +277,14 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
   // auth_plugin_data_length (1 byte)
   if (pos + 1 > len) {
     if (error) *error = "Invalid handshake: truncated auth data length";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   uint8_t auth_plugin_data_len = data[pos++];
 
   // Reserved (10 bytes, zeros)
   if (pos + 10 > len) {
     if (error) *error = "Invalid handshake: truncated reserved bytes";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   pos += 10;
 
@@ -288,7 +299,7 @@ mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerH
 
     if (pos + part2_read_len > len) {
       if (error) *error = "Invalid handshake: truncated auth data part 2";
-      return MES_ERR_AUTH;
+      return MES_ERR_CONNECT;
     }
 
     // MySQL spec (Protocol::Handshake V10):
@@ -342,7 +353,7 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
   // connection outright (too many connections, host blocked). It is a
   // different packet shape and carries the real diagnostic.
   if (packet.size() >= 4 && packet[0] == kPacketErr) {
-    return ProcessOkOrError(packet);
+    return ProcessOkOrError(packet, MES_ERR_CONNECT);
   }
 
   const mes_error_t rc = detail::ParseServerHandshakePayload(packet.data(), packet.size(),
@@ -431,11 +442,13 @@ mes_error_t MysqlConnection::SendHandshakeResponse(
     }
   }
 
-  // Compute auth response
+  // Compute auth response. Nothing has been sent yet, so a greeting the client
+  // cannot answer (e.g. too short a salt) is a connection failure, not a
+  // rejection of the credentials.
   std::vector<uint8_t> auth_response;
   mes_error_t rc = ComputeAuthResponse(auth_plugin, password, auth_data, &auth_response);
   if (rc != MES_OK) {
-    return rc;
+    return MES_ERR_CONNECT;
   }
 
   // Build Handshake Response 41 packet
@@ -479,7 +492,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
   mes_error_t rc = ReadPacket(&socket_, &packet, &sequence_id_);
   if (rc != MES_OK) {
     last_error_ = "Failed to read auth response";
-    return MES_ERR_AUTH;
+    return MES_ERR_CONNECT;
   }
   ++sequence_id_;
 
@@ -493,7 +506,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
       return MES_OK;
 
     case kPacketErr:
-      return ProcessOkOrError(packet);
+      return ProcessOkOrError(packet, MES_ERR_AUTH);
 
     case kPacketAuthSwitchRequest:
       return HandleAuthSwitchRequest(packet, password);
@@ -512,10 +525,10 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
         rc = ReadPacket(&socket_, &ok_packet, &sequence_id_);
         if (rc != MES_OK) {
           last_error_ = "Failed to read OK after fast auth success";
-          return MES_ERR_AUTH;
+          return MES_ERR_CONNECT;
         }
         ++sequence_id_;
-        return ProcessOkOrError(ok_packet);
+        return ProcessOkOrError(ok_packet, MES_ERR_AUTH);
       }
 
       if (status == kCachingSha2FullAuthRequired) {
@@ -537,7 +550,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           SecureWipe(cleartext_payload.data(), cleartext_payload.size());
           if (rc != MES_OK) {
             last_error_ = "Failed to send cleartext password";
-            return MES_ERR_AUTH;
+            return rc;
           }
         } else {
           // The key returned on this plaintext channel is unauthenticated: an
@@ -561,14 +574,14 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           rc = SendPacket(rsa_request);
           if (rc != MES_OK) {
             last_error_ = "Failed to send RSA public key request";
-            return MES_ERR_AUTH;
+            return rc;
           }
 
           std::vector<uint8_t> key_packet;
           rc = ReadPacket(&socket_, &key_packet, &sequence_id_);
           if (rc != MES_OK) {
             last_error_ = "Failed to read RSA public key response";
-            return MES_ERR_AUTH;
+            return MES_ERR_CONNECT;
           }
           ++sequence_id_;
 
@@ -648,7 +661,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
             rc = SendPacket(encrypted);
             if (rc != MES_OK) {
               last_error_ = "Failed to send RSA-encrypted password";
-              encrypt_rc = MES_ERR_AUTH;
+              encrypt_rc = rc;
               break;
             }
           } while (false);
@@ -667,10 +680,10 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
         rc = ReadPacket(&socket_, &final_packet, &sequence_id_);
         if (rc != MES_OK) {
           last_error_ = "Failed to read final auth response";
-          return MES_ERR_AUTH;
+          return MES_ERR_CONNECT;
         }
         ++sequence_id_;
-        return ProcessOkOrError(final_packet);
+        return ProcessOkOrError(final_packet, MES_ERR_AUTH);
       }
 
       last_error_ = "Unknown AuthMoreData status: " + std::to_string(status);
@@ -749,14 +762,10 @@ mes_error_t MysqlConnection::HandleAuthSwitchRequest(const std::vector<uint8_t>&
   return HandleAuthResponse(password);
 }
 
-mes_error_t MysqlConnection::ProcessOkOrError(const std::vector<uint8_t>& packet) {
-  // Note: this helper is only used on the authentication / handshake
-  // path. All call sites are inside the auth pipeline, so mapping an ERR
-  // packet to MES_ERR_AUTH is correct. If this helper is ever repurposed
-  // for post-auth OK/ERR packets (e.g. a COM_QUERY response), introduce an
-  // on_error parameter rather than returning MES_ERR_AUTH for non-auth
-  // failures -- ExecuteQuery and similar paths have their own error
-  // handling and do not reuse this function.
+mes_error_t MysqlConnection::ProcessOkOrError(const std::vector<uint8_t>& packet,
+                                              mes_error_t rejection) {
+  // Only the handshake/auth path uses this helper; ExecuteQuery and similar
+  // post-auth paths have their own error handling.
   if (packet.empty()) {
     last_error_ = "Empty packet in ProcessOkOrError";
     return MES_ERR_AUTH;
@@ -775,7 +784,7 @@ mes_error_t MysqlConnection::ProcessOkOrError(const std::vector<uint8_t>& packet
     } else {
       last_error_ = "MySQL error " + std::to_string(error_code) + ": " + msg;
     }
-    return MES_ERR_AUTH;
+    return rejection;
   }
 
   last_error_ = "Unexpected packet marker: " + std::to_string(packet[0]);
@@ -789,7 +798,7 @@ mes_error_t MysqlConnection::ComputeAuthResponse(const std::string& plugin,
   // Validate the plugin before looking at the password. An empty password must
   // not become a way past the allow-list: a server that names an unimplemented
   // plugin has to be rejected regardless of what the credential looks like.
-  if (plugin != kPluginNativePassword && plugin != kPluginCachingSha2Password) {
+  if (!IsSupportedAuthPlugin(plugin)) {
     last_error_ = "Unsupported auth plugin: " + plugin;
     return MES_ERR_AUTH;
   }
@@ -825,7 +834,7 @@ mes_error_t MysqlConnection::SendPacket(const std::vector<uint8_t>& payload) {
   mes_error_t rc = socket_.WriteAll(pkt.Data(), pkt.Size());
   if (rc != MES_OK) {
     last_error_ = "Failed to send packet";
-    return MES_ERR_STREAM;
+    return MES_ERR_CONNECT;
   }
 
   return MES_OK;

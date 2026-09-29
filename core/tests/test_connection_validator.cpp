@@ -69,6 +69,59 @@ TEST(ConnectionValidatorTest, AppliesMariaDbFlavorGates) {
   EXPECT_NE(std::string(result.message).find("log_bin_compress"), std::string::npos);
 }
 
+/** @brief Passing variables, except that one lookup fails with a chosen status and code. */
+struct FailingVariables {
+  FakeVariables passing;
+  std::string failing_name;
+  VariableQueryStatus status = VariableQueryStatus::kQueryError;
+  mes_error_t query_error = MES_OK;
+
+  static VariableValue Lookup(void* context, const char* variable_name) {
+    auto* self = static_cast<FailingVariables*>(context);
+    if (self->failing_name != variable_name) {
+      return FakeVariables::Lookup(&self->passing, variable_name);
+    }
+    VariableValue value;
+    value.status = self->status;
+    value.query_error = self->query_error;
+    value.error_message = "scripted failure";
+    return value;
+  }
+};
+
+TEST(ConnectionValidatorTest, AFailedQueryKeepsItsOwnCodeOnBothCheckKinds) {
+  // log_bin runs through the must-be check, binlog_transaction_compression
+  // through the must-not-be one; both have to forward the query's code.
+  for (const char* name : {"log_bin", "binlog_transaction_compression"}) {
+    for (const mes_error_t code : {MES_ERR_STREAM, MES_ERR_QUEUE_FULL, MES_ERR_VALIDATION}) {
+      SCOPED_TRACE(std::string(name) + " / " + std::to_string(code));
+      FailingVariables variables;
+      variables.failing_name = name;
+      variables.query_error = code;
+      const ValidationResult result =
+          ValidateServerConfiguration(FailingVariables::Lookup, &variables, ServerFlavor::kMySQL);
+      EXPECT_EQ(result.error, code);
+      EXPECT_NE(std::string(result.message).find(name), std::string::npos);
+    }
+  }
+}
+
+TEST(ConnectionValidatorTest, AnAnswerThatCannotBeReadIsStillAValidationFailure) {
+  // A malformed row came from a server that did answer, so it stays a verdict
+  // on the configuration whatever code the query carried.
+  for (const char* name : {"log_bin", "binlog_transaction_compression"}) {
+    SCOPED_TRACE(name);
+    FailingVariables variables;
+    variables.failing_name = name;
+    variables.status = VariableQueryStatus::kMalformed;
+    variables.query_error = MES_OK;
+    EXPECT_EQ(
+        ValidateServerConfiguration(FailingVariables::Lookup, &variables, ServerFlavor::kMySQL)
+            .error,
+        MES_ERR_VALIDATION);
+  }
+}
+
 TEST(ConnectionValidatorTest, UnknownOptionalVariableIsDistinctFromQueryFailure) {
   protocol::QueryResult empty;
   EXPECT_EQ(ClassifyVariableQueryResult(MES_OK, empty), VariableQueryStatus::kNotFound);

@@ -4,8 +4,10 @@
 #include <gtest/gtest.h>
 #include <zlib.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "binary_util.h"
@@ -1209,6 +1211,134 @@ TEST(DecodeWriteRowsTest, NullColumn) {
   EXPECT_TRUE(rows[0].columns[1].is_null);
 }
 
+// --- NULL bitmap edge cases ---
+
+/** @brief @p columns INT columns, the shape every NULL-bitmap case below decodes. */
+TableMetadata IntColumns(size_t columns) {
+  TableMetadata metadata;
+  metadata.table_id = 10;
+  metadata.columns.resize(columns);
+  for (auto& column : metadata.columns) column.type = ColumnType::kLong;
+  return metadata;
+}
+
+/** @brief Value a non-NULL column @p column of row image @p image carries. */
+int32_t CellValue(size_t image, size_t column) {
+  return static_cast<int32_t>(image * 100 + column + 1);
+}
+
+/** @brief Write a bitmap of @p columns bits with the bits in @p set on. */
+void WriteBitmap(BinaryWriter* w, size_t columns, const std::vector<size_t>& set) {
+  std::vector<uint8_t> bytes((columns + 7) / 8, 0);
+  for (size_t bit : set) bytes[bit / 8] |= static_cast<uint8_t>(1u << (bit % 8));
+  for (uint8_t byte : bytes) w->WriteU8(byte);
+}
+
+/** @brief Every column index below @p columns. */
+std::vector<size_t> AllColumns(size_t columns) {
+  std::vector<size_t> all(columns);
+  for (size_t i = 0; i < columns; ++i) all[i] = i;
+  return all;
+}
+
+/** @brief One row image: its NULL bitmap, then a value for every non-NULL column. */
+void WriteRowImage(BinaryWriter* w, size_t columns, size_t image,
+                   const std::vector<size_t>& nulls) {
+  WriteBitmap(w, columns, nulls);
+  for (size_t i = 0; i < columns; ++i) {
+    if (std::find(nulls.begin(), nulls.end(), i) == nulls.end()) {
+      w->WriteU32Le(static_cast<uint32_t>(CellValue(image, i)));
+    }
+  }
+}
+
+/** @brief Assert @p row decoded image @p image with exactly @p nulls NULL. */
+void ExpectRowImage(const RowData& row, size_t columns, size_t image,
+                    const std::vector<size_t>& nulls) {
+  ASSERT_EQ(row.columns.size(), columns);
+  for (size_t i = 0; i < columns; ++i) {
+    SCOPED_TRACE("column " + std::to_string(i));
+    const bool is_null = std::find(nulls.begin(), nulls.end(), i) != nulls.end();
+    EXPECT_EQ(row.columns[i].is_null, is_null);
+    if (!is_null) EXPECT_EQ(row.columns[i].int_val, CellValue(image, i));
+  }
+}
+
+/**
+ * @brief NULL bits are read per row, across byte boundaries, and never shift values.
+ *
+ * The bitmap grows a byte at the ninth column, and each row image of an event
+ * carries its own. A decoder reading the wrong byte, reusing one row's bitmap
+ * for the next, or consuming a value for a NULL column misplaces every value
+ * after the mistake.
+ */
+TEST(DecodeWriteRowsTest, NullBitmapsAcrossByteBoundariesAndRows) {
+  struct Case {
+    const char* description;
+    size_t columns;
+    std::vector<std::vector<size_t>> rows;  // NULL columns per row image
+  };
+  const Case cases[] = {
+      {"8 columns, last NULL", 8, {{7}}},
+      {"9 columns, NULL only in the second byte", 9, {{8}}},
+      {"9 columns, NULL on both sides of the boundary", 9, {{7, 8}}},
+      {"16 columns, first and last of each byte", 16, {{0, 7, 8, 15}}},
+      {"16 columns, every column NULL", 16, {AllColumns(16)}},
+      {"two rows, alternating bitmaps", 9, {{0, 2, 4, 6, 8}, {1, 3, 5, 7}}},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.description);
+    const TableMetadata metadata = IntColumns(c.columns);
+    BinaryWriter w;
+    w.WriteU48Le(10);
+    w.WriteU16Le(0);
+    w.WriteU16Le(2);  // V2 var_header_len
+    w.WriteU8(static_cast<uint8_t>(c.columns));
+    WriteBitmap(&w, c.columns, AllColumns(c.columns));  // columns_present
+    for (size_t image = 0; image < c.rows.size(); ++image) {
+      WriteRowImage(&w, c.columns, image, c.rows[image]);
+    }
+
+    std::vector<RowData> rows;
+    ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
+    ASSERT_EQ(rows.size(), c.rows.size());
+    for (size_t image = 0; image < c.rows.size(); ++image) {
+      SCOPED_TRACE("row " + std::to_string(image));
+      ExpectRowImage(rows[image], c.columns, image, c.rows[image]);
+    }
+  }
+}
+
+TEST(DecodeUpdateRowsTest, BeforeAndAfterImagesKeepTheirOwnNullBitmaps) {
+  // An UPDATE that sets one column to NULL and another from NULL: the two
+  // images of the pair differ, and neither may borrow the other's bitmap.
+  constexpr size_t kColumns = 9;
+  const std::vector<size_t> before_nulls = {1};
+  const std::vector<size_t> after_nulls = {8};
+  const TableMetadata metadata = IntColumns(kColumns);
+  BinaryWriter w;
+  w.WriteU48Le(10);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(static_cast<uint8_t>(kColumns));
+  WriteBitmap(&w, kColumns, AllColumns(kColumns));  // columns_present (before)
+  WriteBitmap(&w, kColumns, AllColumns(kColumns));  // columns_present_update (after)
+  WriteRowImage(&w, kColumns, 0, before_nulls);
+  WriteRowImage(&w, kColumns, 1, after_nulls);
+
+  std::vector<UpdatePair> pairs;
+  ASSERT_TRUE(DecodeUpdateRows(w.Data(), w.Size(), metadata, true, &pairs));
+  ASSERT_EQ(pairs.size(), 1u);
+  {
+    SCOPED_TRACE("before");
+    ExpectRowImage(pairs[0].before, kColumns, 0, before_nulls);
+  }
+  {
+    SCOPED_TRACE("after");
+    ExpectRowImage(pairs[0].after, kColumns, 1, after_nulls);
+  }
+}
+
 TEST(DecodeWriteRowsTest, NullPointers) {
   TableMetadata metadata;
   std::vector<RowData> rows;
@@ -2318,63 +2448,30 @@ TEST(DecodeColumnValueTest, UnsupportedTypeSkipsCorrectBytes) {
 }
 
 TEST(DecodeColumnValueTest, UnsupportedTypeInMultiColumnRow) {
-  // Build a WRITE_ROWS V2 body with 3 columns:
-  //   col0: INT (4 bytes) = 42
-  //   col1: TINY (1 byte, unsupported type 0x06 in metadata) - but we test via
-  //         direct column decode
-  //   col2: INT (4 bytes) = 99
-  //
-  // We test that DecodeOneRow still works when an unsupported type returns
-  // a correct bytes_consumed from CalcFieldSize.
-  // Since type 0x06 returns 0 from CalcFieldSize, we use a TINY type (0x01)
-  // for column 1 and verify the row decodes correctly end-to-end.
-  //
-  // For a true unsupported-type test, use DecodeColumnValue directly with
-  // a type that CalcFieldSize knows (e.g., TINY=0x01 mapped to an unsupported
-  // ColumnType). Actually, let's test with a known-size type that CalcFieldSize
-  // handles: use a WRITE_ROWS event with 3 INT columns, all normal.
-  //
-  // The real test is: if we call DecodeColumnValue with an unsupported type
-  // that CalcFieldSize CAN size (like TIMESTAMP=0x07 which is 4 bytes),
-  // the decoder should skip 4 bytes and continue.
-  //
-  // TIMESTAMP (0x07) is actually supported, so let's test with raw type 0x06
-  // (NULL) which has CalcFieldSize=0. That means the decoder cannot advance,
-  // which is the expected behavior for truly unknown types.
-  //
-  // Instead, let's verify the fix works at the DecodeColumnValue level:
-  // For a type that CalcFieldSize returns a nonzero value, bytes_consumed
-  // should be set to that value.
+  // A column type no decoder knows (0x0E, MYSQL_TYPE_NEWDATE, which the server
+  // never writes to a row image) has no size either, so the row cannot be
+  // walked past it: the decode must fail rather than misread the INT after it
+  // or return a row with a fabricated value.
+  TableMetadata metadata;
+  metadata.table_id = 42;
+  metadata.columns.resize(3);
+  metadata.columns[0].type = ColumnType::kLong;
+  metadata.columns[1].type = static_cast<ColumnType>(0x0E);
+  metadata.columns[2].type = ColumnType::kLong;
 
-  // Use MYSQL_TYPE_TINY (0x01) as ColumnType, but call it as an unsupported
-  // path. Actually, TINY is supported. Let's just verify the default branch
-  // by using a type value not in the enum.
-  // Type 0x00 is not handled - CalcFieldSize returns 0 for it.
-  // Type 0x0E (MYSQL_TYPE_NEWDATE) is not in ColumnType enum.
-  // CalcFieldSize doesn't handle 0x0E either, returns 0.
-  //
-  // We can instead just test the scenario directly: build a 3-column row
-  // where columns 0 and 2 are INT and column 1 is a known fixed-size type
-  // that hits the default branch. Since all numeric types are handled,
-  // we need a type that is NOT in the switch but HAS a CalcFieldSize.
-  //
-  // MYSQL_TYPE_TIMESTAMP (0x07) IS handled in DecodeColumnValue.
-  // Let's check: we have kTimestamp = 0x07 in the enum and it's handled.
-  //
-  // The best test: call DecodeColumnValue with a type like
-  // MYSQL_TYPE_TINY (0x01) reinterpreted to a value outside the enum
-  // that CalcFieldSize still handles.
-  //
-  // CalcFieldSize handles: 0x01 (1), 0x02 (2), 0x03 (4), etc.
-  // Type 0x0E is not handled by either.
-  //
-  // Since CalcFieldSize returns 0 for truly unknown types, let's just verify
-  // the fix doesn't crash and returns Null with consumed=0 for unknown types.
-  uint8_t data[] = {0xAA, 0xBB};
-  size_t consumed = 0;
-  auto val = DecodeColumnValue(static_cast<ColumnType>(0x0E), 0, false, data, 2, &consumed);
-  EXPECT_TRUE(val.is_null);
-  EXPECT_EQ(consumed, 0u);
+  BinaryWriter w;
+  w.WriteU48Le(42);
+  w.WriteU16Le(0);
+  w.WriteU16Le(2);  // V2 var_header_len
+  w.WriteU8(3);     // column_count
+  w.WriteU8(0x07);  // columns_present
+  w.WriteU8(0x00);  // null bitmap: every column carries a value
+  w.WriteU32Le(42);
+  w.WriteU32Le(0x0A0B0C0D);
+  w.WriteU32Le(99);
+
+  std::vector<RowData> rows;
+  EXPECT_FALSE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows));
 }
 
 // --- BLOB/JSON CalcFieldSize with correct buffer length (Bug 1.4) ---

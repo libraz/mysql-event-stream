@@ -180,6 +180,11 @@ std::string GetOpenSSLError() {
 
 using SteadyClock = std::chrono::steady_clock;
 
+/** Deadline for one wait on the socket; each stall gets the full @p timeout_s. */
+SteadyClock::time_point StallDeadline(uint32_t timeout_s) {
+  return SteadyClock::now() + std::chrono::seconds(timeout_s);
+}
+
 /** Wait until the socket direction requested by OpenSSL is ready. */
 int WaitForSocket(int fd, bool want_read, SteadyClock::time_point deadline, bool has_deadline) {
   for (;;) {
@@ -311,8 +316,7 @@ mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addr
     if (has_deadline) {
       // Non-blocking connect with timeout via poll().
       if (SetNonBlocking(fd_.load(), true) < 0) {
-        CloseSocket(fd_.load());
-        fd_.store(-1);
+        CloseDescriptor();
         continue;
       }
 
@@ -325,8 +329,7 @@ mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addr
         int err = errno;
         if (err != EINPROGRESS) {
 #endif
-          CloseSocket(fd_.load());
-          fd_.store(-1);
+          CloseDescriptor();
           continue;
         }
 
@@ -354,8 +357,7 @@ mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addr
               .Field("port", static_cast<int>(port))
               .Field("timeout_s", static_cast<int>(timeout_s))
               .Error();
-          CloseSocket(fd_.load());
-          fd_.store(-1);
+          CloseDescriptor();
           // Remaining candidates would each need a budget that no longer
           // exists; stop rather than overrunning the caller's timeout.
           if (SteadyClock::now() >= deadline) break;
@@ -365,8 +367,7 @@ mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addr
         // Check for connect error.
         int sock_err = GetSocketError(fd_.load());
         if (sock_err != 0) {
-          CloseSocket(fd_.load());
-          fd_.store(-1);
+          CloseDescriptor();
           if (SteadyClock::now() >= deadline) break;
           continue;
         }
@@ -374,16 +375,14 @@ mes_error_t SocketHandle::ConnectToResolvedAddresses(const struct addrinfo* addr
 
       // Restore blocking mode.
       if (SetNonBlocking(fd_.load(), false) < 0) {
-        CloseSocket(fd_.load());
-        fd_.store(-1);
+        CloseDescriptor();
         continue;
       }
     } else {
       // Blocking connect (no timeout).
       int rc = ::connect(fd_.load(), rp->ai_addr, static_cast<int>(rp->ai_addrlen));
       if (rc < 0) {
-        CloseSocket(fd_.load());
-        fd_.store(-1);
+        CloseDescriptor();
         continue;
       }
     }
@@ -743,8 +742,9 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
     return MES_OK;
   }
 
+  // read_timeout_s_ bounds each stall, not the whole transfer, matching
+  // SO_RCVTIMEO on plain TCP: every wait for the socket gets the full budget.
   const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
-  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
   // One guard for the whole call rather than one per iteration, so SIGPIPE is
   // never momentarily deliverable between two reads.
   [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
@@ -754,8 +754,8 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
     if (n <= 0) {
       int ssl_err = SSL_get_error(ssl_, n);
       if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-        int wait_rc =
-            WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+        int wait_rc = WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ,
+                                    StallDeadline(read_timeout_s_), has_deadline);
         if (wait_rc > 0) continue;
         StructuredLog()
             .Event(wait_rc == 0 ? "ssl_read_timeout" : "ssl_read_wait_error")
@@ -791,8 +791,8 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   if (tls_active_) sigpipe_guard.emplace();
 
   size_t total = 0;
+  // Like ReadExact(), read_timeout_s_ bounds each stall, not the whole transfer.
   const bool has_deadline = tls_active_ && read_timeout_s_ > 0;
-  const auto deadline = SteadyClock::now() + std::chrono::seconds(read_timeout_s_);
   while (total < len) {
     int n;
     if (tls_active_) {
@@ -801,8 +801,8 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
       if (n <= 0) {
         int ssl_err = SSL_get_error(ssl_, n);
         if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
-          int wait_rc =
-              WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ, deadline, has_deadline);
+          int wait_rc = WaitForSocket(fd_.load(), ssl_err == SSL_ERROR_WANT_READ,
+                                      StallDeadline(read_timeout_s_), has_deadline);
           if (wait_rc > 0) continue;
           StructuredLog()
               .Event(wait_rc == 0 ? "ssl_write_timeout" : "ssl_write_wait_error")
@@ -872,7 +872,6 @@ void SocketHandle::Poison() {
 }
 
 void SocketHandle::Close() {
-  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (ssl_ != nullptr) {
     // Attempt a clean TLS shutdown; ignore errors (we are tearing down).
     // SSL_shutdown() writes close_notify and can raise SIGPIPE if the peer has
@@ -895,6 +894,11 @@ void SocketHandle::Close() {
   read_ahead_begin_ = 0;
   read_ahead_end_ = 0;
 
+  CloseDescriptor();
+}
+
+void SocketHandle::CloseDescriptor() {
+  std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   const int fd = fd_.exchange(-1);
   if (fd >= 0) {
     CloseSocket(fd);

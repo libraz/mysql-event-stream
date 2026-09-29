@@ -48,7 +48,8 @@ struct mes_engine : mes::MetadataFetcherOwner {
   mes::CdcEngine engine;
 
   // Buffers for the current event's C representation, valid until the
-  // next call to mes_feed() or mes_next_event().
+  // next call to mes_feed(), mes_next_event() or mes_reset(), each of which
+  // releases them through ReleaseDeliveredEvent().
   mes::ChangeEvent current_event;
   mes_event_t c_event;
   std::vector<mes_column_t> before_cols;
@@ -352,6 +353,21 @@ MES_API const char* mes_error_string(mes_error_t error) {
   return "unknown error";
 }
 
+/**
+ * @brief Free the payload of the event mes_next_event() last returned.
+ *
+ * Every call that invalidates the returned pointer releases what it pointed
+ * at, so a drained engine does not hold its last row (up to a whole decoded
+ * BLOB/JSON value) until the next event arrives. Column arrays keep their
+ * capacity; they hold only borrowed pointers.
+ */
+static void ReleaseDeliveredEvent(mes_engine_t* engine) {
+  engine->current_event = mes::ChangeEvent();
+  engine->before_cols.clear();
+  engine->after_cols.clear();
+  engine->c_event = mes_event_t{};
+}
+
 /* ---- Engine lifecycle ---- */
 
 MES_API mes_engine_t* mes_create(void) { return new (std::nothrow) mes_engine_t(); }
@@ -368,6 +384,7 @@ MES_API mes_error_t mes_feed(mes_engine_t* engine, const uint8_t* data, size_t l
   if (data == nullptr && len > 0) {
     return MES_ERR_NULL_ARG;
   }
+  ReleaseDeliveredEvent(engine);
   *consumed = engine->engine.Feed(data, len);
   if (engine->engine.IsError()) {
     // Intentionally reset consumed to 0: the parse state is undefined once an
@@ -387,18 +404,17 @@ MES_API mes_error_t mes_next_event(mes_engine_t* engine, const mes_event_t** eve
   if (engine == nullptr || event == nullptr) {
     return MES_ERR_NULL_ARG;
   }
+  ReleaseDeliveredEvent(engine);
   if (!engine->engine.NextEvent(&engine->current_event)) {
     return MES_ERR_NO_EVENT;
   }
 
   // Convert before columns
-  engine->before_cols.clear();
   for (const auto& col : engine->current_event.before.columns) {
     engine->before_cols.push_back(ConvertColumn(col));
   }
 
   // Convert after columns
-  engine->after_cols.clear();
   for (const auto& col : engine->current_event.after.columns) {
     engine->after_cols.push_back(ConvertColumn(col));
   }
@@ -464,6 +480,7 @@ MES_API mes_error_t mes_reset(mes_engine_t* engine) {
   if (engine == nullptr) {
     return MES_ERR_NULL_ARG;
   }
+  ReleaseDeliveredEvent(engine);
   engine->engine.Reset();
   return MES_OK;
 }

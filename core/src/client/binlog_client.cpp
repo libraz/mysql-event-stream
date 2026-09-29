@@ -109,7 +109,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
   if (validation.error != MES_OK) {
     SetLastError(validation.message);
     conn_.Disconnect();
-    return MES_ERR_VALIDATION;
+    return validation.error;
   }
 
   StructuredLog()
@@ -158,6 +158,12 @@ mes_error_t BinlogClient::StartStream() {
   }
 
   if (streaming_.load(std::memory_order_acquire)) {
+    // The reader clears connected_ before queueing its terminal error, so a
+    // stream in that drain window is over even though the socket may be open.
+    if (!connected_.load(std::memory_order_acquire)) {
+      SetLastError("Binlog stream has ended; poll its terminal error before starting again");
+      return MES_ERR_DISCONNECTED;
+    }
     return MES_OK;
   }
 
@@ -260,6 +266,9 @@ mes_error_t BinlogClient::StartStream() {
   // instead of unwinding out through the C ABI; a caller that does survive it
   // observes a client that is not streaming rather than one that hangs.
   reader_thread_ = std::thread(&BinlogClient::ReaderLoop, this);
+  // A restart over a transport the previous dump left in command phase makes
+  // it usable again; the reader cleared the flag when that dump ended.
+  connected_.store(true, std::memory_order_release);
   streaming_.store(true, std::memory_order_release);
 
   return MES_OK;
@@ -864,29 +873,7 @@ PollResult BinlogClient::Poll() {
   }
 
   if (event.error != MES_OK) {
-    // Error from reader thread. Snapshot the current GTID under the mutex
-    // directly (instead of routing through GetCurrentGtid() which returns
-    // a pointer into a shared buffer) so the log line's GTID remains valid
-    // for the duration of the structured log build-up, and so we avoid the
-    // "valid-until-next-call" contract that GetCurrentGtid() carries.
-    std::string gtid_snap;
-    {
-      std::lock_guard<std::mutex> lock(gtid_mutex_);
-      gtid_snap = current_gtid_;
-    }
-    const std::string err_msg =
-        event.error_message.empty() ? "Binlog stream read error" : event.error_message;
-    SetLastError(err_msg);
-    StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "poll_error")
-        .Field("gtid", gtid_snap)
-        .Field("error", err_msg)
-        .Field("error_code", static_cast<int64_t>(event.error))
-        .Field("server_error_code", static_cast<uint64_t>(event.server_error_code))
-        .Error();
-    streaming_.store(false, std::memory_order_release);
-    return {event.error, nullptr, 0, false, false};
+    return DeliverTerminalError(event);
   }
 
   // Store event data so pointer remains valid until next Poll().
@@ -931,11 +918,7 @@ size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* resul
       continue;
     }
     if (event.error != MES_OK) {
-      const std::string message =
-          event.error_message.empty() ? "Binlog stream read error" : event.error_message;
-      SetLastError(message);
-      streaming_.store(false, std::memory_order_release);
-      results->push_back({event.error, nullptr, 0, false, false});
+      results->push_back(DeliverTerminalError(event));
       break;
     }
     batch_events_.push_back(std::move(event));
@@ -944,6 +927,29 @@ size_t BinlogClient::PollBatch(size_t max_events, std::vector<PollResult>* resul
                         held.data.size() - held.data_offset, false, held.checksum_enabled});
   }
   return results->size();
+}
+
+PollResult BinlogClient::DeliverTerminalError(const QueuedEvent& event) {
+  // Snapshot the GTID under its mutex rather than through GetCurrentGtid(),
+  // whose pointer is only valid until that accessor's next call.
+  std::string gtid_snap;
+  {
+    std::lock_guard<std::mutex> lock(gtid_mutex_);
+    gtid_snap = current_gtid_;
+  }
+  const std::string err_msg =
+      event.error_message.empty() ? "Binlog stream read error" : event.error_message;
+  SetLastError(err_msg);
+  StructuredLog()
+      .Event("binlog_error")
+      .Field("type", "poll_error")
+      .Field("gtid", gtid_snap)
+      .Field("error", err_msg)
+      .Field("error_code", static_cast<int64_t>(event.error))
+      .Field("server_error_code", static_cast<uint64_t>(event.server_error_code))
+      .Error();
+  streaming_.store(false, std::memory_order_release);
+  return {event.error, nullptr, 0, false, false};
 }
 
 void BinlogClient::Stop() {

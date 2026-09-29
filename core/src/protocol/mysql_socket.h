@@ -166,9 +166,9 @@ class SocketHandle {
   /** @brief Platform socket descriptor (-1 when invalid). */
   std::atomic<int> fd_{-1};
 
-  // Serializes shutdown() with Close(). Without it, a Stop() thread can
-  // observe an old descriptor, while Disconnect() closes it and a subsequent
-  // Connect() reuses the same number for an unrelated socket.
+  // Serializes shutdown() with every close of fd_. Without it, a Stop() thread
+  // can observe a descriptor that the owner thread closes and the OS reassigns
+  // to an unrelated socket before shutdown() is issued.
   mutable std::mutex lifecycle_mutex_;
 
   /** @brief OpenSSL context (owned, may be null). */
@@ -194,6 +194,9 @@ class SocketHandle {
 
   /** @brief Release all resources (SSL objects and socket). */
   void Close();
+
+  /** @brief Close the descriptor alone, serialized against Shutdown(). */
+  void CloseDescriptor();
 };
 
 }  // namespace mes::protocol

@@ -177,9 +177,11 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     infos.push_back(std::move(info));
   }
 
-  // Verify column count matches expectation
+  // Verify column count matches expectation. The mismatch holds until the
+  // schema changes, so remember it for this count as a failed query is.
   if (infos.size() != expected_count) {
     EraseCacheEntry(database, table);
+    StoreNegativeEntry(database, table, expected_count);
     StructuredLog()
         .Event("metadata_fetch_column_count_mismatch")
         .Field("db", database)

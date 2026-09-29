@@ -951,6 +951,41 @@ TEST(TableMapTest, RejectsOverflowingColumnNameLength) {
   EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
 }
 
+/**
+ * @brief The metadata block must be exactly what the column types consume.
+ *
+ * A block one byte longer or shorter than the layout needs means the types and
+ * their metadata disagree; parsing on would misattribute every later field.
+ */
+TEST(TableMapTest, RejectsAMetadataBlockThatDoesNotMatchTheColumnTypes) {
+  struct Case {
+    const char* description;
+    std::vector<uint8_t> types;
+    std::vector<uint8_t> metadata;
+  };
+  const Case cases[] = {
+      // INT consumes no metadata, so the trailing byte is unaccounted for.
+      {"one byte too long", {static_cast<uint8_t>(ColumnType::kLong)}, {0x01}},
+      // VARCHAR's metadata is its 2-byte maximum length.
+      {"one byte too short", {static_cast<uint8_t>(ColumnType::kVarchar)}, {0x64}},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.description);
+    TableMapBuilder builder;
+    builder.WriteTableId(42);
+    builder.WriteFlags(0);
+    builder.WriteDatabaseName("testdb");
+    builder.WriteTableName("users");
+    builder.WriteColumnCount(c.types.size());
+    builder.WriteColumnTypes(c.types);
+    builder.WriteMetadataBlock(c.metadata);
+    builder.WriteNullBitmap({0x01});
+
+    TableMetadata metadata;
+    EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
+  }
+}
+
 TEST(TableMapTest, ParseTruncatedBuffer) {
   // Only 5 bytes - way too short
   uint8_t buf[5] = {0};

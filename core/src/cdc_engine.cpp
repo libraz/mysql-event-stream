@@ -526,6 +526,12 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     case static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent):
     case static_cast<uint8_t>(BinlogEventType::kDeleteRowsEventV1):
       ProcessRowEvent(header, body, body_len);
+      // The statement's annotation ends with its last ROWS event, so a later
+      // unannotated statement in the same transaction does not inherit it.
+      if (body != nullptr && body_len >= 8 &&
+          (binary::ReadU16Le(body + 6) & kRowsEventStmtEndFlag) != 0) {
+        pending_source_sql_.reset();
+      }
       break;
 
     case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
@@ -575,8 +581,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       // The server emits one ANNOTATE_ROWS per statement, not per ROWS event:
       // a statement whose row data exceeds the per-event size limit produces
       // several consecutive ROWS events under a single annotation. The
-      // statement is therefore held past a ROWS event and ends only at the
-      // next annotation or the next control event. One allocation is shared by
+      // statement is therefore held past a ROWS event and ends at the ROWS
+      // event flagged STMT_END_F, the next annotation or the next control
+      // event. One allocation is shared by
       // every row it annotates instead of copied once per row.
       auto sql = std::make_shared<std::string>();
       if (MariaDBEventParser::ExtractAnnotateRowsBody(body, body_len, sql.get()) != MES_OK) {

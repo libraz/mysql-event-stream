@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -190,22 +191,24 @@ inline std::string GetCurrentGtid() {
 }
 
 // Read one scalar column from a single-row query as root (flavor-aware TLS).
-// Returns an empty string when the query fails or returns no row.
-inline std::string QueryScalar(const std::string& sql) {
+// nullopt when the connection or the query fails, so a probe cannot mistake a
+// failure for an absent feature; an empty string when the query returns no row.
+inline std::optional<std::string> QueryScalar(const std::string& sql) {
   mes::protocol::MysqlConnection conn;
   if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
                    DefaultCa(), "", "") != MES_OK)
-    return "";
+    return std::nullopt;
   mes::protocol::QueryResult qr;
   std::string err;
-  if (mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err) != MES_OK) return "";
-  if (qr.rows.empty() || qr.rows[0].values.empty()) return "";
+  if (mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err) != MES_OK) return std::nullopt;
+  if (qr.rows.empty() || qr.rows[0].values.empty()) return std::string();
   return qr.rows[0].values[0];
 }
 
-// Server-side binlog_checksum setting, uppercased ("CRC32" or "NONE").
+// Server-side binlog_checksum setting, uppercased ("CRC32" or "NONE"); empty if
+// the probe failed.
 inline std::string GetBinlogChecksumSetting() {
-  std::string value = QueryScalar("SELECT @@GLOBAL.binlog_checksum");
+  std::string value = QueryScalar("SELECT @@GLOBAL.binlog_checksum").value_or("");
   for (char& ch : value) {
     ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
   }
@@ -343,21 +346,21 @@ inline std::vector<CapturedEvent> CaptureTableEvents(const std::string& start_gt
       200, engine, feed_error);
 }
 
-// Get MySQL/MariaDB major version from server
-inline int GetMysqlMajorVersion() {
-  mes::protocol::MysqlConnection conn;
-  if (conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
-                   DefaultCa(), "", "") != MES_OK)
-    return 0;
-  mes::protocol::QueryResult qr;
-  std::string err;
-  if (mes::protocol::ExecuteQuery(conn.Socket(), "SELECT @@version", &qr, &err) != MES_OK) return 0;
-  if (qr.rows.empty()) return 0;
-  const std::string& ver = qr.rows[0].values[0];
-  return std::atoi(ver.c_str());
+// MySQL/MariaDB major version from the server; nullopt if the probe failed.
+inline std::optional<int> GetMysqlMajorVersion() {
+  const std::optional<std::string> version = QueryScalar("SELECT @@version");
+  if (!version.has_value()) return std::nullopt;
+  return std::atoi(version->c_str());
 }
 
-inline bool IsMysql9OrLater() { return !IsMariaDB() && GetMysqlMajorVersion() >= 9; }
+// Whether the server is MySQL 9.0 or later; nullopt if the version probe
+// failed, which a caller must fail on rather than skip.
+inline std::optional<bool> IsMysql9OrLater() {
+  if (IsMariaDB()) return false;
+  const std::optional<int> major = GetMysqlMajorVersion();
+  if (!major.has_value()) return std::nullopt;
+  return *major >= 9;
+}
 
 // Filter events by table name
 inline std::vector<CapturedEvent> FilterByTable(const std::vector<CapturedEvent>& events,

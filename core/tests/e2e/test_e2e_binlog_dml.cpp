@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -937,7 +938,9 @@ TEST(E2EBinlogDML, MysqlMultiValuedIndex) {
 // ---- VECTOR type tests (MySQL 9.0+) ----
 
 TEST(E2EBinlogDML, VectorInsert) {
-  if (!e2e::IsMysql9OrLater()) {
+  const std::optional<bool> mysql9 = e2e::IsMysql9OrLater();
+  ASSERT_TRUE(mysql9.has_value()) << "server version probe failed";
+  if (!*mysql9) {
     GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
   }
 
@@ -977,7 +980,9 @@ TEST(E2EBinlogDML, VectorInsert) {
 }
 
 TEST(E2EBinlogDML, VectorUpdate) {
-  if (!e2e::IsMysql9OrLater()) {
+  const std::optional<bool> mysql9 = e2e::IsMysql9OrLater();
+  ASSERT_TRUE(mysql9.has_value()) << "server version probe failed";
+  if (!*mysql9) {
     GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
   }
 
@@ -1021,7 +1026,9 @@ TEST(E2EBinlogDML, VectorUpdate) {
 }
 
 TEST(E2EBinlogDML, VectorDelete) {
-  if (!e2e::IsMysql9OrLater()) {
+  const std::optional<bool> mysql9 = e2e::IsMysql9OrLater();
+  ASSERT_TRUE(mysql9.has_value()) << "server version probe failed";
+  if (!*mysql9) {
     GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
   }
 
@@ -1064,7 +1071,9 @@ TEST(E2EBinlogDML, VectorDelete) {
 // that: a decoder that skips VECTOR shifts the utf8mb4 exception onto the wrong
 // column and surfaces `label` as raw bytes.
 TEST(E2EBinlogDML, VectorOccupiesACharsetSlotAheadOfStringColumns) {
-  if (!e2e::IsMysql9OrLater()) {
+  const std::optional<bool> mysql9 = e2e::IsMysql9OrLater();
+  ASSERT_TRUE(mysql9.has_value()) << "server version probe failed";
+  if (!*mysql9) {
     GTEST_SKIP() << "VECTOR type requires MySQL 9.0+";
   }
 
@@ -1110,10 +1119,10 @@ TEST(E2EBinlogDML, VectorOccupiesACharsetSlotAheadOfStringColumns) {
 // the MINIMAL path stays covered, so this test raises the server setting for
 // its own DML and puts it back afterwards.
 TEST(E2EBinlogDML, FullRowMetadataResolvesColumnNamesWithoutAMetadataConnection) {
-  const std::string previous = e2e::QueryScalar("SELECT @@GLOBAL.binlog_row_metadata");
-  if (previous.empty()) {
-    GTEST_SKIP() << "server does not expose binlog_row_metadata";
-  }
+  // Every supported server defines the variable, so an empty answer is a
+  // failed probe rather than a server without the feature.
+  const std::string previous = e2e::QueryScalar("SELECT @@GLOBAL.binlog_row_metadata").value_or("");
+  ASSERT_FALSE(previous.empty()) << "binlog_row_metadata probe failed";
   e2e::ScopedCleanup restore_metadata("SET GLOBAL binlog_row_metadata = '" + previous + "'");
   ASSERT_EQ(e2e::ExecuteDML("SET GLOBAL binlog_row_metadata = 'FULL'"), MES_OK);
 

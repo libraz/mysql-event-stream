@@ -116,9 +116,10 @@ class HandshakePeer {
    * @param auth_plugin_data_len Value the greeting declares for that field. The
    *        bytes written are unchanged, so lowering this shortens only the salt
    *        the parser is willing to take from them.
+   * @param greeting Payload sent in place of the handshake when non-empty.
    */
   HandshakePeer(const std::string& auth_plugin, std::function<void(int)> respond,
-                uint8_t auth_plugin_data_len = 21) {
+                uint8_t auth_plugin_data_len = 21, std::vector<uint8_t> greeting = {}) {
     listener_ = socket(AF_INET, SOCK_STREAM, 0);
     EXPECT_GE(listener_, 0);
     sockaddr_in address{};
@@ -132,10 +133,12 @@ class HandshakePeer {
     port_ = ntohs(address.sin_port);
 
     thread_ = std::thread([this, plugin = auth_plugin, declared = auth_plugin_data_len,
-                           responder = std::move(respond)] {
+                           first = std::move(greeting), responder = std::move(respond)] {
       const int peer = accept(listener_, nullptr, nullptr);
       if (peer < 0) return;
-      if (SendPacket(peer, 0, BuildHandshake(plugin, declared))) responder(peer);
+      if (SendPacket(peer, 0, first.empty() ? BuildHandshake(plugin, declared) : first)) {
+        responder(peer);
+      }
       close(peer);
     });
   }
@@ -210,14 +213,88 @@ class HandshakePeer {
   std::thread thread_;
 };
 
-TEST(MysqlConnection, UnknownAuthPluginIsRejectedEvenForAnEmptyPassword) {
-  HandshakePeer peer("sha256_password", [](int fd) { HandshakePeer::WaitForClose(fd); });
+/** @brief Read one wire packet's payload; empty if the peer went away. */
+std::vector<uint8_t> ReadPayload(int peer) {
+  uint8_t header[4]{};
+  if (recv(peer, header, sizeof(header), MSG_WAITALL) != static_cast<ssize_t>(sizeof(header))) {
+    return {};
+  }
+  const size_t size = static_cast<size_t>(header[0]) | (static_cast<size_t>(header[1]) << 8) |
+                      (static_cast<size_t>(header[2]) << 16);
+  std::vector<uint8_t> body(size);
+  if (recv(peer, body.data(), body.size(), MSG_WAITALL) != static_cast<ssize_t>(body.size())) {
+    return {};
+  }
+  return body;
+}
+
+/** @brief Plugin a HandshakeResponse41 names; empty if the payload is too short. */
+std::string ResponsePluginName(const std::vector<uint8_t>& response) {
+  // Capabilities, max packet size, charset and filler: 32 fixed bytes.
+  size_t pos = 32;
+  const auto user_end = std::find(response.begin() + std::min(pos, response.size()), response.end(),
+                                  static_cast<uint8_t>(0));
+  if (user_end == response.end()) return std::string();
+  pos = static_cast<size_t>(user_end - response.begin()) + 1;
+  // The auth response is a length-encoded string; every scramble fits one byte.
+  if (pos >= response.size()) return std::string();
+  pos += 1 + response[pos];
+  if (pos >= response.size()) return std::string();
+  const auto plugin_end =
+      std::find(response.begin() + pos, response.end(), static_cast<uint8_t>(0));
+  return std::string(response.begin() + pos, plugin_end);
+}
+
+/** @brief AuthSwitchRequest naming @p plugin, with a 20-byte scramble. */
+std::vector<uint8_t> AuthSwitchRequest(const std::string& plugin) {
+  std::vector<uint8_t> payload{0xFE};
+  payload.insert(payload.end(), plugin.begin(), plugin.end());
+  payload.push_back(0);
+  for (uint8_t i = 0; i < 20; ++i) payload.push_back(static_cast<uint8_t>('k' + (i % 10)));
+  payload.push_back(0);
+  return payload;
+}
+
+/**
+ * @brief The greeting's plugin is the server default, not the account's.
+ *
+ * A server whose default plugin this client cannot speak may still hold an
+ * account that uses one it can, and says so with an AuthSwitchRequest once it
+ * has a response. Refusing on the greeting alone never lets it get that far.
+ */
+TEST(MysqlConnection, AnUnsupportedGreetingPluginIsLeftToTheAuthSwitch) {
+  std::string answered_plugin;
+  {
+    HandshakePeer peer("sha256_password", [&answered_plugin](int fd) {
+      answered_plugin = ResponsePluginName(ReadPayload(fd));
+      if (!HandshakePeer::SendPacket(fd, 2, AuthSwitchRequest("mysql_native_password"))) return;
+      if (!HandshakePeer::ConsumePacket(fd)) return;  // switch response
+      if (!HandshakePeer::SendPacket(fd, 4, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00})) return;
+      HandshakePeer::WaitForClose(fd);
+    });
+
+    MysqlConnection connection;
+    EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, 0, "", "", ""),
+              MES_OK)
+        << connection.GetLastError();
+  }
+  // Read only once the peer thread that wrote it has been joined.
+  EXPECT_EQ(answered_plugin, "caching_sha2_password");
+}
+
+TEST(MysqlConnection, AnUnsupportedSwitchedPluginIsRejectedEvenForAnEmptyPassword) {
+  HandshakePeer peer("caching_sha2_password", [](int fd) {
+    if (!HandshakePeer::ConsumePacket(fd)) return;
+    if (!HandshakePeer::SendPacket(fd, 2, AuthSwitchRequest("sha256_password"))) return;
+    HandshakePeer::WaitForClose(fd);
+  });
 
   MysqlConnection connection;
   EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "", 1, 5, 0, "", "", ""),
             MES_ERR_AUTH);
-  // An empty password must not skip the plugin allow-list: without the check
-  // the client would answer with an empty response and wait for the server.
+  // The plugin the account requires is the one that decides, and an empty
+  // password must not skip the allow-list: without the check the client would
+  // answer with an empty response and wait for the server.
   EXPECT_EQ(connection.GetLastError(), "Unsupported auth plugin: sha256_password");
 }
 
@@ -240,8 +317,10 @@ TEST(MysqlConnection, AnUndersizedAuthSaltIsRefusedBeforeTheResponseIsComputed) 
     MysqlConnection connection;
     // The password has to be non-empty for the length to be consulted at all:
     // an empty one returns an empty response before reaching the check.
+    // The greeting is refused before any credential is sent, so this is a
+    // connection failure rather than an authentication one.
     EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, 0, "", "", ""),
-              MES_ERR_AUTH)
+              MES_ERR_CONNECT)
         << plugin;
     const std::string& error = connection.GetLastError();
     EXPECT_NE(error.find("salt too short"), std::string::npos) << plugin << ": " << error;
@@ -263,6 +342,98 @@ TEST(MysqlConnection, FullAuthWithoutVerifiedTlsNamesBothRemedies) {
   const std::string& error = connection.GetLastError();
   EXPECT_NE(error.find("verify_ca"), std::string::npos) << error;
   EXPECT_NE(error.find("allow_public_key_retrieval"), std::string::npos) << error;
+}
+
+/**
+ * @brief A mode that requires TLS refuses a server that does not offer it.
+ *
+ * The refusal has to come before the handshake response: sending it in
+ * plaintext would hand the credentials to exactly the server the mode exists
+ * to distrust.
+ */
+TEST(MysqlConnection, RequiredTlsIsRefusedBeforeAnyCredentialIsSent) {
+  for (const uint32_t ssl_mode : {MES_SSL_REQUIRED, MES_SSL_VERIFY_CA, MES_SSL_VERIFY_IDENTITY}) {
+    SCOPED_TRACE(ssl_mode);
+    std::atomic<bool> response_received{false};
+    {
+      // The peer's greeting omits CLIENT_SSL.
+      HandshakePeer peer("caching_sha2_password", [&response_received](int fd) {
+        response_received.store(HandshakePeer::ConsumePacket(fd), std::memory_order_release);
+      });
+      MysqlConnection connection;
+      EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, ssl_mode, "",
+                                   "", ""),
+                MES_ERR_CONNECT);
+      EXPECT_NE(connection.GetLastError().find("does not support TLS"), std::string::npos)
+          << connection.GetLastError();
+    }
+    EXPECT_FALSE(response_received.load(std::memory_order_acquire));
+  }
+}
+
+/** @brief ERR packet payload: marker, code, protocol-41 SQL state, message. */
+std::vector<uint8_t> ErrPacket(uint16_t code, const std::string& message) {
+  std::vector<uint8_t> payload{0xFF, static_cast<uint8_t>(code), static_cast<uint8_t>(code >> 8),
+                               '#'};
+  const std::string sql_state = "HY000";
+  payload.insert(payload.end(), sql_state.begin(), sql_state.end());
+  payload.insert(payload.end(), message.begin(), message.end());
+  return payload;
+}
+
+/**
+ * @brief Only a rejection of the credentials is reported as MES_ERR_AUTH.
+ *
+ * The bindings never retry MES_ERR_AUTH, so a connection that breaks while
+ * authentication is in flight, or a server that refuses the connection before
+ * it has seen any credentials, must surface as a connection failure.
+ */
+TEST(MysqlConnection, OnlyARejectionOfTheCredentialsIsAnAuthError) {
+  struct Case {
+    const char* description;
+    std::function<void(int)> respond;
+    std::vector<uint8_t> greeting;
+    mes_error_t expected;
+  };
+  const Case cases[] = {
+      // Whether the handshake response fails to send or its reply fails to
+      // arrive depends on timing; both are the same transport failure.
+      {"hang-up right after the greeting", [](int) {}, {}, MES_ERR_CONNECT},
+      {"hang-up instead of the auth reply",
+       [](int fd) { HandshakePeer::ConsumePacket(fd); },
+       {},
+       MES_ERR_CONNECT},
+      {"hang-up after fast-auth success, before the OK",
+       [](int fd) {
+         if (!HandshakePeer::ConsumePacket(fd)) return;
+         HandshakePeer::SendPacket(fd, 2, {0x01, 0x03});
+       },
+       {},
+       MES_ERR_CONNECT},
+      {"too many connections in place of the greeting", [](int) {},
+       ErrPacket(1040, "Too many connections"), MES_ERR_CONNECT},
+      {"malformed greeting (protocol version 9)",
+       [](int) {},
+       {0x09, 0x00, 0x00, 0x00, 0x00},
+       MES_ERR_CONNECT},
+      {"credentials rejected",
+       [](int fd) {
+         if (!HandshakePeer::ConsumePacket(fd)) return;
+         HandshakePeer::SendPacket(fd, 2, ErrPacket(1045, "Access denied"));
+         HandshakePeer::WaitForClose(fd);
+       },
+       {},
+       MES_ERR_AUTH},
+  };
+
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.description);
+    HandshakePeer peer("caching_sha2_password", c.respond, 21, c.greeting);
+    MysqlConnection connection;
+    EXPECT_EQ(connection.Connect("127.0.0.1", peer.port(), "user", "password", 1, 5, 0, "", "", ""),
+              c.expected)
+        << connection.GetLastError();
+  }
 }
 
 TEST(MysqlConnection, ConnectSpendsOneTimeoutBudgetAcrossResolvedAddresses) {
@@ -596,7 +767,7 @@ TEST(MysqlConnectionHandshake, TruncationAtEveryOffsetFailsSafely) {
     std::string error;
     const mes_error_t rc = detail::ParseServerHandshakePayload(packet.data(), len, &out, &error);
     if (len < required) {
-      EXPECT_EQ(rc, MES_ERR_AUTH) << "length " << len;
+      EXPECT_EQ(rc, MES_ERR_CONNECT) << "length " << len;
       EXPECT_FALSE(error.empty()) << "length " << len;
     } else {
       EXPECT_EQ(rc, MES_OK) << "length " << len << ": " << error;
@@ -635,7 +806,7 @@ TEST(MysqlConnectionHandshake, OverstatedAuthDataLengthIsRejectedRatherThanOverr
   ServerHandshake out;
   std::string error;
   EXPECT_EQ(detail::ParseServerHandshakePayload(packet.data(), packet.size(), &out, &error),
-            MES_ERR_AUTH);
+            MES_ERR_CONNECT);
   EXPECT_NE(error.find("auth data part 2"), std::string::npos) << error;
 }
 
@@ -647,7 +818,7 @@ TEST(MysqlConnectionHandshake, RejectsUnsupportedProtocolVersion) {
   ServerHandshake out;
   std::string error;
   EXPECT_EQ(detail::ParseServerHandshakePayload(packet.data(), packet.size(), &out, &error),
-            MES_ERR_AUTH);
+            MES_ERR_CONNECT);
   EXPECT_NE(error.find("Unsupported protocol version"), std::string::npos) << error;
 }
 
@@ -658,7 +829,7 @@ TEST(MysqlConnectionHandshake, RejectsAnUnterminatedServerVersion) {
   ServerHandshake out;
   std::string error;
   EXPECT_EQ(detail::ParseServerHandshakePayload(packet.data(), packet.size(), &out, &error),
-            MES_ERR_AUTH);
+            MES_ERR_CONNECT);
   EXPECT_NE(error.find("server version terminator"), std::string::npos) << error;
 }
 
@@ -681,7 +852,7 @@ TEST(MysqlConnectionHandshake, ArbitraryRemoteBytesAreRejectedWithADiagnostic) {
     std::string error;
     EXPECT_EQ(detail::ParseServerHandshakePayload(input.empty() ? nullptr : input.data(),
                                                   input.size(), &out, &error),
-              MES_ERR_AUTH)
+              MES_ERR_CONNECT)
         << "size " << input.size();
     EXPECT_FALSE(error.empty()) << "size " << input.size();
   }
@@ -695,7 +866,7 @@ TEST(MysqlConnectionHandshake, ToleratesAMissingErrorSinkAndOutput) {
   EXPECT_EQ(detail::ParseServerHandshakePayload(packet.data(), packet.size(), &out, nullptr),
             MES_OK);
   EXPECT_EQ(detail::ParseServerHandshakePayload(packet.data(), packet.size(), nullptr, nullptr),
-            MES_ERR_AUTH);
+            MES_ERR_CONNECT);
 }
 
 }  // namespace

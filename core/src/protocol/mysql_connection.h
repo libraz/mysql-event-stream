@@ -47,13 +47,13 @@ namespace detail {
  * Exposed separately from MysqlConnection so the parse can be unit-tested and
  * fuzzed against arbitrary remote bytes without a live socket. The caller is
  * responsible for the ERR-packet case: this function treats every input as a
- * handshake and reports malformed ones as MES_ERR_AUTH.
+ * handshake and reports malformed ones as MES_ERR_CONNECT.
  *
  * @param data   Packet payload; may be null when @p len is zero.
  * @param len    Payload length in bytes.
  * @param[out] out    Parsed handshake. Partially filled on failure.
  * @param[out] error  Human-readable reason on failure. May be null.
- * @return MES_OK on success, MES_ERR_AUTH on any malformed input.
+ * @return MES_OK on success, MES_ERR_CONNECT on any malformed input.
  */
 mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerHandshake* out,
                                         std::string* error);
@@ -204,7 +204,8 @@ class MysqlConnection {
   /**
    * @brief Handle server's auth response (OK, ERR, AuthSwitch, AuthMoreData)
    * @param password  User password for re-authentication if needed
-   * @return MES_OK on success, MES_ERR_AUTH on failure
+   * @return MES_OK on success, MES_ERR_AUTH when the server or the client
+   *         rejects the authentication, MES_ERR_CONNECT when the transport fails
    */
   mes_error_t HandleAuthResponse(const std::string& password);
 
@@ -219,10 +220,13 @@ class MysqlConnection {
 
   /**
    * @brief Check if a packet is OK or ERR and process accordingly
-   * @param packet  Raw packet payload
-   * @return MES_OK for OK packet, MES_ERR_AUTH for ERR packet
+   * @param packet     Raw packet payload
+   * @param rejection  Code for an ERR packet: MES_ERR_AUTH in reply to
+   *                   credentials, MES_ERR_CONNECT in place of the greeting
+   * @return MES_OK for OK packet, @p rejection for ERR packet, MES_ERR_AUTH
+   *         for anything else
    */
-  mes_error_t ProcessOkOrError(const std::vector<uint8_t>& packet);
+  mes_error_t ProcessOkOrError(const std::vector<uint8_t>& packet, mes_error_t rejection);
 
   /**
    * @brief Compute auth response bytes for a given plugin
@@ -238,7 +242,7 @@ class MysqlConnection {
   /**
    * @brief Send a packet and advance the sequence ID
    * @param payload  Payload data
-   * @return MES_OK on success
+   * @return MES_OK on success, MES_ERR_CONNECT on a transport failure
    */
   mes_error_t SendPacket(const std::vector<uint8_t>& payload);
 };

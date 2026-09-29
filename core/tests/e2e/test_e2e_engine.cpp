@@ -270,12 +270,14 @@ TEST(E2EEngine, TableFilterInclude) {
   std::string gtid = GetCurrentGtid();
   ASSERT_FALSE(gtid.empty());
 
-  // INSERT into both items and users
-  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
-                       "('filter_inc', 1)"),
-            MES_OK);
+  // users commits first, so the capture below, which stops at the first items
+  // event, has already read the users transaction: an include filter that let
+  // it through would have delivered it.
   ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.users (name, email) VALUES "
                        "('filter_inc_user', 'inc@test.com')"),
+            MES_OK);
+  ASSERT_EQ(ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES "
+                       "('filter_inc', 1)"),
             MES_OK);
 
   // Create engine with include filter for items only

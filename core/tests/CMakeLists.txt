@@ -52,7 +52,7 @@ mes_add_gtest(test_capi test_capi.cpp)
 mes_add_gtest(test_gtid_encoder test_gtid_encoder.cpp)
 
 # test_mysql_packet
-mes_add_gtest(test_mysql_packet test_mysql_packet.cpp)
+mes_add_gtest(test_mysql_packet test_mysql_packet.cpp OpenSSL::SSL)
 
 # test_mysql_auth
 mes_add_gtest(test_mysql_auth test_mysql_auth.cpp)

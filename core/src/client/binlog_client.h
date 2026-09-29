@@ -400,6 +400,15 @@ class BinlogClient {
   void PromoteDeliveredCheckpoint();
 
   /**
+   * @brief Hand the reader's terminal error to the consumer and end the stream.
+   *
+   * The one place a queued error sentinel is turned into a result, whether
+   * Poll() pops it or PollBatch() finds it behind buffered events: records the
+   * last error, emits the binlog_error/poll_error record and clears streaming_.
+   */
+  PollResult DeliverTerminalError(const QueuedEvent& event);
+
+  /**
    * @brief Release every event buffer retained from the previous poll.
    *
    * current_event_ and batch_events_ are two halves of one piece of state --

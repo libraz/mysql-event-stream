@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
+#include <openssl/ssl.h>
 
 #include <algorithm>
 #include <chrono>
@@ -903,6 +904,244 @@ TEST(TlsReadSigPipeGuardTest, IsEnteredOncePerCallRatherThanPerRead) {
   ASSERT_NE(guard_at, std::string::npos) << guard << " not found before " << read_call;
 
   EXPECT_LT(guard_at, loop_at) << "the TLS read loop enters the SIGPIPE guard per iteration";
+}
+
+// --- TLS read timeout scope ---
+
+#ifndef _WIN32
+
+/**
+ * @brief Loopback TLS server that runs a script against one accepted client.
+ *
+ * Presents the E2E server certificate; the client under test uses a mode that
+ * does not verify it, so only the transport's timing is exercised.
+ */
+class TlsPeer {
+ public:
+  explicit TlsPeer(std::function<void(SSL*)> respond) {
+    const std::filesystem::path certs = source_scan::RepoRoot() / "e2e" / "docker" / "certs";
+    ctx_ = SSL_CTX_new(TLS_server_method());
+    EXPECT_NE(ctx_, nullptr);
+    EXPECT_EQ(
+        SSL_CTX_use_certificate_file(ctx_, (certs / "server-cert.pem").c_str(), SSL_FILETYPE_PEM),
+        1);
+    EXPECT_EQ(
+        SSL_CTX_use_PrivateKey_file(ctx_, (certs / "server-key.pem").c_str(), SSL_FILETYPE_PEM), 1);
+
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    EXPECT_EQ(bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(listen(listener_, 1), 0);
+    socklen_t address_len = sizeof(address);
+    EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &address_len), 0);
+    port_ = ntohs(address.sin_port);
+
+    thread_ = std::thread([this, responder = std::move(respond)] {
+      const int peer = accept(listener_, nullptr, nullptr);
+      if (peer < 0) return;
+#if defined(SO_NOSIGPIPE)
+      const int nosigpipe = 1;
+      setsockopt(peer, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+      const int nodelay = 1;
+      setsockopt(peer, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+      SSL* ssl = SSL_new(ctx_);
+      if (ssl != nullptr) {
+        SSL_set_fd(ssl, peer);
+        if (SSL_accept(ssl) == 1) responder(ssl);
+        SSL_free(ssl);
+      }
+      close(peer);
+    });
+  }
+
+  ~TlsPeer() {
+    if (thread_.joinable()) thread_.join();
+    if (listener_ >= 0) close(listener_);
+    SSL_CTX_free(ctx_);
+  }
+
+  TlsPeer(const TlsPeer&) = delete;
+  TlsPeer& operator=(const TlsPeer&) = delete;
+
+  uint16_t port() const { return port_; }
+
+ private:
+  SSL_CTX* ctx_ = nullptr;
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::thread thread_;
+};
+
+/** @brief Write every byte of a buffer over TLS, looping over partial writes. */
+bool TlsSendAll(SSL* ssl, const uint8_t* data, size_t len) {
+  size_t offset = 0;
+  while (offset < len) {
+    const int sent = SSL_write(ssl, data + offset, static_cast<int>(len - offset));
+    if (sent <= 0) return false;
+    offset += static_cast<size_t>(sent);
+  }
+  return true;
+}
+
+/** @brief Block until the client closes its side of the TLS connection. */
+void WaitForTlsReaderClose(SSL* ssl) {
+  uint8_t byte = 0;
+  SSL_read(ssl, &byte, 1);
+}
+
+/** @brief Connect @p socket to @p peer over TLS the way MySQLConnection does. */
+void ConnectTls(SocketHandle* socket, uint16_t port, uint32_t read_timeout_s) {
+  ASSERT_EQ(socket->Connect("127.0.0.1", port, 1), MES_OK);
+  ASSERT_EQ(socket->SetReadTimeout(read_timeout_s), MES_OK);
+  ASSERT_EQ(socket->UpgradeToTLS(MES_SSL_REQUIRED, nullptr, nullptr, nullptr, nullptr), MES_OK);
+  ASSERT_EQ(socket->SetReadTimeout(read_timeout_s), MES_OK);
+}
+
+#endif  // _WIN32
+
+TEST(TlsReadTimeoutTest, BoundsEachStallRatherThanTheWholeTransfer) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // read_timeout_s is an idle timeout, as SO_RCVTIMEO makes it on plain TCP: a
+  // transfer that keeps making progress may take longer in total than the
+  // timeout, as long as no single gap between arrivals reaches it.
+  constexpr uint32_t kTimeoutS = 1;
+  constexpr int kChunks = 4;
+  constexpr auto kGap = std::chrono::milliseconds(600);
+  const std::vector<uint8_t> chunk = PatternBytes(1024, 0x3C);
+  TlsPeer peer([&](SSL* ssl) {
+    for (int i = 0; i < kChunks; ++i) {
+      if (i > 0) std::this_thread::sleep_for(kGap);
+      if (!TlsSendAll(ssl, chunk.data(), chunk.size())) return;
+    }
+    WaitForTlsReaderClose(ssl);
+  });
+
+  SocketHandle socket;
+  ConnectTls(&socket, peer.port(), kTimeoutS);
+  if (HasFatalFailure()) return;
+
+  const auto started = std::chrono::steady_clock::now();
+  std::vector<uint8_t> received(chunk.size() * kChunks, 0);
+  ASSERT_EQ(socket.ReadExact(received.data(), received.size()), MES_OK);
+  // Guard against a script that finished early and so never outlasted the timeout.
+  EXPECT_GT(std::chrono::steady_clock::now() - started, std::chrono::seconds(kTimeoutS));
+  for (int i = 0; i < kChunks; ++i) {
+    EXPECT_TRUE(std::equal(chunk.begin(), chunk.end(), received.begin() + i * chunk.size()));
+  }
+  socket.Shutdown();
+#endif
+}
+
+TEST(TlsReadTimeoutTest, AStallAsLongAsTheTimeoutStillFailsTheRead) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // The per-stall bound must still bound: part of the payload arriving does not
+  // exempt the rest from the timeout.
+  constexpr uint32_t kTimeoutS = 1;
+  const std::vector<uint8_t> chunk = PatternBytes(1024, 0x5A);
+  TlsPeer peer([&](SSL* ssl) {
+    if (!TlsSendAll(ssl, chunk.data(), chunk.size())) return;
+    WaitForTlsReaderClose(ssl);
+  });
+
+  SocketHandle socket;
+  ConnectTls(&socket, peer.port(), kTimeoutS);
+  if (HasFatalFailure()) return;
+
+  const auto started = std::chrono::steady_clock::now();
+  std::vector<uint8_t> received(chunk.size() * 2, 0);
+  EXPECT_EQ(socket.ReadExact(received.data(), received.size()), MES_ERR_STREAM);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(kTimeoutS * 3));
+  socket.Shutdown();
+#endif
+}
+
+// --- TLS verify_identity ---
+
+TEST(TlsVerifyIdentityTest, ChecksTheNameAgainstTheCertificateNotJustTheChain) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // verify_ca alone accepts any certificate the CA signed. verify_identity has
+  // to add the name check, and it cannot be satisfied without a name at all;
+  // a mode 4 that behaved like mode 3 would pass every row but the last two.
+  const std::string ca = (source_scan::RepoRoot() / "e2e" / "docker" / "certs" / "ca.pem").string();
+  struct Case {
+    const char* hostname;
+    mes_error_t expected;
+  };
+  const Case cases[] = {
+      {"localhost", MES_OK},
+      {"127.0.0.1", MES_OK},
+      {"wrong.example", MES_ERR_CONNECT},
+      {nullptr, MES_ERR_CONNECT},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.hostname == nullptr ? "(no hostname)" : c.hostname);
+    TlsPeer peer([](SSL* ssl) { WaitForTlsReaderClose(ssl); });
+    SocketHandle socket;
+    ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+    ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+    EXPECT_EQ(
+        socket.UpgradeToTLS(MES_SSL_VERIFY_IDENTITY, ca.c_str(), nullptr, nullptr, c.hostname),
+        c.expected);
+    EXPECT_EQ(socket.IsTlsActive(), c.expected == MES_OK);
+    socket.Shutdown();
+  }
+#endif
+}
+
+// --- Descriptor close serialization ---
+
+/**
+ * @brief Every close of the descriptor is serialized against Shutdown().
+ *
+ * Shutdown() may run on another thread while Connect() is still trying
+ * addresses. A close outside lifecycle_mutex_ lets Shutdown() read a descriptor
+ * number the owner has already closed and the OS may have handed to an
+ * unrelated socket. The window is a few instructions wide, so no test that
+ * drives the socket can hit it reliably; where the close is written is
+ * observable, so that is what this asserts.
+ */
+TEST(SocketDescriptorCloseTest, HappensOnlyUnderTheLifecycleLock) {
+  const std::filesystem::path source =
+      source_scan::RepoRoot() / "core" / "src" / "protocol" / "mysql_socket.cpp";
+  const std::string text = source_scan::ReadCollapsed(source);
+  ASSERT_FALSE(text.empty()) << "cannot read " << source;
+
+  const std::string close_call = std::string("CloseSocket") + "(";
+  const std::string close_definition = std::string("int CloseSocket") + "(int fd)";
+  const std::string helper = std::string("void SocketHandle::") + "CloseDescriptor() {";
+  const std::string lock = std::string("lock_guard<std::mutex> lock(") + "lifecycle_mutex_);";
+
+  // One definition per platform branch; every other occurrence is a call.
+  const int definitions = source_scan::CountOccurrences(text, close_definition);
+  ASSERT_GT(definitions, 0) << close_definition << " not found in " << source;
+  ASSERT_EQ(source_scan::CountOccurrences(text, close_call) - definitions, 1)
+      << "the descriptor is closed somewhere other than the locked helper";
+
+  size_t call_at = std::string::npos;
+  for (size_t at = text.find(close_call); at != std::string::npos;
+       at = text.find(close_call, at + close_call.size())) {
+    if (text.compare(at - 4, close_definition.size(), close_definition) != 0) call_at = at;
+  }
+  ASSERT_NE(call_at, std::string::npos);
+
+  const size_t helper_at = text.rfind(helper, call_at);
+  ASSERT_NE(helper_at, std::string::npos) << "the close is not inside " << helper;
+  // No other member function opens between the helper and the call.
+  EXPECT_GT(text.find("SocketHandle::", helper_at + helper.size()), call_at);
+  const size_t lock_at = text.find(lock, helper_at);
+  ASSERT_NE(lock_at, std::string::npos) << lock << " not found after " << helper;
+  EXPECT_LT(lock_at, call_at) << "the descriptor is closed before the lifecycle lock is taken";
 }
 
 }  // namespace
