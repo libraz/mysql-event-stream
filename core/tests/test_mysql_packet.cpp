@@ -512,7 +512,7 @@ class PacketPeer {
 
     thread_ = std::thread([this, responder = std::move(respond)] {
 #if !defined(SO_NOSIGPIPE)
-      // A client that aborts the handshake must not let a server write raise SIGPIPE.
+      // A client that closes early must not let a write from this peer raise SIGPIPE.
       sigset_t pipe_set;
       sigemptyset(&pipe_set);
       sigaddset(&pipe_set, SIGPIPE);
@@ -951,7 +951,7 @@ class TlsPeer {
 
     thread_ = std::thread([this, responder = std::move(respond)] {
 #if !defined(SO_NOSIGPIPE)
-      // A client that aborts the handshake must not let a server write raise SIGPIPE.
+      // A client that closes early must not let a write from this peer raise SIGPIPE.
       sigset_t pipe_set;
       sigemptyset(&pipe_set);
       sigaddset(&pipe_set, SIGPIPE);
