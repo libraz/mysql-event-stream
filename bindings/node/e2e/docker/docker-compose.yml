@@ -1,3 +1,5 @@
+name: mes-node-e2e-mysql
+
 services:
   mysql:
     image: mysql:${MYSQL_VERSION:-8.4}

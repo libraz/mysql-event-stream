@@ -1,3 +1,5 @@
+name: mes-node-e2e-mariadb
+
 services:
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.8}

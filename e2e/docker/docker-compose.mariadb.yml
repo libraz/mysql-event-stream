@@ -1,6 +1,8 @@
 # MariaDB test container for E2E tests
 # Uses the same port (13308) and DB name as MySQL so that
 # C++ E2E tests work unchanged (just swap the container).
+name: mes-e2e-mariadb
+
 services:
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.8}
