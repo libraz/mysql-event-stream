@@ -53,7 +53,7 @@ An exception raised inside the callback is swallowed. A logging handler must nev
 
 ## Records worth watching
 
-- `include_filter_matched_nothing` — configured include filters saw `TABLE_MAP` events and matched none of them. Emitted once, at reset or at stream close. See [Table filtering](filtering.md).
+- `include_filter_matched_nothing` — configured include filters saw `TABLE_MAP` events and matched none of them. Emitted once per connection window: at reset (a reconnect triggers one too) and again at stream close. See [Table filtering](filtering.md).
 - `event_exceeds_queue_byte_budget` — a single event larger than `max_queue_bytes`. The connection is retired and the poll reports code 301. See [Backpressure and limits](backpressure.md).
 
-A metadata connection failure does not travel this way. `CdcStream` reports it through `onMetadataError` / `on_metadata_error`; see [Column names](column-names.md).
+A failure to enable the metadata connection does not travel this way: `CdcStream` reports it through `onMetadataError` / `on_metadata_error`. A lookup that fails once the connection is open does arrive here. See [Column names](column-names.md).

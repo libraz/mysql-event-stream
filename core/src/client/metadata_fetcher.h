@@ -69,7 +69,8 @@ class MetadataFetcher : public ColumnNameSource {
 
   /**
    * @brief Connect to MySQL server
-   * @return MES_OK on success, MES_ERR_CONNECT on failure
+   * @return MES_OK on success, MES_ERR_CONNECT on TCP failure, MES_ERR_AUTH
+   *         on authentication failure
    */
   mes_error_t Connect(const std::string& host, uint16_t port, const std::string& user,
                       const std::string& password, uint32_t connect_timeout_s,
@@ -156,12 +157,20 @@ class MetadataFetcher : public ColumnNameSource {
   /** @brief Drop every entry and reset the retained-byte total. */
   void DropAllEntries();
 
+  /** @brief A table that failed to resolve: its expected column count and when. */
+  struct NegativeEntry {
+    size_t expected_count;
+    std::chrono::steady_clock::time_point stored_at;
+  };
+
   protocol::MysqlConnection conn_;
   std::unordered_map<std::string, std::unordered_map<std::string, std::vector<ColumnInfo>>> cache_;
-  // Server-side SQL failures (for example missing SELECT privilege) are
-  // stable until DDL/cache invalidation. Remember the expected column count
-  // so repeated TABLE_MAP events do not cause a query/reconnect storm.
-  std::unordered_map<std::string, std::unordered_map<std::string, size_t>> negative_cache_;
+  // A server-side SQL failure (for example missing SELECT privilege) is
+  // remembered so repeated TABLE_MAP events do not cause a query/reconnect
+  // storm, but only for kNegativeEntryTtl: unlike a column-count mismatch,
+  // an ERR can resolve itself (a GRANT, a transient failure) without any DDL
+  // for cache invalidation to observe. DDL still clears it immediately.
+  std::unordered_map<std::string, std::unordered_map<std::string, NegativeEntry>> negative_cache_;
   // Both maps are charged against one total because they share one bound and
   // one overflow policy. A negative entry retains only the two identifiers, so
   // it is the resolved entries that can reach the byte bound.

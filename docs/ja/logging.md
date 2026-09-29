@@ -53,7 +53,7 @@ C ABI と Python では、このコールバックはネイティブのリーダ
 
 ## 見ておきたいレコード
 
-- `include_filter_matched_nothing` — 設定した include フィルタが `TABLE_MAP` イベントを受け取りながら、どれにも一致しませんでした。リセット時またはストリーム終了時に一度だけ発行されます。[テーブルフィルタ](filtering.md)を参照してください。
+- `include_filter_matched_nothing` — 設定した include フィルタが `TABLE_MAP` イベントを受け取りながら、どれにも一致しませんでした。接続の区切りごとに発行されます。リセット時（再接続でも起きます）に一度、ストリーム終了時にもう一度です。[テーブルフィルタ](filtering.md)を参照してください。
 - `event_exceeds_queue_byte_budget` — `max_queue_bytes` を超える単一のイベントです。その接続は破棄され、poll はコード 301 を報告します。[バックプレッシャーと上限](backpressure.md)を参照してください。
 
-メタデータ接続の失敗はこの経路を通りません。`CdcStream` は `onMetadataError` / `on_metadata_error` で報告します。[カラム名](column-names.md)を参照してください。
+メタデータ接続を有効化できなかった場合は、この経路を通りません。`CdcStream` は `onMetadataError` / `on_metadata_error` で報告します。接続した後のルックアップの失敗は、この経路で届きます。[カラム名](column-names.md)を参照してください。

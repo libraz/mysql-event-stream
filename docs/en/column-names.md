@@ -36,7 +36,7 @@ engine.enable_metadata(
 )
 ```
 
-The credentials need `SELECT` on the streamed tables. The `SHOW COLUMNS` query runs synchronously while the `TABLE_MAP` event is being processed, bounded by `readTimeoutS` / `read_timeout_s` and by the library default of 30 seconds when that option is `0`. A timeout leaves that one event's names unresolved and the connection is retried once.
+The credentials need `SELECT` on the streamed tables. The `SHOW COLUMNS` query runs synchronously while the `TABLE_MAP` event is being processed. A timeout on that query reconnects and retries once within the same call, so the worst case for one event is a read timeout, a connect timeout, a handshake read timeout and a second read timeout — all bounded by `readTimeoutS` / `read_timeout_s` and `connectTimeoutS` / `connect_timeout_s`, or by the library defaults (30 and 10 seconds respectively) when those options are `0`. If every attempt still fails, that event's names are left unresolved. A table that keeps failing — denied privilege, or another server error — is not requeried on every subsequent `TABLE_MAP`: it stays unresolved for 30 seconds before the next one retries, while a schema change (DDL) clears that immediately.
 
 ## Checking whether it worked
 
@@ -52,7 +52,7 @@ for await (const event of stream) {
 }
 ```
 
-`CdcStream` reports a metadata connection failure through `onMetadataError` / `on_metadata_error`. Without that callback the failure is tolerated silently and the keys fall back to indices — the library writes nothing to stderr on its own.
+`CdcStream` reports a failure to *enable* the metadata connection through `onMetadataError` / `on_metadata_error`; it does not fire for a lookup that fails mid-stream, which instead surfaces as a log event with `namesResolved` / `names_resolved` false on the affected rows. Without that callback the enable failure is tolerated silently and the keys fall back to indices — the library writes nothing to stderr on its own.
 
 ## The schema it reads is the current one
 

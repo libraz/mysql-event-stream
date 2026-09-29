@@ -532,17 +532,16 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
       }
 
       if (status == kCachingSha2FullAuthRequired) {
-        // Full authentication required.
-        //
-        // An active TLS session is not sufficient on its own: ssl_mode
-        // preferred/required encrypt the channel but authenticate nothing, so a
-        // MITM that terminates TLS with its own certificate would receive the
-        // cleartext password. The cleartext shortcut therefore stays gated on
-        // certificate verification rather than on encryption, and the
-        // preferred/required + cold-cache combination is directed to the
-        // opt-in RSA path by the error below.
-        if (socket_.IsTlsActive() && ssl_mode_ >= MES_SSL_VERIFY_CA) {
-          // Send cleartext password only over certificate-verified TLS.
+        // Over TLS the server reads full-auth data as the cleartext password, so an
+        // RSA key request cannot work there. Unverified TLS exposes the password to
+        // an active MITM, the same exposure as an unauthenticated RSA key, so both
+        // need the allow_public_key_retrieval opt-in.
+        const bool verified_tls = socket_.IsTlsActive() && ssl_mode_ >= MES_SSL_VERIFY_CA;
+        const bool unverified_tls_opted_in =
+            socket_.IsTlsActive() && ssl_mode_ < MES_SSL_VERIFY_CA && allow_public_key_retrieval_;
+
+        if (verified_tls || unverified_tls_opted_in) {
+          // Send cleartext password over the active TLS session.
           std::vector<uint8_t> cleartext_payload(password.begin(), password.end());
           cleartext_payload.push_back(0);
 
@@ -552,24 +551,8 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
             last_error_ = "Failed to send cleartext password";
             return rc;
           }
-        } else {
-          // The key returned on this plaintext channel is unauthenticated: an
-          // active MITM can substitute its own key and recover the password.
-          // Require an explicit opt-in; verified TLS is the safe default.
-          if (!allow_public_key_retrieval_) {
-            last_error_ =
-                "caching_sha2_password full auth needs either certificate-verified TLS or "
-                "unauthenticated public-key retrieval, and this connection has neither "
-                "(ssl_mode=" +
-                std::to_string(ssl_mode_) + ", tls=" + (socket_.IsTlsActive() ? "on" : "off") +
-                "). Either raise ssl_mode to verify_ca (3) or verify_identity (4) so the "
-                "password can be sent over a verified TLS session, or set "
-                "allow_public_key_retrieval to fetch the server's RSA key over this "
-                "unverified channel";
-            return MES_ERR_AUTH;
-          }
-
-          // Explicit opt-in: request server's RSA public key and encrypt password.
+        } else if (!socket_.IsTlsActive() && allow_public_key_retrieval_) {
+          // Explicit opt-in, no TLS: request server's RSA public key and encrypt password.
           std::vector<uint8_t> rsa_request = {0x02};
           rc = SendPacket(rsa_request);
           if (rc != MES_OK) {
@@ -673,6 +656,18 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
           if (encrypt_rc != MES_OK) {
             return encrypt_rc;
           }
+        } else {
+          // No opt-in, and no verified TLS to fall back on.
+          last_error_ =
+              "caching_sha2_password full auth needs either certificate-verified TLS or "
+              "an explicit allow_public_key_retrieval opt-in to complete over an unverified "
+              "channel (ssl_mode=" +
+              std::to_string(ssl_mode_) + ", tls=" + (socket_.IsTlsActive() ? "on" : "off") +
+              "). Either raise ssl_mode to verify_ca (3) or verify_identity (4), or set "
+              "allow_public_key_retrieval, which then sends the password in cleartext over "
+              "TLS when TLS is active, or fetches the server's RSA key over this plaintext "
+              "channel otherwise";
+          return MES_ERR_AUTH;
         }
 
         // Read final OK/ERR

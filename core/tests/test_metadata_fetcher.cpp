@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -36,6 +37,18 @@ class MetadataFetcherTestAccess {
                                 const std::string& table, size_t expected_count) {
     fetcher->StoreNegativeEntry(database, table, expected_count);
   }
+
+  /** @brief Store a negative entry as though it were recorded at @p stored_at,
+   *  to exercise TTL expiry without a real 30-second wait. */
+  static void StoreUnresolvableAt(MetadataFetcher* fetcher, const std::string& database,
+                                  const std::string& table, size_t expected_count,
+                                  std::chrono::steady_clock::time_point stored_at) {
+    fetcher->negative_cache_[database][table] = {expected_count, stored_at};
+  }
+
+  /** @brief Close the underlying MySQL connection without going through
+   *  MetadataFetcher::Disconnect(), which also drops the cache. */
+  static void PoisonConnection(MetadataFetcher* fetcher) { fetcher->conn_.Disconnect(); }
 };
 
 namespace {
@@ -254,6 +267,71 @@ class ShowColumnsPeer {
   std::thread thread_;
 };
 
+/**
+ * @brief Loopback peer that accepts every connection but never sends a
+ *        greeting, so each connect attempt against it blocks for the full
+ *        read timeout before the client gives up.
+ */
+class SilentHandshakePeer {
+ public:
+  SilentHandshakePeer() {
+    listener_ = socket(AF_INET, SOCK_STREAM, 0);
+    EXPECT_GE(listener_, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    EXPECT_EQ(bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(listen(listener_, 4), 0);
+    socklen_t length = sizeof(address);
+    EXPECT_EQ(getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length), 0);
+    port_ = ntohs(address.sin_port);
+    thread_ = std::thread([this] { Serve(); });
+  }
+
+  ~SilentHandshakePeer() {
+    stop_.store(true, std::memory_order_release);
+    // accept() is blocked waiting for a connection; open and drop one so the
+    // loop observes stop_ and exits instead of joining forever.
+    const int wake = socket(AF_INET, SOCK_STREAM, 0);
+    if (wake >= 0) {
+      sockaddr_in address{};
+      address.sin_family = AF_INET;
+      address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      address.sin_port = htons(port_);
+      (void)connect(wake, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+      close(wake);
+    }
+    if (thread_.joinable()) thread_.join();
+    if (listener_ >= 0) close(listener_);
+    for (int fd : accepted_) close(fd);
+  }
+
+  SilentHandshakePeer(const SilentHandshakePeer&) = delete;
+  SilentHandshakePeer& operator=(const SilentHandshakePeer&) = delete;
+
+  uint16_t port() const { return port_; }
+
+ private:
+  void Serve() {
+    while (!stop_.load(std::memory_order_acquire)) {
+      const int peer = accept(listener_, nullptr, nullptr);
+      if (peer < 0 || stop_.load(std::memory_order_acquire)) {
+        if (peer >= 0) close(peer);
+        return;
+      }
+      // Held open and never written to; the client's handshake read times
+      // out on its own. Closed in the destructor.
+      accepted_.push_back(peer);
+    }
+  }
+
+  int listener_ = -1;
+  uint16_t port_ = 0;
+  std::atomic<bool> stop_{false};
+  std::vector<int> accepted_;
+  std::thread thread_;
+};
+
 #endif  // _WIN32
 
 TEST(MetadataFetcherQueryTest, AColumnCountMismatchIsQueriedOncePerTableMapCount) {
@@ -280,6 +358,78 @@ TEST(MetadataFetcherQueryTest, AColumnCountMismatchIsQueriedOncePerTableMapCount
     EXPECT_TRUE(fetcher.FetchColumnInfo("db", "t", 2).empty());
     EXPECT_EQ(peer.queries(), 3);
   }
+#endif
+}
+
+TEST(MetadataFetcherReconnectTest, ThrottleIsMeasuredFromWhenTheAttemptEnded) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // read_timeout_s exceeds the fetcher's 1-second reconnect throttle, so a
+  // deadline computed from the attempt's START (the bug) is already in the
+  // past by the time the attempt ends, and the very next lookup reconnects
+  // again instead of being throttled.
+  SilentHandshakePeer peer;
+  MetadataFetcher fetcher;
+  fetcher.Connect("127.0.0.1", peer.port(), "user", "pass", 1, 2);
+
+  // First lookup: not connected, throttle unset -- attempts and blocks for
+  // the read timeout.
+  EXPECT_TRUE(fetcher.FetchColumnInfo("db", "t", 1).empty());
+
+  // Second lookup, immediately after: a correctly-computed throttle window
+  // (attempt end + 1s) is still open, so this must return without
+  // reconnecting.
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_TRUE(fetcher.FetchColumnInfo("db", "t", 1).empty());
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+#endif
+}
+
+TEST(MetadataFetcherCacheTest, DisconnectedFetcherStillServesFromCache) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  ShowColumnsPeer peer;
+  MetadataFetcher fetcher;
+  ASSERT_EQ(fetcher.Connect("127.0.0.1", peer.port(), "user", "", 2, 2), MES_OK);
+  ASSERT_EQ(fetcher.FetchColumnInfo("db", "t", 1).size(), 1u);
+  ASSERT_EQ(peer.queries(), 1);
+
+  // Poison the connection without touching the cache, the way a socket that
+  // failed a later query (rather than Disconnect()) would leave it.
+  MetadataFetcherTestAccess::PoisonConnection(&fetcher);
+
+  // A cached, still-matching table must resolve from the cache rather than
+  // reaching for the dead connection; a lookup that checked IsConnected()
+  // first would return empty here instead.
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_EQ(fetcher.FetchColumnInfo("db", "t", 1).size(), 1u);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+  EXPECT_EQ(peer.queries(), 1);
+#endif
+}
+
+TEST(MetadataFetcherQueryTest, ExpiredNegativeEntryIsRequeriedButAFreshOneSuppresses) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  ShowColumnsPeer peer;
+  MetadataFetcher fetcher;
+  ASSERT_EQ(fetcher.Connect("127.0.0.1", peer.port(), "user", "", 2, 2), MES_OK);
+
+  // A negative entry older than the TTL must not suppress the next lookup.
+  MetadataFetcherTestAccess::StoreUnresolvableAt(
+      &fetcher, "db", "expired", 1, std::chrono::steady_clock::now() - std::chrono::seconds(31));
+  EXPECT_EQ(fetcher.FetchColumnInfo("db", "expired", 1).size(), 1u);
+  EXPECT_EQ(peer.queries(), 1);
+
+  // A fresh negative entry still suppresses.
+  MetadataFetcherTestAccess::StoreUnresolvable(&fetcher, "db", "fresh", 1);
+  EXPECT_TRUE(fetcher.FetchColumnInfo("db", "fresh", 1).empty());
+  EXPECT_EQ(peer.queries(), 1);
 #endif
 }
 

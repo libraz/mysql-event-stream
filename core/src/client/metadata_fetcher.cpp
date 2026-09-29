@@ -17,6 +17,11 @@ namespace {
 
 constexpr auto kReconnectRetryInterval = std::chrono::seconds(1);
 
+// Balances the latency of a human-driven remedy (GRANT SELECT, a retried
+// transient failure) against not requerying a still-broken table on every
+// TABLE_MAP; DDL invalidation clears the entry immediately regardless.
+constexpr auto kNegativeEntryTtl = std::chrono::seconds(30);
+
 }  // namespace
 
 MetadataFetcher::MetadataFetcher() = default;
@@ -76,11 +81,7 @@ void MetadataFetcher::Disconnect() {
 std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& database,
                                                          const std::string& table,
                                                          size_t expected_count) {
-  if (!conn_.IsConnected()) {
-    if (!Reconnect()) return {};
-  }
-
-  // Check cache
+  // Caches answer before any reconnect, so a disconnected fetcher still serves them.
   {
     auto db_it = cache_.find(database);
     if (db_it != cache_.end()) {
@@ -96,13 +97,19 @@ std::vector<ColumnInfo> MetadataFetcher::FetchColumnInfo(const std::string& data
     if (negative_db_it != negative_cache_.end()) {
       auto negative_table_it = negative_db_it->second.find(table);
       if (negative_table_it != negative_db_it->second.end() &&
-          negative_table_it->second == expected_count) {
+          negative_table_it->second.expected_count == expected_count &&
+          std::chrono::steady_clock::now() - negative_table_it->second.stored_at <
+              kNegativeEntryTtl) {
         return {};
       }
     }
   }
 
-  // Cache miss or count mismatch -- query MySQL.
+  if (!conn_.IsConnected()) {
+    if (!Reconnect()) return {};
+  }
+
+  // Cache miss, count mismatch, or expired negative entry -- query MySQL.
   // EscapeIdentifier returns "" when it detects an invalid identifier
   // (e.g. embedded NUL byte). Reject the fetch early instead of emitting a
   // malformed `SHOW COLUMNS FROM .` query. In practice MySQL never sends
@@ -263,7 +270,7 @@ void MetadataFetcher::StoreNegativeEntry(const std::string& database, const std:
     StructuredLog().Event("metadata_cache_cleared_on_overflow").Warn();
     DropAllEntries();
   }
-  negative_cache_[database][table] = expected_count;
+  negative_cache_[database][table] = {expected_count, std::chrono::steady_clock::now()};
   retained_bytes_ += charge;
 }
 
@@ -300,7 +307,8 @@ bool MetadataFetcher::Reconnect() {
     next_reconnect_attempt_ = {};
     return true;
   }
-  next_reconnect_attempt_ = now + kReconnectRetryInterval;
+  // From the attempt's end: Connect() itself can outlast the interval.
+  next_reconnect_attempt_ = std::chrono::steady_clock::now() + kReconnectRetryInterval;
   StructuredLog()
       .Event("metadata_reconnect_failed")
       .Field("error_code", static_cast<int64_t>(rc))

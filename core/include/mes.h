@@ -580,7 +580,10 @@ MES_API mes_error_t mes_set_include_databases(mes_engine_t* engine, const char**
  * Matching is byte-exact and case-sensitive. A trailing '*' is a prefix
  * wildcard (for example, "mydb.audit_*"); '*' elsewhere is literal. An entry
  * without a '.' is compared against the bare table name only, so its prefix
- * never matches a database name.
+ * never matches a database name. A database or table identifier that itself
+ * contains '.' cannot be matched unambiguously this way: db "x" table "y.z"
+ * and db "x.y" table "z" both produce the qualified form "x.y.z", so an
+ * entry naming one also matches the other.
  * When include database/table filters see TABLE_MAP events but match none
  * before reset or destruction, the configured WARN callback receives an
  * `include_filter_matched_nothing` event.
@@ -599,7 +602,8 @@ MES_API mes_error_t mes_set_include_tables(mes_engine_t* engine, const char** ta
  * Matching is byte-exact and case-sensitive. A trailing '*' is a prefix
  * wildcard; '*' elsewhere is literal. An entry without a '.' is compared
  * against the bare table name only, so its prefix never matches a database
- * name.
+ * name. See mes_set_include_tables() for the ambiguity a '.' inside a
+ * database or table identifier itself creates.
  *
  * @param engine Engine handle.
  * @param tables Array of table name strings.
@@ -689,14 +693,17 @@ typedef struct {
   const char* ssl_key;     /**< Path to client private key file (NULL to skip) */
   /* Buffering */
   size_t max_queue_size; /**< @brief 0 = use MES_DEFAULT_QUEUE_SIZE */
-  /** Allow fetching an unauthenticated RSA key so caching_sha2_password can
-   *  complete full authentication (a cold server-side password cache: fresh
-   *  user, server restart, FLUSH PRIVILEGES). Required whenever ssl_mode is
-   *  below MES_SSL_VERIFY_CA, including with TLS active, because preferred and
-   *  required encrypt without authenticating the server certificate and the
-   *  cleartext shortcut stays gated on certificate verification. Disabled by
-   *  default; raising ssl_mode to verify_ca or verify_identity is the safer
-   *  remedy, since the fetched key is itself unauthenticated. */
+  /** Opts into completing caching_sha2_password full authentication (a cold
+   *  server-side password cache: fresh user, server restart, FLUSH
+   *  PRIVILEGES) over a channel that has not authenticated the server.
+   *  Required whenever ssl_mode is below MES_SSL_VERIFY_CA: with TLS active
+   *  but unverified (preferred/required), the password is then sent in
+   *  cleartext over that TLS session, same as a verified session; without
+   *  TLS, it instead fetches the server's unauthenticated RSA key and
+   *  encrypts the password with it. Either way an active MITM that controls
+   *  the channel can recover the password; passive eavesdropping is defeated
+   *  by TLS regardless. Disabled by default; raising ssl_mode to verify_ca or
+   *  verify_identity is the safer remedy. */
   int allow_public_key_retrieval;
   /** Defaults to MES_START_AT_CURRENT for zero-initialized configs. */
   mes_start_position_mode_t start_position_mode;
@@ -1007,13 +1014,19 @@ MES_API uint64_t mes_client_crc_errors(mes_client_t* client);
 
 /** @brief Enable metadata queries for column name resolution.
  *  Uses a separate MySQL connection with the same credentials. TABLE_MAP
- *  processing may synchronously execute SHOW COLUMNS; each network read is
- *  bounded by config->read_timeout_s, or by MES_DEFAULT_READ_TIMEOUT_S when
- *  that field is 0. A timeout leaves names unresolved for that event
- *  and the metadata connection is retried once with the same timeout. For
- *  schema-derived column names, configure binlog_row_metadata=FULL or grant
- *  SELECT to this same credential; otherwise consumers must check
- *  mes_event_t::names_resolved before using col_name.
+ *  processing may synchronously execute SHOW COLUMNS; a lookup that times out
+ *  disconnects and reconnects within the same call, retrying once, so the
+ *  worst case for one event is a read timeout, a connect timeout, a
+ *  handshake read timeout and a second read timeout -- bounded by
+ *  config->read_timeout_s / config->connect_timeout_s, or by
+ *  MES_DEFAULT_READ_TIMEOUT_S / MES_DEFAULT_CONNECT_TIMEOUT_S when those
+ *  fields are 0. If every attempt still fails, that event's names are left
+ *  unresolved, and a table that keeps failing (denied privilege, or another
+ *  server error) is not requeried on every subsequent TABLE_MAP: it stays
+ *  unresolved for 30 seconds before the next one retries. For schema-derived
+ *  column names, configure binlog_row_metadata=FULL or grant SELECT to this
+ *  same credential; otherwise consumers must check mes_event_t::names_resolved
+ *  before using col_name.
  *  This side connection reads the server's current schema, not the schema at
  *  a historical binlog position. Treat resolved names as authoritative only
  *  when consuming at the current head; for historical replay, configure

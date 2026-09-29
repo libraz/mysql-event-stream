@@ -141,6 +141,59 @@ TEST(E2EAuth, CachingSha2RequiredTlsColdCacheReportsBothRemedies) {
   ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
 }
 
+TEST(E2EAuth, CachingSha2PreferredTlsColdCacheOptedInSendsCleartext) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
+  // ssl_mode=preferred negotiates TLS opportunistically without verifying the
+  // certificate. The server reads full-auth data as cleartext once the
+  // channel is encrypted regardless of verification, so the opt-in must send
+  // the password in the clear here rather than requesting the RSA key, which
+  // the server would otherwise misread as the password and reject.
+  const std::string temp_user = "sha2_preferred_tls_test_user";
+  const std::string temp_pass = "preferred_tls_pwd_123";
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+  auto dml_rc = ExecuteDML("CREATE USER '" + temp_user +
+                           "'@'%' IDENTIFIED WITH caching_sha2_password BY '" + temp_pass + "'");
+  ASSERT_EQ(dml_rc, MES_OK) << "Failed to create temp user";
+  ExecuteDML("GRANT SELECT ON *.* TO '" + temp_user + "'@'%'");
+  ExecuteDML("FLUSH PRIVILEGES");
+
+  mes::protocol::MysqlConnection opted_in;
+  auto rc = opted_in.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
+                             MES_SSL_PREFERRED, "", "", "", true);
+  EXPECT_EQ(rc, MES_OK) << opted_in.GetLastError();
+  opted_in.Disconnect();
+
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+}
+
+TEST(E2EAuth, CachingSha2PreferredTlsColdCacheWithoutOptInRejected) {
+  if (e2e::IsMariaDB()) {
+    GTEST_SKIP() << "caching_sha2_password is MySQL-specific";
+  }
+  // Same unverified-TLS session as above, but without the opt-in: the client
+  // must refuse locally rather than let the server reject a mismatched
+  // exchange.
+  const std::string temp_user = "sha2_preferred_no_optin_user";
+  const std::string temp_pass = "preferred_no_optin_pwd_123";
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+  auto dml_rc = ExecuteDML("CREATE USER '" + temp_user +
+                           "'@'%' IDENTIFIED WITH caching_sha2_password BY '" + temp_pass + "'");
+  ASSERT_EQ(dml_rc, MES_OK) << "Failed to create temp user";
+  ExecuteDML("GRANT SELECT ON *.* TO '" + temp_user + "'@'%'");
+  ExecuteDML("FLUSH PRIVILEGES");
+
+  mes::protocol::MysqlConnection rejected;
+  auto rc = rejected.Connect(kHost, kPort, temp_user.c_str(), temp_pass.c_str(), kTimeout, kTimeout,
+                             MES_SSL_PREFERRED, "", "", "");
+  EXPECT_EQ(rc, MES_ERR_AUTH);
+  EXPECT_NE(rejected.GetLastError().find("allow_public_key_retrieval"), std::string::npos)
+      << rejected.GetLastError();
+
+  ExecuteDML("DROP USER IF EXISTS '" + temp_user + "'@'%'");
+}
+
 // -- Auth switch tests --
 
 TEST(E2EAuth, CachingSha2DefaultPlugin) {

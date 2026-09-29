@@ -28,6 +28,8 @@ The same three setters exist on `CdcEngine` — `setIncludeDatabases()` / `set_i
 
 **`includeTables` / `include_tables`** and **`excludeTables` / `exclude_tables`** take a qualified `database.table`, a bare table name, or a trailing `*` as a prefix wildcard — `shop.audit_*`, `orders_*`. A `*` anywhere other than the end is a literal asterisk.
 
+A database or table name that itself contains `.` cannot be matched unambiguously this way: db `x` table `y.z` and db `x.y` table `z` both produce the same qualified form `x.y.z`, so an entry naming one matches the other too.
+
 An exclude wins over an include.
 
 ## Case sensitivity
@@ -36,4 +38,4 @@ Every comparison is case-sensitive. MySQL's own identifier case rules differ by 
 
 ## When nothing matches
 
-Configured include filters that see `TABLE_MAP` events and match none of them produce one `include_filter_matched_nothing` warning through the [log callback](logging.md), at reset or at stream close. A filter that silently matches nothing looks exactly like a quiet database, and this is what separates the two.
+Configured include filters that see `TABLE_MAP` events and match none of them produce one `include_filter_matched_nothing` warning through the [log callback](logging.md) per connection window — once at reset (which a reconnect also triggers) and once more at stream close. A filter that silently matches nothing looks exactly like a quiet database, and this is what separates the two.

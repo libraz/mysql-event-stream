@@ -47,10 +47,10 @@ The native client implements MySQL's `caching_sha2_password` and `mysql_native_p
 `caching_sha2_password` normally completes against the server's password cache. When that cache is cold — a fresh user, a server restart, a `FLUSH PRIVILEGES` — the plugin falls back to *full authentication*, which sends the password in a form the server can read. That needs one of two things:
 
 - `sslMode` / `ssl_mode` of `3` (`verify_ca`) or `4` (`verify_identity`), so the password travels over a TLS session whose certificate has been verified; or
-- `allowPublicKeyRetrieval` / `allow_public_key_retrieval`, which opts into fetching the server's RSA public key over the current channel and encrypting the password with it.
+- `allowPublicKeyRetrieval` / `allow_public_key_retrieval`, an opt-in for completing full authentication over a channel that has not authenticated the server.
 
-`preferred` (1) and `required` (2) are not sufficient. They encrypt the channel without authenticating the server, so a machine in the middle could collect the cleartext password. Full authentication under those modes without `allowPublicKeyRetrieval` fails with an authentication error naming both remedies.
+What that opt-in does depends on whether TLS is active. With `preferred` (1) or `required` (2) — encrypted but not authenticated — it sends the password in cleartext over that TLS session, same as under a verified mode. Without TLS at all, it instead fetches the server's RSA public key over the plaintext channel and encrypts the password with it. Full authentication under `preferred` or `required` without the opt-in fails with an authentication error naming both remedies.
 
-Verified TLS is the one to use. Public-key retrieval trusts a key that has not itself been authenticated, which is the same exposure in a different shape.
+Verified TLS is the one to use. Either shape of the opt-in trusts a channel or a key that has not itself been authenticated, so an active machine-in-the-middle can still recover the password; passive eavesdropping is defeated by TLS regardless.
 
 A connection that only ever authenticates against a warm cache will work under `preferred` and then fail after the next server restart. That is worth knowing before the restart rather than after it.

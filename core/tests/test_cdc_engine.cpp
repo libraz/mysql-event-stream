@@ -1970,6 +1970,85 @@ TEST(CdcEngineTest, UnqualifiedIncludeWildcardIgnoresTheDatabaseName) {
   EXPECT_FALSE(engine.IsError());
 }
 
+TEST(CdcEngineTest, TableFilterMatchingIsCaseSensitive) {
+  CdcEngine engine;
+  // mes.h promises byte-exact, case-sensitive matching: "Users" must not
+  // admit a table actually named "users".
+  engine.SetIncludeTables({"mydb.Users"});
+
+  const auto lower_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "users"));
+  const auto upper_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
+                                    200, BuildTableMapBody(2, "mydb", "Users"));
+  ASSERT_EQ(engine.Feed(lower_map.data(), lower_map.size()), lower_map.size());
+  ASSERT_EQ(engine.Feed(upper_map.data(), upper_map.size()), upper_map.size());
+
+  const auto lower_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                    300, BuildWriteRowsBody(1, 10));
+  const auto upper_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
+                                    400, BuildWriteRowsBody(2, 20));
+  ASSERT_EQ(engine.Feed(lower_row.data(), lower_row.size()), lower_row.size());
+  ASSERT_EQ(engine.Feed(upper_row.data(), upper_row.size()), upper_row.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "Users");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, ANonTrailingAsteriskIsLiteral) {
+  CdcEngine engine;
+  // mes.h promises a trailing '*' is a prefix wildcard and a '*' anywhere
+  // else is a literal asterisk, so this entry matches only a table whose
+  // name literally contains one -- not "audit" via a middle wildcard.
+  engine.SetIncludeTables({"mydb.au*dit"});
+
+  const auto audit_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "audit"));
+  const auto literal_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
+                                      200, BuildTableMapBody(2, "mydb", "au*dit"));
+  ASSERT_EQ(engine.Feed(audit_map.data(), audit_map.size()), audit_map.size());
+  ASSERT_EQ(engine.Feed(literal_map.data(), literal_map.size()), literal_map.size());
+
+  const auto audit_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                    300, BuildWriteRowsBody(1, 10));
+  const auto literal_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
+                                      400, BuildWriteRowsBody(2, 20));
+  ASSERT_EQ(engine.Feed(audit_row.data(), audit_row.size()), audit_row.size());
+  ASSERT_EQ(engine.Feed(literal_row.data(), literal_row.size()), literal_row.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "au*dit");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
+TEST(CdcEngineTest, IncludeDatabasesHasNoWildcardForm) {
+  CdcEngine engine;
+  // mes.h promises includeDatabases has no wildcard form at all: "shard_*"
+  // matches a database named exactly that, not "shard_1".
+  engine.SetIncludeDatabases({"shard_*"});
+
+  const auto numbered_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                       100, BuildTableMapBody(1, "shard_1", "orders"));
+  const auto literal_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
+                                      200, BuildTableMapBody(2, "shard_*", "orders"));
+  ASSERT_EQ(engine.Feed(numbered_map.data(), numbered_map.size()), numbered_map.size());
+  ASSERT_EQ(engine.Feed(literal_map.data(), literal_map.size()), literal_map.size());
+
+  const auto numbered_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                       300, BuildWriteRowsBody(1, 10));
+  const auto literal_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
+                                      400, BuildWriteRowsBody(2, 20));
+  ASSERT_EQ(engine.Feed(numbered_row.data(), numbered_row.size()), numbered_row.size());
+  ASSERT_EQ(engine.Feed(literal_row.data(), literal_row.size()), literal_row.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.database, "shard_*");
+  EXPECT_FALSE(engine.HasEvents());
+}
+
 TEST(CdcEngineTest, WarnsOnceWhenIncludeFiltersMatchNoTableMaps) {
   g_include_filter_warning_count = 0;
   g_include_filter_warning_message.clear();
