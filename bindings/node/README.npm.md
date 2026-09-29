@@ -57,7 +57,8 @@ An `UPDATE` arrives with both images of the row:
   "after": { "id": 8, "name": "Widget", "value": 100 },
   "timestamp": 1773584164,
   "position": { "file": "mysql-bin.000003", "offset": 3611 },
-  "namesResolved": true
+  "namesResolved": true,
+  "sourceSql": ""
 }
 ```
 

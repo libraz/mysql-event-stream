@@ -102,6 +102,8 @@ async function main(): Promise<void> {
     port: 13308,
     user: "root",
     password: "test_root_password",
+    // Local test server only; use verified TLS (sslMode/sslCa) in production.
+    allowPublicKeyRetrieval: true,
     serverId: 98,
     connectTimeoutS: 10,
     readTimeoutS: 30,

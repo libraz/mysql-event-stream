@@ -78,6 +78,8 @@ async function main(): Promise<void> {
     port: 13308,
     user: "root",
     password: "test_root_password",
+    // Local test server only; use verified TLS (sslMode/sslCa) in production.
+    allowPublicKeyRetrieval: true,
     serverId: 99,
     // Left unset without --gtid, which snapshots the server's current
     // position. An empty GTID set would instead ask for every binlog the

@@ -33,9 +33,7 @@
  *   UPDATE products SET price = 24.99, stock = stock - 1
  *   WHERE name = 'Wireless Mouse';
  *
- *   UPDATE products SET is_active = 0 WHERE stock = 0;
- *
- *   DELETE FROM products WHERE category = 'furniture' AND is_active = 0;
+ *   DELETE FROM products WHERE category = 'furniture';
  *
  * Example output:
  *   Search Index Sync
@@ -49,7 +47,8 @@
  *   [INDEX] + product 3: Standing Desk (furniture) $499.00
  *   [INDEX] ~ product 1: price $29.99 -> $24.99, stock 150 -> 149
  *   [INDEX] - product 3: removed from index
- *   [STATS] indexed=2 updated=1 removed=1
+ *   [STATS] indexed=3 updated=1 removed=1
+ *   [STATS] index size: 2 documents
  *
  * Prerequisites:
  *   1a. Docker MySQL running:   (cd ../../e2e/docker && docker compose up -d)
@@ -106,7 +105,7 @@ function indexProduct(row: Record<string, unknown>): void {
   if (existing) {
     const changes: string[] = [];
     if (existing.price !== doc.price) {
-      changes.push(`price $${existing.price} -> $${doc.price}`);
+      changes.push(`price $${existing.price.toFixed(2)} -> $${doc.price.toFixed(2)}`);
     }
     if (existing.stock !== doc.stock) {
       changes.push(`stock ${existing.stock} -> ${doc.stock}`);
@@ -117,7 +116,9 @@ function indexProduct(row: Record<string, unknown>): void {
     console.log(`  [INDEX] ~ product ${doc.id}: ${changes.join(", ") || "no visible changes"}`);
     stats.updated++;
   } else {
-    console.log(`  [INDEX] + product ${doc.id}: ${doc.name} (${doc.category}) $${doc.price}`);
+    console.log(
+      `  [INDEX] + product ${doc.id}: ${doc.name} (${doc.category}) $${doc.price.toFixed(2)}`,
+    );
     stats.indexed++;
   }
 }
@@ -156,6 +157,8 @@ async function main(): Promise<void> {
     port: 13308,
     user: "root",
     password: "test_root_password",
+    // Local test server only; use verified TLS (sslMode/sslCa) in production.
+    allowPublicKeyRetrieval: true,
     serverId: 97,
   });
 

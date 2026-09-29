@@ -62,7 +62,8 @@ async with CdcStream(
   "after": { "id": 8, "name": "Widget", "value": 100 },
   "timestamp": 1773584164,
   "position": { "file": "mysql-bin.000003", "offset": 3611 },
-  "namesResolved": true
+  "namesResolved": true,
+  "sourceSql": ""
 }
 ```
 
