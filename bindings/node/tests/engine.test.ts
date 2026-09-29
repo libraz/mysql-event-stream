@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readdirSync, readFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
 import { type ChangeEvent, MesErrorCode } from "../src/types.js";
@@ -522,6 +523,33 @@ const REFUSED_ARGUMENTS: Array<{ method: string; argument: unknown; label: strin
   { method: "enableMetadata", argument: { port: "3306" }, label: "a wrongly-typed option" },
   { method: "enableMetadata", argument: { notAnOption: 1 }, label: "an unrecognized key" },
   { method: "enableMetadata", argument: { serverId: 0 }, label: "an out-of-range option" },
+  {
+    method: "enableMetadata",
+    argument: { includeTables: ["mydb.orders"] },
+    label: "a stream-only key",
+  },
+  { method: "enableMetadataAsync", argument: 42, label: "a non-object config" },
+  { method: "enableMetadataAsync", argument: { port: "3306" }, label: "a wrongly-typed option" },
+  { method: "enableMetadataAsync", argument: { notAnOption: 1 }, label: "an unrecognized key" },
+  { method: "enableMetadataAsync", argument: { serverId: 0 }, label: "an out-of-range option" },
+  {
+    method: "enableMetadataAsync",
+    argument: { includeTables: ["mydb.orders"] },
+    label: "a stream-only key",
+  },
+];
+
+/**
+ * StreamConfig options {@link CdcEngine.enableMetadata} does not accept: it
+ * connects on its own rather than reusing an already-validated stream config,
+ * so these are refused the same way an unrecognized key is.
+ */
+const STREAM_ONLY_KEYS = [
+  "includeDatabases",
+  "includeTables",
+  "excludeTables",
+  "maxReconnectAttempts",
+  "onMetadataError",
 ];
 
 describe("CdcEngine error codes", () => {
@@ -554,6 +582,34 @@ describe("CdcEngine error codes", () => {
   it("covers every engine method that takes an argument", () => {
     const covered = [...new Set(REFUSED_ARGUMENTS.map((refusal) => refusal.method))].sort();
     expect(covered).toEqual([...ARGUMENT_TAKING_METHODS].sort());
+  });
+
+  it("enableMetadata refuses every stream-only key but accepts a plain connection config", async () => {
+    for (const key of STREAM_ONLY_KEYS) {
+      engine = await CdcEngine.create();
+      let thrown: unknown;
+      try {
+        engine.enableMetadata({ [key]: [] } as never);
+      } catch (error) {
+        thrown = error;
+      }
+      const rejection = thrown as (Error & { code?: unknown }) | undefined;
+      expect(rejection, key).toBeDefined();
+      expect(rejection?.message, key).toContain(`Unknown config key: ${key}`);
+      expect(rejection?.code, key).toBe(MesErrorCode.InvalidArg);
+    }
+
+    // A config carrying only connection options reaches the native connect
+    // attempt instead -- no server listens on this port, so it still throws,
+    // just not as an unrecognized key.
+    engine = await CdcEngine.create();
+    let connectError: unknown;
+    try {
+      engine.enableMetadata({ host: "127.0.0.1", port: 19999 });
+    } catch (error) {
+      connectError = error;
+    }
+    expect((connectError as Error | undefined)?.message).not.toContain("Unknown config key");
   });
 
   it("codes a decoded event whose type the addon does not know", async () => {
@@ -710,5 +766,89 @@ describe("CdcEngine trailer pre-verification", () => {
     const event = engine.nextEvent() as ChangeEvent;
     expect(event).not.toBeNull();
     expect(event.after?.["0"]).toBe(77);
+  });
+});
+
+/**
+ * A TCP server that accepts every connection and never writes to it, so a
+ * MySQL handshake read against it blocks until the caller's read timeout.
+ */
+function silentServer(): Promise<{ server: Server; port: number }> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => {
+      socket.on("error", () => {});
+    });
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        reject(new Error("expected a TCP address"));
+        return;
+      }
+      resolve({ server, port: address.port });
+    });
+  });
+}
+
+describe("CdcEngine metadata connect (async)", () => {
+  let engine: CdcEngine;
+  let server: Server | undefined;
+
+  afterEach(async () => {
+    engine?.destroy();
+    if (server) {
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+      server = undefined;
+    }
+  });
+
+  it("keeps the event loop responsive while a metadata connect is in flight", async () => {
+    const started = await silentServer();
+    server = started.server;
+    engine = await CdcEngine.create();
+    const internals = engine as unknown as {
+      enableMetadataAsync(config: Record<string, unknown>): Promise<void>;
+    };
+
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks++;
+    }, 5);
+    try {
+      const pending = internals.enableMetadataAsync({
+        host: "127.0.0.1",
+        port: started.port,
+        connectTimeoutS: 1,
+        readTimeoutS: 1,
+      });
+      // A synchronous mes_engine_set_metadata_conn() call would starve this
+      // interval for the whole ~1s the handshake read blocks on the never-sent
+      // greeting; a worker on the thread pool leaves the loop free to tick.
+      await expect(pending).rejects.toThrow();
+    } finally {
+      clearInterval(timer);
+    }
+    expect(ticks).toBeGreaterThan(0);
+  });
+
+  it("tolerates destroy() while a metadata connect is still in flight", async () => {
+    const started = await silentServer();
+    server = started.server;
+    engine = await CdcEngine.create();
+    const internals = engine as unknown as {
+      enableMetadataAsync(config: Record<string, unknown>): Promise<void>;
+    };
+
+    const pending = internals.enableMetadataAsync({
+      host: "127.0.0.1",
+      port: started.port,
+      connectTimeoutS: 1,
+      readTimeoutS: 1,
+    });
+    // Race destroy() against the worker still running Execute() on the thread
+    // pool: EngineWrap defers the actual mes_destroy() until the worker
+    // completes, so this must not crash or leave the promise unsettled.
+    engine.destroy();
+    await expect(pending).rejects.toThrow();
   });
 });

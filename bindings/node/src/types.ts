@@ -245,7 +245,10 @@ export interface StreamConfig extends ClientConfig {
   /** Maximum number of automatic reconnection attempts (default 10, 0 = disabled). */
   maxReconnectAttempts?: number;
   /**
-   * Optional callback fired when the optional metadata connection fails.
+   * Optional callback fired when opening the metadata connection fails, on
+   * start or on a later reconnect. A failure once the connection is already
+   * open does not reach this callback; it surfaces as a log event, with
+   * `namesResolved: false` on the event whose columns it affects.
    * If unset, metadata failures are silently tolerated (column names fall
    * back to numeric string indices). The library intentionally does NOT
    * write to stderr on its own; embedding applications should wire this

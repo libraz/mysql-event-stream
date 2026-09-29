@@ -5,7 +5,9 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "addon_constants.h"
@@ -22,6 +24,52 @@ void ThrowDestroyed(Napi::Env env) {
 }
 
 }  // namespace
+
+/**
+ * @brief Runs mes_engine_set_metadata_conn(), a blocking connect handshake, off
+ * the event loop. @c strings_ owns the storage @c config_ points into.
+ */
+class EnableMetadataWorker : public Napi::AsyncWorker {
+ public:
+  EnableMetadataWorker(Napi::Env env, mes_engine_t* engine, EngineWrap* wrap,
+                       Napi::Promise::Deferred deferred, const mes_client_config_t& config,
+                       std::unique_ptr<mes_node::ConfigStrings> strings)
+      : Napi::AsyncWorker(env),
+        engine_(engine),
+        wrap_(wrap),
+        deferred_(deferred),
+        config_(config),
+        strings_(std::move(strings)),
+        error_(MES_OK) {}
+
+  void Execute() override { error_ = mes_engine_set_metadata_conn(engine_, &config_); }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    if (error_ != MES_OK) {
+      deferred_.Reject(
+          mes_node::MakeMesError(
+              env, std::string("Failed to connect metadata: ") + mes_error_string(error_), error_)
+              .Value());
+    } else {
+      deferred_.Resolve(env.Undefined());
+    }
+    wrap_->OnMetadataWorkerComplete();
+  }
+
+  void OnError(const Napi::Error& error) override {
+    deferred_.Reject(error.Value());
+    wrap_->OnMetadataWorkerComplete();
+  }
+
+ private:
+  mes_engine_t* engine_;
+  EngineWrap* wrap_;
+  Napi::Promise::Deferred deferred_;
+  mes_client_config_t config_;
+  std::unique_ptr<mes_node::ConfigStrings> strings_;
+  mes_error_t error_;
+};
 
 Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
   Napi::Function func = DefineClass(
@@ -45,6 +93,7 @@ Napi::Object EngineWrap::Init(Napi::Env env, Napi::Object exports) {
           InstanceMethod<&EngineWrap::SetExcludeTables>("setExcludeTables"),
           InstanceMethod<&EngineWrap::Destroy>("destroy"),
           InstanceMethod<&EngineWrap::EnableMetadata>("enableMetadata"),
+          InstanceMethod<&EngineWrap::EnableMetadataAsync>("enableMetadataAsync"),
           InstanceAccessor<&EngineWrap::GetSourceSqlConversions>("sourceSqlConversions"),
       });
 
@@ -485,9 +534,28 @@ void EngineWrap::SetExcludeTables(const Napi::CallbackInfo& info) {
 
 void EngineWrap::Destroy(const Napi::CallbackInfo& info) {
   (void)info;
-  if (engine_) {
+  if (!engine_) return;
+  if (pending_workers_.load(std::memory_order_acquire) > 0) {
+    // No stop() can interrupt the worker, so free the engine once it completes.
+    destroy_pending_.store(true, std::memory_order_release);
+    return;
+  }
+  mes_destroy(engine_);
+  engine_ = nullptr;
+}
+
+void EngineWrap::OnMetadataWorkerComplete() {
+  pending_workers_.fetch_sub(1, std::memory_order_acq_rel);
+  Unref();  // allow GC now that the worker is done
+  MaybeFinalizeDeferredDestroy();
+}
+
+void EngineWrap::MaybeFinalizeDeferredDestroy() {
+  if (destroy_pending_.load(std::memory_order_acquire) && engine_ &&
+      pending_workers_.load(std::memory_order_acquire) == 0) {
     mes_destroy(engine_);
     engine_ = nullptr;
+    destroy_pending_.store(false, std::memory_order_release);
   }
 }
 
@@ -523,6 +591,41 @@ Napi::Value EngineWrap::EnableMetadata(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
+}
+
+Napi::Value EngineWrap::EnableMetadataAsync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  auto deferred = Napi::Promise::Deferred::New(env);
+
+  if (!engine_ || destroy_pending_.load(std::memory_order_acquire)) {
+    deferred.Reject(
+        mes_node::MakeMesError(env, "Engine has been destroyed", MES_ERR_INVALID_ARG).Value());
+    return deferred.Promise();
+  }
+
+  if (info.Length() < 1 || !info[0].IsObject()) {
+    deferred.Reject(mes_node::MakeMesError(env, "config must be an object", MES_ERR_INVALID_ARG,
+                                           mes_node::MesErrorClass::kType)
+                        .Value());
+    return deferred.Promise();
+  }
+
+  Napi::Object config = info[0].As<Napi::Object>();
+
+  // Owned by the worker so cfg's string pointers outlive this call.
+  auto strings = std::make_unique<mes_node::ConfigStrings>();
+  mes_client_config_t cfg{};
+  if (!mes_node::ParseClientConfig(env, config, cfg, *strings)) {
+    // Turn the pending JS exception into a rejection of the returned promise.
+    deferred.Reject(env.GetAndClearPendingException().Value());
+    return deferred.Promise();
+  }
+
+  pending_workers_.fetch_add(1, std::memory_order_acq_rel);
+  Ref();  // prevent GC while the worker is in flight
+  auto* worker = new EnableMetadataWorker(env, engine_, this, deferred, cfg, std::move(strings));
+  worker->Queue();
+  return deferred.Promise();
 }
 
 Napi::Value EngineWrap::ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count) {

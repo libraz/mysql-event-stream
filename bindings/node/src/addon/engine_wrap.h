@@ -6,6 +6,7 @@
 
 #include <napi.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -17,6 +18,9 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   static Napi::Object Init(Napi::Env env, Napi::Object exports);
   explicit EngineWrap(const Napi::CallbackInfo& info);
   ~EngineWrap();
+
+  /** @brief Called by EnableMetadataWorker on the main thread when work completes. */
+  void OnMetadataWorkerComplete();
 
  private:
   Napi::Value Feed(const Napi::CallbackInfo& info);
@@ -39,6 +43,9 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
                        mes_error_t (*setter)(mes_engine_t*, const char**, size_t),
                        const char* method_name);
   void Destroy(const Napi::CallbackInfo& info);
+
+  /** @brief Finalize a deferred destroy once no worker remains in flight. */
+  void MaybeFinalizeDeferredDestroy();
 
   Napi::Value ReadColumns(Napi::Env env, const mes_column_t* cols, uint32_t count);
 
@@ -75,6 +82,14 @@ class EngineWrap : public Napi::ObjectWrap<EngineWrap> {
   uint64_t source_sql_conversions_ = 0;
 
   Napi::Value EnableMetadata(const Napi::CallbackInfo& info);
+  Napi::Value EnableMetadataAsync(const Napi::CallbackInfo& info);
+
+  /// Metadata-enable workers currently running on the thread pool. `Destroy()`
+  /// defers the actual `mes_destroy()` while this is nonzero, since the engine
+  /// has no `stop()` to interrupt one the way `mes_client_stop()` does for a
+  /// blocking client poll.
+  std::atomic<int> pending_workers_{0};
+  std::atomic<bool> destroy_pending_{false};
 };
 
 #endif  // MES_NODE_ENGINE_WRAP_H_

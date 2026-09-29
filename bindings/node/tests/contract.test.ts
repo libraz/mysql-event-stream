@@ -59,21 +59,21 @@ function resumeConfig(stream: CdcStream, checkpoint: string): StreamConfig {
 }
 
 /** Attach a metadata connection that always fails to an unstarted stream. */
-function withFailingMetadata(stream: CdcStream): () => void {
+function withFailingMetadata(stream: CdcStream): () => Promise<void> {
   const internals = stream as unknown as {
-    engine: { enableMetadata(): void };
-    enableMetadataSafe(): void;
+    engine: { enableMetadataAsync(): Promise<void> };
+    enableMetadataSafe(): Promise<void>;
   };
   internals.engine = {
-    enableMetadata(): void {
-      throw new Error("metadata connection refused");
+    enableMetadataAsync(): Promise<void> {
+      return Promise.reject(new Error("metadata connection refused"));
     },
   };
   return () => internals.enableMetadataSafe();
 }
 
 /** Run `body` with stderr captured, so "writes nothing" can be asserted. */
-function captureStderr(body: () => void): string[] {
+async function captureStderr(body: () => void | Promise<void>): Promise<string[]> {
   const written: string[] = [];
   const original = process.stderr.write;
   process.stderr.write = ((chunk: string | Uint8Array) => {
@@ -81,7 +81,7 @@ function captureStderr(body: () => void): string[] {
     return true;
   }) as typeof process.stderr.write;
   try {
-    body();
+    await body();
   } finally {
     process.stderr.write = original;
   }
@@ -239,22 +239,22 @@ describe("binding contract", () => {
     }
   });
 
-  it("stays silent when metadata fails and no handler is configured", () => {
+  it("stays silent when metadata fails and no handler is configured", async () => {
     expect(METADATA_ERROR_DEFAULT).toBe(contract.metadataError.defaultBehaviour);
 
     const report = withFailingMetadata(new CdcStream({ host: "127.0.0.1" }));
-    const written = captureStderr(() => {
-      expect(() => report()).not.toThrow();
+    const written = await captureStderr(async () => {
+      await expect(report()).resolves.toBeUndefined();
     });
     expect(written).toEqual([]);
   });
 
-  it("hands a metadata failure to the configured handler", () => {
+  it("hands a metadata failure to the configured handler", async () => {
     const seen: Error[] = [];
     const report = withFailingMetadata(
       new CdcStream({ host: "127.0.0.1", onMetadataError: (error) => seen.push(error) }),
     );
-    report();
+    await report();
     expect(seen.map((error) => error.message)).toEqual(["metadata connection refused"]);
   });
 

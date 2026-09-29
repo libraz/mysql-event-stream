@@ -4,8 +4,13 @@
 import { BinlogClient } from "./client.js";
 import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";
-import type { ChangeEvent, PollResult, StreamConfig } from "./types.js";
-import { invalidArgument, validateStreamOptions, withStreamDefaults } from "./validation.js";
+import type { ChangeEvent, ClientConfig, PollResult, StreamConfig } from "./types.js";
+import {
+  CLIENT_OPTION_TYPES,
+  invalidArgument,
+  validateStreamOptions,
+  withStreamDefaults,
+} from "./validation.js";
 
 /** A run of bytes together with the checksum framing they were read under. */
 interface FramedBytes {
@@ -46,6 +51,25 @@ function groupFramedResults(results: readonly PollResult[]): FramedBytes[] {
   }
   flush();
   return groups;
+}
+
+/** Copy the filter arrays so later caller mutation cannot reach a reconnect. */
+function cloneFilterArrays(config: StreamConfig): StreamConfig {
+  return {
+    ...config,
+    includeDatabases: config.includeDatabases && [...config.includeDatabases],
+    includeTables: config.includeTables && [...config.includeTables],
+    excludeTables: config.excludeTables && [...config.excludeTables],
+  };
+}
+
+/** Narrow a stream config to the connection options enableMetadata accepts. */
+function clientConfigOf(config: StreamConfig): ClientConfig {
+  const client: Record<string, unknown> = {};
+  for (const key of Object.keys(CLIENT_OPTION_TYPES)) {
+    if (key in config) client[key] = (config as Record<string, unknown>)[key];
+  }
+  return client as ClientConfig;
 }
 
 /** Extract the numeric `code` an addon error carries, if any. */
@@ -95,7 +119,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   constructor(config: StreamConfig) {
     validateStreamOptions(config);
     Object.defineProperty(this, "config", {
-      value: withStreamDefaults(config),
+      value: cloneFilterArrays(withStreamDefaults(config)),
       writable: true,
       configurable: true,
       enumerable: false,
@@ -115,7 +139,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
       throw invalidArgument("Cannot configure after streaming has started");
     }
     validateStreamOptions(overrides, this.config);
-    this.config = { ...this.config, ...overrides };
+    this.config = cloneFilterArrays({ ...this.config, ...overrides });
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ChangeEvent> {
@@ -160,12 +184,13 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     return this.lastGtid;
   }
 
-  private enableMetadataSafe(): void {
+  private async enableMetadataSafe(): Promise<void> {
     // Metadata connection is optional -- column names will be numeric
     // string indices if it fails. The library does not write to stderr
     // on its own; the embedder receives failures via onMetadataError.
+    // Off the event loop: the handshake blocks and repeats on every reconnect.
     try {
-      this.engine!.enableMetadata(this.config);
+      await this.engine!.enableMetadataAsync(clientConfigOf(this.config));
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       this.config.onMetadataError?.(err);
@@ -189,7 +214,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     // clear this flag, so it holds across every reconnect on this engine.
     this.engine.setTrailerPreVerified(true);
     this.applyFilters();
-    this.enableMetadataSafe();
+    await this.enableMetadataSafe();
 
     let reconnectAttempts = 0;
     const maxAttempts = Math.max(
@@ -307,7 +332,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
           // Re-enable metadata after engine reset. Keeps the Node binding
           // consistent with the Python binding, which re-runs
           // enable_metadata on every reconnect.
-          this.enableMetadataSafe();
+          await this.enableMetadataSafe();
         }
       }
     } finally {

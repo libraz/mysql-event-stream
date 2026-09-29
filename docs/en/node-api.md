@@ -50,7 +50,7 @@ Extends `ClientConfig` with:
 | `includeTables?: string[]` | all | `database.table`, a bare name, or a trailing `*`. |
 | `excludeTables?: string[]` | none | Same forms; an exclude wins. |
 | `maxReconnectAttempts?: number` | `10` | `0` disables reconnection. |
-| `onMetadataError?: (error: Error) => void` | — | Called when the metadata connection fails. Unset means the failure is tolerated silently and column names fall back to numeric indices. |
+| `onMetadataError?: (error: Error) => void` | — | Called when opening the metadata connection fails, on start or on a later reconnect. A failure once it's open surfaces as a log event and `namesResolved: false` instead. Unset means the failure is tolerated silently and column names fall back to numeric indices. |
 
 ### ClientConfig
 

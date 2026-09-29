@@ -50,7 +50,7 @@ for await (const event of stream) { /* ... */ }
 | `includeTables?: string[]` | すべて | `database.table`、テーブル名のみ、末尾の `*` のいずれか。 |
 | `excludeTables?: string[]` | なし | 形式は同じで、除外が優先します。 |
 | `maxReconnectAttempts?: number` | `10` | `0` で再接続しなくなります。 |
-| `onMetadataError?: (error: Error) => void` | — | メタデータ接続が失敗したときに呼ばれます。設定しなければ失敗は黙って許容され、カラム名は数値インデックスに落ちます。 |
+| `onMetadataError?: (error: Error) => void` | — | 起動時または再接続時にメタデータ接続を開くのに失敗すると呼ばれます。接続確立後の失敗はここには渡らず、ログイベントと該当イベントの `namesResolved: false` として現れます。設定しなければ失敗は黙って許容され、カラム名は数値インデックスに落ちます。 |
 
 ### ClientConfig
 

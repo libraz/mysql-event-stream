@@ -76,6 +76,9 @@ vi.mock("../src/client.js", () => ({
 vi.mock("../src/engine.js", () => ({
   CdcEngine: class {
     enableMetadata(): void {}
+    enableMetadataAsync(): Promise<void> {
+      return Promise.resolve();
+    }
     feed(chunk: Uint8Array): number {
       return mocks.feedImpl(chunk);
     }
@@ -191,6 +194,70 @@ describe("CdcStream", () => {
     expect(mocks.includeDatabasesImpl).toHaveBeenCalledWith(["mydb"]);
     expect(mocks.includeTablesImpl).toHaveBeenCalledWith(["mydb.orders"]);
     expect(mocks.excludeTablesImpl).toHaveBeenCalledWith(["mydb.audit_log"]);
+  });
+
+  it("does not let a caller's later mutation of a constructor filter array change what a reconnect applies", async () => {
+    mocks.includeTablesImpl.mockClear();
+    mocks.startImpl.mockReset();
+    let attempts = 0;
+    mocks.startImpl.mockImplementation(() => {
+      attempts++;
+      if (attempts === 1) {
+        // The first connection fails so applyFilters() runs a second time on
+        // reconnect, reading this.config.includeTables again.
+        const err: Error & { code?: number } = new Error("stream error");
+        err.code = MesErrorCode.Stream;
+        throw err;
+      }
+    });
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }), 5),
+        ),
+    );
+
+    const includeTables = ["mydb.orders"];
+    const stream = new CdcStream({ host: "127.0.0.1", includeTables, maxReconnectAttempts: 1 });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(1));
+
+    // Mutate the caller's own array after construction, before the reconnect.
+    includeTables.push("mydb.audit_log");
+    await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(2));
+
+    expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(1, ["mydb.orders"]);
+    expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(2, ["mydb.orders"]);
+
+    await stream.close();
+    await next.catch(() => {});
+  });
+
+  it("does not let a caller's later mutation of a configure() filter array change what applyFilters uses", async () => {
+    mocks.includeTablesImpl.mockClear();
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    mocks.pollImpl.mockReset();
+    mocks.pollImpl.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ data: null, isHeartbeat: false, checksumEnabled: false }), 5),
+        ),
+    );
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const includeTables = ["mydb.orders"];
+    stream.configure({ includeTables });
+    // Mutate the caller's own array after configure(), before iteration starts.
+    includeTables.push("mydb.audit_log");
+
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledWith(["mydb.orders"]));
+    expect(mocks.includeTablesImpl).not.toHaveBeenCalledWith(["mydb.orders", "mydb.audit_log"]);
+
+    await stream.close();
+    await next.catch(() => {});
   });
 
   it("configure should update config before streaming", () => {

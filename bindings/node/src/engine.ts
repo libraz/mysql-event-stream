@@ -4,7 +4,7 @@
 import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { REFUSAL_ERROR_NAME, validateStreamOptions } from "./validation.js";
+import { REFUSAL_ERROR_NAME, validateClientOptions } from "./validation.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -29,6 +29,7 @@ interface NativeEngine {
   setExcludeTables(tables: string[]): void;
   destroy(): void;
   enableMetadata(config: ClientConfig): void;
+  enableMetadataAsync(config: ClientConfig): Promise<void>;
 }
 
 const addon = loadNativeAddon<NativeAddon>();
@@ -217,15 +218,26 @@ export class CdcEngine {
   /**
    * Enable metadata queries for column name resolution.
    *
-   * Validated the same way `CdcStream` validates its own config: an unknown
-   * key, a wrongly-typed value, or an out-of-range one is rejected here rather
-   * than reaching the native addon, since this entry point does not go through
-   * a stream that would have validated it already.
+   * Validated against the connection options a direct connect accepts, since
+   * this entry point does not go through a stream that would have validated a
+   * config already: an unknown key -- including a stream-only one such as
+   * `includeTables` -- a wrongly-typed value, or an out-of-range one is
+   * rejected here rather than reaching the native addon.
    */
   enableMetadata(config: ClientConfig): void {
     this.ensureNotDestroyed();
-    validateStreamOptions(config);
+    validateClientOptions(config);
     this.engine!.enableMetadata(config);
+  }
+
+  /**
+   * {@link enableMetadata} with the connect handshake run off the event loop.
+   * @internal Used by {@link CdcStream}, which repeats it on every reconnect.
+   */
+  enableMetadataAsync(config: ClientConfig): Promise<void> {
+    this.ensureNotDestroyed();
+    validateClientOptions(config);
+    return this.engine!.enableMetadataAsync(config);
   }
 
   /** Destroy the engine and free native resources. */

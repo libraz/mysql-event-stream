@@ -6,7 +6,7 @@ import {
   REQUIRED_TOGETHER_OPTIONS,
   STREAM_DEFAULTS,
 } from "./contract.js";
-import type { MesError, StreamConfig } from "./types.js";
+import type { ClientConfig, MesError, StreamConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
 
 /**
@@ -83,6 +83,35 @@ export const OPTION_TYPES = {
   maxReconnectAttempts: "integer",
   onMetadataError: "callback",
 } as const satisfies Record<keyof StreamConfig, OptionType>;
+
+/**
+ * Declared runtime type of every recognized {@link ClientConfig} option --
+ * the subset of {@link OPTION_TYPES} a direct connection accepts, without the
+ * stream-only keys (filters, the reconnect budget, the metadata-error
+ * callback). {@link CdcEngine.enableMetadata} validates against this table
+ * rather than {@link OPTION_TYPES}, since it opens a connection on its own
+ * and never reaches a stream that would otherwise reject those keys.
+ */
+export const CLIENT_OPTION_TYPES = {
+  host: "string",
+  port: "integer",
+  user: "string",
+  password: "string",
+  serverId: "integer",
+  startGtid: "string",
+  startBinlogFile: "string",
+  startBinlogPosition: "integer",
+  connectTimeoutS: "integer",
+  readTimeoutS: "integer",
+  sslMode: "integer",
+  sslCa: "string",
+  sslCert: "string",
+  sslKey: "string",
+  allowPublicKeyRetrieval: "boolean",
+  maxQueueSize: "integer",
+  maxQueueBytes: "integer",
+  maxEventSize: "integer",
+} as const satisfies Record<keyof ClientConfig, OptionType>;
 
 /**
  * String options that, once supplied, must not be empty. A file/offset start
@@ -199,36 +228,40 @@ function validateConditionalMinimums(supplied: Record<string, unknown>): void {
 }
 
 /**
- * Validate a supplied stream configuration in full: unrecognized keys, values
- * that do not match their declared type, integers outside their accepted range,
- * options of a pair supplied alone, options naming competing start modes, and a
- * value below the floor its companion brings into force are all rejected here.
+ * Validate a supplied configuration against a declared option table in full:
+ * unrecognized keys, values that do not match their declared type, integers
+ * outside their accepted range, options of a pair supplied alone, options
+ * naming competing start modes, and a value below the floor its companion
+ * brings into force are all rejected here.
  *
- * Every entry point into a stream's configuration runs this, so no key or value
- * can be refused by one of them and silently defaulted by another. A key whose
- * value is `undefined` counts as unset and takes its default; `null` is a type
- * error, because `undefined` is how this surface spells "unset".
+ * A key whose value is `undefined` counts as unset and takes its default;
+ * `null` is a type error, because `undefined` is how this surface spells
+ * "unset".
  *
+ * @param table The recognized option set and the runtime type each entry
+ *   must carry -- {@link OPTION_TYPES} for a stream, {@link CLIENT_OPTION_TYPES}
+ *   for a direct connection.
  * @param config Options exactly as supplied, before any default is filled in.
  * @param base Configuration `config` overrides, when it is a partial update.
  *   The checks that span two options hold over the configuration the update
  *   produces, not over the keys the update happens to name.
  */
-export function validateStreamOptions(
-  config: Partial<StreamConfig>,
-  base?: Partial<StreamConfig>,
+function validateOptionsAgainst(
+  table: Record<string, OptionType>,
+  config: Record<string, unknown>,
+  base: Record<string, unknown>,
 ): void {
   if (config === null || typeof config !== "object") {
     throw invalidType("config must be an object");
   }
-  const supplied = config as Record<string, unknown>;
-  for (const key of Object.keys(supplied)) {
-    if (!Object.hasOwn(OPTION_TYPES, key)) {
+  for (const key of Object.keys(config)) {
+    if (!Object.hasOwn(table, key)) {
       throw invalidType(`Unknown config key: ${key}`);
     }
-    const value = supplied[key];
+    const value = config[key];
     if (value === undefined) continue;
-    const type = OPTION_TYPES[key as keyof typeof OPTION_TYPES];
+    // hasOwn above guarantees an entry.
+    const type = table[key]!;
     validateOptionType(key, type, value);
     if (type === "integer") {
       validateIntegerRange(key, value as number);
@@ -236,10 +269,49 @@ export function validateStreamOptions(
       throw invalidArgument(`${key} must name a binlog file`);
     }
   }
-  const effective = { ...base, ...supplied } as Record<string, unknown>;
+  const effective = { ...base, ...config };
   validateRequiredTogether(effective);
   validateMutuallyExclusive(effective);
   validateConditionalMinimums(effective);
+}
+
+/**
+ * Validate a supplied stream configuration against every option a stream
+ * accepts, {@link OPTION_TYPES}. Every entry point into a stream's
+ * configuration runs this, so no key or value can be refused by one of them
+ * and silently defaulted by another.
+ *
+ * @param config Options exactly as supplied, before any default is filled in.
+ * @param base Configuration `config` overrides, when it is a partial update.
+ */
+export function validateStreamOptions(
+  config: Partial<StreamConfig>,
+  base?: Partial<StreamConfig>,
+): void {
+  validateOptionsAgainst(
+    OPTION_TYPES,
+    config as Record<string, unknown>,
+    (base ?? {}) as Record<string, unknown>,
+  );
+}
+
+/**
+ * Validate a supplied configuration against {@link CLIENT_OPTION_TYPES}: the
+ * options a direct connection accepts, without a stream's filters, reconnect
+ * budget, or metadata-error callback.
+ *
+ * @param config Options exactly as supplied, before any default is filled in.
+ * @param base Configuration `config` overrides, when it is a partial update.
+ */
+export function validateClientOptions(
+  config: Partial<ClientConfig>,
+  base?: Partial<ClientConfig>,
+): void {
+  validateOptionsAgainst(
+    CLIENT_OPTION_TYPES,
+    config as Record<string, unknown>,
+    (base ?? {}) as Record<string, unknown>,
+  );
 }
 
 /**
