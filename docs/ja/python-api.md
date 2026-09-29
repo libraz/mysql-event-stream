@@ -72,7 +72,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `include_tables` | `None` | `database.table`、テーブル名のみ、末尾の `*` のいずれか。 |
 | `exclude_tables` | `None` | 形式は同じで、除外が優先します。 |
 | `max_reconnect_attempts` | `10` | `0` で再接続しなくなります。 |
-| `on_metadata_error` | `None` | メタデータ接続が失敗したときに呼ばれます。設定しなければ失敗は黙って許容されます。 |
+| `on_metadata_error` | `None` | 任意のメタデータ接続を開始時・再接続時に有効化できなかったときに呼ばれます。設定しなければ失敗は黙って許容されます。 |
 | `lib_path` | `None` | 同梱のものではなく、指定した `libmes` を読み込みます。 |
 
 ## BinlogClient

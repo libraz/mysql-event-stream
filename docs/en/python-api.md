@@ -72,7 +72,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `include_tables` | `None` | `database.table`, a bare name, or a trailing `*`. |
 | `exclude_tables` | `None` | Same forms; an exclude wins. |
 | `max_reconnect_attempts` | `10` | `0` disables reconnection. |
-| `on_metadata_error` | `None` | Called when the metadata connection fails. Unset means the failure is tolerated silently. |
+| `on_metadata_error` | `None` | Called when the optional metadata connection cannot be enabled, at start or reconnect. Unset means the failure is tolerated silently. |
 | `lib_path` | `None` | Loads a specific `libmes` instead of the bundled one. |
 
 ## BinlogClient

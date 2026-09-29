@@ -15,7 +15,7 @@ from ._contract import (
     NON_RETRYABLE_ERROR_CODES,
     backoff_delay_ms,
 )
-from ._options import validate_options
+from ._options import _STRING_LIST_OPTIONS, validate_options
 from .client import BinlogClient
 from .engine import CdcEngine
 from .types import ChangeEvent, PollResult
@@ -172,9 +172,13 @@ class CdcStream:
         self._max_queue_size = max_queue_size
         self._max_queue_bytes = max_queue_bytes
         self._max_event_size = max_event_size
-        self._include_databases = list(include_databases or [])
-        self._include_tables = list(include_tables or [])
-        self._exclude_tables = list(exclude_tables or [])
+        # None is the only value treated as "unset"; every other value --
+        # a bare string, a tuple, a non-string element -- is validated as
+        # supplied rather than silently reinterpreted (a bare string would
+        # otherwise validate as a list of its characters).
+        self._include_databases = [] if include_databases is None else include_databases
+        self._include_tables = [] if include_tables is None else include_tables
+        self._exclude_tables = [] if exclude_tables is None else exclude_tables
         self._allow_public_key_retrieval = allow_public_key_retrieval
         self._lib_path = lib_path
         self._max_reconnect_attempts = max_reconnect_attempts
@@ -182,6 +186,11 @@ class CdcStream:
         # Construction accepts exactly what configure() accepts: both paths
         # check the whole configuration against the same contract table.
         validate_options({key: getattr(self, attr) for key, attr in _FIELD_MAP.items()})
+        # Validation just confirmed each is a list; copy it so a caller's own
+        # list is never mutated by, or aliased into, this stream's state.
+        self._include_databases = list(self._include_databases)
+        self._include_tables = list(self._include_tables)
+        self._exclude_tables = list(self._exclude_tables)
         self._reconnect_attempts = 0
 
         self._client: BinlogClient | None = None
@@ -243,15 +252,17 @@ class CdcStream:
             max_queue_bytes: Internal client queue byte limit (0 uses default).
                 Charges wire payloads and their GTID checkpoints alike.
             max_event_size: Maximum accepted binlog event size in bytes.
-            include_databases: Exact database-name include list.
+            include_databases: Exact database-name include list. ``None`` resets
+                it to empty (no filter).
             include_tables: Case-sensitive table-name include list; a trailing
-                ``*`` is a prefix wildcard.
+                ``*`` is a prefix wildcard. ``None`` resets it to empty.
             exclude_tables: Case-sensitive table-name exclude list; a trailing
-                ``*`` is a prefix wildcard.
+                ``*`` is a prefix wildcard. ``None`` resets it to empty.
             allow_public_key_retrieval: Allow non-TLS caching_sha2 RSA key retrieval.
             lib_path: Explicit path to libmes shared library.
             max_reconnect_attempts: Retry budget (0 disables reconnecting).
-            on_metadata_error: Optional callback for metadata connection errors.
+            on_metadata_error: Called when the optional metadata connection
+                cannot be enabled; see the constructor.
 
         Raises:
             RuntimeError: If streaming has already started.
@@ -263,6 +274,13 @@ class CdcStream:
         if self._started:
             raise RuntimeError("Cannot configure after streaming has started")
 
+        # None means "unset -> []" for the string-list filter options, as it
+        # does in the constructor; every other supplied value, including one
+        # of the wrong type, is validated as the caller wrote it.
+        kwargs = {
+            key: ([] if key in _STRING_LIST_OPTIONS and value is None else value)
+            for key, value in kwargs.items()
+        }
         # Validated before anything is applied, and against the configuration
         # the overrides produce: an option that has to be supplied alongside
         # another may be overridden on its own while that one stays as the

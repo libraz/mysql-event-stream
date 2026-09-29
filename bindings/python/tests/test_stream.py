@@ -73,6 +73,31 @@ class TestStreamClose:
         engine.set_include_tables.assert_called_once_with(["mydb.orders"])
         engine.set_exclude_tables.assert_called_once_with(["mydb.audit_log"])
 
+    def test_filter_options_reject_a_bare_string_instead_of_splitting_it(self) -> None:
+        # A bare string is iterable character-by-character; accepting it here
+        # would silently turn "audit_log" into an exclusion of the letters
+        # a, u, d, i, t, _, l, o, g rather than the table -- and it would drop
+        # the exclusion entirely, since none of a real table's rows are named
+        # a single character.
+        with pytest.raises(TypeError, match="exclude_tables"):
+            CdcStream(exclude_tables="audit_log")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="include_databases"):
+            CdcStream(include_databases="shop")  # type: ignore[arg-type]
+
+    def test_filter_options_reject_other_non_list_iterables(self) -> None:
+        with pytest.raises(TypeError, match="include_tables"):
+            CdcStream(include_tables=("orders",))  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="include_tables"):
+            CdcStream(include_tables="")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="include_tables"):
+            CdcStream(include_tables=0)  # type: ignore[arg-type]
+
+    def test_filter_options_default_none_to_an_empty_list(self) -> None:
+        stream = CdcStream()
+        assert stream._include_databases == []
+        assert stream._include_tables == []
+        assert stream._exclude_tables == []
+
     def test_metadata_error_callback_receives_failures(self) -> None:
         callback = MagicMock()
         stream = CdcStream(on_metadata_error=callback)
@@ -266,6 +291,25 @@ class TestStreamConfigure:
         )
         assert stream._port == 3307
         assert stream._include_tables == ["db.t"]
+
+    def test_string_list_options_reject_a_bare_string_or_other_non_list(self) -> None:
+        # A bare string is iterable, so silently accepting it here would drop
+        # the exclusion character-by-character instead of by name.
+        stream = CdcStream(exclude_tables=["kept"])
+        with pytest.raises(TypeError, match="exclude_tables"):
+            stream.configure(exclude_tables="audit_log")
+        with pytest.raises(TypeError, match="include_databases"):
+            stream.configure(include_databases="shop")
+        with pytest.raises(TypeError, match="include_tables"):
+            stream.configure(include_tables=("orders",))
+        assert stream._exclude_tables == ["kept"]
+
+    def test_string_list_options_accept_none_as_unset(self) -> None:
+        stream = CdcStream(include_databases=["db"])
+        stream.configure(include_databases=None, include_tables=None, exclude_tables=None)
+        assert stream._include_databases == []
+        assert stream._include_tables == []
+        assert stream._exclude_tables == []
 
 
 class TestStreamStartFailure:

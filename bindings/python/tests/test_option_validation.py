@@ -108,6 +108,19 @@ def _binlog_client_config(option: str, value: object) -> None:
         raise AssertionError(f"BinlogClient accepted a ClientConfig with {option}={value!r}")
 
 
+def _cdc_stream_kwargs(option: str, value: object) -> None:
+    """Construct a CdcStream with one keyword option overridden.
+
+    Unlike BinlogClient, construction never touches the native layer, so
+    there is nothing to assert stayed unloaded.
+    """
+    try:
+        CdcStream(**_override(option, value))
+    except (TypeError, ValueError):
+        raise
+    raise AssertionError(f"CdcStream accepted {option}={value!r}")
+
+
 def _enable_metadata(option: str, value: object) -> None:
     """Call CdcEngine.enable_metadata with one keyword option overridden."""
     lib = MagicMock()
@@ -139,6 +152,12 @@ class EntryPoint:
     invoke: Callable[[str, object], None]
 
 
+CDC_STREAM_ENTRY = EntryPoint(
+    "CdcStream(**options)",
+    _keyword_options(CdcStream.__init__),
+    _cdc_stream_kwargs,
+)
+
 ENTRY_POINTS = [
     EntryPoint(
         "BinlogClient(**options)",
@@ -155,7 +174,22 @@ ENTRY_POINTS = [
         _keyword_options(CdcEngine.enable_metadata),
         _enable_metadata,
     ),
+    CDC_STREAM_ENTRY,
 ]
+
+
+def _wrong_values(entry: EntryPoint, declared: str) -> tuple[object, ...]:
+    """Return the wrong-typed values to try for one option of one entry point.
+
+    CdcStream's string-list options treat ``None`` as "unset -> []" (its
+    constructor and ``configure()`` both document this), so ``None`` is not a
+    violation there. The values it silently misinterpreted before that was
+    enforced -- a bare string and ``0`` -- replace it, alongside the type
+    violations every string-list option still rejects.
+    """
+    if entry is CDC_STREAM_ENTRY and declared == "string_list":
+        return ("not-a-list", [1], ("tuple",), "", 0)
+    return _WRONG_TYPED_VALUES[declared]
 
 
 def _cases(*, out_of_range: bool) -> list[tuple[EntryPoint, str, object]]:
@@ -168,7 +202,7 @@ def _cases(*, out_of_range: bool) -> list[tuple[EntryPoint, str, object]]:
                 if declared == "integer":
                     cases.extend((entry, option, value) for value in _out_of_range_values(option))
             else:
-                cases.extend((entry, option, value) for value in _WRONG_TYPED_VALUES[declared])
+                cases.extend((entry, option, value) for value in _wrong_values(entry, declared))
     return cases
 
 
@@ -190,8 +224,8 @@ class TestEveryEntryPointRejectsWrongTypes:
             assert covered == set(entry.options), entry.name
         # Guard the generator itself: a silently emptied table would make every
         # case below pass by never running.
-        assert len(WRONG_TYPE_CASES) == 188
-        assert len(OUT_OF_RANGE_CASES) == 46
+        assert len(WRONG_TYPE_CASES) == 281
+        assert len(OUT_OF_RANGE_CASES) == 65
 
     @pytest.mark.parametrize("case", WRONG_TYPE_CASES, ids=_case_id)
     def test_rejects_a_wrong_typed_value(self, case: tuple[EntryPoint, str, object]) -> None:
@@ -271,6 +305,43 @@ class TestValidOptionsStillReachTheNativeLayer:
             )
             lib.mes_engine_set_metadata_conn.assert_called_once()
             engine.close()
+
+    def test_cdc_stream_accepts_every_option_at_its_bounds(self) -> None:
+        stream = CdcStream(
+            host="mysql.example",
+            port=65535,
+            user="replica",
+            password="secret",
+            server_id=4294967295,
+            start_gtid=None,
+            start_binlog_file="binlog.000001",
+            start_binlog_position=4294967295,
+            connect_timeout_s=0,
+            read_timeout_s=0,
+            ssl_mode=4,
+            ssl_ca="ca.pem",
+            ssl_cert="cert.pem",
+            ssl_key="key.pem",
+            max_queue_size=0,
+            max_queue_bytes=0,
+            max_event_size=4294967295,
+            include_databases=["db"],
+            include_tables=["db.t"],
+            exclude_tables=["db.skip"],
+            allow_public_key_retrieval=True,
+            lib_path=None,
+            max_reconnect_attempts=0,
+            on_metadata_error=None,
+        )
+        assert stream._max_event_size == 4294967295
+
+    def test_cdc_stream_string_list_options_default_none_to_empty(self) -> None:
+        # None is the sentinel for "unset", not a value that reaches the
+        # native layer as a length-1 list of characters or similar.
+        stream = CdcStream(include_databases=None, include_tables=None, exclude_tables=None)
+        assert stream._include_databases == []
+        assert stream._include_tables == []
+        assert stream._exclude_tables == []
 
 
 class TestRejectionHappensBeforeConnect:
