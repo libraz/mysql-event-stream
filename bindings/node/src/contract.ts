@@ -158,7 +158,7 @@ export const LOG_LEVEL_RANGE = {
 } as const;
 
 /**
- * What the binding does when the optional metadata connection fails and no
- * handler is configured: nothing. The library never writes diagnostics itself.
+ * What the binding does when the optional metadata connection cannot be
+ * enabled and no handler is configured: nothing. The library never writes diagnostics itself.
  */
 export const METADATA_ERROR_DEFAULT = "silent";

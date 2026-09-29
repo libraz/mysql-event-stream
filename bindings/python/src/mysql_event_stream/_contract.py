@@ -156,6 +156,6 @@ LOG_LEVEL_MIN = 0
 LOG_LEVEL_MAX = 3
 LOG_LEVEL_DEFAULT = 1
 
-#: What the binding does when the optional metadata connection fails and no
-#: handler is configured: nothing. The library never writes diagnostics itself.
+#: What the binding does when the optional metadata connection cannot be
+#: enabled and no handler is configured: nothing. The library never writes diagnostics itself.
 METADATA_ERROR_DEFAULT = "silent"

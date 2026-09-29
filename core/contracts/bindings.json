@@ -1,6 +1,6 @@
 {
   "contractVersion": 1,
-  "description": "Behaviour every language binding must implement identically: which native error codes are worth retrying, the reconnect backoff schedule, how a reconnect checkpoint replaces the configured start position, what happens when the optional metadata connection fails, and the shared option defaults with their accepted ranges. Each binding keeps a mirror of this table (Node: src/contract.ts, Python: _contract.py) and a contract test that compares the mirror against this file, so changing a constant on one surface alone fails that surface's test suite.",
+  "description": "Behaviour every language binding must implement identically: which native error codes are worth retrying, the reconnect backoff schedule, how a reconnect checkpoint replaces the configured start position, what happens when the optional metadata connection cannot be enabled, and the shared option defaults with their accepted ranges. Each binding keeps a mirror of this table (Node: src/contract.ts, Python: _contract.py) and a contract test that compares the mirror against this file, so changing a constant on one surface alone fails that surface's test suite.",
   "nonRetryableErrorCodes": [
     { "name": "MES_ERR_NULL_ARG", "code": 1 },
     { "name": "MES_ERR_INVALID_ARG", "code": 2 },
