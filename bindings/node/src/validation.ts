@@ -1,5 +1,4 @@
 import {
-  CONDITIONAL_OPTION_MINIMUMS,
   MUTUALLY_EXCLUSIVE_OPTIONS,
   OPTION_RANGES,
   POLL_BATCH,
@@ -205,28 +204,6 @@ function validateMutuallyExclusive(supplied: Record<string, unknown>): void {
   }
 }
 
-/**
- * Apply the floors that hold only while a companion option is set.
- *
- * Also a whole-configuration check: the companion is another key, so the
- * per-key range check cannot see it. Enforcing it here is what keeps a value
- * this validator accepts from being refused later by the native layer.
- *
- * @param supplied Every option the configuration carries, unset keys included.
- */
-function validateConditionalMinimums(supplied: Record<string, unknown>): void {
-  for (const [key, floor] of Object.entries(CONDITIONAL_OPTION_MINIMUMS)) {
-    if (supplied[floor.companion] === undefined) continue;
-    const value = supplied[key];
-    if (typeof value !== "number" || value >= floor.minimum) continue;
-    const { max } = OPTION_RANGES[key as keyof typeof OPTION_RANGES];
-    const upper = max === null ? "unbounded" : String(max);
-    throw invalidArgument(
-      `${key} must be ${floor.minimum} through ${upper} when ${floor.companion} is set, got ${value}`,
-    );
-  }
-}
-
 /** Queue byte budget a `maxQueueBytes` of 0 resolves to (MES_DEFAULT_QUEUE_BYTES). */
 const DEFAULT_QUEUE_BYTES = 48 * 1024 * 1024;
 /** Largest event size the core accepts; 0 and anything above resolve to it. */
@@ -267,9 +244,8 @@ function validateQueueAdmission(supplied: Record<string, unknown>): void {
 /**
  * Validate a supplied configuration against a declared option table in full:
  * unrecognized keys, values that do not match their declared type, integers
- * outside their accepted range, options of a pair supplied alone, options
- * naming competing start modes, and a value below the floor its companion
- * brings into force are all rejected here.
+ * outside their accepted range, options of a pair supplied alone, and options
+ * naming competing start modes are all rejected here.
  *
  * A key whose value is `undefined` counts as unset and takes its default;
  * `null` is a type error, because `undefined` is how this surface spells
@@ -309,7 +285,6 @@ function validateOptionsAgainst(
   const effective = { ...base, ...config };
   validateRequiredTogether(effective);
   validateMutuallyExclusive(effective);
-  validateConditionalMinimums(effective);
   validateQueueAdmission(effective);
 }
 

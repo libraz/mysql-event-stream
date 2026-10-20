@@ -17,11 +17,9 @@ from collections.abc import Callable, Mapping
 from typing import ParamSpec, TypeVar
 
 from ._contract import (
-    CONDITIONAL_OPTION_MINIMUMS,
     MUTUALLY_EXCLUSIVE_OPTIONS,
     OPTION_RANGES,
     REQUIRED_TOGETHER_OPTIONS,
-    UNSET_OPTION_VALUES,
 )
 from .types import mes_validation_error
 
@@ -30,6 +28,9 @@ _STRING_OPTIONS = frozenset({"host", "user", "password", "ssl_ca", "ssl_cert", "
 
 #: Options whose value must be a string or ``None``.
 _OPTIONAL_STRING_OPTIONS = frozenset({"start_gtid", "start_binlog_file", "lib_path"})
+
+#: Integer options that may be ``None`` to mean unset.
+_OPTIONAL_INT_OPTIONS = frozenset({"start_binlog_position"})
 
 #: Optional-string options that, once supplied, must not be empty. A file/offset
 #: start naming no file has no position a server could start from.
@@ -75,6 +76,8 @@ def validate_option(key: str, value: object) -> None:
             option that has to name something is supplied empty.
     """
     if key in OPTION_RANGES:
+        if value is None and key in _OPTIONAL_INT_OPTIONS:
+            return
         minimum, maximum = OPTION_RANGES[key]
         if isinstance(value, bool) or not isinstance(value, int):
             raise mes_validation_error(TypeError(f"{key} must be an integer"))
@@ -136,13 +139,9 @@ def refuse_unknown_options(func: Callable[_P, _R]) -> Callable[_P, _R]:
 def _is_supplied(options: Mapping[str, object], key: str) -> bool:
     """Report whether a configuration supplied ``key`` at all.
 
-    An absent key and ``None`` both mean unset. So does the value in
-    :data:`UNSET_OPTION_VALUES` for an option this surface declares as a plain
-    integer: a caller who passes it cannot be told apart from one who passed
-    nothing.
+    An absent key and ``None`` both mean unset.
     """
-    value = options.get(key)
-    return value is not None and value != UNSET_OPTION_VALUES.get(key)
+    return options.get(key) is not None
 
 
 def _validate_required_together(options: Mapping[str, object]) -> None:
@@ -182,35 +181,6 @@ def _validate_mutually_exclusive(options: Mapping[str, object]) -> None:
         if not all(_is_supplied(options, key) for key in pair):
             continue
         raise mes_validation_error(ValueError(f"{pair[0]} and {pair[1]} cannot be combined"))
-
-
-def _validate_conditional_minimums(options: Mapping[str, object]) -> None:
-    """Apply the floors that hold only while a companion option is set.
-
-    Also a whole-configuration check: the companion is another key, so the
-    per-key range check cannot see it. Enforcing it at the entry point is what
-    keeps a value accepted here from being refused later by the native layer.
-
-    Args:
-        options: Every option the configuration carries, unset keys included.
-
-    Raises:
-        ValueError: If a supplied value is below the floor its companion brings
-            into force.
-    """
-    for key, floor in CONDITIONAL_OPTION_MINIMUMS.items():
-        if not _is_supplied(options, floor.companion) or not _is_supplied(options, key):
-            continue
-        value = options[key]
-        if not isinstance(value, int) or value >= floor.minimum:
-            continue
-        maximum = OPTION_RANGES[key].maximum
-        upper = "unbounded" if maximum is None else str(maximum)
-        raise mes_validation_error(
-            ValueError(
-                f"{key} must be {floor.minimum} through {upper} when {floor.companion} is set"
-            )
-        )
 
 
 def _validate_queue_admission(options: Mapping[str, object]) -> None:
@@ -262,8 +232,7 @@ def validate_options(
         ValueError: If an integer option falls outside its accepted range, if
             an option that has to name something is supplied empty, if one
             option of a required-together pair is supplied alone, if two
-            options naming competing start modes are supplied together, if a
-            value is below the floor its companion brings into force, or if
+            options naming competing start modes are supplied together, or if
             ``max_queue_bytes`` cannot admit one ``max_event_size`` event.
     """
     for key, value in options.items():
@@ -271,5 +240,4 @@ def validate_options(
     effective = {**(base or {}), **options}
     _validate_required_together(effective)
     _validate_mutually_exclusive(effective)
-    _validate_conditional_minimums(effective)
     _validate_queue_admission(effective)

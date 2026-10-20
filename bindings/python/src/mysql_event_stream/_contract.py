@@ -95,32 +95,14 @@ OPTION_RANGES: dict[str, OptionRange] = {
     "max_queue_bytes": OptionRange(0, 9007199254740991),
     "max_event_size": OptionRange(0, 4294967295),
     "max_reconnect_attempts": OptionRange(0, None),
-    "start_binlog_position": OptionRange(0, 4294967295),
+    # The first binlog event begins after the file's 4-byte magic number.
+    "start_binlog_position": OptionRange(4, 4294967295),
 }
 
-
-class ConditionalMinimum(NamedTuple):
-    """Floor that holds for an option only while its companion option is set."""
-
-    minimum: int
-    companion: str
-
-
-#: Floors that hold only while a companion option is set. :data:`OPTION_RANGES`
-#: keeps the unconditional window, which stays in force otherwise:
-#: ``start_binlog_position`` is left at 0 when no file/offset start was
-#: requested, so the tighter floor applies only once ``start_binlog_file`` names
-#: a file. The first binlog event begins after the file's 4-byte magic number,
-#: so an offset into a named file cannot be below 4.
-CONDITIONAL_OPTION_MINIMUMS: dict[str, ConditionalMinimum] = {
-    "start_binlog_position": ConditionalMinimum(minimum=4, companion="start_binlog_file"),
-}
 
 #: Options that are supplied together or not at all. An offset without the file
 #: it points into names no position a server can start from, so it is refused
-#: rather than accepted and dropped. This is a different statement from
-#: :data:`CONDITIONAL_OPTION_MINIMUMS`, which says what a supplied value must be
-#: once its companion is set rather than whether it may appear alone.
+#: rather than accepted and dropped.
 REQUIRED_TOGETHER_OPTIONS: tuple[tuple[str, str], ...] = (
     ("start_binlog_file", "start_binlog_position"),
 )
@@ -133,18 +115,10 @@ REQUIRED_TOGETHER_OPTIONS: tuple[tuple[str, str], ...] = (
 #: The file anchor stands for its whole start mode because
 #: :data:`REQUIRED_TOGETHER_OPTIONS` is checked first and binds the offset to
 #: the file: a configuration that reaches this check carrying an offset carries
-#: the file with it. What counts as supplied is what the pair rule counts,
-#: unset spellings included, so an empty ``start_gtid`` is supplied -- it is a
-#: deliberate request for the empty GTID set.
+#: the file with it. What counts as supplied is what the pair rule counts, so
+#: an empty ``start_gtid`` is supplied -- it is a deliberate request for the
+#: empty GTID set.
 MUTUALLY_EXCLUSIVE_OPTIONS: tuple[tuple[str, str], ...] = (("start_gtid", "start_binlog_file"),)
-
-#: What "not supplied" looks like for an option this surface cannot spell as
-#: absent. ``start_binlog_position`` is a plain integer here, so a
-#: zero-initialized configuration passes 0 -- below the conditional floor, and
-#: therefore never a position the offset could have been asked to start from.
-#: A caller who passes it explicitly is indistinguishable from one who passed
-#: nothing, which is why it counts as unset for the pair rule.
-UNSET_OPTION_VALUES: dict[str, int] = {"start_binlog_position": 0}
 
 # Accepted max_events window for a batched poll.
 POLL_BATCH_DEFAULT_MAX_EVENTS = 64

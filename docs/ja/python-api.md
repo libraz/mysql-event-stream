@@ -59,7 +59,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `server_id` | `1` | レプリカ識別子。プロセスごとに一意でなければなりません。[サーバー設定](server-setup.md#レプリカ識別子)を参照してください。 |
 | `start_gtid` | `None` | `None` ならサーバーの現在のセットをスナップショットします。`""` は空のセットを要求します。実際に先頭から始まるのは、取得元が何もパージしていない場合だけです。[チェックポイントと復旧](checkpoints.md#正確な位置から始める)を参照してください。 |
 | `start_binlog_file` | `None` | `start_binlog_position` と合わせて、ファイルとオフセットを指定した開始になります。`start_gtid` とは併用できません。 |
-| `start_binlog_position` | `0` | 4 から `UINT32_MAX` まで。`start_binlog_file` が必要です。 |
+| `start_binlog_position` | `None` | 4 から `UINT32_MAX` まで。`start_binlog_file` が必要です。`None` は未指定を表し、明示的な `0` は拒否されます。 |
 | `connect_timeout_s` | `10` | |
 | `read_timeout_s` | `30` | ソケット 1 回分の読み取りを制限します。ハンドシェイクでもストリームでも同じです。 |
 | `ssl_mode` | `1`（preferred） | [TLS と認証](tls-and-authentication.md)を参照してください。 |

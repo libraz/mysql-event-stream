@@ -59,7 +59,7 @@ async with CdcStream(host="...", server_id=1001) as stream:
 | `server_id` | `1` | Replica identity. Must be unique per process — see [Server setup](server-setup.md#replica-identity). |
 | `start_gtid` | `None` | `None` snapshots the server's current set; `""` requests the empty set, which only actually starts from the beginning when the source has purged nothing — see [Checkpoints and recovery](checkpoints.md#starting-somewhere-exact). |
 | `start_binlog_file` | `None` | With `start_binlog_position`, an exact file/offset start. Cannot be combined with `start_gtid`. |
-| `start_binlog_position` | `0` | 4 through `UINT32_MAX`. Requires `start_binlog_file`. |
+| `start_binlog_position` | `None` | 4 through `UINT32_MAX`. Requires `start_binlog_file`. `None` means unset; an explicit `0` is refused. |
 | `connect_timeout_s` | `10` | |
 | `read_timeout_s` | `30` | Bounds a single socket read, on the handshake and on the stream alike. |
 | `ssl_mode` | `1` (preferred) | See [TLS and authentication](tls-and-authentication.md). |

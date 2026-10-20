@@ -382,22 +382,18 @@ void ClientWrap::Connect(const Napi::CallbackInfo& info) {
     }
     strings.binlog_file = binlog_file_v.As<Napi::String>().Utf8Value();
     const int64_t position = binlog_position_v.As<Napi::Number>().Int64Value();
-    if (position < 0 || position > UINT32_MAX) {
+    // The first event in a file begins after its 4-byte magic number.
+    if (position < 4 || position > UINT32_MAX) {
       mes_node::MakeMesError(
           env,
-          "startBinlogPosition must be between 0 and 4294967295, got " + std::to_string(position),
+          "startBinlogPosition must be between 4 and 4294967295, got " + std::to_string(position),
           MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }
-    // The floor holds once a file names the offset's binlog: the first event in
-    // a file begins after its 4-byte magic number.
-    if (strings.binlog_file.empty() || position < 4) {
-      mes_node::MakeMesError(env,
-                             "startBinlogPosition must be 4 through 4294967295 when "
-                             "startBinlogFile is set, got " +
-                                 std::to_string(position),
-                             MES_ERR_INVALID_ARG, mes_node::MesErrorClass::kRange)
+    if (strings.binlog_file.empty()) {
+      mes_node::MakeMesError(env, "startBinlogFile must name a binlog file", MES_ERR_INVALID_ARG,
+                             mes_node::MesErrorClass::kRange)
           .ThrowAsJavaScriptException();
       return;
     }

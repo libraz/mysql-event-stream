@@ -131,22 +131,17 @@
     "rule": "Installing a log handler with a level outside the documented mes_log_level_t range is an error, never a silently disabled callback."
   },
   "requiredTogether": {
-    "rule": "Both options of a pair are supplied together or neither is, and the whole-config entry point that received them rejects a configuration supplying one alone: an offset without the file it points into names no position a server can start from, so a binding that accepted it would discard the offset and replicate from somewhere the caller never asked for. The refusal belongs to the entry points that see a whole configuration, because a per-key validator cannot see the companion. This is a different statement from the conditional floor an option entry may carry: the floor says what a supplied value must be once its companion is set, this says whether the option may appear alone at all.",
+    "rule": "Both options of a pair are supplied together or neither is, and the whole-config entry point that received them rejects a configuration supplying one alone: an offset without the file it points into names no position a server can start from, so a binding that accepted it would discard the offset and replicate from somewhere the caller never asked for. The refusal belongs to the entry points that see a whole configuration, because a per-key validator cannot see the companion. Absence is the only unset spelling: Node leaves the key out or sets it to undefined, Python passes None; every other value, 0 included, is a supplied one.",
     "pairs": [
       {
         "canonical": ["startBinlogFile", "startBinlogPosition"],
         "node": ["startBinlogFile", "startBinlogPosition"],
         "python": ["start_binlog_file", "start_binlog_position"]
       }
-    ],
-    "unsetRule": "Whether an option counts as supplied is decided by the surface's own spelling of an absent option. A surface that can spell absence spells it that way and states nothing here (Node leaves the key out or sets it to undefined). A surface whose signature declares a plain integer cannot, so it states the value it passes when nothing was requested, and that value counts as unset: it is below the option's conditional floor and therefore never a position the option could have been asked to start from. The consequence is stated rather than hidden: a Python caller who passes that value explicitly is indistinguishable from one who passed nothing, so it is accepted there and refused on Node.",
-    "unsetValues": {
-      "node": {},
-      "python": { "start_binlog_position": 0 }
-    }
+    ]
   },
   "mutuallyExclusive": {
-    "rule": "At most one option of a pair is supplied, and the whole-config entry point that received them rejects a configuration supplying both: each names a different start mode, so a binding that accepted the combination would have to pick one of them and replicate from a position the caller never asked for. The refusal belongs to the entry points that see a whole configuration, for the same reason the sibling requiredTogether rule does: a per-key validator cannot see the competing mode. Whether an option counts as supplied is decided exactly as that rule decides it, unset spellings included, so the two rules never disagree about what a configuration carries.",
+    "rule": "At most one option of a pair is supplied, and the whole-config entry point that received them rejects a configuration supplying both: each names a different start mode, so a binding that accepted the combination would have to pick one of them and replicate from a position the caller never asked for. The refusal belongs to the entry points that see a whole configuration, for the same reason the sibling requiredTogether rule does: a per-key validator cannot see the competing mode. Whether an option counts as supplied is decided exactly as that rule decides it, so the two rules never disagree about what a configuration carries.",
     "pairs": [
       {
         "canonical": ["startGtid", "startBinlogFile"],
@@ -156,7 +151,7 @@
     ],
     "orderRule": "Checked after requiredTogether, which is what lets the file anchor stand for the whole file/offset start mode here: the offset is bound to the file by that rule, so a configuration reaching this check with an offset carries the file too. Naming the offset in a pair of its own would state a rule no configuration can reach."
   },
-  "optionsRule": "Every entry states the accepted range each binding must enforce for the option. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only. A selector may also state a tighter floor that holds only while the companion option it names is set: the stated range stays in force when that companion is unset, because the value a binding passes through then is the one that means no start position was requested. Naming a companion states when the floor applies and nothing more: whether the two options may appear alone is the sibling requiredTogether rule, not this one. The first binlog event begins after the file's 4-byte magic number, which is why an offset into a named file cannot be below 4.",
+  "optionsRule": "Every entry states the accepted range each binding must enforce for the option, and the range applies to every supplied value whether or not another option is set. An entry that also carries `default` states the value the binding materializes when the option is omitted; an entry without `default` (a start-position selector) has no default to agree on and is range-checked only, and leaving it out means it was not requested. Whether two options may appear alone is the requiredTogether rule, not this one. The first binlog event begins after the file's 4-byte magic number, which is why the offset cannot be below 4.",
   "options": [
     {
       "canonical": "host",
@@ -293,10 +288,8 @@
       "node": "startBinlogPosition",
       "python": "start_binlog_position",
       "type": "integer",
-      "min": 0,
-      "max": 4294967295,
-      "minWhenFileSet": 4,
-      "fileOption": { "node": "startBinlogFile", "python": "start_binlog_file" }
+      "min": 4,
+      "max": 4294967295
     }
   ]
 }

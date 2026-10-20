@@ -89,7 +89,7 @@ class CdcStream:
         server_id: int = 1,
         start_gtid: str | None = None,
         start_binlog_file: str | None = None,
-        start_binlog_position: int = 0,
+        start_binlog_position: int | None = None,
         connect_timeout_s: int = 10,
         read_timeout_s: int = 30,
         ssl_mode: int = 1,
@@ -124,8 +124,8 @@ class CdcStream:
                 start; 4 through UINT32_MAX, since the first event begins after
                 the file's 4-byte magic number. Requires
                 ``start_binlog_file``: an offset naming no file is refused
-                here rather than accepted and dropped. 0 is what a
-                configuration that requested no file/offset start carries.
+                here rather than accepted and dropped. ``None`` means
+                unset; 0 is refused.
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
             ssl_mode: SSL mode (0=disabled, 1=preferred, 2=required,
@@ -726,7 +726,7 @@ class CdcStream:
             return
         self._start_gtid = checkpoint
         self._start_binlog_file = None
-        self._start_binlog_position = 0
+        self._start_binlog_position = None
 
     async def _reconnect(self) -> None:
         """Perform one reconnect attempt using the last known GTID."""

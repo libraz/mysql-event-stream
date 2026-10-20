@@ -17,10 +17,6 @@ export interface ContractOption {
   default?: string | number | boolean;
   min?: number;
   max?: number | null;
-  /** Tighter floor that holds only while {@link fileOption} is set. */
-  minWhenFileSet?: number;
-  /** Companion option whose presence brings {@link minWhenFileSet} into force. */
-  fileOption?: { node: string; python: string };
 }
 
 /** A pair of options that are supplied together or not at all. */
@@ -62,8 +58,6 @@ export interface BindingContract {
   requiredTogether: {
     rule: string;
     pairs: ContractOptionPair[];
-    unsetRule: string;
-    unsetValues: { node: Record<string, number>; python: Record<string, number> };
   };
   mutuallyExclusive: {
     rule: string;
@@ -80,19 +74,13 @@ export function loadBindingContract(): BindingContract {
 }
 
 /**
- * Lowest value an option accepts once everything the contract pairs with it is
- * supplied: the conditional floor, where one is stated, otherwise the range
- * minimum.
+ * Lowest value an option accepts, as the contract states its range.
  *
  * @param key Option as this surface spells it.
  * @returns The accepted minimum, or `undefined` for an option with no range.
  */
 export function acceptedMinimum(key: string): number | undefined {
-  const contract = loadBindingContract();
-  const option = contract.options.find((entry) => entry.node === key);
-  if (option === undefined || option.min === undefined) return undefined;
-  const paired = contract.requiredTogether.pairs.some((pair) => pair.node.includes(key));
-  return paired ? (option.minWhenFileSet ?? option.min) : option.min;
+  return loadBindingContract().options.find((entry) => entry.node === key)?.min;
 }
 
 /**

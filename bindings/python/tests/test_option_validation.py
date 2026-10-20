@@ -28,9 +28,11 @@ from mysql_event_stream._contract import OPTION_RANGES
 from mysql_event_stream._options import (
     _BOOL_OPTIONS,
     _CALLBACK_OPTIONS,
+    _OPTIONAL_INT_OPTIONS,
     _OPTIONAL_STRING_OPTIONS,
     _STRING_LIST_OPTIONS,
     _STRING_OPTIONS,
+    validate_option,
 )
 from mysql_event_stream.client import BinlogClient
 from mysql_event_stream.engine import CdcEngine
@@ -43,6 +45,7 @@ from mysql_event_stream.types import ClientConfig, MesErrorCode
 # ``port=True`` through as port 1.
 _WRONG_TYPED_VALUES: dict[str, tuple[object, ...]] = {
     "integer": ("1", 1.5, True, None),
+    "optional_integer": ("1", 1.5, True),
     "string": (1, None, b"bytes", ["list"]),
     "optional_string": (1, b"bytes", ["list"]),
     "string_list": ("not-a-list", [1], None, ("tuple",)),
@@ -53,6 +56,8 @@ _WRONG_TYPED_VALUES: dict[str, tuple[object, ...]] = {
 
 def _declared_type(option: str) -> str:
     """Return the contract's declared runtime type for ``option``."""
+    if option in _OPTIONAL_INT_OPTIONS:
+        return "optional_integer"
     if option in OPTION_RANGES:
         return "integer"
     if option in _STRING_OPTIONS:
@@ -199,7 +204,7 @@ def _cases(*, out_of_range: bool) -> list[tuple[EntryPoint, str, object]]:
         for option in entry.options:
             declared = _declared_type(option)
             if out_of_range:
-                if declared == "integer":
+                if declared in ("integer", "optional_integer"):
                     cases.extend((entry, option, value) for value in _out_of_range_values(option))
             else:
                 cases.extend((entry, option, value) for value in _wrong_values(entry, declared))
@@ -224,7 +229,7 @@ class TestEveryEntryPointRejectsWrongTypes:
             assert covered == set(entry.options), entry.name
         # Guard the generator itself: a silently emptied table would make every
         # case below pass by never running.
-        assert len(WRONG_TYPE_CASES) == 281
+        assert len(WRONG_TYPE_CASES) == 278
         assert len(OUT_OF_RANGE_CASES) == 65
 
     @pytest.mark.parametrize("case", WRONG_TYPE_CASES, ids=_case_id)
@@ -346,6 +351,24 @@ class TestValidOptionsStillReachTheNativeLayer:
         assert stream._exclude_tables == []
 
 
+class TestStartBinlogPositionUnsetSpelling:
+    """``None`` is the only way to leave the offset unset; 0 is a supplied value."""
+
+    def test_none_is_accepted_on_every_entry_point(self) -> None:
+        validate_option("start_binlog_position", None)
+        assert CdcStream(start_binlog_position=None)._start_binlog_position is None
+        assert CdcStream()._start_binlog_position is None
+        stream = CdcStream()
+        stream.configure(start_binlog_position=None)
+        assert BinlogClient(start_binlog_position=None)._config.start_binlog_position is None
+        assert ClientConfig().start_binlog_position is None
+
+    def test_a_supplied_offset_still_has_to_be_a_plain_integer(self) -> None:
+        for bad in (True, "4", 4.5):
+            with pytest.raises(TypeError, match="start_binlog_position must be an integer"):
+                validate_option("start_binlog_position", bad)
+
+
 class TestRejectionHappensBeforeConnect:
     """A violation must not be deferred to the first native call."""
 
@@ -434,9 +457,13 @@ _OTHER_REFUSALS: dict[str, Callable[[], object]] = {
     "mutually_exclusive": lambda: CdcStream(
         start_gtid="uuid:1", start_binlog_file="binlog.000001", start_binlog_position=4
     ),
-    "conditional_minimum": lambda: CdcStream(
+    "offset_below_minimum": lambda: CdcStream(
         start_binlog_file="binlog.000001", start_binlog_position=1
     ),
+    "zero_offset_with_file": lambda: CdcStream(
+        start_binlog_file="binlog.000001", start_binlog_position=0
+    ),
+    "zero_offset_alone": lambda: CdcStream(start_binlog_position=0),
     "configure_unknown_key": lambda: CdcStream().configure(no_such_option=1),
     "empty_binlog_file": lambda: BinlogClient(start_binlog_file="", start_binlog_position=4),
     "poll_batch_size": lambda: BinlogClient.__new__(BinlogClient).poll_batch(0),

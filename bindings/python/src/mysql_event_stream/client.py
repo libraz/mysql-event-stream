@@ -87,7 +87,7 @@ class BinlogClient:
         server_id: int = 1,
         start_gtid: str | None = None,
         start_binlog_file: str | None = None,
-        start_binlog_position: int = 0,
+        start_binlog_position: int | None = None,
         connect_timeout_s: int = 10,
         read_timeout_s: int = 30,
         ssl_mode: int = 1,
@@ -131,8 +131,8 @@ class BinlogClient:
                 start; 4 through UINT32_MAX, since the first event begins after
                 the file's 4-byte magic number. Requires
                 ``start_binlog_file``: an offset naming no file is refused
-                here rather than accepted and dropped. 0 is what a
-                configuration that requested no file/offset start carries.
+                here rather than accepted and dropped. ``None`` means
+                unset; 0 is refused.
             connect_timeout_s: Connection timeout in seconds.
             read_timeout_s: Read timeout in seconds.
             ssl_mode: SSL mode. Use ``SslMode`` enum values (0=disabled,
@@ -314,7 +314,11 @@ class BinlogClient:
                 else (0 if self._config.start_gtid is None else 1)
             ),
             binlog_file=binlog_file_b,
-            binlog_position=self._config.start_binlog_position,
+            binlog_position=(
+                0
+                if self._config.start_binlog_position is None
+                else self._config.start_binlog_position
+            ),
         )
 
         with self._poll_lock:

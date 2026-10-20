@@ -272,7 +272,7 @@ class TestStreamConfigure:
             server_id=2,
             start_gtid="",
             start_binlog_file=None,
-            start_binlog_position=0,
+            start_binlog_position=None,
             connect_timeout_s=0,
             read_timeout_s=1,
             ssl_mode=4,
@@ -576,7 +576,7 @@ class TestReconnectAttempts:
         kwargs = client_cls.call_args.kwargs
         assert kwargs["start_gtid"] == "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
         assert kwargs["start_binlog_file"] is None
-        assert kwargs["start_binlog_position"] == 0
+        assert kwargs["start_binlog_position"] is None
 
     @pytest.mark.asyncio
     @patch("mysql_event_stream.stream.CdcEngine")

@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mysql_event_stream._contract import (
-    CONDITIONAL_OPTION_MINIMUMS,
     LOG_LEVEL_DEFAULT,
     LOG_LEVEL_MAX,
     LOG_LEVEL_MIN,
@@ -35,7 +34,6 @@ from mysql_event_stream._contract import (
     RECONNECT_JITTER_MIN,
     RECONNECT_MAX_DELAY_MS,
     REQUIRED_TOGETHER_OPTIONS,
-    UNSET_OPTION_VALUES,
     backoff_delay_ms,
 )
 from mysql_event_stream._options import validate_option, validate_options
@@ -43,6 +41,7 @@ from mysql_event_stream.client import BinlogClient, validate_poll_batch_size
 from mysql_event_stream.engine import CdcEngine
 from mysql_event_stream.logging import set_log_callback
 from mysql_event_stream.stream import CdcStream
+from mysql_event_stream.types import ClientConfig
 
 from .contract_fixture import load_binding_contract, load_header_field_doc
 
@@ -84,9 +83,9 @@ START_MODE_GTID = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2"
 #: of sampling it.
 POSITION_CLASSES = (
     "omitted",
-    "range_minimum",
-    "below_floor",
-    "at_floor",
+    "zero",
+    "below_minimum",
+    "at_minimum",
     "at_maximum",
     "above_maximum",
 )
@@ -117,7 +116,7 @@ def _start_position_of(stream: CdcStream) -> dict[str, Any]:
     return {
         "startGtid": stream._start_gtid or None,
         "startBinlogFile": stream._start_binlog_file or None,
-        "startBinlogPosition": stream._start_binlog_position or None,
+        "startBinlogPosition": stream._start_binlog_position,
     }
 
 
@@ -137,43 +136,26 @@ def _position_for(option: dict[str, Any], position_class: str) -> int | None:
     """Return the offset a class stands for, derived from the contract's numbers."""
     values: dict[str, int | None] = {
         "omitted": None,
-        "range_minimum": option["min"],
-        "below_floor": option["minWhenFileSet"] - 1,
-        "at_floor": option["minWhenFileSet"],
+        "zero": 0,
+        "below_minimum": option["min"] - 1,
+        "at_minimum": option["min"],
         "at_maximum": option["max"],
         "above_maximum": option["max"] + 1,
     }
     return values[position_class]
 
 
-def _supplied(position: int | None) -> bool:
-    """Report whether ``position`` is an offset this surface can see as supplied.
-
-    The offset is a plain integer here, so the value the contract names as this
-    surface's unset spelling cannot be told apart from an omitted one and counts
-    as unset. That is the one combination where the two surfaces' decisions
-    differ: Node spells unset by leaving the key out, so it refuses the value
-    this surface accepts. Neither names a position -- the value is below the
-    floor a companion file brings into force -- so no configuration that asks
-    to start somewhere is treated differently.
-    """
-    assert START_POSITION is not None
-    unset = contract["requiredTogether"]["unsetValues"]["python"][START_POSITION["python"]]
-    return position is not None and position != unset
-
-
 def _reason(option: dict[str, Any], file_set: bool, position: int | None) -> str | None:
     """Name the rule that refuses a combination, or ``None`` if it is accepted.
 
     One predicate serves both entry points: the shared option table and the
-    client's own construction agree on every combination.
+    client's own construction agree on every combination. ``None`` is the only
+    unset spelling, so every integer, 0 included, is a supplied offset.
     """
     if position is not None and (position < option["min"] or position > option["max"]):
         return "range"
-    if _supplied(position) != file_set:
+    if (position is not None) != file_set:
         return "pair"
-    if file_set and position is not None and position < option["minWhenFileSet"]:
-        return "floor"
     return None
 
 
@@ -204,7 +186,7 @@ def _start_mode_kwargs(gtid_set: bool, anchor_set: bool) -> dict[str, Any]:
         kwargs[gtid_option] = START_MODE_GTID
     if anchor_set:
         kwargs[file_option] = "binlog.000001"
-        kwargs[START_POSITION["python"]] = START_POSITION["minWhenFileSet"]
+        kwargs[START_POSITION["python"]] = START_POSITION["min"]
     return kwargs
 
 
@@ -334,10 +316,10 @@ class TestBindingContract:
         for pair in expected:
             for name in pair:
                 # Recognized by this surface's option table, whether or not the
-                # shared table states a range for it: the value each option
-                # carries when unset is accepted, and a name the table does not
-                # know is refused by the same validator.
-                validate_option(name, UNSET_OPTION_VALUES.get(name))
+                # shared table states a range for it: None, the unset spelling,
+                # is accepted, and a name the table does not know is refused by
+                # the same validator.
+                validate_option(name, None)
                 with pytest.raises(TypeError):
                     validate_option(f"not_{name}", None)
 
@@ -398,55 +380,35 @@ class TestBindingContract:
                     lib.mes_client_create.assert_not_called()
                     lib.mes_client_connect.assert_not_called()
 
-    def test_mirrors_the_contract_conditional_start_position_floor(self) -> None:
+    def test_states_the_start_position_range_unconditionally_and_spells_unset_as_none(
+        self,
+    ) -> None:
         assert START_POSITION is not None, "startBinlogPosition declared in the contract options"
         option = START_POSITION
-        assert isinstance(option["minWhenFileSet"], int), "conditional floor stated in the contract"
-        assert option["fileOption"]["python"] == "start_binlog_file"
+        assert option["min"] == 4
+        assert "minWhenFileSet" not in option
+        assert "fileOption" not in option
+        assert "unsetValues" not in contract["requiredTogether"]
+        assert tuple(OPTION_RANGES[option["python"]]) == (option["min"], option["max"])
 
-        # The floor is conditional, so the stated range keeps a lower minimum:
-        # the value the constructor passes when no file/offset start was
-        # requested has to stay acceptable.
-        unset = inspect.signature(BinlogClient.__init__).parameters[option["python"]].default
-        assert option["min"] <= unset < option["minWhenFileSet"]
-        validate_option(option["python"], unset)
-
-        assert CONDITIONAL_OPTION_MINIMUMS[option["python"]] == (
-            option["minWhenFileSet"],
-            option["fileOption"]["python"],
-        )
-
-    def test_mirrors_the_contract_unset_option_values(self) -> None:
-        assert START_POSITION is not None
-        option = START_POSITION
-        stated = contract["requiredTogether"]["unsetValues"]["python"]
-        assert stated == UNSET_OPTION_VALUES
-
-        # What the contract states this surface passes when nothing was
-        # requested is what its signatures actually default to, on both entry
-        # points, and it is below the floor so it can never be a real offset.
-        unset = stated[option["python"]]
-        for surface in (CdcStream, BinlogClient):
-            parameters = inspect.signature(surface.__init__).parameters
-            assert parameters[option["python"]].default == unset, surface.__name__
-        assert unset < option["minWhenFileSet"]
-
-        # The stated range has to admit it. This surface passes the value on
-        # every construction that requested no file/offset start, so a range
-        # tightened to the conditional floor would refuse each of them -- which
-        # is the whole reason the range minimum sits below that floor.
-        assert option["min"] <= unset <= option["max"]
+        # Absence is the only unset spelling, on every entry point and on the
+        # config type; 0 is a supplied value the range refuses.
+        for surface in (CdcStream, BinlogClient, ClientConfig):
+            parameters = inspect.signature(surface).parameters
+            assert parameters[option["python"]].default is None, surface.__name__
+        validate_option(option["python"], None)
+        with pytest.raises(ValueError):
+            validate_option(option["python"], 0)
 
     def test_documents_the_contract_start_position_floor_in_the_abi_header(self) -> None:
         assert START_POSITION is not None
         documented = load_header_field_doc("binlog_position")
         window = _HEADER_WINDOW.search(documented)
         assert window is not None, f"mes.h states an accepted offset window: {documented}"
-        assert int(window.group(1)) == START_POSITION["minWhenFileSet"]
+        assert int(window.group(1)) == START_POSITION["min"]
         # UINT32_MAX as the header spells the upper bound the contract states.
         assert START_POSITION["max"] == 2**32 - 1
-        # The header states the same trigger the contract does: the floor holds
-        # for a file/offset start, not for every offset the field can carry.
+        # The header ties the offset to a file/offset start.
         assert "MES_START_AT_POSITION" in documented
         # A parse that stops matching has to fail rather than hand back nothing
         # for the assertions above to pass over.
@@ -482,10 +444,10 @@ class TestBindingContract:
                     assert file_option in stated, label
                     assert offset_option in stated, label
                 else:
-                    # A refusal a window decides names the option and the bound
+                    # A refusal the range decides names the option and the bound
                     # it crossed.
                     assert offset_option in stated, label
-                    bound = option["minWhenFileSet"] if reason == "floor" else option["max"]
+                    bound = option["min"] if position < option["min"] else option["max"]
                     assert str(bound) in stated, label
                 with _mocked_client_library(), pytest.raises(ValueError):
                     BinlogClient(**kwargs).connect()

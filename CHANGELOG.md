@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Python `start_binlog_position` now defaults to `None`** — on `BinlogClient`,
+  `CdcStream` and `ClientConfig`, `None` is the only way to leave the offset
+  unset, as omitting the key is on Node. An explicit `0` is a supplied value and
+  is refused like on Node: with `start_binlog_file` it is below the accepted
+  range, and without one it is an offset without its file.
+
 ## [1.7.1] - 2026-09-29
 
 A correctness release. The C ABI is unchanged — `mes_abi_version()` still

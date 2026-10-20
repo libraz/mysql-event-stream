@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest";
 import { BinlogClient } from "../src/client.js";
 import {
   backoffDelayMs,
-  CONDITIONAL_OPTION_MINIMUMS,
   LOG_LEVEL_RANGE,
   METADATA_ERROR_DEFAULT,
   MUTUALLY_EXCLUSIVE_OPTIONS,
@@ -104,9 +103,9 @@ const startPositionPair = contract.requiredTogether.pairs.find(
  */
 const POSITION_CLASSES = [
   "omitted",
-  "rangeMinimum",
-  "belowFloor",
-  "atFloor",
+  "zero",
+  "belowMinimum",
+  "atMinimum",
   "atMaximum",
   "aboveMaximum",
 ] as const;
@@ -115,17 +114,17 @@ type PositionClass = (typeof POSITION_CLASSES)[number];
 
 /** Offset each class stands for, derived from the contract's own numbers. */
 function positionFor(option: ContractOption, positionClass: PositionClass): number | undefined {
-  const floor = option.minWhenFileSet as number;
+  const minimum = option.min as number;
   const maximum = option.max as number;
   switch (positionClass) {
     case "omitted":
       return undefined;
-    case "rangeMinimum":
-      return option.min as number;
-    case "belowFloor":
-      return floor - 1;
-    case "atFloor":
-      return floor;
+    case "zero":
+      return 0;
+    case "belowMinimum":
+      return minimum - 1;
+    case "atMinimum":
+      return minimum;
     case "atMaximum":
       return maximum;
     case "aboveMaximum":
@@ -137,18 +136,14 @@ function positionFor(option: ContractOption, positionClass: PositionClass): numb
  * The rule that refuses a combination, or `null` if it is accepted.
  *
  * One predicate serves both entry points: the shared option table and the
- * native config parse agree on every combination. Absence is the whole of this
- * surface's unset spelling, so every value it is given is a supplied one --
- * including the offset the contract records as the value the Python surface
- * passes when nothing was requested, which is refused here and accepted there.
- * The contract states that difference; neither surface treats a configuration
- * that names a position any differently.
+ * native config parse agree on every combination. Absence is the only unset
+ * spelling, so every value a caller gives, 0 included, is a supplied one.
  */
 function refusalReason(
   option: ContractOption,
   fileSet: boolean,
   position: number | undefined,
-): "range" | "pair" | "floor" | null {
+): "range" | "pair" | null {
   if (
     position !== undefined &&
     (position < (option.min as number) || position > (option.max as number))
@@ -156,9 +151,6 @@ function refusalReason(
     return "range";
   }
   if ((position !== undefined) !== fileSet) return "pair";
-  if (fileSet && position !== undefined && position < (option.minWhenFileSet as number)) {
-    return "floor";
-  }
   return null;
 }
 
@@ -395,30 +387,19 @@ describe("binding contract", () => {
     }
   });
 
-  it("mirrors the contract's conditional start-position floor", () => {
+  it("states the start-position range unconditionally and spells unset by absence", () => {
     expect(startPosition, "startBinlogPosition declared in the contract options").toBeDefined();
     const option = startPosition as ContractOption;
-    expect(typeof option.minWhenFileSet, "conditional floor stated in the contract").toBe("number");
-    expect(option.fileOption?.node, "companion option named for this surface").toBe(
-      "startBinlogFile",
-    );
-    // The floor is conditional, so the stated range keeps a lower minimum: the
-    // surface that cannot spell an absent offset passes a value inside that
-    // range to mean no file/offset start was requested.
-    expect(option.min).toBeLessThan(option.minWhenFileSet as number);
-
-    expect(CONDITIONAL_OPTION_MINIMUMS[option.node as "startBinlogPosition"]).toEqual({
-      minimum: option.minWhenFileSet,
-      companion: option.fileOption?.node,
+    expect(option.min).toBe(4);
+    expect(option).not.toHaveProperty("minWhenFileSet");
+    expect(option).not.toHaveProperty("fileOption");
+    expect(contract.requiredTogether).not.toHaveProperty("unsetValues");
+    expect({ ...OPTION_RANGES[option.node as "startBinlogPosition"] }).toEqual({
+      min: option.min,
+      max: option.max,
     });
-  });
-
-  it("spells an unset start-position selector by absence alone", () => {
-    const option = startPosition as ContractOption;
-    // This surface can leave a key out, so the contract records no value for
-    // it: a selector materializes no default, and an explicit undefined is the
+    // A selector materializes no default, and an explicit undefined is the
     // same as saying nothing.
-    expect(contract.requiredTogether.unsetValues.node).toEqual({});
     expect(STREAM_DEFAULTS).not.toHaveProperty(option.node);
     expect(() => validateStreamOptions({ [option.node]: undefined })).not.toThrow();
   });
@@ -428,11 +409,10 @@ describe("binding contract", () => {
     const documented = loadHeaderFieldDoc("binlog_position");
     const window = documented.match(/(\d+) through UINT32_MAX/);
     expect(window, `mes.h states an accepted offset window: ${documented}`).not.toBeNull();
-    expect(Number((window as RegExpMatchArray)[1])).toBe(option.minWhenFileSet);
+    expect(Number((window as RegExpMatchArray)[1])).toBe(option.min);
     // UINT32_MAX as the header spells the upper bound the contract states.
     expect(option.max).toBe(2 ** 32 - 1);
-    // The header states the same trigger the contract does: the floor holds for
-    // a file/offset start, not for every offset the field can carry.
+    // The header ties the offset to a file/offset start.
     expect(documented).toContain("MES_START_AT_POSITION");
     // A parse that stops matching has to fail rather than hand back nothing
     // for the assertions above to pass over.
@@ -481,10 +461,10 @@ describe("binding contract", () => {
           expect(stated, `rejection cites the file option for ${label}`).toContain(fileOption);
           expect(stated, `rejection cites the offset option for ${label}`).toContain(offsetOption);
         } else {
-          // A refusal a window decides names the option and the bound it
+          // A refusal the range decides names the option and the bound it
           // crossed.
           expect(stated, `rejection cites the option for ${label}`).toContain(offsetOption);
-          const bound = reason === "floor" ? option.minWhenFileSet : option.max;
+          const bound = (position as number) < (option.min as number) ? option.min : option.max;
           expect(stated, `rejection cites the bound for ${label}`).toContain(String(bound));
         }
         expect(code, `client rejects ${label}`).toBe(MesErrorCode.InvalidArg);

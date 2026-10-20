@@ -505,6 +505,14 @@ class TestClientClose:
         assert position_config.binlog_position == 9876
         position.close()
 
+        # Unset reaches the zero-initialized C field, which the ABI reads as unset.
+        lib.mes_client_connect.reset_mock()
+        unset = BinlogClient()
+        assert unset._config.start_binlog_position is None
+        unset.connect()
+        assert lib.mes_client_connect.call_args.args[1]._obj.binlog_position == 0
+        unset.close()
+
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")
     def test_connect_rejects_conflicting_or_invalid_file_position(
@@ -524,10 +532,12 @@ class TestClientClose:
             )
         with pytest.raises(ValueError, match="must name a binlog file"):
             BinlogClient(start_binlog_file="", start_binlog_position=4)
-        # Below the floor the companion file brings into force, refused at
-        # construction before a connection is attempted at all.
-        with pytest.raises(ValueError, match="start_binlog_position must be 4 through"):
-            BinlogClient(start_binlog_file="binlog.000001", start_binlog_position=3)
+        # Below the range, with or without a file, refused at construction
+        # before a connection is attempted at all.
+        for file in ("binlog.000001", None):
+            for offset in (0, 3):
+                with pytest.raises(ValueError, match="start_binlog_position must be between 4"):
+                    BinlogClient(start_binlog_file=file, start_binlog_position=offset)
 
     @patch("mysql_event_stream.client.load_client_library", return_value=True)
     @patch("mysql_event_stream.client.get_library")

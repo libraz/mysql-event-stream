@@ -89,34 +89,14 @@ export const OPTION_RANGES = {
   maxQueueBytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
   maxEventSize: { min: 0, max: 4294967295 },
   maxReconnectAttempts: { min: 0, max: null },
-  startBinlogPosition: { min: 0, max: 4294967295 },
+  // The first binlog event begins after the file's 4-byte magic number.
+  startBinlogPosition: { min: 4, max: 4294967295 },
 } as const satisfies Record<string, OptionRange>;
-
-/** A floor that holds for an option only while its companion option is set. */
-export interface ConditionalMinimum {
-  readonly minimum: number;
-  /** Option whose presence brings the floor into force. */
-  readonly companion: string;
-}
-
-/**
- * Floors that hold only while a companion option is set. {@link OPTION_RANGES}
- * keeps the unconditional window, which stays in force otherwise:
- * `startBinlogPosition` is left at 0 when no file/offset start was requested,
- * so the tighter floor applies only once `startBinlogFile` names a file. The
- * first binlog event begins after the file's 4-byte magic number, so an offset
- * into a named file cannot be below 4.
- */
-export const CONDITIONAL_OPTION_MINIMUMS = {
-  startBinlogPosition: { minimum: 4, companion: "startBinlogFile" },
-} as const satisfies Record<string, ConditionalMinimum>;
 
 /**
  * Options that are supplied together or not at all. An offset without the file
  * it points into names no position a server can start from, so it is refused
- * rather than accepted and dropped. This is a different statement from the
- * conditional floor above, which says what a supplied value must be once its
- * companion is set rather than whether it may appear alone.
+ * rather than accepted and dropped.
  *
  * Absence is how this surface leaves an option of a pair unset: a key that is
  * missing or explicitly `undefined` was not supplied, and every other value

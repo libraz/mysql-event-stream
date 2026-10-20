@@ -253,6 +253,28 @@ const RANGE_CASES: readonly RangeCase[] = [
       "engine enableMetadata",
     ],
   },
+  {
+    key: "startBinlogPosition",
+    value: 0,
+    companions: { startBinlogFile: "binlog.000001" },
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+    ],
+  },
+  {
+    key: "startBinlogPosition",
+    value: 0,
+    companions: {},
+    refusedBy: [
+      "stream constructor",
+      "stream configure",
+      "client constructor",
+      "engine enableMetadata",
+    ],
+  },
 ];
 
 /**
