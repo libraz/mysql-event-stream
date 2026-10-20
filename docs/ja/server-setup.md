@@ -41,10 +41,11 @@ binlog_row_value_options=""
 log_bin=ON
 binlog_format=ROW
 binlog_row_image=FULL
+binlog_row_metadata=MINIMAL
 log_bin_compress=OFF
 ```
 
-MariaDB に `gtid_mode` 変数はなく、GTID のロギングは `log_bin` に従うため、MariaDB のソースではこの検査を飛ばします。`log_bin_compress=ON` は、MySQL のトランザクション圧縮と同じ理由で拒否します。
+MariaDB に `gtid_mode` 変数はなく、GTID のロギングは `log_bin` に従うため、MariaDB のソースではこの検査を飛ばします。`log_bin_compress=ON` は、MySQL のトランザクション圧縮と同じ理由で拒否します。MariaDB は `binlog_row_metadata` の既定が `NO_LOG` で、テキストカラムがバイト列として届きます。`MINIMAL`（MySQL の既定）か `FULL` にすると文字列に戻ります。[カラム値](column-values.md#テキストとバイナリ)を参照してください。
 
 ## カラムのメタデータ
 

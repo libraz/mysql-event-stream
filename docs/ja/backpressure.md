@@ -27,21 +27,19 @@
 
 ## エンジンでの扱い
 
-`CdcEngine` も同じ 2 つの上限を同じ既定値で持ち、それが現れるのは `feed()` です。キューが埋まると feed は途中で止まり、消費したバイト数を返します。feed のループがキューを空にしてから残りを送り直すのは、このためです。
+`CdcEngine` も同じ 2 つの上限を同じ既定値で持ち、それが現れるのは `feed()` です。キューが埋まると feed は途中で止まり、消費したバイト数を返します。feed のループがキューを空にしてから残りを送るのは、このためです。
 
 ```typescript
 let offset = 0;
 while (offset < chunk.length || engine.hasEvents()) {
   for (let e = engine.nextEvent(); e !== null; e = engine.nextEvent()) handle(e);
   if (offset < chunk.length) {
-    const consumed = engine.feed(chunk.subarray(offset));
-    offset += consumed;
-    if (consumed === 0 && !engine.hasEvents()) break; // 末尾に不完全なイベントが残っている
+    offset += engine.feed(chunk.subarray(offset));
   }
 }
 ```
 
-キューが空の状態で `consumed` が 0 なら、末尾は不完全なイベントです。両者を見分けるのは、先にキューを空にしてから判定するからで、キューが満杯であっても 1 回の `feed()` は 0 を返すことがあります。そのバイト列を保持し、次のチャンクの先頭に付けてください。オフセット 0 から送り直してはいけません。エンジンは不完全なイベントをすでに保持しているので、同じバイト列を送ると状態が壊れます。
+チャンク末尾の不完全なイベントはエンジンがバッファして消費済みとして数えるので、バイト列が残るのはキューが満杯のときだけです。規則は [C API](c-api.md#feed-ループ)にまとめています。
 
 ## クエリ結果の上限
 

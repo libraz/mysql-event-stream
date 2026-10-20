@@ -12,7 +12,7 @@ A `ChangeEvent` describes one row that changed. A statement touching fifty rows 
 | `before` | `before` | The row as it was. `null` / `None` for an `INSERT`. |
 | `after` | `after` | The row as it is. `null` / `None` for a `DELETE`. |
 | `timestamp` | `timestamp` | Unix seconds from the event header — when the source wrote the event, not when it was read. |
-| `position` | `position` | Binlog file and offset the event was read from. |
+| `position` | `position` | Binlog file and the offset just past the event. Resuming from it is safe only at a transaction boundary (after the `XID` / `COMMIT` event): mid-transaction, the next row event arrives without its `TABLE_MAP` and fails to decode. Every row of one row event shares the offset. |
 | `namesResolved` | `names_resolved` | False when any column name for this table could not be resolved. |
 | `sourceSql` | `source_sql` | The statement that produced the event, from MariaDB's `ANNOTATE_ROWS`. Empty otherwise. |
 

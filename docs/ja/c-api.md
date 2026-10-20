@@ -111,7 +111,7 @@ mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* 
 mes_error_t mes_reset(mes_engine_t* engine);
 ```
 
-`mes_feed()` はキューが満杯になった時点で早めに止まり、消費したバイト数を報告します。`mes_next_event()` はキューが空のとき `MES_ERR_NO_EVENT` を返します。`mes_reset()` はバッファ済みのバイト列と `TABLE_MAP` のレジストリをまとめて破棄します。
+`mes_feed()` はキューが満杯になった時点で早めに止まり、消費したバイト数を報告します。続け方は [feed ループ](#feed-ループ)を参照してください。`mes_next_event()` はキューが空のとき `MES_ERR_NO_EVENT` を返します。`mes_reset()` はバッファ済みのバイト列と `TABLE_MAP` のレジストリをまとめて破棄します。
 
 ### 上限
 
@@ -123,7 +123,7 @@ mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size
 uint32_t    mes_get_max_event_size(mes_engine_t* engine);
 ```
 
-キューの上限は `0` を渡すとコンパイル時の既定値に戻ります。`MES_DEFAULT_QUEUE_SIZE`（10,000）と `MES_DEFAULT_QUEUE_BYTES`（48 MiB）です。`mes_set_max_event_size(engine, 0)` はこれと違い、既定値には戻らず 1 GiB のハードリミットまで引き上げます。新規に作ったエンジンの初期値は 64 MiB で、このハードリミットよりも、`mes_client_get_max_event_size()` の初期値である 32 MiB よりも小さい値です。[バックプレッシャーと上限](backpressure.md)を参照してください。
+キューの上限は `0` を渡すとコンパイル時の既定値に戻ります。`MES_DEFAULT_QUEUE_SIZE`（10,000）と `MES_DEFAULT_QUEUE_BYTES`（48 MiB）です。`mes_set_max_event_size(engine, 0)` はこれと違い、既定値には戻らず 1 GiB のハードリミットまで引き上げます。新規に作ったエンジンの初期値は 64 MiB で、このハードリミットより小さく、`mes_client_get_max_event_size()` の初期値である 32 MiB より大きい値です。[バックプレッシャーと上限](backpressure.md)を参照してください。
 
 ### フレーミング
 
@@ -167,6 +167,12 @@ typedef enum { MES_START_AT_CURRENT = 0, MES_START_AT_GTID = 1,
 
 `mes_client_config_t` は `host`、`port`、`user`、`password`、`server_id`、`start_gtid`、`connect_timeout_s`、`read_timeout_s`、4 つの TLS フィールド、`max_queue_size`、`allow_public_key_retrieval`、`start_position_mode`、`binlog_file`、`binlog_position` を持ちます。ほとんどのフィールドはゼロ初期化のままでも安全に既定動作になります。TLS 無効、サーバーの現在位置からの開始、そして `connect_timeout_s` / `read_timeout_s` / `max_queue_size` はコンパイル時の既定値です。唯一の例外が `server_id` で、`mes_client_connect()` はゼロを拒否するため、プロセスごとに一意な明示的な値が常に必要です。
 
+開始位置の規則は次のとおりです。
+
+- `MES_START_AT_CURRENT` はサーバーの現在の GTID セットから始めます。ただし `start_gtid` が空でなければ `MES_START_AT_GTID` として扱います。
+- `MES_START_AT_GTID` は `start_gtid` をそのまま使い、空のセットも含みます。`MES_START_AT_POSITION` は `binlog_file` と `binlog_position` を使います。
+- 再接続のとき、このハンドルがすでに公開したチェックポイントは、設定されたモード（ファイルとオフセットでの開始も含む）より優先されます。別の開始位置を反映したい場合は、新しいクライアントを作ってください。
+
 ```c
 mes_client_t* mes_client_create(void);
 void          mes_client_destroy(mes_client_t* client);
@@ -177,7 +183,7 @@ void        mes_client_stop(mes_client_t* client);      /* 別スレッドから
 void        mes_client_disconnect(mes_client_t* client);
 ```
 
-`mes_client_connect()` はサーバーの設定を検証し、必須の設定が誤っていれば `MES_ERR_VALIDATION` で失敗します。`mes_client_destroy()` 自体は停止も待機も行わない、単なる解放処理です。poll している可能性のあるすべてのスレッドで `mes_client_stop()` を呼び、`mes_client_poll()`（または `mes_client_start()`）の戻りを確認してから `mes_client_destroy()` を呼んでください。poll が実行中のまま破棄すると use-after-free になります。
+`mes_client_connect()` はサーバーの設定を検証し、必須の設定が誤っていれば `MES_ERR_VALIDATION` で失敗します。`mes_client_destroy()` は単なる解放処理ではなく、リーダースレッドを停止して join し、接続を閉じます。ただし別スレッドで実行中の `mes_client_poll()` の終了までは待てません。poll している可能性のあるすべてのスレッドで `mes_client_stop()` を呼び、`mes_client_poll()`（または `mes_client_start()`）の戻りを確認してから `mes_client_destroy()` を呼んでください。poll が実行中のまま破棄すると use-after-free になります。
 
 ### ポーリング
 
@@ -217,7 +223,9 @@ mes_error_t mes_client_set_max_queue_bytes(mes_client_t* client, size_t max_queu
 size_t      mes_client_get_max_queue_bytes(mes_client_t* client);
 ```
 
-永続化すべきチェックポイントは `mes_client_current_gtid()` です。[チェックポイントと復旧](checkpoints.md)を参照してください。
+`mes_client_set_max_event_size()` と `mes_client_set_max_queue_bytes()` は、クライアントがストリーミング中だと `MES_ERR_INVALID_ARG` を返します。`mes_client_start()` の前か、`mes_client_stop()` の後に呼んでください。
+
+永続化すべきチェックポイントは `mes_client_current_gtid()` です。[チェックポイントと復旧](checkpoints.md)を参照してください。空文字列はチェックポイントがまだ確立されていないことを表します。保存せず、`start_gtid` として渡し直してもいけません。
 
 ## feed ループ
 
@@ -237,12 +245,9 @@ while (offset < len || mes_has_events(engine)) {
             break;
         }
         offset += consumed;
-
-        /* 何も消費せず、キューにも何も残っていないなら、末尾は不完全なイベント。
-           data + offset から data + len までを保持し、次のチャンクと一緒に
-           feed し直す。オフセット 0 から feed し直してはいけない。 */
-        if (consumed == 0 && !mes_has_events(engine)) break;
     }
 }
 mes_destroy(engine);
 ```
+
+チャンク末尾の不完全なイベントは消費済みとして扱われます。エンジンが内部でバッファし、`consumed` にもそのバイト数が含まれるので、呼び出し側は何も持ち越さずに次のチャンクをそのまま続けます。`mes_feed()` が途中で止まるのは、キューが満杯になったときかエラーのときだけです。その場合はキューを空にしてから `data + consumed` の位置から送り直してください。チャンクの先頭から送り直すと、キューに入っているイベントが二重に配送されます。

@@ -27,21 +27,19 @@ Raise `maxQueueBytes` alongside it. An event larger than the whole byte budget c
 
 ## On the engine
 
-`CdcEngine` carries the same two bounds with the same defaults, and `feed()` is where they show. A feed stops early once the queue is full and returns how many bytes it consumed, which is why the feed loop drains and re-feeds the tail:
+`CdcEngine` carries the same two bounds with the same defaults, and `feed()` is where they show. A feed stops early once the queue is full and returns how many bytes it consumed, which is why the feed loop drains the queue before feeding the rest:
 
 ```typescript
 let offset = 0;
 while (offset < chunk.length || engine.hasEvents()) {
   for (let e = engine.nextEvent(); e !== null; e = engine.nextEvent()) handle(e);
   if (offset < chunk.length) {
-    const consumed = engine.feed(chunk.subarray(offset));
-    offset += consumed;
-    if (consumed === 0 && !engine.hasEvents()) break; // partial event at the tail
+    offset += engine.feed(chunk.subarray(offset));
   }
 }
 ```
 
-A `consumed` of zero with an empty queue means the tail is an incomplete event — draining first is what tells the two apart, since a full queue can also make a single `feed()` call return zero. Keep those bytes and prepend them to the next chunk. Never re-feed from offset zero: the engine already holds the partial event, and replaying the bytes corrupts its state.
+A partial event at the end of a chunk is buffered by the engine and counted as consumed, so only a full queue leaves bytes behind. [C API](c-api.md#a-feed-loop) states the rule once.
 
 ## Query result caps
 

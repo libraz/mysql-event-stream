@@ -74,6 +74,6 @@ except (MesError, MesConnectionError) as exc:
         raise
 ```
 
-範囲外の値や型の違うオプション、未知の設定キー、負のキューサイズ、読み込めなかったライブラリなどは、ネイティブ層に届く前に拒否されます。送出されるのは `TypeError` か `ValueError` なので、`except TypeError` / `except ValueError` はそのまま使えます。`code` には、C ABI が不正な引数に返すのと同じ `MesErrorCode.INVALID_ARG` が入ります。
+範囲外の値や型の違うオプション、未知の設定キーや負のキューサイズなどは、ネイティブ層に届く前に拒否されます。送出されるのは `TypeError` か `ValueError` なので、`except TypeError` / `except ValueError` はそのまま使えます。`code` には、C ABI が不正な引数に返すのと同じ `MesErrorCode.INVALID_ARG` が入ります。ネイティブライブラリの読み込みに失敗したときは、代わりに `OSError` が送出され、こちらも `code` は `MesErrorCode.INVALID_ARG` です。
 
 どちらのバインディングも `MesErrorCode` をエクスポートします。C では `mes_error_string()` が数値コードに対応する正規の短い説明を返します。

@@ -33,7 +33,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event); // 冪等に書く
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid); // チェックポイントができるまでは空
 }
 ```
 
@@ -48,7 +48,8 @@ async with CdcStream(
 ) as stream:
     async for event in stream:
         await handle(event)  # 冪等に書く
-        await save_checkpoint(stream.current_gtid)
+        if stream.current_gtid:  # チェックポイントができるまでは空
+            await save_checkpoint(stream.current_gtid)
 ```
 
 `UPDATE` は変更前後の両方のイメージを伴って届きます。

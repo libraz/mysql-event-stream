@@ -15,7 +15,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event);
-  saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -29,10 +29,13 @@ async with CdcStream(
 ) as stream:
     async for event in stream:
         await handle(event)
-        save_checkpoint(stream.current_gtid)
+        if stream.current_gtid:
+            save_checkpoint(stream.current_gtid)
 ```
 
 `currentGtid` / `current_gtid` covers every event delivered up to, but not including, the last `poll()` / `poll_batch()` result — `stop()`, `close()`, `disconnect()` and `destroy()` never advance it further. It stays readable and unchanged after the stream closes, so it can also be persisted once after the loop, including after a `break`, but the last delivered event or batch is excluded and is redelivered on the next resume: at-least-once, not exactly-once. `BinlogClient` carries the same pair under the same names.
+
+An empty `currentGtid` / `current_gtid` means no checkpoint has been established yet, for example on a binlog file/offset start, where it stays empty until the stream reaches a `PREVIOUS_GTIDS` (MySQL) or `GTID_LIST` (MariaDB) event. That normally means the next binlog file, or a `FLUSH BINARY LOGS`. Do not persist it, and do not pass it back as `startGtid`: an empty `startGtid` requests the empty set, not "no start position". Keep the previous checkpoint instead.
 
 ## At-least-once, and what that costs you
 

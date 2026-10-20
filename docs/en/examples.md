@@ -19,7 +19,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event); // idempotent
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -41,7 +41,8 @@ async def run() -> None:
     ) as stream:
         async for event in stream:
             await handle(event)  # idempotent
-            await save_checkpoint(stream.current_gtid)
+            if stream.current_gtid:
+                await save_checkpoint(stream.current_gtid)
 ```
 
 `handle` runs before the checkpoint is written, so an event is at worst processed twice. See [Checkpoints and recovery](checkpoints.md).
@@ -59,7 +60,7 @@ for await (const event of stream) {
   if (event.after) keys.add(`product:${event.after.id}`);
 
   await cache.del(...keys);
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -129,24 +130,17 @@ with CdcEngine() as engine:
 
     with open("captured.binlog", "rb") as fh:
         fh.read(4)  # the file's leading magic number, not an event
-        pending = b""
         while chunk := fh.read(1 << 20):
-            buffer = pending + chunk
             offset = 0
-            while offset < len(buffer) or engine.has_events():
+            while offset < len(chunk) or engine.has_events():
                 while (event := engine.next_event()) is not None:
                     print(event.type, event.database, event.table)
 
-                if offset < len(buffer):
-                    consumed = engine.feed(buffer[offset:])
-                    offset += consumed
-
-                    if consumed == 0 and not engine.has_events():
-                        break
-            pending = buffer[offset:]
+                if offset < len(chunk):
+                    offset += engine.feed(chunk[offset:])
 ```
 
-The tail that `feed()` would not consume is an incomplete event; keep it and prepend it to the next chunk. Never re-feed from offset zero.
+A partial event at the end of a chunk is buffered by the engine, so the next chunk is fed as it is. See [C API](c-api.md#a-feed-loop) for what a short `feed()` means.
 
 A capture that does not start at a transaction boundary has row events whose `TABLE_MAP` is missing, and those cannot be decoded at all. See [Change events](change-events.md).
 

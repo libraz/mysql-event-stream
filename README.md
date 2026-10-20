@@ -33,7 +33,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event); // idempotent
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid); // empty until a checkpoint exists
 }
 ```
 
@@ -48,7 +48,8 @@ async with CdcStream(
 ) as stream:
     async for event in stream:
         await handle(event)  # idempotent
-        await save_checkpoint(stream.current_gtid)
+        if stream.current_gtid:  # empty until a checkpoint exists
+            await save_checkpoint(stream.current_gtid)
 ```
 
 An `UPDATE` arrives with both images of the row:

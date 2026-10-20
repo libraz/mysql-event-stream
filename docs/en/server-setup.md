@@ -41,10 +41,11 @@ Each one is checked:
 log_bin=ON
 binlog_format=ROW
 binlog_row_image=FULL
+binlog_row_metadata=MINIMAL
 log_bin_compress=OFF
 ```
 
-MariaDB has no `gtid_mode` variable — GTID logging follows from `log_bin` — so that check is skipped for a MariaDB source. `log_bin_compress=ON` is rejected for the same reason MySQL's transaction compression is.
+MariaDB has no `gtid_mode` variable — GTID logging follows from `log_bin` — so that check is skipped for a MariaDB source. `log_bin_compress=ON` is rejected for the same reason MySQL's transaction compression is. MariaDB defaults `binlog_row_metadata` to `NO_LOG`, which delivers text columns as bytes; `MINIMAL` (the MySQL default) or `FULL` restores strings. See [Column values](column-values.md#text-and-binary).
 
 ## Column metadata
 

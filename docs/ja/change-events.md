@@ -12,7 +12,7 @@
 | `before` | `before` | 変更前の行。`INSERT` では `null` / `None`。 |
 | `after` | `after` | 変更後の行。`DELETE` では `null` / `None`。 |
 | `timestamp` | `timestamp` | イベントヘッダの Unix 秒。読み取った時刻ではなく、ソースがイベントを書いた時刻。 |
-| `position` | `position` | イベントを読み取った binlog のファイルとオフセット。 |
+| `position` | `position` | binlog のファイルと、イベントの直後のオフセット。ここから再開してよいのはトランザクション境界（`XID` / `COMMIT` イベントの後）だけで、トランザクションの途中から再開すると、次の行イベントは `TABLE_MAP` を伴わずに届き、デコードに失敗します。1 つの行イベントに含まれるすべての行が同じオフセットを持ちます。 |
 | `namesResolved` | `names_resolved` | このテーブルのカラム名を 1 つでも解決できなかったときは false。 |
 | `sourceSql` | `source_sql` | MariaDB の `ANNOTATE_ROWS` から得た、イベントを生んだステートメント。それ以外では空。 |
 

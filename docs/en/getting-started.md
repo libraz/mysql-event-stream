@@ -84,7 +84,7 @@ If the keys come back as `"0"`, `"1"`, `"2"` instead of column names, the server
 
 ## Decoding bytes you already have
 
-`CdcEngine` takes binlog bytes from anywhere, as long as they start at an event boundary — a raw binlog file opens with a 4-byte magic number that has to be skipped first. `feed()` returns how many bytes it consumed and stops early once its queue is full, so the loop drains the queue and re-feeds the unconsumed tail.
+`CdcEngine` takes binlog bytes from anywhere, as long as they start at an event boundary — a raw binlog file opens with a 4-byte magic number that has to be skipped first. `feed()` returns how many bytes it consumed and stops early once its queue is full, so the loop drains the queue before feeding the rest. [C API](c-api.md#a-feed-loop) states the rule for partial events.
 
 ```typescript
 import { CdcEngine } from "@libraz/mysql-event-stream";
@@ -100,10 +100,6 @@ try {
     if (offset < chunk.length) {
       const consumed = engine.feed(chunk.subarray(offset));
       offset += consumed;
-
-      // Nothing consumed and nothing queued: the tail is a partial event.
-      // Keep chunk.subarray(offset) and prepend it to the next chunk.
-      if (consumed === 0 && !engine.hasEvents()) break;
     }
   }
 } finally {
@@ -123,14 +119,9 @@ with CdcEngine() as engine:
         if offset < len(chunk):
             consumed = engine.feed(chunk[offset:])
             offset += consumed
-
-            # Nothing consumed and nothing queued: the tail is a partial
-            # event. Keep chunk[offset:] and prepend it to the next chunk.
-            if consumed == 0 and not engine.has_events():
-                break
 ```
 
-Never re-feed from offset zero after a short feed. The engine holds the partial event it has already accepted, and replaying those bytes corrupts its state.
+A partial event at the end of a chunk needs nothing from the caller: the engine buffers it and counts it as consumed.
 
 ## Building from source
 

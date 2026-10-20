@@ -74,6 +74,6 @@ except (MesError, MesConnectionError) as exc:
         raise
 ```
 
-An out-of-range or wrongly-typed option — an unknown config key, a negative queue size, a library that fails to load — is refused before it ever reaches the native layer, but still as a `TypeError` or `ValueError` (so `except TypeError` / `except ValueError` keep working) with `code` set to `MesErrorCode.INVALID_ARG`, the same code the C ABI itself returns for a bad argument.
+An out-of-range or wrongly-typed option — an unknown config key, a negative queue size — is refused before it ever reaches the native layer, but still as a `TypeError` or `ValueError` (so `except TypeError` / `except ValueError` keep working) with `code` set to `MesErrorCode.INVALID_ARG`, the same code the C ABI itself returns for a bad argument. A native library that fails to load raises `OSError` instead, also with `code` set to `MesErrorCode.INVALID_ARG`.
 
 Both bindings export `MesErrorCode`. In C, `mes_error_string()` returns the canonical short description for a numeric code.

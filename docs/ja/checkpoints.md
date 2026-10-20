@@ -15,7 +15,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event);
-  saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -29,10 +29,13 @@ async with CdcStream(
 ) as stream:
     async for event in stream:
         await handle(event)
-        save_checkpoint(stream.current_gtid)
+        if stream.current_gtid:
+            save_checkpoint(stream.current_gtid)
 ```
 
 `currentGtid` / `current_gtid` は、配送済みのイベントのうち、最後の `poll()` / `poll_batch()` で返した分より前をすべて含みます。`stop()`、`close()`、`disconnect()`、`destroy()` を呼んでも値は進みません。ストリームを閉じた後も同じ値を読めるので、ループの後で 1 回だけ保存してもかまいません（`break` で抜けた場合も同じです）。ただし最後に配送したイベントやバッチはこの値に含まれず、再開すると再び配送されます。保証は at-least-once で、exactly-once ではありません。`BinlogClient` も同じ名前で同じ組を持ちます。
+
+`currentGtid` / `current_gtid` が空のときは、チェックポイントがまだ確立されていません。たとえば binlog のファイルとオフセットで開始した場合、ストリームが `PREVIOUS_GTIDS`（MySQL）または `GTID_LIST`（MariaDB）イベントに達するまで空のままです。通常は次の binlog ファイルか、`FLUSH BINARY LOGS` の後です。空の値は保存せず、`startGtid` として渡し直してもいけません。空の `startGtid` は「開始位置なし」ではなく空のセットを要求します。前回のチェックポイントを残しておいてください。
 
 ## at-least-once と、その代償
 

@@ -111,7 +111,7 @@ mes_error_t mes_get_position(mes_engine_t* engine, const char** file, uint64_t* 
 mes_error_t mes_reset(mes_engine_t* engine);
 ```
 
-`mes_feed()` stops early once the queue is full and reports what it consumed. `mes_next_event()` returns `MES_ERR_NO_EVENT` on an empty queue. `mes_reset()` clears the buffered bytes and the `TABLE_MAP` registry together.
+`mes_feed()` stops early once the queue is full and reports what it consumed; [A feed loop](#a-feed-loop) shows how to continue. `mes_next_event()` returns `MES_ERR_NO_EVENT` on an empty queue. `mes_reset()` clears the buffered bytes and the `TABLE_MAP` registry together.
 
 ### Limits
 
@@ -123,7 +123,7 @@ mes_error_t mes_set_max_event_size(mes_engine_t* engine, uint32_t max_event_size
 uint32_t    mes_get_max_event_size(mes_engine_t* engine);
 ```
 
-`0` restores the compiled-in default for the queue bounds: `MES_DEFAULT_QUEUE_SIZE` (10,000) and `MES_DEFAULT_QUEUE_BYTES` (48 MiB). `mes_set_max_event_size(engine, 0)` is different: it raises the ceiling to the 1 GiB hard cap rather than restoring a default. A freshly created engine starts at 64 MiB, below both that hard cap and `mes_client_get_max_event_size()`'s own 32 MiB starting value. See [Backpressure and limits](backpressure.md).
+`0` restores the compiled-in default for the queue bounds: `MES_DEFAULT_QUEUE_SIZE` (10,000) and `MES_DEFAULT_QUEUE_BYTES` (48 MiB). `mes_set_max_event_size(engine, 0)` is different: it raises the ceiling to the 1 GiB hard cap rather than restoring a default. A freshly created engine starts at 64 MiB, below that hard cap and above `mes_client_get_max_event_size()`'s 32 MiB starting value. See [Backpressure and limits](backpressure.md).
 
 ### Framing
 
@@ -167,6 +167,12 @@ typedef enum { MES_START_AT_CURRENT = 0, MES_START_AT_GTID = 1,
 
 `mes_client_config_t` carries `host`, `port`, `user`, `password`, `server_id`, `start_gtid`, `connect_timeout_s`, `read_timeout_s`, the four TLS fields, `max_queue_size`, `allow_public_key_retrieval`, `start_position_mode`, `binlog_file` and `binlog_position`. Most fields default safely when left zero-initialized: TLS disabled, a start at the server's current position, `connect_timeout_s`/`read_timeout_s`/`max_queue_size` at their compiled-in defaults. `server_id` is the one exception — `mes_client_connect()` rejects zero, so it always needs an explicit, per-process-unique value.
 
+Start position:
+
+- `MES_START_AT_CURRENT` starts at the server's current GTID set, unless `start_gtid` is non-empty: a non-empty `start_gtid` is treated as `MES_START_AT_GTID`.
+- `MES_START_AT_GTID` uses `start_gtid` exactly, including an empty set. `MES_START_AT_POSITION` uses `binlog_file` and `binlog_position`.
+- On a reconnect, a checkpoint this handle already published outranks the configured mode, including a file/offset start. To honour a different start, create a new client.
+
 ```c
 mes_client_t* mes_client_create(void);
 void          mes_client_destroy(mes_client_t* client);
@@ -177,7 +183,7 @@ void        mes_client_stop(mes_client_t* client);      /* callable from another
 void        mes_client_disconnect(mes_client_t* client);
 ```
 
-`mes_client_connect()` validates the server's configuration and fails with `MES_ERR_VALIDATION` when a required setting is wrong. `mes_client_destroy()` does not stop or wait for anything itself — it is a bare deallocation. Call `mes_client_stop()` and observe `mes_client_poll()` (or `mes_client_start()`) return on every thread that might be polling before calling `mes_client_destroy()`; destroying while a poll is in flight is a use-after-free.
+`mes_client_connect()` validates the server's configuration and fails with `MES_ERR_VALIDATION` when a required setting is wrong. `mes_client_destroy()` is not a bare deallocation: it stops and joins the reader thread and closes the connection. It cannot wait for a `mes_client_poll()` running on another thread, so call `mes_client_stop()` and observe `mes_client_poll()` (or `mes_client_start()`) return on every thread that might be polling before calling `mes_client_destroy()`; destroying while a poll is in flight is a use-after-free.
 
 ### Polling
 
@@ -217,7 +223,9 @@ mes_error_t mes_client_set_max_queue_bytes(mes_client_t* client, size_t max_queu
 size_t      mes_client_get_max_queue_bytes(mes_client_t* client);
 ```
 
-`mes_client_current_gtid()` is the checkpoint to persist; see [Checkpoints and recovery](checkpoints.md).
+`mes_client_set_max_event_size()` and `mes_client_set_max_queue_bytes()` return `MES_ERR_INVALID_ARG` while the client is streaming; call them before `mes_client_start()` or after `mes_client_stop()`.
+
+`mes_client_current_gtid()` is the checkpoint to persist; see [Checkpoints and recovery](checkpoints.md). An empty string means no checkpoint has been established yet: do not persist it, and do not pass it back as `start_gtid`.
 
 ## A feed loop
 
@@ -237,12 +245,9 @@ while (offset < len || mes_has_events(engine)) {
             break;
         }
         offset += consumed;
-
-        /* Nothing consumed and nothing queued: the tail is a partial event.
-           Keep data + offset through data + len and re-feed it with the next
-           chunk. Never re-feed from offset 0. */
-        if (consumed == 0 && !mes_has_events(engine)) break;
     }
 }
 mes_destroy(engine);
 ```
+
+A partial event at the end of a chunk is consumed: the engine buffers it internally and `consumed` includes those bytes, so the next chunk continues the stream with nothing carried over by the caller. `mes_feed()` stops short only when the queue fills or an error occurs. In that case, drain the queue and re-feed from `data + consumed`, never from the start of the chunk, or events already queued are delivered a second time.

@@ -19,7 +19,7 @@ await using stream = new CdcStream({
 
 for await (const event of stream) {
   await handle(event); // 冪等
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -41,7 +41,8 @@ async def run() -> None:
     ) as stream:
         async for event in stream:
             await handle(event)  # 冪等
-            await save_checkpoint(stream.current_gtid)
+            if stream.current_gtid:
+                await save_checkpoint(stream.current_gtid)
 ```
 
 `handle` はチェックポイントの書き込みより前に実行されるので、イベントは最悪でも 2 回処理されるだけです。[チェックポイントと復旧](checkpoints.md)を参照してください。
@@ -59,7 +60,7 @@ for await (const event of stream) {
   if (event.after) keys.add(`product:${event.after.id}`);
 
   await cache.del(...keys);
-  await saveCheckpoint(stream.currentGtid);
+  if (stream.currentGtid) await saveCheckpoint(stream.currentGtid);
 }
 ```
 
@@ -129,24 +130,17 @@ with CdcEngine() as engine:
 
     with open("captured.binlog", "rb") as fh:
         fh.read(4)  # ファイル先頭のマジックナンバー。イベントではない
-        pending = b""
         while chunk := fh.read(1 << 20):
-            buffer = pending + chunk
             offset = 0
-            while offset < len(buffer) or engine.has_events():
+            while offset < len(chunk) or engine.has_events():
                 while (event := engine.next_event()) is not None:
                     print(event.type, event.database, event.table)
 
-                if offset < len(buffer):
-                    consumed = engine.feed(buffer[offset:])
-                    offset += consumed
-
-                    if consumed == 0 and not engine.has_events():
-                        break
-            pending = buffer[offset:]
+                if offset < len(chunk):
+                    offset += engine.feed(chunk[offset:])
 ```
 
-`feed()` が消費しなかった末尾は不完全なイベントです。保持して、次のチャンクの先頭に付けてください。オフセット 0 から渡し直してはいけません。
+チャンク末尾の不完全なイベントはエンジンがバッファするので、次のチャンクはそのまま渡します。短く消費された `feed()` の意味は [C API](c-api.md#feed-ループ)を参照してください。
 
 トランザクション境界から始まっていないキャプチャには `TABLE_MAP` を欠いた行イベントが含まれ、それらはまったくデコードできません。[変更イベント](change-events.md)を参照してください。
 

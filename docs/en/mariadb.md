@@ -30,4 +30,4 @@ MariaDB reads `@master_binlog_checksum` where MySQL 8.4 reads `@source_binlog_ch
 
 ## What stays the same
 
-Everything above the parser. `ChangeEvent` has the same fields, column values map the same way, the filters behave identically, the error codes are the same numbers, and both E2E suites run the same tests against a MariaDB container as against a MySQL one.
+Everything above the parser. `ChangeEvent` has the same fields, column values map the same way except JSON, which MariaDB stores as text ([Column values](column-values.md)), the filters behave identically, the error codes are the same numbers, and both E2E suites run the same tests against a MariaDB container as against a MySQL one.

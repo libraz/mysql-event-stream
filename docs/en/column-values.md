@@ -11,17 +11,19 @@ SQL `NULL` is `null` in Node and `None` in Python.
 | CHAR, VARCHAR, TEXT, DECIMAL, DATE, TIME, DATETIME, TIMESTAMP | `string` | `str` |
 | BINARY, VARBINARY, BLOB, JSON, GEOMETRY, VECTOR | `Uint8Array` | `bytes` |
 
+Three conditions refine this table: signedness metadata for large unsigned values, the server flavour for JSON, and `binlog_row_metadata` for text columns. Each is stated below, and nowhere else.
+
 ## Reading the rows
 
 **Integers.** Node returns a `number`, or a `bigint` when the exact value does not fit a safe integer. Python returns an `int`, which has no such limit.
 
-**Values above `INT64_MAX`.** A `BIGINT UNSIGNED`, `SET` or `BIT` value larger than a signed 64-bit integer arrives as an exact decimal string, because the core has no integer type that holds it.
+**Values above `INT64_MAX`.** A `BIGINT UNSIGNED`, `SET` or `BIT` value larger than a signed 64-bit integer arrives as an exact decimal string, because the core has no integer type that holds it. This needs the column's signedness, which comes from the `TABLE_MAP` optional metadata (`binlog_row_metadata=MINIMAL` or `FULL`) or from the metadata side-connection. With neither, every numeric column is read as signed: an `UNSIGNED` value above the signed range of its width reads as a negative number, and a `table_map_missing_signedness` warning is logged once per table.
 
 **ENUM** is the 1-based index into the column's value list, not the label. **SET** is a numeric bitmask, bit *i* counting from the least significant set when the *i*-th member of the definition is present. **BIT** is the integer value of its bits. Recovering the labels needs the column definition, which the binlog does not carry.
 
 **Temporal types and DECIMAL** are formatted as text by the core. Every `TIMESTAMP` variant is a string of decimal Unix epoch seconds carrying as many fractional digits as the column's declared precision — `"1735689600"`, or `"1735689600.123456"` for `TIMESTAMP(6)`.
 
-**JSON** arrives as raw bytes in MySQL's internal binary JSON format. It is not decoded text and not a parsed object; reading it needs a binary-JSON parser.
+**JSON** on MySQL arrives as raw bytes in MySQL's internal binary JSON format. It is not decoded text and not a parsed object; reading it needs a binary-JSON parser. On MariaDB, `JSON` is an alias for `LONGTEXT` and the binlog carries plain text, so the value follows the text rule below: a string with charset metadata, bytes without.
 
 **VECTOR** (MySQL 9.0 and later) arrives as raw bytes.
 
