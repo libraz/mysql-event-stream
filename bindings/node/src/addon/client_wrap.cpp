@@ -3,6 +3,8 @@
 
 #include "client_wrap.h"
 
+#include <uv.h>
+
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -27,6 +29,53 @@ std::string DescribeClientError(mes_client_t* client, mes_error_t error) {
   return mes_error_string(error);
 }
 
+/**
+ * @brief Stops the client if the environment starts tearing down mid-poll.
+ *
+ * A terminated Worker drains in-flight thread-pool work before any cleanup
+ * hook runs, so a poll blocked on a silent server would hold the teardown for
+ * up to readTimeoutS. Prepare callbacks still run in those drain iterations;
+ * this one stops the client once JS can no longer run, releasing the poll.
+ */
+class TeardownStopper {
+ public:
+  TeardownStopper(napi_env env, mes_client_t* client) : env_(env), client_(client) {
+    uv_loop_t* loop = nullptr;
+    if (napi_get_uv_event_loop(env, &loop) != napi_ok || loop == nullptr) return;
+    handle_ = new uv_prepare_t;
+    handle_->data = this;
+    uv_prepare_init(loop, handle_);
+    uv_prepare_start(handle_, OnPrepare);
+    uv_unref(reinterpret_cast<uv_handle_t*>(handle_));
+  }
+
+  ~TeardownStopper() {
+    if (handle_ == nullptr) return;
+    uv_close(reinterpret_cast<uv_handle_t*>(handle_),
+             [](uv_handle_t* handle) { delete reinterpret_cast<uv_prepare_t*>(handle); });
+  }
+
+  TeardownStopper(const TeardownStopper&) = delete;
+  TeardownStopper& operator=(const TeardownStopper&) = delete;
+
+ private:
+  static void OnPrepare(uv_prepare_t* handle) {
+    auto* self = static_cast<TeardownStopper*>(handle->data);
+    napi_handle_scope scope = nullptr;
+    if (napi_open_handle_scope(self->env_, &scope) != napi_ok) return;
+    const bool can_call = mes_node::CanCallIntoJs(Napi::Env(self->env_));
+    napi_close_handle_scope(self->env_, scope);
+    if (can_call) return;
+    // The only C ABI entry point callable while the poll runs on another thread.
+    mes_client_stop(self->client_);
+    uv_prepare_stop(handle);
+  }
+
+  napi_env env_;
+  mes_client_t* client_;
+  uv_prepare_t* handle_ = nullptr;
+};
+
 }  // namespace
 
 /** @brief AsyncWorker for non-blocking poll() on the libuv thread pool. */
@@ -38,6 +87,7 @@ class PollWorker : public Napi::AsyncWorker {
         client_(client),
         wrap_(wrap),
         deferred_(deferred),
+        stopper_(env, client),
         error_(MES_OK),
         is_heartbeat_(false),
         checksum_enabled_(false) {}
@@ -95,6 +145,7 @@ class PollWorker : public Napi::AsyncWorker {
   mes_client_t* client_;
   ClientWrap* wrap_;
   Napi::Promise::Deferred deferred_;
+  TeardownStopper stopper_;
   mes_error_t error_;
   bool is_heartbeat_;
   bool checksum_enabled_;
@@ -110,6 +161,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
         client_(client),
         wrap_(wrap),
         deferred_(deferred),
+        stopper_(env, client),
         max_events_(max_events),
         error_(MES_OK) {}
 
@@ -195,6 +247,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
   mes_client_t* client_;
   ClientWrap* wrap_;
   Napi::Promise::Deferred deferred_;
+  TeardownStopper stopper_;
   size_t max_events_;
   mes_error_t error_;
   std::vector<BatchResult> results_;
