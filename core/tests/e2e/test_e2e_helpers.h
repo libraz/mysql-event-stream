@@ -114,16 +114,24 @@ inline std::string WrongCa() { return CertDir() + "/wrong-ca.pem"; }
 
 inline std::string DefaultCa() { return IsMariaDB() ? "" : CaCert(); }
 
+// A container can report healthy before MySQL 8.4 accepts a certificate-verified
+// TLS login, so the first connection is retried for a bounded window.
 inline bool IsE2eServerAvailable(std::string* error = nullptr) {
-  mes::protocol::MysqlConnection conn;
-  auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
-                         DefaultCa(), "", "");
-  if (rc != MES_OK) {
-    if (error) *error = conn.GetLastError();
-    return false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (true) {
+    mes::protocol::MysqlConnection conn;
+    auto rc = conn.Connect(kHost, kPort, kRootUser, kRootPass, kTimeout, kTimeout, DefaultSslMode(),
+                           DefaultCa(), "", "");
+    if (rc == MES_OK) {
+      conn.Disconnect();
+      return true;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      if (error) *error = conn.GetLastError();
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
-  conn.Disconnect();
-  return true;
 }
 
 // Captured column value (deep-copied from transient mes_column_t)
