@@ -20,7 +20,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
   size_t pos = 0;
   uint64_t fixed = 0;
-  mes::protocol::ReadLenEncInt(data, size, &pos);
+  uint64_t len_enc = 0;
+  (void)mes::protocol::ReadLenEncInt(data, size, &pos, &len_enc);
   pos = 0;
   mes::protocol::ReadFixedIntChecked(data, size, &pos, size % 10, &fixed);
 

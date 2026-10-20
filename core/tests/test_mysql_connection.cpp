@@ -755,6 +755,31 @@ TEST(MysqlConnectionHandshake, ParsesAServerHandshake) {
   EXPECT_EQ(out.auth_data[19], 0x2C);
 }
 
+TEST(MysqlConnectionHandshake, ReusedHandshakeKeepsNoStateFromThePreviousGreeting) {
+  HandshakeSpec first;
+  first.auth_plugin_name = "mysql_native_password";
+  const auto first_packet = BuildHandshake(first);
+
+  HandshakeSpec second;
+  second.capabilities = kCapSecureConnection;  // no CLIENT_PLUGIN_AUTH: no plugin name sent
+  const auto second_packet = BuildHandshake(second);
+
+  ServerHandshake out;
+  std::string error;
+  ASSERT_EQ(
+      detail::ParseServerHandshakePayload(first_packet.data(), first_packet.size(), &out, &error),
+      MES_OK)
+      << error;
+  ASSERT_EQ(out.auth_plugin_name, "mysql_native_password");
+
+  ASSERT_EQ(
+      detail::ParseServerHandshakePayload(second_packet.data(), second_packet.size(), &out, &error),
+      MES_OK)
+      << error;
+  EXPECT_EQ(out.auth_plugin_name, "caching_sha2_password");
+  EXPECT_EQ(out.auth_data.size(), 20u);
+}
+
 TEST(MysqlConnectionHandshake, TruncationAtEveryOffsetFailsSafely) {
   const HandshakeSpec spec;
   const auto packet = BuildHandshake(spec);

@@ -63,6 +63,26 @@ TEST_F(LoggerTest, NoCallbackDoesNotCrash) {
   EXPECT_EQ(g_capture.call_count.load(), 0);
 }
 
+TEST_F(LoggerTest, PlainValuesAreEmittedUnchanged) {
+  LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
+  StructuredLog().Event("e").Field("db", "orders_2024").Field("n", 7).Field("ok", true).Error();
+  EXPECT_EQ(g_capture.last_message, "event=e db=orders_2024 n=7 ok=true");
+}
+
+TEST_F(LoggerTest, ValueCannotForgeFieldsOrSplitTheLine) {
+  LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
+  StructuredLog().Event("e").Field("error", "bad\nevent=forged x=1").Field("next", "ok").Error();
+  EXPECT_EQ(g_capture.last_message, "event=e error=\"bad\\nevent=forged x=1\" next=ok");
+  EXPECT_EQ(g_capture.last_message.find('\n'), std::string::npos);
+}
+
+TEST_F(LoggerTest, EmbeddedNulAndQuotesAreEscaped) {
+  LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
+  const std::string value("a\0b\"c\\d", 7);
+  StructuredLog().Event("e").Field("v", value).Field("after", "1").Error();
+  EXPECT_EQ(g_capture.last_message, "event=e v=\"a\\x00b\\\"c\\\\d\" after=1");
+}
+
 TEST_F(LoggerTest, CallbackReceivesMessage) {
   LogConfig::SetCallback(TestCallback, MES_LOG_DEBUG, nullptr);
   StructuredLog().Event("test_event").Field("key", "val").Error();

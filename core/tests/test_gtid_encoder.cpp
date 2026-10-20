@@ -423,6 +423,72 @@ TEST(GtidSetTest, ParseKeepsEveryWellFormedFormAccepted) {
   }
 }
 
+TEST(GtidSetTest, ParseAcceptsEveryTagRunTheServerPrintsUnderOneUuid) {
+  // MySQL prints one entry per UUID: its untagged intervals, then each tag
+  // followed by that tag's intervals.
+  struct Case {
+    std::string text;
+    std::string canonical;
+  };
+  const std::string sid(kSid);
+  const Case cases[] = {
+      {sid + ":5:mytag:1:other:3", sid + ":5-5," + sid + ":mytag:1-1," + sid + ":other:3-3"},
+      {sid + ":a:1:b:2", sid + ":a:1-1," + sid + ":b:2-2"},
+      {sid + ":1-3:7:Analytics:1-4:9,\n" + kSid2 + ":tag:2",
+       sid + ":1-3:7-7," + sid + ":analytics:1-4:9-9," + kSid2 + ":tag:2-2"},
+      {sid + ":a:1:b:2:a:5", sid + ":a:1-1:5-5," + sid + ":b:2-2"},
+  };
+  for (const Case& test_case : cases) {
+    mes::GtidSet set;
+    ASSERT_EQ(mes::GtidSet::Parse(test_case.text, &set), MES_OK)
+        << "input: '" << test_case.text << "'";
+    EXPECT_EQ(set.ToString(), test_case.canonical) << "input: '" << test_case.text << "'";
+
+    // The server text and its canonical form denote one set on the wire too.
+    std::vector<uint8_t> from_server;
+    std::vector<uint8_t> from_canonical;
+    ASSERT_EQ(GtidEncoder::Encode(test_case.text.c_str(), &from_server), MES_OK)
+        << "input: '" << test_case.text << "'";
+    ASSERT_EQ(GtidEncoder::Encode(test_case.canonical.c_str(), &from_canonical), MES_OK);
+    EXPECT_EQ(from_server, from_canonical) << "input: '" << test_case.text << "'";
+  }
+
+  // An entry with several runs names no single transaction, so it is not widened.
+  for (const std::string& text : {sid + ":5:mytag:1:other:3", sid + ":a:1:b:2"}) {
+    EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(text), text);
+  }
+}
+
+TEST(GtidSetTest, PurgedPreflightComparesTagRunsTsidByTsid) {
+  const std::string sid(kSid);
+  mes::GtidSet purged;
+  ASSERT_EQ(mes::GtidSet::Parse(sid + ":5:mytag:1:other:3", &purged), MES_OK);
+
+  mes::GtidSet covering;
+  ASSERT_EQ(mes::GtidSet::Parse(sid + ":1-5:mytag:1-2:other:1-3", &covering), MES_OK);
+  EXPECT_TRUE(purged.IsSubsetOf(covering));
+
+  mes::GtidSet missing_one_tag;
+  ASSERT_EQ(mes::GtidSet::Parse(sid + ":1-5:mytag:1-2", &missing_one_tag), MES_OK);
+  EXPECT_FALSE(purged.IsSubsetOf(missing_one_tag));
+}
+
+TEST(GtidSetTest, ParseRejectsEveryEmptyOrDanglingColonPiece) {
+  // The server never prints an empty piece, and skipping one would turn a
+  // malformed position into a plausible one.
+  const std::string sid(kSid);
+  for (const std::string& text :
+       {sid + ":1::2", sid + "::5", sid + ":1:", sid + ":tag:1:", sid + ":", sid + ":tag:",
+        sid + ":tag", sid + ":a:b:1", sid + ":1:tag", sid + ":1: :2", sid + ":5:mytag:1:other:"}) {
+    mes::GtidSet set;
+    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
+    std::vector<uint8_t> encoded;
+    EXPECT_EQ(GtidEncoder::Encode(GtidEncoder::ConvertSingleGtidToRange(text).c_str(), &encoded),
+              MES_ERR_INVALID_ARG)
+        << "input: '" << text << "'";
+  }
+}
+
 // --- Error: null output pointer ---
 
 TEST(GtidEncoderTest, ErrorNullOutput) {

@@ -246,8 +246,8 @@ MES_API int mes_client_checksum_enabled(mes_client_t* c) {
 
 MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* c, uint32_t max_event_size) {
   if (c == nullptr) return MES_ERR_NULL_ARG;
-  c->client.SetMaxEventSize(max_event_size);
-  return MES_OK;
+  ClearBoundaryError(c);
+  return c->client.SetMaxEventSize(max_event_size);
 }
 
 MES_API uint32_t mes_client_get_max_event_size(mes_client_t* c) {
@@ -256,8 +256,8 @@ MES_API uint32_t mes_client_get_max_event_size(mes_client_t* c) {
 
 MES_API mes_error_t mes_client_set_max_queue_bytes(mes_client_t* c, size_t max_queue_bytes) {
   if (c == nullptr) return MES_ERR_NULL_ARG;
-  c->client.SetMaxQueueBytes(max_queue_bytes);
-  return MES_OK;
+  ClearBoundaryError(c);
+  return c->client.SetMaxQueueBytes(max_queue_bytes);
 }
 
 MES_API size_t mes_client_get_max_queue_bytes(mes_client_t* c) {

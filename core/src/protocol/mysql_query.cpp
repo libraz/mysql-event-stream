@@ -36,29 +36,25 @@ constexpr size_t kMaxColumnDefBytes = 64u * 1024u;
 // forever while keeping the read timeout from firing.
 constexpr size_t kMaxEmptyRowPackets = 4;
 
-/** @brief Skip a length-encoded string at the current position */
-void SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
-  uint64_t str_len = ReadLenEncInt(data, len, pos);
+/** @brief Skip a length-encoded string; false when the prefix or body is malformed */
+bool SkipLenEncString(const uint8_t* data, size_t len, size_t* pos) {
+  uint64_t str_len = 0;
+  if (!ReadLenEncInt(data, len, pos, &str_len)) return false;
   // Subtraction-form bounds check: avoids overflow when str_len is huge
-  // (up to 2^64) and size_t is 32-bit (WASM). `*pos <= len` is guaranteed
-  // by ReadLenEncInt's own bounds check.
-  if (str_len > static_cast<uint64_t>(len - *pos)) {
-    *pos = len;
-    return;
-  }
+  // (up to 2^64) and size_t is 32-bit (WASM).
+  if (str_len > static_cast<uint64_t>(len - *pos)) return false;
   *pos += static_cast<size_t>(str_len);
+  return true;
 }
 
-/** @brief Read a length-encoded string at the current position */
-std::string ReadLenEncString(const uint8_t* data, size_t len, size_t* pos) {
-  uint64_t str_len = ReadLenEncInt(data, len, pos);
-  if (str_len > static_cast<uint64_t>(len - *pos)) {
-    *pos = len;
-    return {};
-  }
-  std::string result(reinterpret_cast<const char*>(data + *pos), static_cast<size_t>(str_len));
+/** @brief Read a length-encoded string; false when the prefix or body is malformed */
+bool ReadLenEncString(const uint8_t* data, size_t len, size_t* pos, std::string* out) {
+  uint64_t str_len = 0;
+  if (!ReadLenEncInt(data, len, pos, &str_len)) return false;
+  if (str_len > static_cast<uint64_t>(len - *pos)) return false;
+  out->assign(reinterpret_cast<const char*>(data + *pos), static_cast<size_t>(str_len));
   *pos += static_cast<size_t>(str_len);
-  return result;
+  return true;
 }
 
 /** @brief Extract error message from an ERR packet payload */
@@ -69,20 +65,18 @@ void ParseErrPacket(const std::vector<uint8_t>& payload, std::string* error_msg)
   *error_msg = "MySQL error " + std::to_string(error_code) + ": " + msg;
 }
 
-/** @brief Parse column name from a column definition packet */
-std::string ParseColumnName(const std::vector<uint8_t>& payload) {
+/** @brief Parse column name from a column definition packet; false when malformed */
+bool ParseColumnName(const std::vector<uint8_t>& payload, std::string* name) {
   const uint8_t* data = payload.data();
   size_t len = payload.size();
   size_t pos = 0;
 
   // Column definition packet fields (all length-encoded strings):
   // catalog, schema, table, org_table, name, org_name, ...
-  SkipLenEncString(data, len, &pos);  // catalog
-  SkipLenEncString(data, len, &pos);  // schema
-  SkipLenEncString(data, len, &pos);  // table
-  SkipLenEncString(data, len, &pos);  // org_table
-
-  return ReadLenEncString(data, len, &pos);  // name
+  for (int i = 0; i < 4; ++i) {  // catalog, schema, table, org_table
+    if (!SkipLenEncString(data, len, &pos)) return false;
+  }
+  return ReadLenEncString(data, len, &pos, name);
 }
 
 /**
@@ -111,18 +105,19 @@ bool ParseTextResultRow(const std::vector<uint8_t>& payload, size_t column_count
     }
     if (data[pos] == kNullColumnMarker) {
       // NULL value: text-protocol row uses a dedicated 0xFB marker byte
-      // *before* ReadLenEncInt is consulted. ReadLenEncInt's built-in
-      // "return 0 on 0xFB" behavior is therefore not relied on here; see
-      // the defensive comment in ReadLenEncInt for details.
+      // that must be checked before the length prefix is decoded.
       row->is_null[i] = true;
       row->values[i].clear();
       pos += 1;
     } else {
       row->is_null[i] = false;
-      uint64_t str_len = ReadLenEncInt(data, data_size, &pos);
+      uint64_t str_len = 0;
+      if (!ReadLenEncInt(data, data_size, &pos, &str_len)) {
+        // Invalid or truncated length prefix.
+        return false;
+      }
       // Subtraction-form bounds check to prevent size_t overflow when
       // str_len is attacker-controlled and size_t is 32-bit (WASM).
-      // ReadLenEncInt guarantees pos <= data_size on return.
       if (str_len > static_cast<uint64_t>(data_size - pos)) {
         // Declared length runs past the payload end: treat as truncation.
         return false;
@@ -212,16 +207,18 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
   // ceiling silently raise the other.
   static constexpr uint64_t kMaxColumnCount = 4096;
   size_t pos = 0;
-  uint64_t column_count = ReadLenEncInt(payload.data(), payload.size(), &pos);
+  uint64_t column_count = 0;
+  if (!ReadLenEncInt(payload.data(), payload.size(), &pos, &column_count)) {
+    *error_msg = "Malformed result set header (invalid column count)";
+    return fail_after_response(MES_ERR_STREAM);
+  }
   if (column_count > kMaxColumnCount) {
     *error_msg = "Column count exceeds maximum (" + std::to_string(column_count) + ")";
     return fail_after_response(MES_ERR_STREAM);
   }
   // A result set always declares at least one column; the no-result-set case is
-  // the OK packet handled above. Zero here means ReadLenEncInt could not decode
-  // the prefix -- a LOCAL INFILE request (0xFB) or a truncated multi-byte
-  // length -- and both return 0. Accepting it would declare an empty result set
-  // and then read every following packet as a zero-column row.
+  // the OK packet handled above. Accepting zero would declare an empty result
+  // set and then read every following packet as a zero-column row.
   if (column_count == 0) {
     *error_msg = "Malformed result set header (zero column count)";
     return fail_after_response(MES_ERR_STREAM);
@@ -255,7 +252,11 @@ mes_error_t ExecuteQuery(SocketHandle* sock, const std::string& query, QueryResu
       *error_msg = "Result set ended before all column definitions were sent";
       return fail_after_response(MES_ERR_STREAM);
     }
-    std::string column_name = ParseColumnName(payload);
+    std::string column_name;
+    if (!ParseColumnName(payload, &column_name)) {
+      *error_msg = "Malformed column definition";
+      return fail_after_response(MES_ERR_STREAM);
+    }
     // Subtraction form: result_bytes never exceeds kMaxResultBytes, so the
     // right-hand side cannot underflow.
     if (column_name.size() > kMaxResultBytes - result_bytes) {

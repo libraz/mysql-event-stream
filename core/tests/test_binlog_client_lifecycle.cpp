@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -128,8 +129,9 @@ class ScriptedMysqlPeer {
     kMalformedReplyDuringStartStream,
     /// Answer the whole start sequence, then stream `stream_event`.
     kStreamOneEvent,
-    /// Stream `stream_event` and a heartbeat, then end the dump with a server
-    /// error and go on answering commands. That is the state a source leaves a
+    /// Stream `stream_event` -- one event, or several laid end to end, each
+    /// sent as its own packet -- and a heartbeat, then end the dump with a
+    /// server error and go on answering commands. That is the state a source leaves a
     /// client in when the dump dies but the session survives, which is what
     /// makes a restart possible without reconnecting.
     kStreamThenServerError,
@@ -291,16 +293,28 @@ class ScriptedMysqlPeer {
       if (command_byte == kComBinlogDump || command_byte == kComBinlogDumpGtid) {
         const size_t dumps = RecordDumpRequest(command);
         if (mode == Mode::kStreamThenServerError) {
+          uint8_t sequence = 1;
           if (dumps == 1) {
-            std::vector<uint8_t> packet{0x00};  // replication OK marker
-            packet.insert(packet.end(), stream_event.begin(), stream_event.end());
-            SendPacket(peer, 1, packet);
-            SendPacket(peer, 2, {0x00});  // OK marker with no event: a heartbeat
+            size_t offset = 0;
+            do {
+              // Each event's own header length marks where the next one begins.
+              size_t length = stream_event.size() - offset;
+              if (length >= kEventHeaderSize) {
+                const uint32_t declared = binary::ReadU32Le(stream_event.data() + offset + 9);
+                if (declared >= kEventHeaderSize && declared <= length) length = declared;
+              }
+              std::vector<uint8_t> packet{0x00};  // replication OK marker
+              packet.insert(packet.end(), stream_event.begin() + offset,
+                            stream_event.begin() + offset + length);
+              SendPacket(peer, sequence++, packet);
+              offset += length;
+            } while (offset < stream_event.size());
+            SendPacket(peer, sequence++, {0x00});  // OK marker with no event: a heartbeat
           }
           // An ERR packet ends the dump without closing the session, so the
           // loop goes back to serving commands and the client can start a
           // replacement stream over this same connection.
-          SendPacket(peer, 3, BuildStreamError(dump_error));
+          SendPacket(peer, sequence, BuildStreamError(dump_error));
           continue;
         }
         if (mode == Mode::kStreamEventAheadOfTheFormatDescription) {
@@ -618,6 +632,39 @@ std::vector<uint8_t> MakePreviousGtidsEvent(const std::string& gtid_set) {
   SetEventLength(&event);
   std::copy(encoded.begin(), encoded.end(), event.begin() + kEventHeaderSize);
   return event;
+}
+
+/// Server UUID of kConfiguredGtid, as a GTID_LOG_EVENT carries it.
+constexpr uint8_t kConfiguredSid[16] = {0x3e, 0x11, 0xfa, 0x47, 0x71, 0xca, 0x11, 0xe1,
+                                        0x9e, 0x33, 0xc8, 0x0a, 0xa9, 0x42, 0x95, 0x62};
+
+/** @brief A GTID_LOG_EVENT for transaction @p gno of kConfiguredSid. */
+std::vector<uint8_t> MakeGtidEvent(uint64_t gno) {
+  // Body: one flags byte, the 16-byte SID, then the 8-byte GNO.
+  std::vector<uint8_t> event(kEventHeaderSize + 1 + 16 + 8, 0);
+  event[4] = static_cast<uint8_t>(BinlogEventType::kGtidLogEvent);
+  SetEventLength(&event);
+  std::copy(std::begin(kConfiguredSid), std::end(kConfiguredSid),
+            event.begin() + kEventHeaderSize + 1);
+  for (int byte = 0; byte < 8; ++byte) {
+    event[kEventHeaderSize + 17 + byte] = static_cast<uint8_t>(gno >> (8 * byte));
+  }
+  return event;
+}
+
+/** @brief An XID_EVENT: the commit boundary of a transactional group. */
+std::vector<uint8_t> MakeXidEvent() {
+  std::vector<uint8_t> event(kEventHeaderSize + 8, 0);
+  event[4] = static_cast<uint8_t>(BinlogEventType::kXidEvent);
+  SetEventLength(&event);
+  return event;
+}
+
+/** @brief @p events laid end to end, the way the scripted peer streams several. */
+std::vector<uint8_t> Concatenate(const std::vector<std::vector<uint8_t> >& events) {
+  std::vector<uint8_t> stream;
+  for (const auto& event : events) stream.insert(stream.end(), event.begin(), event.end());
+  return stream;
 }
 
 /// GTID_LIST_EVENT body: a 4-byte count-and-flags word, then one entry per
@@ -948,6 +995,108 @@ TEST(BinlogClientLifecycle, RestartAfterAStreamErrorResumesFromTheDeliveredCheck
   EXPECT_NE(DumpRequestGtidData(requests[1]), DumpRequestGtidData(requests[0]));
   // Establishing the replacement stream may not walk the checkpoint backwards.
   EXPECT_EQ(std::string(client.GetCurrentGtid()), kDeliveredGtid);
+
+  client.Stop();
+  client.Disconnect();
+}
+
+/**
+ * @brief A mid-file start publishes no checkpoint until the executed set is known.
+ *
+ * A dump from an offset past the file header carries no PREVIOUS_GTIDS event, so
+ * the GTIDs committed after the offset are only part of the executed set.
+ * Publishing them would hand a supervisor a resume position that skips nothing
+ * it lacks yet requests everything before it; the checkpoint stays empty and a
+ * restart goes back to the configured file anchor.
+ */
+TEST(BinlogClientLifecycle, AMidFileStartPublishesNoCheckpointWithoutABaseline) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
+                         Concatenate({MakeGtidEvent(7), MakeXidEvent()}));
+  BinlogClient client;
+  BinlogClientConfig config = PeerConfig(peer, 10);
+  config.start_gtid.clear();
+  config.start_at_file_position = true;
+  config.binlog_file = "binlog.000001";
+  config.binlog_position = 1234;
+  ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  for (int i = 0; i < 2; ++i) {
+    const PollResult event = client.Poll();
+    ASSERT_EQ(event.error, MES_OK) << client.GetLastError();
+    ASSERT_NE(event.data, nullptr);
+  }
+  // Polling past the XID acknowledges the committed transaction.
+  const PollResult heartbeat = client.Poll();
+  ASSERT_EQ(heartbeat.error, MES_OK) << client.GetLastError();
+  ASSERT_TRUE(heartbeat.is_heartbeat);
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), "");
+
+  const PollResult dropped = client.Poll();
+  EXPECT_EQ(dropped.error, MES_ERR_STREAM) << client.GetLastError();
+
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(peer.WaitForDumpRequests(2, seconds(3)));
+  const std::vector<std::vector<uint8_t> > requests = peer.DumpRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[1][0], kComBinlogDump);
+  EXPECT_EQ(requests[1], requests[0]);
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), "");
+
+  client.Stop();
+  client.Disconnect();
+}
+
+/**
+ * @brief A mid-file start publishes the complete set once a baseline arrives.
+ *
+ * The PREVIOUS_GTIDS event of the next file supplies the executed set, so from
+ * there on every checkpoint is the baseline plus the observed commits, and a
+ * restart resumes from it by GTID rather than from the file anchor.
+ */
+TEST(BinlogClientLifecycle, AMidFileStartPublishesTheCompleteSetAfterABaseline) {
+  ScriptedMysqlPeer peer(
+      ScriptedMysqlPeer::Mode::kStreamThenServerError,
+      Concatenate({MakeGtidEvent(7), MakeXidEvent(), MakePreviousGtidsEvent(kConfiguredGtid),
+                   MakeGtidEvent(8), MakeXidEvent()}));
+  BinlogClient client;
+  BinlogClientConfig config = PeerConfig(peer, 10);
+  config.start_gtid.clear();
+  config.start_at_file_position = true;
+  config.binlog_file = "binlog.000001";
+  config.binlog_position = 1234;
+  ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+  // Each poll acknowledges the event before it; the value seen after each is
+  // the checkpoint of the event just acknowledged.
+  const char* const expected[] = {
+      "",                                              // after GTID 7
+      "",                                              // after its XID: no baseline yet
+      "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5:7-7",  // after PREVIOUS_GTIDS
+      "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5:7-7",  // after GTID 8
+  };
+  ASSERT_EQ(client.Poll().error, MES_OK) << client.GetLastError();
+  for (const char* checkpoint : expected) {
+    const PollResult event = client.Poll();
+    ASSERT_EQ(event.error, MES_OK) << client.GetLastError();
+    ASSERT_NE(event.data, nullptr);
+    EXPECT_EQ(std::string(client.GetCurrentGtid()), checkpoint);
+  }
+  const PollResult heartbeat = client.Poll();
+  ASSERT_TRUE(heartbeat.is_heartbeat);
+  constexpr char kCompleteSet[] = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5:7-8";
+  EXPECT_EQ(std::string(client.GetCurrentGtid()), kCompleteSet);
+
+  const PollResult dropped = client.Poll();
+  EXPECT_EQ(dropped.error, MES_ERR_STREAM) << client.GetLastError();
+
+  ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+  ASSERT_TRUE(peer.WaitForDumpRequests(2, seconds(3)));
+  const std::vector<std::vector<uint8_t> > requests = peer.DumpRequests();
+  ASSERT_EQ(requests.size(), 2u);
+  EXPECT_EQ(requests[1][0], kComBinlogDumpGtid);
+  EXPECT_EQ(DumpRequestGtidData(requests[1]), EncodedGtidSet(kCompleteSet));
 
   client.Stop();
   client.Disconnect();
@@ -1496,6 +1645,44 @@ TEST(BinlogClientLifecycle, AReaderThatAbandonsALiveDumpRefusesTheNextStart) {
   client.Disconnect();
 }
 
+/**
+ * @brief A checksummed frame that cannot carry a valid trailer fails closed.
+ *
+ * Events the client queues as checksummed are treated as already verified
+ * downstream. A frame too short to hold the trailer, or one whose header length
+ * disagrees with the packet even though its last four bytes are a valid CRC32,
+ * must end the stream the way a wrong trailer does rather than slip through.
+ */
+TEST(BinlogClientLifecycle, AChecksummedFrameThatCannotCarryItsTrailerFailsClosed) {
+  // Header only: with the OK marker, a 20-byte packet.
+  std::vector<uint8_t> header_only = MakeWireEvent(kEventHeaderSize);
+  // A valid trailer over the bytes, but a header length one byte short.
+  std::vector<uint8_t> misframed = MakeWireEvent(256);
+  misframed[9] = static_cast<uint8_t>(misframed.size() - 1);
+  const size_t data_length = misframed.size() - kChecksumSize;
+  const uint32_t crc = ComputeCRC32(misframed.data(), data_length);
+  for (size_t byte = 0; byte < kChecksumSize; ++byte) {
+    misframed[data_length + byte] = static_cast<uint8_t>(crc >> (8 * byte));
+  }
+
+  for (const auto& frame : {header_only, misframed}) {
+    SCOPED_TRACE("frame size " + std::to_string(frame.size()));
+    ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamCorruptedEventThenKeepStreaming, frame);
+    BinlogClient client;
+    ASSERT_EQ(client.Connect(PeerConfig(peer, 10)), MES_OK) << client.GetLastError();
+    ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
+
+    const PollResult result = client.Poll();
+    EXPECT_EQ(result.error, MES_ERR_CHECKSUM) << client.GetLastError();
+    EXPECT_EQ(result.data, nullptr);
+    EXPECT_EQ(client.GetCRCErrors(), 1u);
+    EXPECT_FALSE(client.IsStreaming());
+    EXPECT_FALSE(BinlogClientTestAccess::TransportUsable(client));
+
+    client.Disconnect();
+  }
+}
+
 TEST(BinlogClientLifecycle, RestartDoesNotPublishABatchCheckpointFromThePreviousStream) {
   ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamThenServerError,
                          MakePreviousGtidsEvent(kDeliveredGtid));
@@ -1785,6 +1972,54 @@ TEST(BinlogClientLifecycle, CApiReadTimeoutReachesTheNegotiatedHeartbeat) {
       << "the stream negotiated a heartbeat that is not half of the configured read timeout";
 
   mes_client_stop(client);
+  mes_client_destroy(client);
+}
+
+/**
+ * @brief The reader's limits are fixed for the life of a stream.
+ *
+ * The reader reads the event-size ceiling on every fetch and the queue is
+ * built with the byte budget at start, so a change while streaming would race
+ * the one and never reach the other. Both setters refuse it, and the getters
+ * keep reporting the limits in force.
+ */
+TEST(BinlogClientLifecycle, CApiLimitSettersAreRefusedWhileStreaming) {
+  ScriptedMysqlPeer peer(ScriptedMysqlPeer::Mode::kStreamOneEvent, MakeWireEvent(256));
+  mes_client_t* client = mes_client_create();
+  ASSERT_NE(client, nullptr);
+
+  mes_client_config_t config{};
+  config.host = "127.0.0.1";
+  config.port = peer.port();
+  config.user = "repl";
+  config.password = "repl";
+  config.server_id = 4242;
+  config.start_position_mode = MES_START_AT_GTID;
+  config.start_gtid = kConfiguredGtid;
+  config.connect_timeout_s = 2;
+  config.read_timeout_s = 10;
+
+  ASSERT_EQ(mes_client_set_max_event_size(client, 4096), MES_OK);
+  ASSERT_EQ(mes_client_set_max_queue_bytes(client, 64u * 1024u * 1024u), MES_OK);
+  const uint32_t event_size_in_force = mes_client_get_max_event_size(client);
+  const size_t queue_bytes_in_force = mes_client_get_max_queue_bytes(client);
+
+  ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
+  ASSERT_EQ(mes_client_is_streaming(client), 1);
+
+  EXPECT_EQ(mes_client_set_max_event_size(client, 128u * 1024u * 1024u), MES_ERR_INVALID_ARG);
+  EXPECT_NE(std::string(mes_client_last_error(client)).find("max_event_size"), std::string::npos);
+  EXPECT_EQ(mes_client_set_max_queue_bytes(client, 0), MES_ERR_INVALID_ARG);
+  EXPECT_NE(std::string(mes_client_last_error(client)).find("max_queue_bytes"), std::string::npos);
+  EXPECT_EQ(mes_client_get_max_event_size(client), event_size_in_force);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), queue_bytes_in_force);
+
+  // Once the stream is torn down the next start may use new limits again.
+  mes_client_stop(client);
+  EXPECT_EQ(mes_client_set_max_event_size(client, 8192), MES_OK);
+  EXPECT_EQ(mes_client_set_max_queue_bytes(client, 0), MES_OK);
+  EXPECT_EQ(mes_client_get_max_queue_bytes(client), MES_DEFAULT_QUEUE_BYTES);
   mes_client_destroy(client);
 }
 

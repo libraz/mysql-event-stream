@@ -35,21 +35,23 @@ struct UpdatePair {
 constexpr size_t kMaxDecompressedColumnBytes = 64U * 1024U * 1024U;
 
 /**
- * @brief Heap budget for the decoded column payloads of one row event.
+ * @brief Heap budget for the decoded rows of one row event.
  *
  * @ref kMaxDecompressedColumnBytes caps a single compressed field but says
  * nothing about how many such fields an event may carry, and the on-wire size
  * of a row event bounds neither its column count nor its row count. A few
  * kilobytes of wire bytes can therefore buy one maximally expanded field per
- * column per row. The budget bounds the sum instead: every decoded column
- * charges its payload against it, across all rows and across both images of an
- * UPDATE, and the decode fails once the budget is exhausted. Compressed
+ * column per row, and a NULL column costs a single wire bit yet a whole
+ * ColumnValue slot. The budget bounds the sum instead: every decoded column
+ * charges its slot and its payload against it, and every decoded row charges
+ * its queue entry, across all rows and across both images of an UPDATE, and the
+ * decode fails once the budget is exhausted. Compressed
  * columns clamp their expansion to what remains, so the peak — not merely the
  * final total — stays under @ref limit.
  *
  * A caller that queues what it decodes passes its own queue byte budget as the
  * ceiling, which is what ties this limit to the bound the queue publishes: the
- * payload bytes one event can add to a queue charged through QueuedEventCharge()
+ * row bytes one event can add to a queue charged through QueuedEventCharge()
  * never exceed the budget that queue was configured with. CdcEngine does exactly
  * that; a standalone decode keeps the @ref kMaxDecompressedColumnBytes default.
  *
@@ -68,9 +70,7 @@ struct DecodeBudget {
    * The floor is @p expansion_ceiling — how much decompression this caller is
    * willing to hold for one event — so a legitimately huge compressed column
    * still decodes. Above that the budget follows the event size, because an
-   * uncompressed value can never exceed the bytes it was decoded from — an event
-   * that carries no compressed columns is thus never rejected, whatever ceiling
-   * the caller configured for event size.
+   * uncompressed value can never exceed the bytes it was decoded from.
    *
    * @param body_bytes Wire size of the event body.
    * @param expansion_ceiling Decompressed bytes allowed for this one event; a

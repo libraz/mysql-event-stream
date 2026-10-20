@@ -397,33 +397,51 @@ TEST(E2EEngine, BackpressureMaxQueueSize) {
   ASSERT_EQ(mes_client_connect(client, &config), MES_OK) << mes_client_last_error(client);
   ASSERT_EQ(mes_client_start(client), MES_OK) << mes_client_last_error(client);
 
-  // Feed and drain loop: collect all events, verifying queue never exceeds limit
   std::vector<CapturedEvent> all_events;
-  int polls = 0;
-  constexpr int kMaxPolls = 200;
-
-  while (polls < kMaxPolls) {
-    auto result = mes_client_poll(client);
-    polls++;
-    if (result.error != MES_OK) break;
-    if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    // Drain all available events before next feed
+  size_t pushbacks = 0;
+  size_t drained_at_first_pushback = 0;
+  const auto drain = [&] {
     const mes_event_t* event = nullptr;
     while (mes_next_event(engine, &event) == MES_OK) {
       all_events.push_back(CopyEvent(event));
     }
+  };
+  // Nothing is drained between feeds, so the 5 inserts fill the 2-entry queue and
+  // the engine must push back; the drain FeedAll runs on that push-back is the
+  // first moment the queue is emptied.
+  const auto drain_on_pushback = [&] {
+    const size_t before = all_events.size();
+    drain();
+    if (++pushbacks == 1) drained_at_first_pushback = all_events.size() - before;
+  };
 
-    // Check if we have enough items events
-    size_t items_count = 0;
+  constexpr int kMaxPolls = 200;
+  int polls = 0;
+  while (pushbacks == 0 && polls < kMaxPolls) {
+    auto result = mes_client_poll(client);
+    polls++;
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.is_heartbeat || result.data == nullptr) continue;
+    ASSERT_TRUE(FeedAll(engine, result, drain_on_pushback));
+  }
+  ASSERT_GE(pushbacks, 1u) << "max_queue_size=2 never pushed back while 5 inserts were queued";
+  EXPECT_EQ(drained_at_first_pushback, 2u);
+  drain();
+
+  auto count_items = [&] {
+    size_t count = 0;
     for (const auto& e : all_events) {
-      if (e.table == "items" && e.type == MES_EVENT_INSERT) items_count++;
+      if (e.table == "items" && e.type == MES_EVENT_INSERT) count++;
     }
-    if (items_count >= 5) break;
+    return count;
+  };
+  while (count_items() < 5 && polls < kMaxPolls) {
+    auto result = mes_client_poll(client);
+    polls++;
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
+    if (result.is_heartbeat || result.data == nullptr) continue;
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   auto items_events = FilterByTable(all_events, "items");
@@ -491,20 +509,20 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
     const mes_poll_result_t result = mes_client_poll(client1);
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client1);
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    ASSERT_EQ(mes_set_checksum_enabled(engine1, result.checksum_enabled), MES_OK);
-    ASSERT_EQ(mes_feed(engine1, result.data, result.size, &consumed), MES_OK);
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine1, &event) == MES_OK) {
-      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
-          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
-        continue;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine1, &event) == MES_OK) {
+        if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+            event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+          continue;
+        }
+        const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+        ++first_delivery_count[name];
+        saw_barrier = name == "reconn_checkpoint_barrier";
       }
-      const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
-      ++first_delivery_count[name];
-      saw_barrier = name == "reconn_checkpoint_barrier";
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine1, result, drain));
+    drain();
   }
   ASSERT_TRUE(saw_barrier) << "client1 did not reach the checkpoint barrier";
   for (const auto& name : before_names) {
@@ -554,23 +572,22 @@ TEST(E2EEngine, ReconnectAfterDisconnect) {
     const mes_poll_result_t poll_result = mes_client_poll(client2);
     ASSERT_EQ(poll_result.error, MES_OK) << mes_client_last_error(client2);
     if (poll_result.is_heartbeat || poll_result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    ASSERT_EQ(mes_set_checksum_enabled(engine, poll_result.checksum_enabled), MES_OK);
-    ASSERT_EQ(mes_feed(engine, poll_result.data, poll_result.size, &consumed), MES_OK);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
-          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
-        continue;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+            event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+          continue;
+        }
+        const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+        ++second_delivery_count[name];
+        for (const auto& before_name : before_names)
+          replayed_before = replayed_before || name == before_name;
+        saw_after_barrier = name == "reconn_after_barrier";
       }
-      const std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
-      ++second_delivery_count[name];
-      for (const auto& before_name : before_names)
-        replayed_before = replayed_before || name == before_name;
-      saw_after_barrier = name == "reconn_after_barrier";
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, poll_result, drain));
+    drain();
   }
 
   ASSERT_TRUE(saw_after_barrier) << "client2 did not capture the post-resume barrier";
@@ -634,17 +651,16 @@ TEST(E2EEngine, GtidTracking) {
     polls++;
     if (result.error != MES_OK) break;
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
-        items_count++;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
+          items_count++;
+        }
       }
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   ASSERT_GE(items_count, 3u) << "Expected at least 3 INSERT events";

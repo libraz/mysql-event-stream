@@ -9,6 +9,8 @@
 #ifndef MES_TEST_E2E_HELPERS_H_
 #define MES_TEST_E2E_HELPERS_H_
 
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -250,8 +252,55 @@ inline mes_error_t ExecuteDML(const std::string& sql) {
   return mes::protocol::ExecuteQuery(conn.Socket(), sql, &qr, &err);
 }
 
+// Feed one poll result to an engine under the feed/drain contract: the result's
+// checksum framing is applied first, and when the engine stops consuming short
+// of the buffer (queue backpressure) `drain` runs and the remainder is fed
+// again, until every byte is consumed. `drain` must empty the engine's event
+// queue; the caller drains once more after this returns.
+// Every E2E test feeds through here. A feed error is stored in `feed_error`
+// when the caller expects one; otherwise it fails the test.
+template <typename Drain>
+inline bool FeedAll(mes_engine_t* engine, const mes_poll_result_t& result, Drain&& drain,
+                    mes_error_t* feed_error = nullptr) {
+  const mes_error_t framing_rc = mes_set_checksum_enabled(engine, result.checksum_enabled);
+  if (framing_rc != MES_OK) {
+    ADD_FAILURE() << "mes_set_checksum_enabled failed: " << mes_error_string(framing_rc);
+    return false;
+  }
+  size_t offset = 0;
+  bool stalled = false;
+  while (offset < result.size) {
+    size_t consumed = 0;
+    const mes_error_t rc = mes_feed(engine, result.data + offset, result.size - offset, &consumed);
+    if (rc != MES_OK) {
+      if (feed_error != nullptr) {
+        *feed_error = rc;
+      } else {
+        ADD_FAILURE() << "mes_feed failed: " << mes_error_string(rc);
+      }
+      return false;
+    }
+    if (consumed > result.size - offset) {
+      ADD_FAILURE() << "mes_feed consumed " << consumed << " of " << (result.size - offset);
+      return false;
+    }
+    offset += consumed;
+    if (offset == result.size) break;
+    // A feed that consumes nothing right after a drain cannot be helped by
+    // another one.
+    if (consumed == 0 && stalled) {
+      ADD_FAILURE() << "mes_feed made no progress with " << (result.size - offset) << " bytes left";
+      return false;
+    }
+    stalled = consumed == 0;
+    drain();
+  }
+  return true;
+}
+
 // Capture events from binlog stream using a predicate.
 // Returns captured events. Stops when predicate returns true or max_polls reached.
+// Connection, start and poll failures fail the test with the native error.
 using EventPredicate = std::function<bool(const std::vector<CapturedEvent>&)>;
 
 inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, uint32_t server_id,
@@ -262,7 +311,10 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
   std::vector<CapturedEvent> events;
 
   mes_client_t* client = mes_client_create();
-  if (!client) return events;
+  if (!client) {
+    ADD_FAILURE() << "mes_client_create failed";
+    return events;
+  }
 
   mes_client_config_t config{};
   config.host = kHost;
@@ -280,10 +332,12 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
   config.ssl_key = nullptr;
 
   if (mes_client_connect(client, &config) != MES_OK) {
+    ADD_FAILURE() << "mes_client_connect failed: " << mes_client_last_error(client);
     mes_client_destroy(client);
     return events;
   }
   if (mes_client_start(client) != MES_OK) {
+    ADD_FAILURE() << "mes_client_start failed: " << mes_client_last_error(client);
     mes_client_disconnect(client);
     mes_client_destroy(client);
     return events;
@@ -291,6 +345,7 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
 
   mes_engine_t* engine = external_engine ? external_engine : mes_create();
   if (!engine) {
+    ADD_FAILURE() << "mes_create failed";
     mes_client_stop(client);
     mes_client_disconnect(client);
     mes_client_destroy(client);
@@ -299,23 +354,23 @@ inline std::vector<CapturedEvent> CaptureEvents(const std::string& start_gtid, u
 
   for (int i = 0; i < max_polls; i++) {
     auto result = mes_client_poll(client);
-    if (result.error != MES_OK) break;
+    if (result.error != MES_OK) {
+      ADD_FAILURE() << "mes_client_poll failed: " << mes_client_last_error(client);
+      break;
+    }
     if (result.is_heartbeat || result.data == nullptr) continue;
 
-    size_t consumed = 0;
     // A decode failure cannot be recovered by waiting for more packets. Stop
     // immediately so an E2E assertion reports the triggering event rather
     // than spending the remaining poll budget on heartbeats.
-    const mes_error_t rc = mes_feed(engine, result.data, result.size, &consumed);
-    if (rc != MES_OK) {
-      if (feed_error) *feed_error = rc;
-      break;
-    }
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      events.push_back(CopyEvent(event));
-    }
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        events.push_back(CopyEvent(event));
+      }
+    };
+    if (!FeedAll(engine, result, drain, feed_error)) break;
+    drain();
 
     if (done_pred(events)) break;
   }

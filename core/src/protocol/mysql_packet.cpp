@@ -5,6 +5,7 @@
 
 #include <cstring>
 
+#include "binary_util.h"
 #include "protocol/mysql_socket.h"
 #include "secure_cleanse.h"
 
@@ -120,59 +121,12 @@ mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_
 
 // --- Length-encoded integer ---
 
-uint64_t ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos) {
-  if (*pos >= len) {
-    return 0;
-  }
-
-  uint8_t first = data[*pos];
-  ++(*pos);
-
-  if (first < 0xFB) {
-    return first;
-  }
-
-  if (first == 0xFB) {
-    // Note: 0xFB (NULL marker) and a legitimate length of 0 both
-    // return 0 here. This ambiguity is intentional and safe because every
-    // caller in this codebase that has to distinguish NULL from length-0
-    // inspects the raw 0xFB byte *before* invoking ReadLenEncInt (see
-    // ParseRowData in mysql_query.cpp for the canonical example). If a
-    // future caller needs to disambiguate, add a bool* is_null overload
-    // rather than changing this return value, which many callers rely on
-    // to be 0 for safe bounds arithmetic.
-    return 0;
-  }
-
-  if (first == 0xFC) {
-    if (*pos + 2 > len) {
-      return 0;
-    }
-    uint64_t val = ReadFixedInt(data + *pos, 2);
-    *pos += 2;
-    return val;
-  }
-
-  if (first == 0xFD) {
-    if (*pos + 3 > len) {
-      return 0;
-    }
-    uint64_t val = ReadFixedInt(data + *pos, 3);
-    *pos += 3;
-    return val;
-  }
-
-  if (first == 0xFE) {
-    if (*pos + 8 > len) {
-      return 0;
-    }
-    uint64_t val = ReadFixedInt(data + *pos, 8);
-    *pos += 8;
-    return val;
-  }
-
-  // 0xFF: error/undefined
-  return 0;
+bool ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos, uint64_t* value) {
+  if (*pos > len) return false;
+  size_t consumed = 0;
+  if (!binary::ReadLenEncInt(data + *pos, len - *pos, value, &consumed)) return false;
+  *pos += consumed;
+  return true;
 }
 
 void WriteLenEncInt(std::vector<uint8_t>* buf, uint64_t val) {

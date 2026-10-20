@@ -57,38 +57,48 @@ mes_error_t GtidSet::Parse(const std::string& text, GtidSet* out) {
     std::string part =
         Trim(text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
     pos = comma == std::string::npos ? text.size() : comma + 1;
+    // The server grammar allows empty entries between commas; colon pieces
+    // below get no such allowance.
     if (part.empty()) continue;
 
     const size_t colon = part.find(':');
     if (colon == std::string::npos) return MES_ERR_INVALID_ARG;
-    std::string intervals = part.substr(colon + 1);
-    std::string tag;
-    const size_t tag_separator = intervals.find(':');
-    if (tag_separator != std::string::npos &&
-        NormalizeTag(intervals.substr(0, tag_separator), &tag)) {
-      intervals = intervals.substr(tag_separator + 1);
-    }
 
     Sid sid{};
     mes_error_t rc = ParseUuid(part.substr(0, colon), &sid);
     if (rc != MES_OK) return rc;
 
-    auto& target = parsed.sets_[{sid, tag}];
-    size_t interval_pos = 0;
-    while (interval_pos < intervals.size()) {
-      const size_t next = intervals.find(':', interval_pos);
-      const std::string interval = intervals.substr(
-          interval_pos, next == std::string::npos ? std::string::npos : next - interval_pos);
-      interval_pos = next == std::string::npos ? intervals.size() : next + 1;
-      if (interval.empty()) continue;
-      Interval value;
-      rc = ParseInterval(interval, &value);
-      if (rc != MES_OK || target.size() == kMaxIntervalsPerSid) {
-        return rc == MES_OK ? MES_ERR_INVALID_ARG : rc;
+    // After the UUID come runs: untagged intervals, then any number of tags
+    // each followed by its own intervals, as MySQL prints them
+    // ("uuid:5:mytag:1:other:3"). Every colon piece, including an empty or
+    // trailing one, is a tag or an interval; anything else is malformed.
+    std::vector<Interval>* target = nullptr;
+    size_t run_intervals = 0;
+    size_t piece_pos = colon + 1;
+    for (;;) {
+      const size_t next = part.find(':', piece_pos);
+      const std::string piece = Trim(
+          part.substr(piece_pos, next == std::string::npos ? std::string::npos : next - piece_pos));
+      std::string tag;
+      if (NormalizeTag(piece, &tag)) {
+        // A tag names the TSID of the intervals after it, so it cannot be empty.
+        if (target != nullptr && run_intervals == 0) return MES_ERR_INVALID_ARG;
+        target = &parsed.sets_[{sid, tag}];
+        run_intervals = 0;
+      } else {
+        if (target == nullptr) target = &parsed.sets_[{sid, ""}];
+        Interval value;
+        rc = ParseInterval(piece, &value);
+        if (rc != MES_OK || target->size() == kMaxIntervalsPerSid) {
+          return rc == MES_OK ? MES_ERR_INVALID_ARG : rc;
+        }
+        target->push_back(value);
+        ++run_intervals;
       }
-      target.push_back(value);
+      if (next == std::string::npos) break;
+      piece_pos = next + 1;
     }
-    if (target.empty()) return MES_ERR_INVALID_ARG;
+    if (run_intervals == 0) return MES_ERR_INVALID_ARG;
   }
 
   // Only a genuinely empty request denotes the empty set. Text holding nothing

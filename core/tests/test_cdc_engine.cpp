@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -637,7 +638,11 @@ TEST(CdcEngineNamesResolvedTest, RetriedResolutionDoesNotWriteIntoMetadataQueued
   ASSERT_EQ(events.size(), 2u);
   ASSERT_TRUE(events[0].table_metadata);
   ASSERT_TRUE(events[1].table_metadata);
-  EXPECT_NE(events[0].table_metadata.get(), events[1].table_metadata.get());
+  // A retry that resolves nothing installs nothing, so both events share the
+  // one object and no resolution wrote into what the first event borrows.
+  EXPECT_EQ(events[0].table_metadata.get(), events[1].table_metadata.get());
+  EXPECT_FALSE(events[0].names_resolved);
+  EXPECT_TRUE(events[0].table_metadata->columns[0].name.empty());
   // The first event still reads the storage of the registration it was decoded
   // against, which its own shared_ptr is what keeps alive.
   EXPECT_EQ(events[0].database.data(), events[0].table_metadata->database_name.data());
@@ -755,6 +760,68 @@ TEST(CdcEngineDdlTest, ADdlStatementDropsWhatTheColumnNameSourceResolved) {
                               BuildQueryEventBody("testdb", "BEGIN"));
   engine.Feed(dml.data(), dml.size());
   EXPECT_EQ(source.ClearCount(), 1);
+}
+
+TEST(CdcEngineDdlTest, MariaDbSetStatementPrefixDoesNotHideTheDdlItWraps) {
+  // MariaDB binlogs SET STATEMENT ... FOR <stmt> verbatim, so the statement
+  // that decides whether the schema changed follows the FOR.
+  struct Case {
+    const char* sql;
+    int expected_clears;
+  };
+  const Case cases[] = {
+      {"SET STATEMENT max_statement_time=100 FOR ALTER TABLE users RENAME COLUMN a TO b", 1},
+      {"/* x */ set  statement\nmax_statement_time=1, sql_mode='a for b' for\tDROP TABLE users", 1},
+      {"SET STATEMENT sql_mode=(SELECT 1 FOR UPDATE) FOR TRUNCATE TABLE users", 1},
+      {"SET STATEMENT max_statement_time=100 FOR INSERT INTO users VALUES (1)", 0},
+      {"SET STATEMENT max_statement_time=100 FOR SELECT 'ALTER' FROM users", 0},
+      {"SET STATEMENT max_statement_time=100", 0},
+      {"SET autocommit=1", 0},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.sql);
+    CdcEngine engine;
+    FakeColumnNameSource source;
+    engine.SetMetadataFetcher(&source);
+    const auto query = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+                                  BuildQueryEventBody("testdb", c.sql));
+    engine.Feed(query.data(), query.size());
+    EXPECT_EQ(source.ClearCount(), c.expected_clears);
+  }
+}
+
+TEST(CdcEngineDdlTest, ARenameIssuedThroughSetStatementIsResolvedAgainForTheNextTableMap) {
+  CdcEngine engine;
+  FakeColumnNameSource source;
+  source.SetNames({"a"});
+  engine.SetMetadataFetcher(&source);
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(42, "testdb", "users"));
+  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+                                BuildWriteRowsBody(42, 1));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  ASSERT_EQ(event.after.columns[0].name, "a");
+
+  const auto ddl = BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+      BuildQueryEventBody("testdb",
+                          "SET STATEMENT max_statement_time=100 FOR ALTER TABLE users RENAME "
+                          "COLUMN a TO b"));
+  ASSERT_EQ(engine.Feed(ddl.data(), ddl.size()), ddl.size());
+  source.SetNames({"b"});
+
+  // The TABLE_MAP body is byte-identical: only the invalidation forces a re-fetch.
+  const auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+                                     300, BuildWriteRowsBody(42, 2));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(source.FetchCount(), 2);
+  EXPECT_EQ(event.after.columns[0].name, "b");
 }
 
 TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt) {
@@ -2376,6 +2443,134 @@ TEST(CdcEngineQueueBudgetTest, CompressedColumnExpansionStaysWithinTheQueueByteB
   EXPECT_LT(queued_events, kRowEvents) << "the entry count must not be what bounded the queue";
   EXPECT_GT(queued_events, 0u);
   EXPECT_EQ(engine.QueuedBytes(), 0u);
+}
+
+// WRITE_ROWS_EVENT V2 body of @p row_count rows over one nullable column, every
+// value NULL: each row costs a single wire byte.
+std::vector<uint8_t> BuildAllNullRowsBody(uint64_t table_id, size_t row_count) {
+  test::EventBuilder b;
+  b.WriteU48Le(table_id);
+  b.WriteU16Le(0);                                         // flags
+  b.WriteU16Le(2);                                         // V2 var_header_len
+  b.WriteU8(1);                                            // column_count
+  b.WriteU8(0x01);                                         // columns_present
+  for (size_t i = 0; i < row_count; ++i) b.WriteU8(0x01);  // null bitmap: NULL
+  return b.Data();
+}
+
+TEST(CdcEngineQueueBudgetTest, RowsWhoseColumnArraysExceedTheByteBudgetFailInsteadOfQueueing) {
+  constexpr uint64_t kTableId = 42;
+  constexpr size_t kQueueBytes = 1024U * 1024U;
+  // One wire byte per row, so the body is far smaller than the budget while the
+  // decoded column arrays alone are several times larger.
+  constexpr size_t kRows = 10000;
+  ASSERT_GT(kRows * (sizeof(ColumnValue) + sizeof(ChangeEvent)), kQueueBytes);
+
+  CdcEngine engine;
+  engine.SetMaxQueueBytes(kQueueBytes);
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+                                    BuildTableMapBody(kTableId, "testdb", "users"));
+  const auto rows = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1, 200,
+                               BuildAllNullRowsBody(kTableId, kRows));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  engine.Feed(rows.data(), rows.size());
+
+  EXPECT_TRUE(engine.IsError());
+  EXPECT_EQ(engine.ErrorCode(), MES_ERR_DECODE_ROW);
+  EXPECT_EQ(engine.PendingEventCount(), 0u);
+  EXPECT_EQ(engine.QueuedBytes(), 0u);
+}
+
+TEST(CdcEngineQueueBudgetTest, ManyNullRowsWithinTheByteBudgetStillDecode) {
+  constexpr uint64_t kTableId = 42;
+  constexpr size_t kRows = 50;
+
+  CdcEngine engine;
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+                                    BuildTableMapBody(kTableId, "testdb", "users"));
+  const auto rows = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1, 200,
+                               BuildAllNullRowsBody(kTableId, kRows));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(engine.Feed(rows.data(), rows.size()), rows.size());
+
+  EXPECT_FALSE(engine.IsError());
+  EXPECT_EQ(engine.PendingEventCount(), kRows);
+}
+
+TEST(CdcEngineQueueBudgetTest, AFailingColumnNameSourceLeavesQueuedEventsSharingOneMetadata) {
+  constexpr uint64_t kTableId = 42;
+  constexpr int kPairs = 20;
+
+  CdcEngine engine;
+  FakeColumnNameSource source;  // Resolves nothing.
+  engine.SetMetadataFetcher(&source);
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+                                    BuildTableMapBody(kTableId, "testdb", "users"));
+  for (int i = 0; i < kPairs; ++i) {
+    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+                                  200 + i, BuildWriteRowsBody(kTableId, i));
+    ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+    ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
+  }
+  // Resolution is retried on every TABLE_MAP while the names are unresolved.
+  EXPECT_EQ(source.FetchCount(), kPairs);
+
+  std::set<const TableMetadata*> distinct;
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) distinct.insert(event.table_metadata.get());
+  EXPECT_EQ(distinct.size(), 1u);
+}
+
+TEST(CdcEngineQueueBudgetTest, MetadataPinnedAfterReplacementIsChargedUntilTheEventDrains) {
+  constexpr uint64_t kTableId = 42;
+  const std::string long_table(200, 't');
+
+  CdcEngine engine;
+  const auto first_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+                                    BuildTableMapBody(kTableId, "testdb", long_table));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+                                      200, BuildWriteRowsBody(kTableId, 1));
+  // A different body for the same id replaces the registered metadata, which
+  // leaves the first event as the only holder of the previous instance.
+  const auto second_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 300,
+                                     BuildTableMapBody(kTableId, "testdb", "other"));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+                                       400, BuildWriteRowsBody(kTableId, 2));
+  ASSERT_EQ(engine.Feed(first_map.data(), first_map.size()), first_map.size());
+  ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
+  const size_t after_first = engine.QueuedBytes();
+  ASSERT_EQ(engine.Feed(second_map.data(), second_map.size()), second_map.size());
+  ASSERT_EQ(engine.Feed(second_write.data(), second_write.size()), second_write.size());
+
+  ASSERT_EQ(engine.PendingEventCount(), 2u);
+  EXPECT_GE(after_first, sizeof(TableMetadata) + long_table.size());
+  EXPECT_GE(engine.QueuedBytes(), after_first + sizeof(TableMetadata));
+
+  ChangeEvent event;
+  while (engine.NextEvent(&event)) {
+  }
+  EXPECT_EQ(engine.QueuedBytes(), 0u);
+}
+
+TEST(CdcEngineQueueBudgetTest, QueuedEventMetadataCountsTowardTheByteBudget) {
+  constexpr uint64_t kTableId = 42;
+
+  CdcEngine engine;
+  // Above one event's column array and below two events once the metadata they
+  // pin is counted.
+  engine.SetMaxQueueBytes(sizeof(TableMetadata) + sizeof(ColumnMetadata));
+  std::vector<uint8_t> stream = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1,
+                                           100, BuildTableMapBody(kTableId, "testdb", "users"));
+  for (int i = 0; i < 3; ++i) {
+    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+                                  200 + i, BuildWriteRowsBody(kTableId, i));
+    stream.insert(stream.end(), write.begin(), write.end());
+  }
+
+  const size_t consumed = engine.Feed(stream.data(), stream.size());
+  EXPECT_LT(consumed, stream.size());
+  EXPECT_EQ(engine.PendingEventCount(), 1u);
 }
 
 // ---- Resume position ----

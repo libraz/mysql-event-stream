@@ -38,6 +38,44 @@ LogState& State() {
   return *state;
 }
 
+/// A value is quoted when a reader splitting on spaces and '=' could not recover it unchanged.
+bool NeedsQuoting(const std::string& value) {
+  for (unsigned char ch : value) {
+    if (ch <= 0x20 || ch == 0x7F || ch == '=' || ch == '"' || ch == '\\') return true;
+  }
+  return false;
+}
+
+/// Appends @p value as key=value text: verbatim when plain, otherwise quoted
+/// with backslash escapes so it stays on one line and cannot introduce fields.
+void AppendValue(std::string* out, const std::string& value) {
+  if (!NeedsQuoting(value)) {
+    *out += value;
+    return;
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  *out += '"';
+  for (unsigned char ch : value) {
+    if (ch == '"' || ch == '\\') {
+      *out += '\\';
+      *out += static_cast<char>(ch);
+    } else if (ch == '\n') {
+      *out += "\\n";
+    } else if (ch == '\r') {
+      *out += "\\r";
+    } else if (ch == '\t') {
+      *out += "\\t";
+    } else if (ch < 0x20 || ch == 0x7F) {
+      *out += "\\x";
+      *out += kHex[ch >> 4];
+      *out += kHex[ch & 0x0F];
+    } else {
+      *out += static_cast<char>(ch);
+    }
+  }
+  *out += '"';
+}
+
 }  // namespace
 
 void LogConfig::SetCallback(mes_log_callback_t callback, mes_log_level_t log_level,
@@ -76,7 +114,7 @@ void StructuredLog::Emit(mes_log_level_t level) {
     if (!message.empty()) message += ' ';
     message += key;
     message += '=';
-    message += value;
+    AppendValue(&message, value);
   }
 
   snap_->callback(level, message.c_str(), snap_->userdata);

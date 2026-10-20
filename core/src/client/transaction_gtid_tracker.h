@@ -28,13 +28,23 @@ class TransactionGtidTracker {
   bool Reset(const std::string& initial_gtid_set, ServerFlavor flavor);
 
   /**
+   * Reset for a stream that starts at a binlog file offset with no known set.
+   *
+   * Commits are still tracked, but no checkpoint is returned until a
+   * PREVIOUS_GTIDS/GTID_LIST event supplies the baseline: the GTIDs observed
+   * from the offset alone are not a complete executed set.
+   */
+  void ResetAwaitingBaseline(ServerFlavor flavor);
+
+  /**
    * Observe one complete event and return a safe complete-set checkpoint.
    *
    * A checkpoint is returned at a transaction commit boundary, at the
    * terminating event of a group that commits without one (MariaDB
    * FL_STANDALONE), or when a PREVIOUS_GTIDS/GTID_LIST baseline event has been
-   * completely received. The caller is responsible for promoting it only after
-   * delivering the corresponding event to the consumer.
+   * completely received. Nothing is returned while the baseline is unknown
+   * (see ResetAwaitingBaseline()). The caller is responsible for promoting it
+   * only after delivering the corresponding event to the consumer.
    */
   std::string Observe(const uint8_t* data, size_t size, bool has_checksum);
 
@@ -79,6 +89,8 @@ class TransactionGtidTracker {
   std::string received_gtid_;
   PendingGtid pending_gtid_;
   bool transaction_open_ = false;
+  /// False while the observed GTIDs lack the executed set that precedes them.
+  bool baseline_known_ = true;
 };
 
 }  // namespace mes

@@ -184,6 +184,9 @@ class BinlogClient {
 
   /** @brief Get the current GTID position as a string.
    *
+   * A non-empty value is a complete executed set; an empty one means no
+   * checkpoint is established yet and must not be persisted or resumed from.
+   *
    * Safe to call from any thread: the read is serialised on gtid_mutex_. As
    * with GetLastError(), the returned pointer refers to a buffer shared by
    * every caller and stays valid only until the next GetCurrentGtid() call on
@@ -208,9 +211,10 @@ class BinlogClient {
    *
    * Uses the same normalization contract as EventStreamParser: 0 resolves to
    * the 1 GiB hard cap and other out-of-range values are clamped. Call before
-   * StartStream(); changing it while the reader is running is not supported.
+   * StartStream(): while streaming it returns MES_ERR_INVALID_ARG and keeps
+   * the limit in force.
    */
-  void SetMaxEventSize(uint32_t max_event_size);
+  mes_error_t SetMaxEventSize(uint32_t max_event_size);
 
   /** @brief Get the normalized reader event-size ceiling. */
   uint32_t MaxEventSize() const;
@@ -223,8 +227,10 @@ class BinlogClient {
    * QueuedEventCharge()). StartStream() rejects a budget below
    * MinQueueBytesForEvent(MaxEventSize()), so a configuration that survives
    * start always admits an event at the ceiling together with its checkpoint.
+   * While streaming the setter returns MES_ERR_INVALID_ARG and keeps the budget
+   * in force.
    */
-  void SetMaxQueueBytes(size_t max_queue_bytes);
+  mes_error_t SetMaxQueueBytes(size_t max_queue_bytes);
   size_t MaxQueueBytes() const;
 
   /**
@@ -398,6 +404,14 @@ class BinlogClient {
 
   /** Promote the prior Poll() event's commit checkpoint to delivered state. */
   void PromoteDeliveredCheckpoint();
+
+  /**
+   * @brief The only writer of current_gtid_.
+   *
+   * Accepts either the resolved start set or a complete set the tracker
+   * returned at a group terminator; empty means no checkpoint is established.
+   */
+  void PublishCheckpoint(std::string checkpoint);
 
   /**
    * @brief Hand the reader's terminal error to the consumer and end the stream.

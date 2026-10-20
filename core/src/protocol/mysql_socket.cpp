@@ -458,6 +458,8 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
       ssl_ctx_ = nullptr;
       return MES_ERR_CONNECT;
     }
+    // A successful call can still leave probe failures from unreadable paths queued.
+    ERR_clear_error();
   }
 
   // Load client certificate if provided.
@@ -583,6 +585,7 @@ mes_error_t SocketHandle::UpgradeToTLS(uint32_t ssl_mode, const char* ssl_ca, co
   }
   [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
   for (;;) {
+    ERR_clear_error();
     int ret = SSL_connect(ssl_);
     if (ret == 1) break;
     const int ssl_err = SSL_get_error(ssl_, ret);
@@ -749,6 +752,7 @@ mes_error_t SocketHandle::ReadExact(uint8_t* buf, size_t len) {
   // never momentarily deliverable between two reads.
   [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
   while (total < len) {
+    ERR_clear_error();
     const int n = SSL_read(ssl_, buf + total,
                            static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
     if (n <= 0) {
@@ -796,6 +800,7 @@ mes_error_t SocketHandle::WriteAll(const uint8_t* buf, size_t len) {
   while (total < len) {
     int n;
     if (tls_active_) {
+      ERR_clear_error();
       n = SSL_write(ssl_, buf + total,
                     static_cast<int>(std::min(len - total, static_cast<size_t>(INT_MAX))));
       if (n <= 0) {
@@ -880,6 +885,7 @@ void SocketHandle::Close() {
       [[maybe_unused]] ScopedSigPipeSuppressor sigpipe_guard;
       SSL_shutdown(ssl_);
     }
+    ERR_clear_error();
     SSL_free(ssl_);
     ssl_ = nullptr;
   }

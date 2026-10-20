@@ -342,13 +342,13 @@ TEST(QueryExecutionTest, ErrPacketInColumnDefinitionPositionReportsTheServerErro
 #endif
 }
 
-TEST(QueryExecutionTest, AResultSetHeaderDeclaringNoColumnsIsRejected) {
+TEST(QueryExecutionTest, AResultSetHeaderWithAnUndecodableColumnCountIsRejected) {
 #ifdef _WIN32
   GTEST_SKIP() << "local socket test is POSIX-only";
 #else
-  // A LOCAL INFILE request decodes to a column count of zero, as does any
-  // truncated length prefix. Taken as an empty result set it would send the
-  // client on to read rows from a server that is answering something else.
+  // A LOCAL INFILE request (0xFB) and a truncated length prefix are not column
+  // counts. Taken as an empty result set they would send the client on to read
+  // rows from a server that is answering something else.
   QueryPeer peer([](int fd) {
     if (!SendWirePacket(fd, 1, {0xFB, 'f', 'i', 'l', 'e'})) return;
     uint8_t byte = 0;
@@ -361,6 +361,29 @@ TEST(QueryExecutionTest, AResultSetHeaderDeclaringNoColumnsIsRejected) {
   QueryResult result;
   std::string error;
   EXPECT_EQ(ExecuteQuery(&socket, "SELECT infile", &result, &error), MES_ERR_STREAM);
+  EXPECT_EQ(error, "Malformed result set header (invalid column count)");
+  EXPECT_FALSE(socket.IsValid());
+#endif
+}
+
+TEST(QueryExecutionTest, AResultSetHeaderDeclaringNoColumnsIsRejected) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  // A well-formed but zero column count never starts a result set; the
+  // no-result-set case is the OK packet.
+  QueryPeer peer([](int fd) {
+    if (!SendWirePacket(fd, 1, {0xFC, 0x00, 0x00})) return;
+    uint8_t byte = 0;
+    recv(fd, &byte, 1, 0);
+  });
+
+  SocketHandle socket;
+  ASSERT_EQ(socket.Connect("127.0.0.1", peer.port(), 1), MES_OK);
+  ASSERT_EQ(socket.SetReadTimeout(2), MES_OK);
+  QueryResult result;
+  std::string error;
+  EXPECT_EQ(ExecuteQuery(&socket, "SELECT nothing", &result, &error), MES_ERR_STREAM);
   EXPECT_EQ(error, "Malformed result set header (zero column count)");
   EXPECT_FALSE(socket.IsValid());
 #endif
@@ -395,4 +418,19 @@ TEST(QueryExecutionTest, AReplicationPacketLeftInTheSocketIsNotAQueryResponse) {
 }
 
 }  // namespace
+
+TEST(ParseTextResultRowTest, InvalidLengthPrefixIsAParseFailure) {
+  QueryResultRow row;
+  EXPECT_FALSE(ParseTextResultRow({0xFF, 0x01, 0x00}, 1, &row));
+  EXPECT_FALSE(ParseTextResultRow({0xFC, 0x01}, 1, &row));
+}
+
+TEST(ParseTextResultRowTest, NullMarkerStillYieldsNull) {
+  QueryResultRow row;
+  ASSERT_TRUE(ParseTextResultRow({0xFB, 0x01, 'a'}, 2, &row));
+  EXPECT_TRUE(row.is_null[0]);
+  EXPECT_FALSE(row.is_null[1]);
+  EXPECT_EQ(row.values[1], "a");
+}
+
 }  // namespace mes::protocol

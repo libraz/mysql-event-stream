@@ -2006,9 +2006,9 @@ TEST(DecodeWriteRowsTest, DecodeBudgetChargesEveryRowAndColumn) {
   std::vector<RowData> rows;
   ASSERT_TRUE(DecodeWriteRows(w.Data(), w.Size(), metadata, true, &rows, &budget));
   ASSERT_EQ(rows.size(), 2u);
-  // Both rows are charged: the "Alice" and "Bob" payloads. The INT columns
-  // carry no payload.
-  EXPECT_EQ(budget.used, 5u + 3u);
+  // Both rows are charged: the "Alice" and "Bob" payloads, the two column
+  // slots of each row and one queue entry per row.
+  EXPECT_EQ(budget.used, 5u + 3u + 2u * 2u * sizeof(ColumnValue) + 2u * sizeof(ChangeEvent));
   EXPECT_LE(budget.used, budget.limit);
 }
 
@@ -2037,8 +2037,9 @@ TEST(DecodeUpdateRowsTest, DecodeBudgetChargesBothImages) {
   std::vector<UpdatePair> pairs;
   ASSERT_TRUE(DecodeUpdateRows(w.Data(), w.Size(), metadata, true, &pairs, &budget));
   ASSERT_EQ(pairs.size(), 1u);
-  // Both images are charged, not just the after image.
-  EXPECT_EQ(budget.used, 4u + 2u);
+  // Both images are charged, not just the after image: payloads, one column
+  // slot per image and the pair's single queue entry.
+  EXPECT_EQ(budget.used, 4u + 2u + 2u * sizeof(ColumnValue) + sizeof(ChangeEvent));
 }
 
 // A deflate bomb spread across columns: the per-field 64 MiB cap says nothing

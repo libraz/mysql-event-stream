@@ -134,97 +134,101 @@ TEST(DecimalDigitCountTest, CountsEveryMagnitude) {
   EXPECT_EQ(DecimalDigitCount(std::numeric_limits<unsigned>::max()), 10);
 }
 
-// --- ReadPackedInt ---
+// --- ReadLenEncInt ---
 
-TEST(BinaryUtilTest, ReadPackedInt1Byte) {
+namespace {
+struct LenEncResult {
+  bool ok;
+  uint64_t value;
+  size_t consumed;
+};
+
+LenEncResult DecodeLenEnc(const uint8_t* data, size_t len) {
+  LenEncResult r{false, 7, 99};
+  r.ok = ReadLenEncInt(data, len, &r.value, &r.consumed);
+  return r;
+}
+}  // namespace
+
+TEST(BinaryUtilTest, ReadLenEncInt1Byte) {
   uint8_t data[] = {42};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 42u);
-  EXPECT_EQ(consumed, 1u);
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.value, 42u);
+  EXPECT_EQ(r.consumed, 1u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt1ByteZero) {
-  uint8_t data[] = {0};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0u);
-  EXPECT_EQ(consumed, 1u);
+TEST(BinaryUtilTest, ReadLenEncInt1ByteBounds) {
+  uint8_t zero[] = {0};
+  uint8_t max[] = {250};
+  auto r0 = DecodeLenEnc(zero, 1);
+  auto r250 = DecodeLenEnc(max, 1);
+  EXPECT_TRUE(r0.ok);
+  EXPECT_EQ(r0.value, 0u);
+  EXPECT_TRUE(r250.ok);
+  EXPECT_EQ(r250.value, 250u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt1ByteMax) {
-  uint8_t data[] = {250};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 250u);
-  EXPECT_EQ(consumed, 1u);
+TEST(BinaryUtilTest, ReadLenEncIntNullMarkerFails) {
+  uint8_t data[] = {0xFB};
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_FALSE(r.ok);
+  EXPECT_EQ(r.consumed, 0u);
 }
 
-TEST(BinaryUtilTest, ReadPackedIntNull) {
-  uint8_t data[] = {251};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0u);
-  EXPECT_EQ(consumed, 1u);
+TEST(BinaryUtilTest, ReadLenEncIntUndefinedPrefixFails) {
+  uint8_t data[] = {0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_FALSE(r.ok);
+  EXPECT_EQ(r.consumed, 0u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt2Bytes) {
-  // 252 marker + 2 bytes little-endian
-  uint8_t data[] = {252, 0x00, 0x01};  // 256
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 256u);
-  EXPECT_EQ(consumed, 3u);
+TEST(BinaryUtilTest, ReadLenEncInt2Bytes) {
+  uint8_t data[] = {252, 0x00, 0x01};
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.value, 256u);
+  EXPECT_EQ(r.consumed, 3u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt3Bytes) {
-  // 253 marker + 3 bytes little-endian
-  uint8_t data[] = {253, 0x01, 0x00, 0x01};  // 65537
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 65537u);
-  EXPECT_EQ(consumed, 4u);
+TEST(BinaryUtilTest, ReadLenEncInt3Bytes) {
+  uint8_t data[] = {253, 0x01, 0x00, 0x01};
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.value, 65537u);
+  EXPECT_EQ(r.consumed, 4u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt8Bytes) {
-  // 254 marker + 8 bytes little-endian
-  uint8_t data[] = {254, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 1u);
-  EXPECT_EQ(consumed, 9u);
-}
-
-TEST(BinaryUtilTest, ReadPackedInt8BytesLarge) {
+TEST(BinaryUtilTest, ReadLenEncInt8Bytes) {
   uint8_t data[] = {254, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F};
-  size_t consumed = 0;
-  EXPECT_EQ(ReadPackedInt(data, sizeof(data), consumed), 0x7FFFFFFFFFFFFFFFuLL);
-  EXPECT_EQ(consumed, 9u);
+  auto r = DecodeLenEnc(data, sizeof(data));
+  EXPECT_TRUE(r.ok);
+  EXPECT_EQ(r.value, 0x7FFFFFFFFFFFFFFFuLL);
+  EXPECT_EQ(r.consumed, 9u);
 }
 
-// --- ReadPackedInt bounds checking ---
-
-TEST(BinaryUtilTest, ReadPackedIntEmptyBuffer) {
+TEST(BinaryUtilTest, ReadLenEncIntEmptyBufferFails) {
   uint8_t data[] = {0};
-  size_t consumed = 99;
-  EXPECT_EQ(ReadPackedInt(data, 0, consumed), 0u);
-  EXPECT_EQ(consumed, 0u);
+  auto r = DecodeLenEnc(data, 0);
+  EXPECT_FALSE(r.ok);
+  EXPECT_EQ(r.consumed, 0u);
 }
 
-TEST(BinaryUtilTest, ReadPackedInt252InsufficientLen) {
-  // 252 marker requires 3 bytes total, but only 2 available
-  uint8_t data[] = {252, 0x00};
-  size_t consumed = 99;
-  EXPECT_EQ(ReadPackedInt(data, 2, consumed), 0u);
-  EXPECT_EQ(consumed, 0u);
+TEST(BinaryUtilTest, ReadLenEncIntTruncatedFails) {
+  uint8_t d252[] = {252, 0x00};
+  uint8_t d253[] = {253, 0x01, 0x00};
+  uint8_t d254[] = {254, 0x01, 0x00, 0x00, 0x00};
+  for (auto r : {DecodeLenEnc(d252, sizeof(d252)), DecodeLenEnc(d253, sizeof(d253)),
+                 DecodeLenEnc(d254, sizeof(d254))}) {
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.consumed, 0u);
+  }
 }
 
-TEST(BinaryUtilTest, ReadPackedInt253InsufficientLen) {
-  // 253 marker requires 4 bytes total, but only 3 available
-  uint8_t data[] = {253, 0x01, 0x00};
+TEST(BinaryUtilTest, ReadBinlogLengthRejectsUndefinedPrefix) {
+  uint8_t data[] = {0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   size_t consumed = 99;
-  EXPECT_EQ(ReadPackedInt(data, 3, consumed), 0u);
-  EXPECT_EQ(consumed, 0u);
-}
-
-TEST(BinaryUtilTest, ReadPackedInt254InsufficientLen) {
-  // 254 marker requires 9 bytes total, but only 5 available
-  uint8_t data[] = {254, 0x01, 0x00, 0x00, 0x00};
-  size_t consumed = 99;
-  EXPECT_EQ(ReadPackedInt(data, 5, consumed), 0u);
+  EXPECT_EQ(ReadBinlogLength(data, sizeof(data), consumed), 0u);
   EXPECT_EQ(consumed, 0u);
 }
 

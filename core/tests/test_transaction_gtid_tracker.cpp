@@ -233,6 +233,34 @@ TEST(TransactionGtidTrackerTest, DdlQueryWithLeadingCommentCheckpoints) {
   EXPECT_EQ(tracker.Observe(ddl.data(), ddl.size(), true), std::string(kSid1) + ":42-42");
 }
 
+TEST(TransactionGtidTrackerTest, DdlBehindASetStatementPrefixOrVersionCommentCheckpoints) {
+  // The engine treats these as DDL, so the tracker must close their group too.
+  for (const char* statement :
+       {"SET STATEMENT max_statement_time=10 FOR ALTER TABLE t ADD c INT",
+        "set statement lock_wait_timeout=5, sql_mode='' for /* note */ DROP TABLE t",
+        "/*!40101 ALTER TABLE t ADD c INT */"}) {
+    TransactionGtidTracker tracker;
+    auto gtid = BuildMySQLGtid(42);
+    tracker.Observe(gtid.data(), gtid.size(), true);
+    auto ddl = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
+                                test::BuildQueryEventBody("db", statement));
+    EXPECT_EQ(tracker.Observe(ddl.data(), ddl.size(), true), std::string(kSid1) + ":42-42")
+        << statement;
+  }
+}
+
+TEST(TransactionGtidTrackerTest, SetStatementPrefixedDmlDoesNotCheckpoint) {
+  TransactionGtidTracker tracker;
+  auto gtid = BuildMySQLGtid(42);
+  tracker.Observe(gtid.data(), gtid.size(), true);
+  auto dml = test::BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
+      test::BuildQueryEventBody(
+          "db", "SET STATEMENT max_statement_time=10 FOR INSERT INTO t VALUES (1)"));
+  EXPECT_TRUE(tracker.Observe(dml.data(), dml.size(), true).empty());
+  EXPECT_TRUE(tracker.has_pending_gtid());
+}
+
 TEST(TransactionGtidTrackerTest, RollbackToSavepointKeepsCheckpointPendingUntilCommit) {
   TransactionGtidTracker tracker;
   auto gtid = BuildMySQLGtid(42);
@@ -297,6 +325,85 @@ TEST(TransactionGtidTrackerTest, MariaDBStandaloneDdlCheckpointsAtItsQueryEvent)
   auto ddl = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
                               test::BuildQueryEventBody("db", "CREATE TABLE t (id INT)"));
   EXPECT_EQ(tracker.Observe(ddl.data(), ddl.size(), true), "7-1-42");
+}
+
+TEST(TransactionGtidTrackerTest, MariaDBCreateTableSelectCheckpointsOnlyAtItsXid) {
+  TransactionGtidTracker tracker;
+  // MariaDB logs CREATE TABLE ... SELECT as a non-standalone group with no
+  // BEGIN query: GTID, the CREATE statement, its rows, then the XID.
+  auto gtid = BuildMariaDBGtid(4, 0, /*standalone=*/false);
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+
+  auto create = test::BuildEvent(
+      static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
+      test::BuildQueryEventBody("db", "CREATE TABLE t2 ENGINE=InnoDB SELECT * FROM t1"));
+  EXPECT_TRUE(tracker.Observe(create.data(), create.size(), true).empty());
+  auto rows = BuildRowsEvent(/*stmt_end=*/true);
+  EXPECT_TRUE(tracker.Observe(rows.data(), rows.size(), true).empty());
+  EXPECT_TRUE(tracker.has_pending_gtid());
+
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+  EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), "0-1-4");
+}
+
+TEST(TransactionGtidTrackerTest, MariaDBNonStandaloneGroupClosesAtItsCommitQuery) {
+  TransactionGtidTracker tracker;
+  auto gtid = BuildMariaDBGtid(5, 0, /*standalone=*/false);
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+
+  auto observe_query = [&tracker](const char* statement) {
+    auto query = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 0, 0,
+                                  test::BuildQueryEventBody("db", statement));
+    return tracker.Observe(query.data(), query.size(), true);
+  };
+  EXPECT_TRUE(observe_query("INSERT INTO myisam_t VALUES (1)").empty());
+  EXPECT_EQ(observe_query("COMMIT"), "0-1-5");
+}
+
+TEST(TransactionGtidTrackerTest, FilePositionStartWithholdsCheckpointsUntilTheBaseline) {
+  TransactionGtidTracker tracker;
+  tracker.ResetAwaitingBaseline(ServerFlavor::kMySQL);
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+
+  // The GTIDs committed after a mid-file offset are only part of the executed
+  // set, so no checkpoint may be built from them alone.
+  auto first = BuildMySQLGtid(7);
+  EXPECT_TRUE(tracker.Observe(first.data(), first.size(), true).empty());
+  EXPECT_TRUE(tracker.Observe(xid.data(), xid.size(), true).empty());
+  EXPECT_FALSE(tracker.has_pending_gtid());
+
+  // The baseline completes the set, including the commits observed before it.
+  auto previous = BuildPreviousGtids(std::string(kSid1) + ":1-5");
+  EXPECT_EQ(tracker.Observe(previous.data(), previous.size(), true),
+            std::string(kSid1) + ":1-5:7-7");
+
+  auto second = BuildMySQLGtid(8);
+  EXPECT_TRUE(tracker.Observe(second.data(), second.size(), true).empty());
+  EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), std::string(kSid1) + ":1-5:7-8");
+}
+
+TEST(TransactionGtidTrackerTest, MariaDBFilePositionStartWithholdsCheckpointsUntilTheGtidList) {
+  TransactionGtidTracker tracker;
+  tracker.ResetAwaitingBaseline(ServerFlavor::kMariaDB);
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+
+  auto gtid = BuildMariaDBGtid(30, 9, /*standalone=*/false);
+  EXPECT_TRUE(tracker.Observe(gtid.data(), gtid.size(), true).empty());
+  EXPECT_TRUE(tracker.Observe(xid.data(), xid.size(), true).empty());
+
+  auto list = BuildMariaDBGtidList({{7, 3, 12}, {9, 1, 31}});
+  EXPECT_EQ(tracker.Observe(list.data(), list.size(), true), "7-3-12,9-1-31");
+}
+
+TEST(TransactionGtidTrackerTest, ResetAfterAFilePositionStartPublishesAgain) {
+  TransactionGtidTracker tracker;
+  tracker.ResetAwaitingBaseline(ServerFlavor::kMySQL);
+  ASSERT_TRUE(tracker.Reset(std::string(kSid1) + ":1-2", ServerFlavor::kMySQL));
+
+  auto gtid = BuildMySQLGtid(3);
+  tracker.Observe(gtid.data(), gtid.size(), true);
+  auto xid = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 0, 0, {});
+  EXPECT_EQ(tracker.Observe(xid.data(), xid.size(), true), std::string(kSid1) + ":1-3");
 }
 
 TEST(TransactionGtidTrackerTest, TransactionalRowsEventWithStmtEndDoesNotCheckpoint) {

@@ -18,10 +18,13 @@
  * mes_client_stop(), which may be called from any thread to interrupt a
  * blocking mes_client_poll() or mes_client_start(), and the observers
  * mes_client_is_connected(), mes_client_is_streaming(),
- * mes_client_checksum_enabled(), mes_client_queued_bytes() and
- * mes_client_crc_errors(), which may be sampled from another thread while the
- * owner thread is inside any client call except mes_client_destroy(). The
- * per-function @threadsafety annotation is authoritative.
+ * mes_client_checksum_enabled(), mes_client_queued_bytes(),
+ * mes_client_crc_errors(), mes_client_last_error() and
+ * mes_client_current_gtid(), which may be sampled from another thread while the
+ * owner thread is inside any client call except mes_client_destroy(). The two
+ * string observers return a buffer shared by every caller, valid only until
+ * the next call to the same function from any thread. The per-function
+ * @threadsafety annotation is authoritative.
  */
 
 #ifndef MES_H_
@@ -362,9 +365,10 @@ MES_API mes_error_t mes_get_position(mes_engine_t* engine, const char** file, ui
  * @note An entry count cannot bound the queue's memory on its own, because a
  * compressed column decodes to a size its on-wire length does not predict. The
  * queue is therefore also bounded in bytes, at MES_DEFAULT_QUEUE_BYTES, counting
- * every decoded column payload it holds; mes_feed() stops consuming input when
- * either limit is reached. Resident bytes stay below that budget plus the one
- * event pushed after the last check, whose decoded payloads the same budget caps.
+ * every byte a queued entry keeps resident (see mes_set_max_queue_bytes());
+ * mes_feed() stops consuming input when either limit is reached. Resident bytes
+ * stay below that budget plus the one event pushed after the last check, which
+ * the same budget caps.
  * A stream of highly compressible BLOB/TEXT columns therefore reaches
  * backpressure on bytes long before it reaches @p max_size entries.
  *
@@ -389,12 +393,18 @@ MES_API mes_error_t mes_set_max_queue_size(mes_engine_t* engine, size_t max_size
  *
  * mes_feed() stops consuming input when either this budget or the
  * mes_set_max_queue_size() entry count is reached, whichever comes first. The
- * charge counts every decoded column payload a queued entry holds, which is what
- * lets this bound express a memory limit where an entry count cannot: a
- * compressed column decodes to a size its on-wire length does not predict.
+ * charge counts every byte a queued entry keeps resident: its decoded column
+ * payloads, its per-row column arrays and entry structure, its strings, and the
+ * table metadata (names and column arrays) it pins, even after the table has
+ * been evicted or replaced. That is what lets this bound express a memory limit
+ * where an entry count cannot: a compressed column decodes to a size its
+ * on-wire length does not predict.
  *
  * Resident bytes stay below this budget plus the one event pushed after the last
- * check, whose decoded payloads the same budget caps.
+ * check. That event's rows are charged against a per-event decode budget capped
+ * by this one (floored at 1 MiB, so a very small budget still decodes an
+ * ordinary row and applies backpressure), and an event that would exceed it
+ * fails with MES_ERR_DECODE_ROW instead of queueing.
  *
  * mes_client_set_max_queue_bytes() is a different budget, over the client's own
  * queue of undecoded events, and does not apply to an engine fed directly.
@@ -642,7 +652,17 @@ typedef enum {
   MES_SERVER_FLAVOR_MARIADB = 1,
 } mes_server_flavor_t;
 
-/** @brief How BinlogClient chooses its starting position. */
+/**
+ * @brief How BinlogClient chooses its starting position.
+ *
+ * Two rules take precedence over the mode. A non-empty start_gtid with
+ * MES_START_AT_CURRENT is treated as MES_START_AT_GTID. And once a client
+ * handle has published a non-empty checkpoint (see mes_client_current_gtid()),
+ * every later mes_client_start() on that handle -- including one after another
+ * mes_client_connect() with a different configuration -- resumes from that
+ * checkpoint instead of the configured position; create a new client to start
+ * somewhere else. While the checkpoint is empty, the configuration is used.
+ */
 typedef enum {
   MES_START_AT_CURRENT = 0,  /**< Snapshot the server's current GTID set. */
   MES_START_AT_GTID = 1,     /**< Use start_gtid exactly, including an empty set. */
@@ -671,7 +691,9 @@ typedef struct {
    *  registration, each side reconnects, and the stream alternates between
    *  them indefinitely. Assign a distinct value per process. */
   uint32_t server_id;
-  /** Used exactly when start_position_mode is MES_START_AT_GTID.
+  /** Used exactly when start_position_mode is MES_START_AT_GTID, or when it is
+   *  MES_START_AT_CURRENT and this string is non-empty, unless the handle has
+   *  already published a checkpoint (see mes_start_position_mode_t).
    *  A MySQL entry naming a bare transaction number is widened for backward
    *  compatibility before it goes on the wire: "uuid:N" is sent as "uuid:1-N",
    *  and the tagged form "uuid:tag:N" as "uuid:tag:1-N". An entry that already
@@ -914,6 +936,14 @@ MES_API const char* mes_client_last_error(mes_client_t* client);
  *  persist the checkpoint only after application processing succeeds.
  *  MySQL singleton intervals are returned as explicit ranges (for example,
  *  `uuid:42-42`) so passing the value back as `start_gtid` cannot widen it.
+ *
+ *  A non-empty value is always a complete executed set: the start set plus
+ *  every committed GTID delivered since, never only the GTIDs observed. An
+ *  empty string means no checkpoint has been established yet -- before the
+ *  first start, after a failed connect, or after a MES_START_AT_POSITION start
+ *  until the stream reaches a PREVIOUS_GTIDS/GTID_LIST event. It is not the
+ *  empty GTID set: skip persisting it, and never pass it back as `start_gtid`,
+ *  where an empty string requests every binlog the source still retains.
  *  @note The returned pointer is valid until the next call to
  *        mes_client_current_gtid() on the same client instance, at which
  *        point the underlying buffer may be overwritten. Callers must copy
@@ -958,8 +988,11 @@ MES_API int mes_client_checksum_enabled(mes_client_t* client);
  * ceiling is accepted. Values use the same normalization as the engine: 0
  * resolves to the 1 GiB hard cap and other out-of-range values are clamped.
  *
- * Call before mes_client_start().
- * @return MES_OK on success, MES_ERR_NULL_ARG if @p client is NULL.
+ * Call before mes_client_start(). While the client is streaming the limit in
+ * force cannot change: the call returns MES_ERR_INVALID_ARG and records a
+ * message for mes_client_last_error().
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p client is NULL, or
+ *         MES_ERR_INVALID_ARG while streaming.
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_client_set_max_event_size(mes_client_t* client, uint32_t max_event_size);
@@ -986,7 +1019,11 @@ MES_API uint32_t mes_client_get_max_event_size(mes_client_t* client);
  * MES_ERR_INVALID_ARG. Raising max_event_size to the 1 GiB hard cap therefore
  * requires a budget of at least 1 GiB + 1 MiB + 1 byte.
  *
- * Call before mes_client_start().
+ * Call before mes_client_start(). While the client is streaming the budget in
+ * force cannot change: the call returns MES_ERR_INVALID_ARG and records a
+ * message for mes_client_last_error().
+ * @return MES_OK on success, MES_ERR_NULL_ARG if @p client is NULL, or
+ *         MES_ERR_INVALID_ARG while streaming.
  * @threadsafety NOT thread-safe.
  */
 MES_API mes_error_t mes_client_set_max_queue_bytes(mes_client_t* client, size_t max_queue_bytes);

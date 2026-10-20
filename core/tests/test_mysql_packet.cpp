@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 
 #include <algorithm>
@@ -127,7 +128,9 @@ TEST(LenEncIntTest, SmallValues) {
     WriteLenEncInt(&buf, v);
     EXPECT_EQ(buf.size(), 1u);
     size_t pos = 0;
-    EXPECT_EQ(ReadLenEncInt(buf.data(), buf.size(), &pos), v);
+    uint64_t decoded = 0;
+    ASSERT_TRUE(ReadLenEncInt(buf.data(), buf.size(), &pos, &decoded));
+    EXPECT_EQ(decoded, v);
     EXPECT_EQ(pos, 1u);
   }
 }
@@ -138,7 +141,9 @@ TEST(LenEncIntTest, TwoByteValues) {
     WriteLenEncInt(&buf, v);
     EXPECT_EQ(buf.size(), 3u);  // 0xFC marker + 2 bytes
     size_t pos = 0;
-    EXPECT_EQ(ReadLenEncInt(buf.data(), buf.size(), &pos), v);
+    uint64_t decoded = 0;
+    ASSERT_TRUE(ReadLenEncInt(buf.data(), buf.size(), &pos, &decoded));
+    EXPECT_EQ(decoded, v);
     EXPECT_EQ(pos, 3u);
   }
 }
@@ -149,7 +154,9 @@ TEST(LenEncIntTest, ThreeByteValues) {
     WriteLenEncInt(&buf, v);
     EXPECT_EQ(buf.size(), 4u);  // 0xFD marker + 3 bytes
     size_t pos = 0;
-    EXPECT_EQ(ReadLenEncInt(buf.data(), buf.size(), &pos), v);
+    uint64_t decoded = 0;
+    ASSERT_TRUE(ReadLenEncInt(buf.data(), buf.size(), &pos, &decoded));
+    EXPECT_EQ(decoded, v);
     EXPECT_EQ(pos, 4u);
   }
 }
@@ -160,8 +167,26 @@ TEST(LenEncIntTest, EightByteValues) {
     WriteLenEncInt(&buf, v);
     EXPECT_EQ(buf.size(), 9u);  // 0xFE marker + 8 bytes
     size_t pos = 0;
-    EXPECT_EQ(ReadLenEncInt(buf.data(), buf.size(), &pos), v);
+    uint64_t decoded = 0;
+    ASSERT_TRUE(ReadLenEncInt(buf.data(), buf.size(), &pos, &decoded));
+    EXPECT_EQ(decoded, v);
     EXPECT_EQ(pos, 9u);
+  }
+}
+
+TEST(LenEncIntTest, InvalidPrefixesFailAndKeepPosition) {
+  const std::vector<std::vector<uint8_t>> cases = {
+      {0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+      {0xFB},
+      {0xFC, 0x01},
+      {0xFD, 0x01, 0x00},
+      {0xFE, 0x01, 0x00},
+      {}};
+  for (const auto& buf : cases) {
+    size_t pos = 0;
+    uint64_t decoded = 123;
+    EXPECT_FALSE(ReadLenEncInt(buf.data(), buf.size(), &pos, &decoded));
+    EXPECT_EQ(pos, 0u);
   }
 }
 
@@ -1077,6 +1102,32 @@ TEST(TlsReadTimeoutTest, AStallAsLongAsTheTimeoutStillFailsTheRead) {
   EXPECT_EQ(socket.ReadExact(received.data(), received.size()), MES_ERR_STREAM);
   EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(kTimeoutS * 3));
   socket.Shutdown();
+#endif
+}
+
+TEST(TlsErrorQueueTest, AStaleEntryDoesNotTurnAWaitingReadIntoAFailure) {
+#ifdef _WIN32
+  GTEST_SKIP() << "local socket test is POSIX-only";
+#else
+  const std::vector<uint8_t> chunk = PatternBytes(256, 0x6B);
+  TlsPeer peer([&](SSL* ssl) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    if (!TlsSendAll(ssl, chunk.data(), chunk.size())) return;
+    WaitForTlsReaderClose(ssl);
+  });
+
+  SocketHandle socket;
+  ConnectTls(&socket, peer.port(), 5);
+  if (HasFatalFailure()) return;
+
+  // An unrelated library call on this thread left an entry behind; the read
+  // must wait for the peer rather than report it as its own failure.
+  ERR_raise(ERR_LIB_USER, 1);
+  std::vector<uint8_t> received(chunk.size(), 0);
+  EXPECT_EQ(socket.ReadExact(received.data(), received.size()), MES_OK);
+  EXPECT_EQ(received, chunk);
+  socket.Shutdown();
+  ERR_clear_error();
 #endif
 }
 

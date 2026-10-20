@@ -10,9 +10,11 @@
 #include <utility>
 
 #include "binary_util.h"
+#include "cdc_engine.h"
 #include "event_header.h"
 #include "logger.h"
 #include "mariadb_event_parser.h"
+#include "sql_statement.h"
 
 namespace mes {
 namespace {
@@ -143,15 +145,20 @@ bool ExtractTaggedMySQLGtid(const uint8_t* data, size_t size, bool has_checksum,
   return true;
 }
 
-bool ExtractQueryKeywords(const uint8_t* data, size_t size, bool has_checksum, std::string* first,
-                          std::string* second) {
+/** Locate a QUERY_EVENT body long enough to hold its fixed post-header. */
+bool QueryEventBody(const uint8_t* data, size_t size, bool has_checksum, const uint8_t** body,
+                    size_t* body_len) {
   EventHeader header;
   if (!ParseEventHeader(data, size, &header) || header.event_length > size) return false;
   size_t tail_size = has_checksum ? kChecksumSize : 0;
   if (header.event_length < kEventHeaderSize + 13 + tail_size) return false;
+  *body = data + kEventHeaderSize;
+  *body_len = header.event_length - kEventHeaderSize - tail_size;
+  return true;
+}
 
-  const uint8_t* body = data + kEventHeaderSize;
-  size_t body_len = header.event_length - kEventHeaderSize - tail_size;
+bool ExtractQueryKeywords(const uint8_t* body, size_t body_len, std::string* first,
+                          std::string* second) {
   uint8_t db_len = body[8];
   uint16_t status_vars_len = binary::ReadU16Le(body + 11);
   size_t stmt_offset = 13 + static_cast<size_t>(status_vars_len) + db_len + 1;
@@ -160,29 +167,7 @@ bool ExtractQueryKeywords(const uint8_t* data, size_t size, bool has_checksum, s
   const char* statement = reinterpret_cast<const char*>(body + stmt_offset);
   size_t statement_len = body_len - stmt_offset;
   size_t pos = 0;
-  for (;;) {
-    while (pos < statement_len && std::isspace(static_cast<unsigned char>(statement[pos])) != 0) {
-      ++pos;
-    }
-    if (pos + 1 < statement_len && statement[pos] == '/' && statement[pos + 1] == '*') {
-      size_t end = pos + 2;
-      while (end + 1 < statement_len && !(statement[end] == '*' && statement[end + 1] == '/')) {
-        ++end;
-      }
-      if (end + 1 >= statement_len) return false;
-      pos = end + 2;
-      continue;
-    }
-    if (pos < statement_len && statement[pos] == '#') {
-      while (pos < statement_len && statement[pos] != '\n') ++pos;
-      continue;
-    }
-    if (pos + 1 < statement_len && statement[pos] == '-' && statement[pos + 1] == '-') {
-      while (pos < statement_len && statement[pos] != '\n') ++pos;
-      continue;
-    }
-    break;
-  }
+  if (!SkipLeadingSqlTrivia(statement, statement_len, &pos)) return false;
 
   auto read_keyword = [&](std::string* keyword) {
     while (pos < statement_len && std::isspace(static_cast<unsigned char>(statement[pos])) != 0) {
@@ -206,11 +191,6 @@ bool ExtractQueryKeywords(const uint8_t* data, size_t size, bool has_checksum, s
   return true;
 }
 
-bool IsDdlKeyword(const std::string& keyword) {
-  return keyword == "ALTER" || keyword == "RENAME" || keyword == "DROP" || keyword == "CREATE" ||
-         keyword == "TRUNCATE";
-}
-
 }  // namespace
 
 void TransactionGtidTracker::Reset() {
@@ -220,6 +200,7 @@ void TransactionGtidTracker::Reset() {
   received_gtid_.clear();
   pending_gtid_ = {};
   transaction_open_ = false;
+  baseline_known_ = true;
 }
 
 bool TransactionGtidTracker::Reset(const std::string& initial_gtid_set, ServerFlavor flavor) {
@@ -238,6 +219,12 @@ bool TransactionGtidTracker::Reset(const std::string& initial_gtid_set, ServerFl
   }
 
   return GtidSet::Parse(initial_gtid_set, &mysql_set_) == MES_OK;
+}
+
+void TransactionGtidTracker::ResetAwaitingBaseline(ServerFlavor flavor) {
+  Reset();
+  flavor_ = flavor;
+  baseline_known_ = false;
 }
 
 void TransactionGtidTracker::MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid& gtid) {
@@ -287,7 +274,7 @@ std::string TransactionGtidTracker::CommitPending() {
     }
   }
   pending_gtid_ = {};
-  return FormatCurrentSet();
+  return baseline_known_ ? FormatCurrentSet() : std::string();
 }
 
 std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bool has_checksum) {
@@ -308,6 +295,7 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
     if (!merged.Merge(baseline)) return {};
     mysql_set_ = std::move(merged);
     flavor_ = ServerFlavor::kMySQL;
+    baseline_known_ = true;
     return FormatCurrentSet();
   }
 
@@ -320,6 +308,7 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
     for (const auto& gtid : baseline) MergeMariaDBGtid(&merged, gtid);
     mariadb_set_ = std::move(merged);
     flavor_ = ServerFlavor::kMariaDB;
+    baseline_known_ = true;
     return FormatCurrentSet();
   }
 
@@ -361,7 +350,10 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
     MariaDBGtid gtid;
     if (MariaDBGtid::Parse(gtid_string, &gtid) != MES_OK) return {};
     std::string committed = CommitPending();
-    transaction_open_ = false;
+    // MariaDB writes no BEGIN query: a group without FL_STANDALONE is open
+    // from its GTID event until XID/COMMIT/ROLLBACK, even when its first
+    // statement is DDL (CREATE TABLE ... SELECT).
+    transaction_open_ = !standalone;
     flavor_ = ServerFlavor::kMariaDB;
     received_gtid_ = std::move(gtid_string);
     // FL_STANDALONE only says the group ends without a COMMIT/XID event; the
@@ -399,16 +391,20 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
 
   if (event_type != static_cast<uint8_t>(BinlogEventType::kQueryEvent)) return {};
 
+  const uint8_t* body = nullptr;
+  size_t body_len = 0;
+  if (!QueryEventBody(data, size, has_checksum, &body, &body_len)) return {};
   std::string first;
   std::string second;
-  if (!ExtractQueryKeywords(data, size, has_checksum, &first, &second)) return {};
-  if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
-    transaction_open_ = true;
-    return {};
-  }
-  if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
-    transaction_open_ = false;
-    return CommitPending();
+  if (ExtractQueryKeywords(body, body_len, &first, &second)) {
+    if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
+      transaction_open_ = true;
+      return {};
+    }
+    if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
+      transaction_open_ = false;
+      return CommitPending();
+    }
   }
   // DDL normally has an implicit transaction boundary, but never promote a
   // pending checkpoint merely because a DDL word appears inside an explicitly
@@ -416,8 +412,10 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   // transaction rollback and must leave its GTID pending until COMMIT/XID.
   // A standalone group carries exactly one statement, so this QUERY is its
   // terminating event whether or not the statement is DDL.
+  // DDL is classified by the engine's own rule, so both see through the same
+  // comments and MariaDB `SET STATEMENT ... FOR` prefixes.
   if (transaction_open_) return {};
-  if (pending_gtid_.standalone || IsDdlKeyword(first)) return CommitPending();
+  if (pending_gtid_.standalone || IsDdlQueryEvent(body, body_len)) return CommitPending();
   return {};
 }
 

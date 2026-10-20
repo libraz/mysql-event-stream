@@ -45,49 +45,42 @@ inline size_t DecimalBinarySize(uint8_t precision, uint8_t scale) {
   return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 + kDig2Bytes[frac_rem]);
 }
 
-// First byte of a packed integer that stands for NULL instead of a value.
-static constexpr uint8_t kPackedIntNull = 0xFB;
+bool ReadLenEncInt(const uint8_t* data, size_t len, uint64_t* value, size_t* bytes_consumed) {
+  *bytes_consumed = 0;
+  if (len < 1) return false;
 
-uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed) {
-  bytes_consumed = 0;
-  if (len < 1) return 0;
-
-  uint8_t first = data[0];
-
-  if (first < 251) {
-    bytes_consumed = 1;
-    return static_cast<uint64_t>(first);
+  const uint8_t first = data[0];
+  size_t width = 0;
+  uint64_t decoded = 0;
+  if (first < 0xFB) {
+    width = 1;
+    decoded = first;
+  } else if (first == 0xFC) {
+    if (len < 3) return false;
+    width = 3;
+    decoded = ReadU16Le(data + 1);
+  } else if (first == 0xFD) {
+    if (len < 4) return false;
+    width = 4;
+    decoded = ReadU24Le(data + 1);
+  } else if (first == 0xFE) {
+    if (len < 9) return false;
+    width = 9;
+    decoded = ReadU64Le(data + 1);
+  } else {
+    // 0xFB (NULL) and 0xFF (undefined)
+    return false;
   }
 
-  if (first == kPackedIntNull) {
-    bytes_consumed = 1;
-    return 0;
-  }
-
-  if (first == 252) {
-    if (len < 3) return 0;
-    bytes_consumed = 3;
-    return static_cast<uint64_t>(ReadU16Le(data + 1));
-  }
-
-  if (first == 253) {
-    if (len < 4) return 0;
-    bytes_consumed = 4;
-    return static_cast<uint64_t>(ReadU24Le(data + 1));
-  }
-
-  // first == 254
-  if (len < 9) return 0;
-  bytes_consumed = 9;
-  return ReadU64Le(data + 1);
+  *value = decoded;
+  *bytes_consumed = width;
+  return true;
 }
 
 uint64_t ReadBinlogLength(const uint8_t* data, size_t len, size_t& bytes_consumed) {
-  if (len >= 1 && data[0] == kPackedIntNull) {
-    bytes_consumed = 0;
-    return 0;
-  }
-  return ReadPackedInt(data, len, bytes_consumed);
+  uint64_t value = 0;
+  if (!ReadLenEncInt(data, len, &value, &bytes_consumed)) return 0;
+  return value;
 }
 
 std::string DecodeDecimal(const uint8_t* data, size_t available, uint8_t precision, uint8_t scale,

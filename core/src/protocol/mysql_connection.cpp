@@ -193,6 +193,7 @@ namespace detail {
 mes_error_t ParseServerHandshakePayload(const uint8_t* data, size_t len, ServerHandshake* out,
                                         std::string* error) {
   if (out == nullptr) return MES_ERR_CONNECT;
+  *out = ServerHandshake{};
 
   if (len < 4) {
     if (error) *error = "Server handshake packet too short";
@@ -590,6 +591,7 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
             uint8_t pw_byte = (i < password.size()) ? static_cast<uint8_t>(password[i]) : 0;
             xored.push_back(pw_byte ^ scramble[i % scramble.size()]);
           }
+          SecureCleanse cleanse_xored(xored.data(), xored.size());
 
           // Parse PEM and encrypt with RSA OAEP padding
           BIO* bio = BIO_new_mem_buf(pem_key.data(), static_cast<int>(pem_key.size()));
@@ -651,7 +653,6 @@ mes_error_t MysqlConnection::HandleAuthResponse(const std::string& password) {
 
           EVP_PKEY_CTX_free(ctx);
           EVP_PKEY_free(pkey);
-          SecureWipe(xored.data(), xored.size());
 
           if (encrypt_rc != MES_OK) {
             return encrypt_rc;

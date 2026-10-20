@@ -249,19 +249,18 @@ TEST(E2ESSL, SslBinlogStreamCapture) {
 
     if (result.error != MES_OK) break;
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
-        found_insert = true;
-        EXPECT_GT(event->after_count, 0u);
-        break;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
+          found_insert = true;
+          EXPECT_GT(event->after_count, 0u);
+          break;
+        }
       }
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   EXPECT_TRUE(found_insert) << "Did not capture INSERT event over TLS after " << poll_count

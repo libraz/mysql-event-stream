@@ -659,20 +659,19 @@ TEST(E2EProtocol, BinlogStreamInsertAndCapture) {
     if (result.is_heartbeat || result.data == nullptr) {
       continue;
     }
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
-        found_insert = true;
-        // Verify we got the right data
-        EXPECT_GT(event->after_count, 0u);
-        break;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
+          found_insert = true;
+          // Verify we got the right data
+          EXPECT_GT(event->after_count, 0u);
+          break;
+        }
       }
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   EXPECT_TRUE(found_insert) << "Did not capture INSERT event after " << poll_count << " polls";
@@ -742,20 +741,20 @@ TEST(E2EProtocol, EmptyStartGtidSnapshotsCurrentPosition) {
     mes_poll_result_t result = mes_client_poll(client);
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    ASSERT_EQ(mes_set_checksum_enabled(engine, result.checksum_enabled), MES_OK);
-    size_t consumed = 0;
-    ASSERT_EQ(mes_feed(engine, result.data, result.size, &consumed), MES_OK);
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
-          event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
-        continue;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type != MES_EVENT_INSERT || std::strcmp(event->table, "items") != 0 ||
+            event->after_count < 2 || event->after_columns[1].type != MES_COL_STRING) {
+          continue;
+        }
+        std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
+        saw_before = saw_before || name == before_name;
+        saw_after = saw_after || name == after_name;
       }
-      std::string name(event->after_columns[1].str_data, event->after_columns[1].str_len);
-      saw_before = saw_before || name == before_name;
-      saw_after = saw_after || name == after_name;
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   EXPECT_FALSE(saw_before) << "empty start_gtid replayed a pre-start transaction";
@@ -1234,23 +1233,22 @@ TEST(E2EProtocol, MetadataFetcherColumnNames) {
     poll_count++;
     if (result.error != MES_OK) break;
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
-        found = true;
-        // Check column names are populated (via MetadataFetcher)
-        ASSERT_GT(event->after_count, 0u);
-        EXPECT_STREQ(event->after_columns[0].col_name, "id");
-        EXPECT_STREQ(event->after_columns[1].col_name, "name");
-        EXPECT_STREQ(event->after_columns[2].col_name, "value");
-        break;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (event->type == MES_EVENT_INSERT && std::strcmp(event->table, "items") == 0) {
+          found = true;
+          // Check column names are populated (via MetadataFetcher)
+          ASSERT_GT(event->after_count, 0u);
+          EXPECT_STREQ(event->after_columns[0].col_name, "id");
+          EXPECT_STREQ(event->after_columns[1].col_name, "name");
+          EXPECT_STREQ(event->after_columns[2].col_name, "value");
+          break;
+        }
       }
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
   }
 
   EXPECT_TRUE(found) << "Did not capture INSERT event with column names";

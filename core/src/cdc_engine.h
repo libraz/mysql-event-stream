@@ -120,13 +120,16 @@ class CdcEngine {
    * consuming input once the charge reaches the budget, and the per-event decode
    * budget is capped by it as well, so:
    *
-   *   resident queue bytes < max_queue_bytes + max(max_event_size, max_queue_bytes)
+   *   resident queue bytes < max_queue_bytes + max(max_event_size, max_queue_bytes, 1 MiB)
    *
    * The second term is the one event Feed() pushes atomically after the last
-   * capacity check: its decoded column payloads cannot exceed
-   * DecodeBudget::ForEventBody(body_bytes, max_queue_bytes), and its column
-   * array follows the wire body, which the parser caps at max_event_size.
-   * Nothing in that bound depends on a compressed column's expansion ratio.
+   * capacity check: its column arrays, payloads and entry structures are all
+   * charged to DecodeBudget::ForEventBody(body_bytes, max(max_queue_bytes, 1 MiB)), and an
+   * event that would exceed it fails with MES_ERR_DECODE_ROW instead of
+   * queueing. Nothing in that bound depends on a compressed column's expansion
+   * ratio or on how many rows the body packs. The TableMetadata a queued event
+   * pins is charged to that event even after the table-map registry has
+   * evicted or replaced it.
    */
   void SetMaxQueueBytes(size_t max_queue_bytes);
 

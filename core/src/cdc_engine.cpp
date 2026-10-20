@@ -18,6 +18,7 @@
 #include "logger.h"
 #include "mariadb_event_parser.h"
 #include "rotate_event.h"
+#include "sql_statement.h"
 
 namespace mes {
 
@@ -29,66 +30,14 @@ static void AttachColumnNames(RowData& row, const TableMetadata& meta) {
 
 namespace {
 
-bool IsSqlWhitespace(char ch) {
-  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
-}
+// Row scratch capacity kept between events; one outsized event must not pin
+// its row array for the life of the engine.
+constexpr size_t kRetainedScratchRows = 1024;
 
-/** Skip MySQL leading whitespace/comments and expose executable version comments. */
-bool SkipLeadingSqlTrivia(const char* stmt, size_t stmt_len, size_t* pos) {
-  for (;;) {
-    while (*pos < stmt_len && IsSqlWhitespace(stmt[*pos])) ++(*pos);
-    if (*pos >= stmt_len) return false;
-
-    if (stmt[*pos] == '#') {
-      while (*pos < stmt_len && stmt[*pos] != '\n' && stmt[*pos] != '\r') ++(*pos);
-      continue;
-    }
-
-    if (stmt_len - *pos >= 2 && stmt[*pos] == '-' && stmt[*pos + 1] == '-' &&
-        (stmt_len - *pos == 2 || IsSqlWhitespace(stmt[*pos + 2]))) {
-      *pos += 2;
-      while (*pos < stmt_len && stmt[*pos] != '\n' && stmt[*pos] != '\r') ++(*pos);
-      continue;
-    }
-
-    if (stmt_len - *pos >= 2 && stmt[*pos] == '/' && stmt[*pos + 1] == '*') {
-      const bool mysql_version_comment = stmt_len - *pos >= 3 && stmt[*pos + 2] == '!';
-      const bool mariadb_version_comment = stmt_len - *pos >= 4 &&
-                                           (stmt[*pos + 2] == 'M' || stmt[*pos + 2] == 'm') &&
-                                           stmt[*pos + 3] == '!';
-      if (mysql_version_comment || mariadb_version_comment) {
-        *pos += mysql_version_comment ? 3 : 4;
-        while (*pos < stmt_len && std::isdigit(static_cast<unsigned char>(stmt[*pos]))) ++(*pos);
-        while (*pos < stmt_len && IsSqlWhitespace(stmt[*pos])) ++(*pos);
-        return *pos < stmt_len;
-      }
-
-      const size_t comment_start = *pos;
-      *pos += 2;
-      bool closed = false;
-      while (stmt_len - *pos >= 2) {
-        if (stmt[*pos] == '*' && stmt[*pos + 1] == '/') {
-          *pos += 2;
-          closed = true;
-          break;
-        }
-        ++(*pos);
-      }
-      if (!closed) {
-        *pos = comment_start;
-        return false;
-      }
-      continue;
-    }
-
-    return true;
-  }
-}
-
-bool IsSqlIdentifierChar(char ch) {
-  const auto uch = static_cast<unsigned char>(ch);
-  return std::isalnum(uch) || ch == '_' || ch == '$';
-}
+// Floor under the per-event decode budget, so a small queue byte budget still
+// decodes an ordinary row (a maximal-width row's column array alone is ~256 KiB)
+// and applies backpressure instead of failing the event.
+constexpr size_t kMinEventDecodeBudget = 1024U * 1024U;
 
 /**
  * @brief Report that a table's numeric signedness is not established.
@@ -110,6 +59,22 @@ void ReportUnknownSignedness(TableMetadata* meta) {
       .Field("db", meta->database_name)
       .Field("table", meta->table_name)
       .Warn();
+}
+
+/** True when @p a and @p b differ in no field the metadata resolution writes. */
+bool SameResolution(const TableMetadata& a, const TableMetadata& b) {
+  if (a.names_resolved != b.names_resolved ||
+      a.unknown_signedness_reported != b.unknown_signedness_reported ||
+      a.columns.size() != b.columns.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < a.columns.size(); i++) {
+    if (a.columns[i].name != b.columns[i].name ||
+        a.columns[i].is_unsigned != b.columns[i].is_unsigned) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -137,24 +102,19 @@ bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
   size_t pos = 0;
   if (!SkipLeadingSqlTrivia(stmt, stmt_len, &pos)) return false;
 
+  // MariaDB logs `SET STATEMENT ... FOR <stmt>` verbatim; the statement that
+  // follows FOR is what runs.
+  size_t after_prefix = pos;
+  if (SkipSetStatementPrefix(stmt, stmt_len, &after_prefix)) {
+    pos = after_prefix;
+    if (!SkipLeadingSqlTrivia(stmt, stmt_len, &pos)) return false;
+  }
+
   // Compare the first keyword case-insensitively against known DDL verbs.
   static constexpr std::array<const char*, 5> kDdlKeywords = {"ALTER", "RENAME", "DROP", "CREATE",
                                                               "TRUNCATE"};
   for (const char* keyword : kDdlKeywords) {
-    size_t keyword_len = std::strlen(keyword);
-    if (stmt_len - pos < keyword_len) {
-      continue;
-    }
-    bool match = true;
-    for (size_t i = 0; i < keyword_len; ++i) {
-      if (std::toupper(static_cast<unsigned char>(stmt[pos + i])) != keyword[i]) {
-        match = false;
-        break;
-      }
-    }
-    if (match && (stmt_len - pos == keyword_len || !IsSqlIdentifierChar(stmt[pos + keyword_len]))) {
-      return true;
-    }
+    if (KeywordAt(stmt, stmt_len, pos, keyword)) return true;
   }
   return false;
 }
@@ -244,7 +204,7 @@ bool CdcEngine::NextEvent(ChangeEvent* event) {
   const size_t charge = ChangeEventCharge(event_queue_.front());
   *event = std::move(event_queue_.front());
   event_queue_.pop();
-  queued_bytes_ = charge < queued_bytes_ ? queued_bytes_ - charge : 0;
+  queued_bytes_ -= std::min(charge, queued_bytes_);
   return true;
 }
 
@@ -512,6 +472,9 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
           ReportUnknownSignedness(&resolved);
         }
+        // Resolution that yields nothing new keeps the registered object, so
+        // queued events keep sharing one instance while the retry goes on.
+        if (unchanged && SameResolution(*meta, resolved)) break;
         evicted_table_ids.clear();
         table_registry_.ReplaceMetadata(table_id, std::move(resolved), &evicted_table_ids);
         for (uint64_t evicted : evicted_table_ids) blocked_table_ids_.erase(evicted);
@@ -716,7 +679,8 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
   // add to the queue stay a function of the engine's configured limits. The cap
   // is the whole budget, not what is left of it: a decode must not start failing
   // because the consumer happens to be behind.
-  DecodeBudget budget = DecodeBudget::ForEventBody(body_len, max_queue_bytes_);
+  DecodeBudget budget =
+      DecodeBudget::ForEventBody(body_len, std::max(max_queue_bytes_, kMinEventDecodeBudget));
 
   if (is_write) {
     row_buf_.clear();
@@ -782,6 +746,11 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
       LogRowDecodeFailure("delete_rows", *meta);
     }
   }
+
+  row_buf_.clear();
+  update_buf_.clear();
+  if (row_buf_.capacity() > kRetainedScratchRows) std::vector<RowData>().swap(row_buf_);
+  if (update_buf_.capacity() > kRetainedScratchRows) std::vector<UpdatePair>().swap(update_buf_);
 }
 
 void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta) {

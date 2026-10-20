@@ -339,7 +339,8 @@ struct ChangeEvent {
  *
  * Fixed per-entry structure -- the queue node and the entry struct itself -- is
  * not charged here. It is proportional to the entry count, which every queue
- * bounds separately.
+ * bounds separately; the engine's decoder charges it to the per-event decode
+ * budget instead, where the entry count of one event is otherwise unbounded.
  */
 constexpr size_t QueuedEventCharge(size_t payload_bytes, size_t bookkeeping_bytes) {
   return payload_bytes + bookkeeping_bytes;
@@ -366,15 +367,25 @@ inline size_t RowDataCharge(const RowData& row) {
  *     database and table names, the binlog filename -- is charged to every
  *     entry that references it, so the total charge is an upper bound on
  *     resident bytes rather than an exact count.
- *   - The column metadata behind @ref ChangeEvent::table_metadata is not
- *     charged. One instance is shared by every event for that table id and its
- *     residency is bounded by the table-map registry's own entry cap, not by
- *     how many events are queued.
+ *   - The TableMetadata behind @ref ChangeEvent::table_metadata is charged to
+ *     every entry that pins it for the same reason. Charging it is what keeps
+ *     the bound true after the table-map registry evicts or replaces the
+ *     instance while queued events still hold it.
  */
 inline size_t ChangeEventCharge(const ChangeEvent& event) {
+  size_t metadata_bytes = 0;
+  if (event.table_metadata) {
+    const TableMetadata& metadata = *event.table_metadata;
+    metadata_bytes = sizeof(TableMetadata) + metadata.database_name.size() +
+                     metadata.table_name.size() + metadata.columns.size() * sizeof(ColumnMetadata);
+    for (const ColumnMetadata& column : metadata.columns) {
+      metadata_bytes += column.name.size();
+    }
+  }
   return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
                            event.database.size() + event.table.size() +
-                               event.position.BinlogFile().size() + event.SourceSql().size());
+                               event.position.BinlogFile().size() + event.SourceSql().size() +
+                               metadata_bytes);
 }
 
 }  // namespace mes

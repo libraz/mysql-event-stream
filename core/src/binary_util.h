@@ -144,33 +144,30 @@ inline void AppendPaddedInt(std::string& out, int value, int width) {
 /**
  * @brief Read a MySQL packed integer (length-encoded integer)
  *
- * Format:
+ * The sole decoder for the format, shared by binlog bodies and the text
+ * protocol:
  * - < 251: 1 byte value
- * - 251: NULL marker (returns 0)
  * - 252: next 2 bytes (little-endian)
  * - 253: next 3 bytes (little-endian)
  * - 254: next 8 bytes (little-endian)
  *
- * Reporting 0 for the NULL marker is only correct where NULL is a legal value
- * of the field being read, such as a result-set row value. Binlog structures
- * carry no nullable length, count or index field, so those parsers must read
- * through @ref ReadBinlogLength instead of accepting the substituted 0.
+ * An empty buffer, a truncated field, the NULL marker 0xFB and the undefined
+ * prefix 0xFF are all failures. A caller that accepts NULL (a result-set row
+ * value) inspects the raw 0xFB byte before calling.
  *
  * @param data Pointer to the packed integer data
  * @param len Available bytes in data buffer
- * @param bytes_consumed Set to the number of bytes consumed:
- *   - 0: error (insufficient data)
- *   - 1: NULL marker (value 0xFB, returned value is 0)
- *   - 1-9: valid integer decoded
- *   Callers MUST check bytes_consumed to distinguish error (0) from NULL (1).
- * @return The decoded integer value (0 on error or NULL, check bytes_consumed)
+ * @param value Receives the decoded integer on success; untouched on failure
+ * @param bytes_consumed Receives 1-9 on success; 0 on failure
+ * @return true when a value was decoded
  */
-[[nodiscard]] uint64_t ReadPackedInt(const uint8_t* data, size_t len, size_t& bytes_consumed);
+[[nodiscard]] bool ReadLenEncInt(const uint8_t* data, size_t len, uint64_t* value,
+                                 size_t* bytes_consumed);
 
 /**
  * @brief Read a length, count or index field from binlog wire bytes
  *
- * The sole decoder for packed-integer length fields in binlog event bodies:
+ * The entry point for packed-integer length fields in binlog event bodies:
  * TABLE_MAP's column_count and metadata_length, its optional-metadata field
  * lengths, the column names and charset indices inside them, and a
  * ROWS_EVENT's column_count.

@@ -399,11 +399,14 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
     if (rc != MES_OK) return rc;
   }
 
-  // A file/position start carries no GTID, but the tracker still has to be
-  // bound to this flavor so the first observed transaction yields a valid
-  // checkpoint. current_gtid_ stays empty until then, and an empty checkpoint
-  // means "none established yet" -- never "the empty GTID set".
-  if (!gtid_tracker_.Reset(state->gtid_set, server_flavor_)) {
+  // A file/position start carries no GTID set, and the GTIDs observed from the
+  // offset are not the executed set on their own, so the tracker withholds
+  // every checkpoint until a PREVIOUS_GTIDS/GTID_LIST event supplies the
+  // baseline. Until then the checkpoint stays empty, which means "none
+  // established yet" -- never "the empty GTID set".
+  if (state->from_file_position) {
+    gtid_tracker_.ResetAwaitingBaseline(server_flavor_);
+  } else if (!gtid_tracker_.Reset(state->gtid_set, server_flavor_)) {
     SetLastError(std::string("Invalid ") + GetServerFlavorName(server_flavor_) +
                  " GTID checkpoint set");
     return MES_ERR_INVALID_ARG;
@@ -411,10 +414,7 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   // Publishing the resolved set cannot move the checkpoint backwards: it is
   // either the value current_gtid_ already held (the resume above) or the first
   // position this instance has ever established.
-  {
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
-    current_gtid_ = state->gtid_set;
-  }
+  PublishCheckpoint(state->gtid_set);
   return MES_OK;
 }
 
@@ -739,15 +739,23 @@ void BinlogClient::ReaderLoop() {
     // Verify CRC32 checksum for data integrity.
     // MySQL appends a 4-byte CRC32 to every event when @source_binlog_checksum='CRC32'.
     // MariaDB may have binlog_checksum=NONE, in which case we skip verification.
-    if (event_has_checksum && event_pkt.size >= kEventHeaderSize + kChecksumSize) {
-      const size_t data_length = event_pkt.size - kChecksumSize;
-      uint32_t computed_crc = ComputeCRC32(event_pkt.data, data_length);
-      uint32_t stored_crc = binary::ReadU32Le(event_pkt.data + data_length);
-      if (computed_crc != stored_crc) {
+    // An event queued as checksummed is treated as verified downstream, so a
+    // frame too short to hold the trailer, or whose header length disagrees
+    // with the packet, fails here the same way a wrong trailer does.
+    if (event_has_checksum) {
+      const bool framed = has_wire_header && event_pkt.size >= kEventHeaderSize + kChecksumSize;
+      uint32_t computed_crc = 0;
+      uint32_t stored_crc = 0;
+      if (framed) {
+        const size_t data_length = event_pkt.size - kChecksumSize;
+        computed_crc = ComputeCRC32(event_pkt.data, data_length);
+        stored_crc = binary::ReadU32Le(event_pkt.data + data_length);
+      }
+      if (!framed || computed_crc != stored_crc) {
         crc_errors_.fetch_add(1, std::memory_order_relaxed);
         StructuredLog()
             .Event("binlog_error")
-            .Field("type", "crc32_checksum_mismatch")
+            .Field("type", framed ? "crc32_checksum_mismatch" : "crc32_checksum_frame_malformed")
             .Field("computed_crc", static_cast<uint64_t>(computed_crc))
             .Field("stored_crc", static_cast<uint64_t>(stored_crc))
             .Field("event_length", static_cast<uint64_t>(event_pkt.size))
@@ -759,7 +767,8 @@ void BinlogClient::ReaderLoop() {
         retire_transport();
         QueuedEvent crc_err;
         crc_err.error = MES_ERR_CHECKSUM;
-        crc_err.error_message = "CRC32 checksum mismatch";
+        crc_err.error_message = framed ? "CRC32 checksum mismatch"
+                                       : "Binlog event frame cannot carry its CRC32 checksum";
         if (!event_queue_->Push(std::move(crc_err))) {
           StructuredLog()
               .Event("binlog_error")
@@ -814,14 +823,30 @@ void BinlogClient::ReaderLoop() {
   }
 }
 
-void BinlogClient::SetMaxEventSize(uint32_t max_event_size) {
+mes_error_t BinlogClient::SetMaxEventSize(uint32_t max_event_size) {
+  // The reader reads the limit on every fetch. Stop() holds stop_mutex_ until
+  // it has joined the reader, so a stream it is tearing down is not raced.
+  std::lock_guard<std::mutex> lock(stop_mutex_);
+  if (streaming_.load(std::memory_order_acquire)) {
+    SetLastError("max_event_size cannot change while the client is streaming");
+    return MES_ERR_INVALID_ARG;
+  }
   max_event_size_ = NormalizeMaxEventSize(max_event_size);
+  return MES_OK;
 }
 
 uint32_t BinlogClient::MaxEventSize() const { return max_event_size_; }
 
-void BinlogClient::SetMaxQueueBytes(size_t max_queue_bytes) {
+mes_error_t BinlogClient::SetMaxQueueBytes(size_t max_queue_bytes) {
+  // The live queue keeps the budget it was built with, so a new value could
+  // only be reported, never enforced, until the next start.
+  std::lock_guard<std::mutex> lock(stop_mutex_);
+  if (streaming_.load(std::memory_order_acquire)) {
+    SetLastError("max_queue_bytes cannot change while the client is streaming");
+    return MES_ERR_INVALID_ARG;
+  }
   max_queue_bytes_ = max_queue_bytes == 0 ? kDefaultEventQueueBytes : max_queue_bytes;
+  return MES_OK;
 }
 
 size_t BinlogClient::MaxQueueBytes() const { return max_queue_bytes_; }
@@ -1053,14 +1078,17 @@ const char* BinlogClient::GetCurrentGtid() const {
 void BinlogClient::PromoteDeliveredCheckpoint() {
   for (auto& event : batch_events_) {
     if (event.checkpoint_gtid.empty()) continue;
-    std::lock_guard<std::mutex> lock(gtid_mutex_);
-    current_gtid_ = std::move(event.checkpoint_gtid);
+    PublishCheckpoint(std::move(event.checkpoint_gtid));
     event.checkpoint_gtid.clear();
   }
   if (current_event_.checkpoint_gtid.empty()) return;
-  std::lock_guard<std::mutex> lock(gtid_mutex_);
-  current_gtid_ = std::move(current_event_.checkpoint_gtid);
+  PublishCheckpoint(std::move(current_event_.checkpoint_gtid));
   current_event_.checkpoint_gtid.clear();
+}
+
+void BinlogClient::PublishCheckpoint(std::string checkpoint) {
+  std::lock_guard<std::mutex> lock(gtid_mutex_);
+  current_gtid_ = std::move(checkpoint);
 }
 
 void BinlogClient::ResetDeliveredEvents() {

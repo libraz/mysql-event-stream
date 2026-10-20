@@ -115,20 +115,18 @@ constexpr bool PacketPayloadAppendFits(size_t current_size, size_t append_size,
 /**
  * @brief Read a MySQL length-encoded integer from a buffer
  *
- * Encoding:
- * - < 0xFB (251): value is the byte itself (1 byte)
- * - 0xFB: NULL marker (returns 0)
- * - 0xFC: next 2 bytes LE
- * - 0xFD: next 3 bytes LE
- * - 0xFE: next 8 bytes LE
- * - 0xFF: error/undefined (returns 0)
+ * Positional adapter over binary::ReadLenEncInt. An empty remainder, a
+ * truncated field, the 0xFB NULL marker and the 0xFF prefix are failures; a
+ * caller that accepts NULL checks for 0xFB before calling.
  *
  * @param data  Pointer to the buffer
  * @param len   Available bytes in the buffer
- * @param pos   Current position; advanced past the consumed bytes
- * @return Decoded value, or 0 on error/NULL
+ * @param pos   Current position; advanced past the consumed bytes on success,
+ *              unchanged on failure
+ * @param value Receives the decoded value on success
+ * @return true when a value was decoded
  */
-uint64_t ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos);
+bool ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos, uint64_t* value);
 
 /**
  * @brief Write a MySQL length-encoded integer to a buffer

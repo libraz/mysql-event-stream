@@ -194,17 +194,16 @@ TEST(E2EBuffer, EventsBufferedDuringConsumerSleep) {
     auto r = mes_client_poll(client);
     if (r.error != MES_OK) break;
     if (r.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, r.checksum_enabled);
-    mes_feed(engine, r.data, r.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      if (std::strcmp(event->table, "items") == 0) {
-        item_count++;
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        if (std::strcmp(event->table, "items") == 0) {
+          item_count++;
+        }
       }
-    }
+    };
+    ASSERT_TRUE(FeedAll(engine, r, drain));
+    drain();
     if (item_count >= 5) break;
   }
 
@@ -336,15 +335,14 @@ TEST(E2EBuffer, QueueSizeConfigurable) {
     auto result = mes_client_poll(client);
     if (result.error != MES_OK) break;
     if (result.is_heartbeat || result.data == nullptr) continue;
-
-    size_t consumed = 0;
-    mes_set_checksum_enabled(engine, result.checksum_enabled);
-    mes_feed(engine, result.data, result.size, &consumed);
-
-    const mes_event_t* event = nullptr;
-    while (mes_next_event(engine, &event) == MES_OK) {
-      events_received++;
-    }
+    const auto drain = [&] {
+      const mes_event_t* event = nullptr;
+      while (mes_next_event(engine, &event) == MES_OK) {
+        events_received++;
+      }
+    };
+    ASSERT_TRUE(FeedAll(engine, result, drain));
+    drain();
     if (events_received >= 10) break;
   }
 

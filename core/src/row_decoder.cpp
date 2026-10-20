@@ -158,6 +158,10 @@ bool DecodeOneRow(const uint8_t*& ptr, size_t& remaining, const TableMetadata& m
   ptr += null_bitmap_bytes;
   remaining -= null_bitmap_bytes;
 
+  // The column array is resident for the life of the queued event, and a NULL
+  // costs one wire bit, so it must be charged before it is allocated.
+  if (column_count > budget.Remaining() / sizeof(ColumnValue)) return false;
+  budget.Charge(column_count * sizeof(ColumnValue));
   row->columns.resize(column_count);
   size_t null_bit_index = 0;
   const size_t meta_col_count = metadata.columns.size();
@@ -925,6 +929,7 @@ static bool DecodeSimpleRows(const uint8_t* data, size_t len, const TableMetadat
       return false;
     }
     if (ctx.remaining >= remaining_before) return false;
+    if (!event_budget.Charge(sizeof(ChangeEvent))) return false;
     rows->push_back(std::move(row));
   }
   return true;
@@ -965,6 +970,7 @@ bool DecodeUpdateRows(const uint8_t* data, size_t len, const TableMetadata& meta
       return false;
     }
     if (ctx.remaining >= remaining_before) return false;
+    if (!event_budget.Charge(sizeof(ChangeEvent))) return false;
     pairs->push_back(std::move(pair));
   }
   return true;

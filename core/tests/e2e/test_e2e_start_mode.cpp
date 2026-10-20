@@ -18,10 +18,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <string>
 #include <thread>
 
+#include "client/gtid_set.h"
 #include "mes.h"
 #include "test_e2e_helpers.h"
 
@@ -122,7 +125,7 @@ TEST(E2EStartMode, EveryStartModeEstablishesChecksumAndCheckpointState) {
   }
 }
 
-TEST(E2EStartMode, FilePositionStartPublishesACheckpointAfterTheFirstCommit) {
+TEST(E2EStartMode, FilePositionStartWithholdsTheCheckpointUntilThePreviousGtidsOfALaterFile) {
   const BinlogCoordinates coords = GetCurrentBinlogCoordinates();
   ASSERT_FALSE(coords.file.empty());
   ASSERT_GE(coords.position, 4u);
@@ -157,16 +160,58 @@ TEST(E2EStartMode, FilePositionStartPublishesACheckpointAfterTheFirstCommit) {
       ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('position_checkpoint', 7)"),
       MES_OK);
 
-  // The GTID tracker is seeded for this flavour even without a start GTID, so
-  // the first committed transaction turns into a resumable checkpoint.
-  std::string checkpoint;
-  for (int i = 0; i < 20 && checkpoint.empty(); i++) {
+  // A mid-file offset start has seen no PREVIOUS_GTIDS / GTID_LIST of its own
+  // file, so a commit alone cannot make a complete checkpoint.
+  constexpr uint8_t kXidEvent = 16;
+  constexpr uint8_t kPreviousGtidsEvent = 35;
+  constexpr uint8_t kMariaDbGtidListEvent = 163;
+  const auto event_type = [](const mes_poll_result_t& result) {
+    return result.data != nullptr && result.size > 4 ? result.data[4] : uint8_t{0};
+  };
+
+  bool saw_commit = false;
+  for (int i = 0; i < 40 && !saw_commit; i++) {
     const mes_poll_result_t result = mes_client_poll(fixture.client);
-    if (result.error != MES_OK) break;
-    checkpoint = mes_client_current_gtid(fixture.client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(fixture.client);
+    ASSERT_STREQ(mes_client_current_gtid(fixture.client), "");
+    saw_commit = event_type(result) == kXidEvent;
   }
-  EXPECT_FALSE(checkpoint.empty())
-      << "no checkpoint published after a commit on a file/position start";
+  ASSERT_TRUE(saw_commit) << "the first commit never arrived";
+
+  // A new file opens with the full executed set, which is what completes the checkpoint.
+  ASSERT_EQ(ExecuteDML("FLUSH BINARY LOGS"), MES_OK);
+  ASSERT_EQ(
+      ExecuteDML("INSERT INTO mes_test.items (name, value) VALUES ('position_checkpoint', 8)"),
+      MES_OK);
+  const std::string executed = GetCurrentGtid();
+  ASSERT_FALSE(executed.empty());
+
+  // The server prints a single-transaction interval as N where the library
+  // prints N-N, so MySQL sets are compared parsed; MariaDB positions are not
+  // sets and compare as text without whitespace.
+  const auto canonical = [](std::string text) {
+    mes::GtidSet set;
+    if (mes::GtidSet::Parse(text, &set) == MES_OK) return set.ToString();
+    text.erase(std::remove_if(text.begin(), text.end(),
+                              [](unsigned char c) { return std::isspace(c) != 0; }),
+               text.end());
+    return text;
+  };
+  bool passed_gtid_set_event = false;
+  std::string checkpoint;
+  for (int i = 0; i < 80 && canonical(checkpoint) != canonical(executed); i++) {
+    const mes_poll_result_t result = mes_client_poll(fixture.client);
+    ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(fixture.client);
+    checkpoint = mes_client_current_gtid(fixture.client);
+    if (!passed_gtid_set_event) {
+      EXPECT_EQ(checkpoint, "") << "checkpoint published before the file's executed set";
+    }
+    const uint8_t type = event_type(result);
+    passed_gtid_set_event =
+        passed_gtid_set_event || type == kPreviousGtidsEvent || type == kMariaDbGtidListEvent;
+  }
+  EXPECT_TRUE(passed_gtid_set_event);
+  EXPECT_EQ(canonical(checkpoint), canonical(executed));
 }
 
 }  // namespace
