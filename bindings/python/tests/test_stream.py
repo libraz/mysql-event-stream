@@ -22,6 +22,7 @@ from mysql_event_stream.stream import CdcStream
 from mysql_event_stream.types import (
     MesConnectionError,
     MesError,
+    MesErrorCode,
     PollResult,
     exception_for_rc,
 )
@@ -160,7 +161,7 @@ class TestCheckpointRetention:
     ) -> None:
         client = MagicMock()
         client.current_gtid = "uuid:1-42"
-        client.poll.return_value = PollResult(b"\x01", False, True)
+        client.poll_batch.return_value = [PollResult(b"\x01", False, True)]
         mock_client_cls.return_value = client
         engine = MagicMock()
         event = MagicMock()
@@ -220,7 +221,7 @@ class TestCheckpointRetention:
         client = MagicMock()
         gtid_reads = PropertyMock(return_value="uuid:1-7")
         type(client).current_gtid = gtid_reads
-        client.poll.return_value = PollResult(b"\x01", False, True)
+        client.poll_batch.return_value = [PollResult(b"\x01", False, True)]
         mock_client_cls.return_value = client
         engine = MagicMock()
         event = MagicMock()
@@ -244,7 +245,7 @@ class TestCheckpointRetention:
         assert (
             reads_while_iterating <= contract["checkpointRetention"]["maxNativeReadsPerPollBatch"]
         )
-        assert client.poll.call_count == 1
+        assert client.poll_batch.call_count == 1
         assert stream.current_gtid == "uuid:1-7"
 
 
@@ -279,7 +280,7 @@ class TestStreamConfigure:
             ssl_cert="cert.pem",
             ssl_key="key.pem",
             max_queue_size=1,
-            max_queue_bytes=1,
+            max_queue_bytes=2 * 1024 * 1024,
             max_event_size=1,
             include_databases=["db"],
             include_tables=["db.t"],
@@ -303,6 +304,36 @@ class TestStreamConfigure:
         with pytest.raises(TypeError, match="include_tables"):
             stream.configure(include_tables=("orders",))
         assert stream._exclude_tables == ["kept"]
+
+    @pytest.mark.asyncio
+    async def test_configure_is_refused_while_the_first_connect_is_retried(self) -> None:
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=3)
+        in_backoff = asyncio.Event()
+        release = asyncio.Event()
+
+        async def backoff() -> None:
+            in_backoff.set()
+            await release.wait()
+
+        with (
+            patch.object(
+                CdcStream, "_start", new=AsyncMock(side_effect=ConnectionError("refused"))
+            ),
+            patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock(side_effect=backoff)),
+        ):
+            iteration = asyncio.create_task(stream.__anext__())
+            await asyncio.wait_for(in_backoff.wait(), 5)
+
+            # Iteration has begun even though no connection has started yet.
+            with pytest.raises(RuntimeError, match="Cannot configure") as refused:
+                stream.configure(host="elsewhere")
+            assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+            assert stream._host == "127.0.0.1"
+
+            await stream.close()
+            release.set()
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iteration, 5)
 
     def test_string_list_options_accept_none_as_unset(self) -> None:
         stream = CdcStream(include_databases=["db"])
@@ -480,6 +511,8 @@ class TestReconnectAttempts:
         stream._client = previous_client
         stream._engine = MagicMock()
         replacement_client = MagicMock()
+        # The successor has not committed anything yet.
+        replacement_client.current_gtid = ""
 
         with (
             patch.object(stream, "_wait_for_backoff", new=AsyncMock()),
@@ -522,6 +555,18 @@ class TestReconnectAttempts:
         assert kwargs["start_gtid"] == "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-2"
 
     @pytest.mark.asyncio
+    async def test_a_later_empty_checkpoint_never_replaces_a_published_one(self) -> None:
+        # The successor dropped before its first commit: "" means it established
+        # no checkpoint, not that the stream should restart from the empty set.
+        published = "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5"
+        stream = CdcStream()
+        await self._reconnect_with_checkpoint(stream, published)
+        client_cls = await self._reconnect_with_checkpoint(stream, "")
+
+        assert client_cls.call_args.kwargs["start_gtid"] == published
+        assert stream.current_gtid == published
+
+    @pytest.mark.asyncio
     async def test_reconnect_prefers_a_published_checkpoint_over_the_anchor(self) -> None:
         stream = CdcStream(start_binlog_file="binlog.000001", start_binlog_position=4)
         client_cls = await self._reconnect_with_checkpoint(
@@ -540,7 +585,7 @@ class TestReconnectAttempts:
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         client = MagicMock()
-        client.poll.side_effect = RuntimeError("immediate drop")
+        client.poll_batch.side_effect = RuntimeError("immediate drop")
         mock_client_cls.side_effect = [ConnectionError("connect refused"), client]
         engine = MagicMock()
         engine.next_event.return_value = None
@@ -700,8 +745,7 @@ class TestReconnectAttempts:
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"bad event", False, True)
-        client.poll.side_effect = RuntimeError("immediate drop")
+        client.poll_batch.side_effect = RuntimeError("immediate drop")
         mock_client_cls.side_effect = [
             ConnectionError("connect refused 1"),
             ConnectionError("connect refused 2"),
@@ -721,7 +765,7 @@ class TestReconnectAttempts:
         assert mock_client_cls.call_count == 3
         client.connect.assert_called_once()
         client.start.assert_called_once()
-        client.poll.assert_called_once()
+        client.poll_batch.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_reconnect_connect_failures_remain_inside_retry_loop(self) -> None:
@@ -762,7 +806,8 @@ class TestReconnectAttempts:
         await asyncio.sleep(0)
         await stream.close()
 
-        assert backoff.done()
+        # The full backoff at this attempt is several seconds.
+        await asyncio.wait_for(backoff, 1)
         assert stream._backoff_task is None
 
 
@@ -832,9 +877,11 @@ class TestCloseDuringConnect:
     async def test_close_during_a_reconnect_connect(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock, _: MagicMock
     ) -> None:
-        dropped = MagicMock(spec=["connect", "start", "poll", "stop", "close", "current_gtid"])
+        dropped = MagicMock(
+            spec=["connect", "start", "poll_batch", "stop", "close", "current_gtid"]
+        )
         dropped.current_gtid = ""
-        dropped.poll.side_effect = MesConnectionError("dropped", MES_ERR_DISCONNECTED)
+        dropped.poll_batch.side_effect = MesConnectionError("dropped", MES_ERR_DISCONNECTED)
         successor, entered = _connect_blocked_until_stopped()
         mock_client_cls.side_effect = [dropped, successor]
         stream = CdcStream(host="127.0.0.1")
@@ -895,9 +942,9 @@ class TestRetryClassification:
     async def test_permanent_configuration_error_surfaces_on_the_first_connect(
         self, mock_client_cls: MagicMock, mock_engine_cls: MagicMock
     ) -> None:
-        # max_queue_bytes below max_event_size is rejected by the native
-        # connect with MES_ERR_INVALID_ARG. That is a configuration mistake, so
-        # it must not burn the reconnect budget before reaching the caller.
+        # A configuration the native connect refuses with MES_ERR_INVALID_ARG
+        # is a configuration mistake, so it must not burn the reconnect budget
+        # before reaching the caller.
         error = MesConnectionError(
             "max_queue_bytes must be greater than max_event_size", MES_ERR_INVALID_ARG
         )
@@ -906,7 +953,7 @@ class TestRetryClassification:
         mock_client_cls.return_value = client
         mock_engine_cls.return_value = MagicMock()
 
-        stream = CdcStream(host="127.0.0.1", max_queue_bytes=1024)
+        stream = CdcStream(host="127.0.0.1")
         with (
             patch.object(CdcStream, "_wait_for_backoff", new=AsyncMock()) as backoff,
             pytest.raises(ConnectionError, match="max_queue_bytes"),
@@ -929,7 +976,7 @@ class TestEngineFailures:
         self, error_code: int
     ) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"abcdef", False, True)
+        client.poll_batch.return_value = [PollResult(b"abcdef", False, True)]
         engine = MagicMock()
         engine.next_event.return_value = None
         permanent_error = exception_for_rc(error_code, "permanent error")
@@ -958,8 +1005,8 @@ class TestEngineFailures:
 
     @pytest.mark.asyncio
     async def test_feed_failure_surfaces_after_the_events_decoded_before_it(self) -> None:
-        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
-        client.poll.return_value = [
+        client = MagicMock(spec=["poll_batch", "stop", "close", "current_gtid"])
+        client.poll_batch.return_value = [
             PollResult(b"good", False, False),
             PollResult(b"more-bad", False, True),
         ]
@@ -1000,13 +1047,13 @@ class TestEngineFailures:
         # The engine is reset before the events queued ahead of the failure are
         # drained, the only call the feed contract allows after a failure.
         assert engine.reset.call_count == 1
-        assert client.poll.call_count == 1
+        assert client.poll_batch.call_count == 1
         assert stream._closed
 
     @pytest.mark.asyncio
     async def test_feed_retains_unconsumed_packet_suffix(self) -> None:
         client = MagicMock()
-        client.poll.return_value = PollResult(b"abcdef", False, True)
+        client.poll_batch.return_value = [PollResult(b"abcdef", False, True)]
         engine = MagicMock()
         decoded = MagicMock()
         engine.next_event.side_effect = [decoded, None]
@@ -1031,15 +1078,15 @@ class TestEngineFailures:
         # to be fed and their events delivered before the next poll runs.
         stream = CdcStream(host="127.0.0.1")
         calls: list[str] = []
-        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
+        client = MagicMock(spec=["poll_batch", "stop", "close", "current_gtid"])
 
-        def poll() -> PollResult:
+        def poll_batch() -> list[PollResult]:
             assert not stream._pending
             assert not stream._ready_events
             calls.append("poll")
-            return PollResult(b"abcdef", False, True)
+            return [PollResult(b"abcdef", False, True)]
 
-        client.poll.side_effect = poll
+        client.poll_batch.side_effect = poll_batch
         engine = MagicMock()
         first, second, third = MagicMock(), MagicMock(), MagicMock()
         engine.next_event.side_effect = [first, None, second, None, third, None]
@@ -1067,17 +1114,17 @@ class TestEngineFailures:
         # unfed would resume past it and discard them with the connection.
         promoted = ""
         polls = 0
-        client = MagicMock(spec=["poll", "stop", "close", "current_gtid"])
+        client = MagicMock(spec=["poll_batch", "stop", "close", "current_gtid"])
 
-        def poll() -> PollResult:
+        def poll_batch() -> list[PollResult]:
             nonlocal promoted, polls
             polls += 1
             if polls == 1:
-                return PollResult(b"tx1tx2", False, True)
+                return [PollResult(b"tx1tx2", False, True)]
             promoted = "uuid:1-2"
             raise MesConnectionError("dropped", MES_ERR_DISCONNECTED)
 
-        client.poll.side_effect = poll
+        client.poll_batch.side_effect = poll_batch
         type(client).current_gtid = PropertyMock(side_effect=lambda: promoted)
         engine = MagicMock()
         tx1, tx2 = MagicMock(), MagicMock()
@@ -1111,9 +1158,9 @@ class TestEngineFailures:
     @pytest.mark.asyncio
     async def test_feed_frames_each_result_under_the_flag_it_carried(self) -> None:
         client = MagicMock()
-        client.poll.side_effect = [
-            PollResult(b"before", False, False),
-            PollResult(b"after", False, True),
+        client.poll_batch.side_effect = [
+            [PollResult(b"before", False, False)],
+            [PollResult(b"after", False, True)],
         ]
         engine = MagicMock()
         first, second = MagicMock(), MagicMock()
@@ -1133,3 +1180,114 @@ class TestEngineFailures:
         # read with, never under the one a later event established.
         assert engine.set_checksum_enabled.call_args_list == [call(False), call(True)]
         assert engine.feed.call_args_list == [call(b"before"), call(b"after")]
+
+    @pytest.mark.asyncio
+    async def test_a_batch_is_fed_as_one_segment_per_run_of_equal_framing(self) -> None:
+        client = MagicMock(spec=["poll_batch", "stop", "close", "current_gtid"])
+        client.poll_batch.return_value = [
+            PollResult(b"a", False, False),
+            PollResult(b"b", False, False),
+            PollResult(b"c", False, True),
+            PollResult(b"d", False, True),
+            PollResult(b"e", False, False),
+        ]
+        engine = MagicMock()
+        decoded = MagicMock()
+        engine.next_event.side_effect = [decoded, None, None, None]
+        engine.feed.side_effect = len
+
+        stream = CdcStream(host="127.0.0.1")
+        stream._started = True
+        stream._client = client
+        stream._engine = engine
+
+        with patch("asyncio.to_thread", new=AsyncMock(side_effect=_run_in_test)):
+            assert await stream.__anext__() is decoded
+
+        # Results are fed in order, each under its own flag, and a run of equal
+        # flags is one segment while every change of flag starts a new one.
+        framing = [c for c in engine.mock_calls if c[0] in ("set_checksum_enabled", "feed")]
+        assert framing == [
+            call.set_checksum_enabled(False),
+            call.feed(b"ab"),
+            call.set_checksum_enabled(True),
+            call.feed(b"cd"),
+            call.set_checksum_enabled(False),
+            call.feed(b"e"),
+        ]
+        assert client.poll_batch.call_count == 1
+
+
+class TestMetadataFailureTolerance:
+    """A failed metadata enable is reported and never stops the stream."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            MesConnectionError("metadata server unreachable", MES_ERR_CONNECT),
+            MesError("metadata refused", MES_ERR_INVALID_ARG),
+        ],
+        ids=["connection", "other"],
+    )
+    @patch("mysql_event_stream.stream.backoff_delay_ms", return_value=0)
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_start_and_reconnect_report_once_per_attempt_and_carry_on(
+        self,
+        mock_client_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        _: MagicMock,
+        failure: Exception,
+    ) -> None:
+        dropped = MagicMock()
+        dropped.current_gtid = ""
+        dropped.poll_batch.side_effect = MesConnectionError("dropped", MES_ERR_DISCONNECTED)
+        healthy = MagicMock()
+        healthy.current_gtid = ""
+        healthy.poll_batch.return_value = [PollResult(b"\x01", False, True)]
+        mock_client_cls.side_effect = [dropped, healthy]
+        engine = MagicMock()
+        engine.enable_metadata.side_effect = failure
+        engine.feed.return_value = 1
+        event = MagicMock()
+        engine.next_event.side_effect = [event, None]
+        mock_engine_cls.return_value = engine
+        handler = MagicMock()
+
+        stream = CdcStream(host="127.0.0.1", on_metadata_error=handler)
+        assert await asyncio.wait_for(stream.__anext__(), 5) is event
+
+        # Once for the start and once for the reconnect.
+        assert handler.call_args_list == [call(failure), call(failure)]
+        for client in (dropped, healthy):
+            client.connect.assert_called_once()
+            client.start.assert_called_once()
+        await stream.close()
+
+    @pytest.mark.asyncio
+    @patch("mysql_event_stream.stream.CdcEngine")
+    @patch("mysql_event_stream.stream.BinlogClient")
+    async def test_without_a_handler_the_failure_is_silent(
+        self,
+        mock_client_cls: MagicMock,
+        mock_engine_cls: MagicMock,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        client = MagicMock()
+        client.current_gtid = ""
+        client.poll_batch.return_value = [PollResult(b"\x01", False, True)]
+        mock_client_cls.return_value = client
+        engine = MagicMock()
+        engine.enable_metadata.side_effect = MesConnectionError("unreachable", MES_ERR_CONNECT)
+        engine.feed.return_value = 1
+        event = MagicMock()
+        engine.next_event.side_effect = [event, None]
+        mock_engine_cls.return_value = engine
+
+        stream = CdcStream(host="127.0.0.1")
+        assert await asyncio.wait_for(stream.__anext__(), 5) is event
+
+        client.connect.assert_called_once()
+        assert capsys.readouterr() == ("", "")
+        await stream.close()

@@ -25,11 +25,13 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
-from ._options import validate_option, validate_options
+from ._options import refuse_unknown_options, validate_option, validate_options
 from .types import (
+    CONNECTION_ERROR_CODES,
     BinlogPosition,
     ChangeEvent,
     EventType,
+    MesConnectionError,
     exception_for_rc,
     mes_validation_error,
 )
@@ -286,16 +288,12 @@ class CdcEngine:
 
         Raises:
             TypeError: If max_size is not an integer.
-            ValueError: If max_size is negative.
+            ValueError: If max_size is outside the ``max_queue_size`` range
+                every entry point accepts.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
-        if isinstance(max_size, bool) or not isinstance(max_size, int):
-            raise mes_validation_error(
-                TypeError(f"max_size must be an integer, got {type(max_size).__name__}")
-            )
-        if max_size < 0:
-            raise mes_validation_error(ValueError(f"max_size must be non-negative, got {max_size}"))
+        validate_option("max_queue_size", max_size)
         rc = self._lib.mes_set_max_queue_size(self._handle, max_size)
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_queue_size")
@@ -319,20 +317,12 @@ class CdcEngine:
 
         Raises:
             TypeError: If max_queue_bytes is not an integer.
-            ValueError: If max_queue_bytes is negative.
+            ValueError: If max_queue_bytes is outside the range every entry
+                point accepts.
             RuntimeError: If the engine is closed or the call fails.
         """
         self._check_open()
-        if isinstance(max_queue_bytes, bool) or not isinstance(max_queue_bytes, int):
-            raise mes_validation_error(
-                TypeError(
-                    f"max_queue_bytes must be an integer, got {type(max_queue_bytes).__name__}"
-                )
-            )
-        if max_queue_bytes < 0:
-            raise mes_validation_error(
-                ValueError(f"max_queue_bytes must be non-negative, got {max_queue_bytes}")
-            )
+        validate_option("max_queue_bytes", max_queue_bytes)
         rc = self._lib.mes_set_max_queue_bytes(self._handle, max_queue_bytes)
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_set_max_queue_bytes")
@@ -556,6 +546,7 @@ class CdcEngine:
             self._lib.mes_set_exclude_tables, tables, "mes_set_exclude_tables", "exclude_tables"
         )
 
+    @refuse_unknown_options
     def enable_metadata(
         self,
         *,
@@ -594,10 +585,12 @@ class CdcEngine:
                 without TLS. MITM-sensitive; prefer verified TLS.
 
         Raises:
-            TypeError: If an option has the wrong type.
+            TypeError: If an option is unrecognized or has the wrong type.
             ValueError: If an option falls outside its accepted range.
-            RuntimeError: If the engine is closed, client API is unavailable,
-                or the metadata connection fails.
+            MesConnectionError: If the metadata connection fails with a
+                connection-range code (400-499).
+            RuntimeError: If the engine is closed, the client API is
+                unavailable, or the call fails with any other code.
         """
         self._check_open()
         # Rejected here rather than at the ctypes boundary: the shared contract
@@ -652,6 +645,10 @@ class CdcEngine:
         cfg.allow_public_key_retrieval = int(allow_public_key_retrieval)
 
         rc = self._lib.mes_engine_set_metadata_conn(self._handle, ctypes.byref(cfg))
+        if rc in CONNECTION_ERROR_CODES:
+            raise MesConnectionError(
+                f"mes_engine_set_metadata_conn failed with error code {rc}", rc
+            )
         if rc != MES_OK:
             _raise_for_rc(rc, "mes_engine_set_metadata_conn")
 

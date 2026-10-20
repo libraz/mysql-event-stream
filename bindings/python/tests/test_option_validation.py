@@ -272,7 +272,8 @@ class TestValidOptionsStillReachTheNativeLayer:
             ssl_cert="cert.pem",
             ssl_key="key.pem",
             max_queue_size=0,
-            max_queue_bytes=0,
+            # The upper bound, the only budget every max_event_size admits.
+            max_queue_bytes=9007199254740991,
             max_event_size=4294967295,
             allow_public_key_retrieval=True,
             lib_path=None,
@@ -323,7 +324,8 @@ class TestValidOptionsStillReachTheNativeLayer:
             ssl_cert="cert.pem",
             ssl_key="key.pem",
             max_queue_size=0,
-            max_queue_bytes=0,
+            # The upper bound, the only budget every max_event_size admits.
+            max_queue_bytes=9007199254740991,
             max_event_size=4294967295,
             include_databases=["db"],
             include_tables=["db.t"],
@@ -390,6 +392,35 @@ class TestRejectionHappensBeforeConnect:
             stream.configure(start_binlog_file="", start_binlog_position=4)
         assert stream._start_binlog_file is None
 
+    def test_a_queue_budget_too_small_for_one_event_is_refused_up_front(self) -> None:
+        """The native client refuses this pair only once streaming starts."""
+        # Above what the default 48 MiB budget admits once the per-event
+        # overhead is added; 0 resolves to the 1 GiB cap.
+        oversized = 48 * 1024 * 1024
+        with patch("mysql_event_stream.client.get_library") as get_library:
+            with pytest.raises(ValueError, match="max_queue_bytes resolves to"):
+                BinlogClient(max_event_size=0)
+            with pytest.raises(ValueError, match="max_queue_bytes resolves to"):
+                BinlogClient(max_event_size=oversized)
+            get_library.assert_not_called()
+        for event_size in (0, oversized):
+            with pytest.raises(ValueError, match="max_queue_bytes resolves to") as refused:
+                CdcStream(max_event_size=event_size)
+            assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+
+        # The smallest budget the 1 GiB cap admits: the event, its packet
+        # prefix byte, and the one-MiB checkpoint reserve.
+        CdcStream(max_event_size=0, max_queue_bytes=1024**3 + 1 + 1024**2)
+        with pytest.raises(ValueError, match="max_queue_bytes resolves to"):
+            CdcStream(max_event_size=0, max_queue_bytes=1024**3 + 1024**2)
+
+        stream = CdcStream()
+        with pytest.raises(ValueError, match="max_queue_bytes resolves to"):
+            stream.configure(max_event_size=oversized)
+        assert stream._max_event_size == 32 * 1024 * 1024
+        stream.configure(max_event_size=oversized, max_queue_bytes=oversized + 1 + 1024**2)
+        assert stream._max_event_size == oversized
+
     def test_zero_server_id_keeps_its_dedicated_message(self) -> None:
         with pytest.raises(ValueError, match="server_id must be non-zero"):
             BinlogClient(server_id=0)
@@ -412,6 +443,14 @@ _OTHER_REFUSALS: dict[str, Callable[[], object]] = {
     "log_level_type": lambda: set_log_callback(None, "WARN"),  # type: ignore[arg-type]
     "log_level_range": lambda: set_log_callback(None, 99),  # type: ignore[arg-type]
     "engine_queue_size": lambda: CdcEngine().set_max_queue_size(-1),
+    "engine_queue_size_ceiling": lambda: CdcEngine().set_max_queue_size(2**64 + 5),
+    "engine_queue_bytes_ceiling": lambda: CdcEngine().set_max_queue_bytes(2**53),
+    "stream_unknown_keyword": lambda: CdcStream(hots="x"),  # type: ignore[call-arg]
+    "client_unknown_keyword": lambda: BinlogClient(include_tables=["db.t"]),  # type: ignore[call-arg]
+    "metadata_unknown_keyword": lambda: CdcEngine().enable_metadata(start_gtid=""),  # type: ignore[call-arg]
+    "stream_queue_admission": lambda: CdcStream(max_event_size=0),
+    "client_queue_admission": lambda: BinlogClient(max_event_size=0),
+    "configure_queue_admission": lambda: CdcStream().configure(max_event_size=48 * 1024 * 1024),
     "engine_queue_bytes_type": lambda: CdcEngine().set_max_queue_bytes("1"),  # type: ignore[arg-type]
     "engine_event_size": lambda: CdcEngine().set_max_event_size(1 << 32),
     "engine_checksum_flag": lambda: CdcEngine().set_checksum_enabled(1),  # type: ignore[arg-type]
@@ -425,5 +464,15 @@ class TestEveryRefusalCarriesTheInvalidArgumentCode:
     @pytest.mark.parametrize("refusal", list(_OTHER_REFUSALS), ids=str)
     def test_refusal_carries_the_invalid_argument_code(self, refusal: str) -> None:
         with pytest.raises((TypeError, ValueError)) as refused:
+            _OTHER_REFUSALS[refusal]()
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+
+    @pytest.mark.parametrize(
+        "refusal",
+        ["stream_unknown_keyword", "client_unknown_keyword", "metadata_unknown_keyword"],
+    )
+    def test_an_undeclared_keyword_is_refused_as_an_unknown_key(self, refusal: str) -> None:
+        # A key another entry point accepts is still unknown to this one.
+        with pytest.raises(TypeError, match="Unknown config key") as refused:
             _OTHER_REFUSALS[refusal]()
         assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG

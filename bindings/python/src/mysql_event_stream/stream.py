@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import random
 from collections import deque
 from collections.abc import Callable
@@ -15,10 +14,16 @@ from ._contract import (
     NON_RETRYABLE_ERROR_CODES,
     backoff_delay_ms,
 )
-from ._options import _STRING_LIST_OPTIONS, validate_options
+from ._options import _STRING_LIST_OPTIONS, refuse_unknown_options, validate_options
 from .client import BinlogClient
 from .engine import CdcEngine
-from .types import ChangeEvent, PollResult
+from .types import (
+    ChangeEvent,
+    MesConnectionError,
+    MesErrorCode,
+    exception_for_rc,
+    mes_validation_error,
+)
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -68,11 +73,12 @@ class CdcStream:
     Without the context manager, call :meth:`aclose` (or :meth:`close`)
     explicitly once iteration is done.
 
-    One stream serves one consumer at a time: the native engine and client have
-    a single owner, so entering a second iteration while another is in flight
-    raises instead of splitting the event stream between the two.
+    One stream supports one iteration: the native engine and client have a
+    single owner, so a second ``async for`` -- concurrent with the first or
+    after it has ended -- raises instead of splitting or replaying the stream.
     """
 
+    @refuse_unknown_options
     def __init__(
         self,
         *,
@@ -99,7 +105,7 @@ class CdcStream:
         allow_public_key_retrieval: bool = False,
         lib_path: str | None = None,
         max_reconnect_attempts: int = 10,
-        on_metadata_error: Callable[[RuntimeError], None] | None = None,
+        on_metadata_error: Callable[[Exception], None] | None = None,
     ) -> None:
         """Create a new CdcStream.
 
@@ -145,15 +151,18 @@ class CdcStream:
             lib_path: Explicit path to libmes shared library.
             max_reconnect_attempts: Maximum reconnection attempts
                 (default 10, 0 = disabled).
-            on_metadata_error: Called when the optional metadata connection
+            on_metadata_error: Called with the failure (a ``MesError`` or a
+                ``MesConnectionError``) when the optional metadata connection
                 cannot be enabled. Column names then fall back to indices.
                 Without it the failure is silent, matching the library-wide rule
                 that nothing is written to stderr on the caller's behalf.
 
         Raises:
-            TypeError: If an option has the wrong type.
-            ValueError: If an option falls outside its accepted range, or if
-                the configuration names two start modes that exclude each other.
+            TypeError: If an option is unrecognized or has the wrong type.
+            ValueError: If an option falls outside its accepted range, if the
+                configuration names two start modes that exclude each other,
+                or if ``max_queue_bytes`` cannot admit one ``max_event_size``
+                event.
         """
         self._host = host
         self._port = port
@@ -207,6 +216,15 @@ class CdcStream:
         # True while __anext__ is running. The handles have a single owner, so a
         # second concurrent consumer is refused rather than served.
         self._iterating = False
+        # Set by the first iteration step; ends configure() and refuses a
+        # second iteration.
+        self._iteration_begun = False
+        # The start or reconnect in progress. A cancelled await abandons only
+        # the wait, so the next __anext__ resumes this task instead of
+        # repeating its handshake or charging another retry.
+        self._transition: asyncio.Task[None] | None = None
+        # close()'s release of the handles, joined by every later close().
+        self._teardown: asyncio.Task[None] | None = None
         # Events the last feed already decoded, delivered from here without any
         # further native call.
         self._ready_events: deque[ChangeEvent] = deque()
@@ -228,6 +246,13 @@ class CdcStream:
         await self.close()
 
     def __aiter__(self) -> CdcStream:
+        if self._closed:
+            return self
+        if getattr(self, "_iteration_begun", False):
+            raise mes_validation_error(
+                RuntimeError("CdcStream is already being iterated. Use a single async for loop.")
+            )
+        self._iteration_begun = True
         return self
 
     def configure(self, **kwargs: object) -> None:
@@ -265,14 +290,17 @@ class CdcStream:
                 cannot be enabled; see the constructor.
 
         Raises:
-            RuntimeError: If streaming has already started.
+            RuntimeError: If iteration has already begun, including while the
+                first connect is still being retried.
             TypeError: If a key is unrecognized or a value has the wrong type.
             ValueError: If a value falls outside its accepted range, leaves one
-                option of a required-together pair supplied alone, or names two
-                start modes that exclude each other.
+                option of a required-together pair supplied alone, names two
+                start modes that exclude each other, or leaves
+                ``max_queue_bytes`` unable to admit one ``max_event_size``
+                event.
         """
-        if self._started:
-            raise RuntimeError("Cannot configure after streaming has started")
+        if getattr(self, "_iteration_begun", False):
+            raise mes_validation_error(RuntimeError("Cannot configure after streaming has started"))
 
         # None means "unset -> []" for the string-list filter options, as it
         # does in the constructor; every other supplied value, including one
@@ -322,11 +350,20 @@ class CdcStream:
             # Shielded: cancelling the consumer must not cancel the dispatch,
             # because the worker thread would keep running regardless and the
             # slot would stop describing what is inside the handle.
-            return await asyncio.shield(dispatch)
-        finally:
-            if dispatch.done() and self._native_task is dispatch:
-                self._native_task = None
-                self._native_call = None
+            result: _T = await asyncio.shield(dispatch)
+        except Exception:
+            self._release_native_slot(dispatch)
+            raise
+        # Released only once the outcome reached this caller: a cancellation
+        # that lands after the call finished leaves it for the resumed request.
+        self._release_native_slot(dispatch)
+        return result
+
+    def _release_native_slot(self, dispatch: asyncio.Task[Any]) -> None:
+        """Empty the in-flight slot if it still holds ``dispatch``."""
+        if getattr(self, "_native_task", None) is dispatch:
+            self._native_task = None
+            self._native_call = None
 
     async def _quiesce_native_calls(self) -> None:
         """Wait until no worker thread is inside a native call on our handles.
@@ -334,7 +371,9 @@ class CdcStream:
         Every path that destroys or resets a handle runs this first. A blocking
         poll returns only once the client is told to stop, and the task that
         awaited the dispatch may already have been cancelled, so what has to
-        settle is the tracked dispatch rather than the cancellable await.
+        settle is the tracked dispatch rather than the cancellable await. A
+        cancellation of the waiting task is delivered once it has settled, so
+        nothing the caller does next can run while the worker is still inside.
         """
         dispatch = getattr(self, "_native_task", None)
         if dispatch is None:
@@ -347,12 +386,15 @@ class CdcStream:
         # settle the checkpoint over rows the consumer has not received.
         if self._client is not None and not feeding:
             self._client.stop()
-        while not dispatch.done():
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(dispatch)
-        if getattr(self, "_native_task", None) is dispatch:
-            self._native_task = None
-            self._native_call = None
+        try:
+            await _wait_uncancelled(dispatch)
+        finally:
+            if dispatch.done():
+                # Nobody awaits the outcome of a call being settled; consuming
+                # it keeps a failure the caller is discarding from being logged.
+                if not dispatch.cancelled():
+                    dispatch.exception()
+                self._release_native_slot(dispatch)
 
     def _ready_queue(self) -> deque[ChangeEvent]:
         """Return the buffer holding the events the last feed decoded."""
@@ -394,7 +436,9 @@ class CdcStream:
         """
         engine = self._engine
         if engine is None:
-            raise RuntimeError("Internal error: engine missing during feed")
+            raise exception_for_rc(
+                MesErrorCode.INTERNAL, "Internal error: engine missing during feed"
+            )
         events: list[ChangeEvent] = []
         for index, (checksum_enabled, chunk) in enumerate(segments):
             engine.set_checksum_enabled(checksum_enabled)
@@ -424,7 +468,10 @@ class CdcStream:
         # refused here -- before any native call is dispatched -- instead of
         # splitting the byte stream between two iterations.
         if getattr(self, "_iterating", False):
-            raise RuntimeError("CdcStream is already being iterated. Use a single async for loop.")
+            raise mes_validation_error(
+                RuntimeError("CdcStream is already being iterated. Use a single async for loop.")
+            )
+        self._iteration_begun = True
         self._iterating = True
         try:
             return await self._next_change_event()
@@ -442,24 +489,17 @@ class CdcStream:
             Exception: The failure that ended the stream, re-raised as it was
                 received once the retry budget is exhausted, so its ``code``
                 still identifies the native error category.
-            RuntimeError: If an internal invariant is violated.
+            MesError: If an internal invariant is violated.
         """
-        while not self._started:
-            try:
-                await self._start()
-            except Exception as err:
-                # A failure caused by close() stopping the dispatch is the
-                # shutdown the caller asked for, not one to retry or report.
-                if self._closed:
-                    raise StopAsyncIteration from err
-                await self._consume_retry(err)
-                await self._wait_for_backoff()
-                if self._closed:
-                    raise StopAsyncIteration from err
-
         while True:
             if self._closed:
                 raise StopAsyncIteration
+            if not self._started and getattr(self, "_transition", None) is None:
+                self._transition = asyncio.create_task(self._establish())
+            transition = getattr(self, "_transition", None)
+            if transition is not None:
+                await self._join_transition(transition)
+                continue
             try:
                 ready = self._ready_queue()
                 if ready:
@@ -477,14 +517,14 @@ class CdcStream:
                     self._feed_error = None
                     raise feed_error
 
-                # Explicit checks over `assert`: _start() guarantees both are
-                # set when it returns normally, but assertions vanish under
-                # `python -O` and we want a clear error if an internal
-                # invariant is ever violated (e.g. a subclass override of
-                # _start()).
+                # Explicit checks over `assert`: a completed start guarantees
+                # both are set, but assertions vanish under `python -O` and we
+                # want a clear error if an internal invariant is ever violated.
                 client = self._client
                 if client is None or self._engine is None:
-                    raise RuntimeError("Internal error: stream not properly started")
+                    raise exception_for_rc(
+                        MesErrorCode.INTERNAL, "Internal error: stream not properly started"
+                    )
 
                 if self._pending:
                     # The next poll promotes the native checkpoint over every
@@ -492,16 +532,7 @@ class CdcStream:
                     # bytes have been fed and their events delivered.
                     segments = self._pending
                 else:
-                    # Real clients use one blocking batch call followed by a
-                    # non-blocking queue drain; lightweight test doubles that
-                    # only implement poll() remain supported.
-                    poll_method: Callable[[], PollResult | list[PollResult]]
-                    if callable(getattr(type(client), "poll_batch", None)):
-                        poll_method = client.poll_batch
-                    else:
-                        poll_method = client.poll
-                    polled: PollResult | list[PollResult] = await self._dispatch(poll_method)
-                    results = [polled] if isinstance(polled, PollResult) else list(polled)
+                    results = await self._dispatch(client.poll_batch)
                     # Consecutive events read under the same framing are one
                     # byte stream and are fed as one; a framing change starts a
                     # new segment, because the engine frames whatever it is
@@ -530,20 +561,60 @@ class CdcStream:
             except Exception as err:
                 if self._closed:
                     raise StopAsyncIteration from err
-                reconnect_error: Exception = err
-                while True:
-                    await self._consume_retry(reconnect_error)
-                    try:
-                        await self._reconnect()
-                    except Exception as next_error:
-                        if self._closed:
-                            raise StopAsyncIteration from next_error
-                        reconnect_error = next_error
-                        continue
-                    if self._closed:
-                        raise StopAsyncIteration from reconnect_error
-                    break
+                self._transition = asyncio.create_task(self._recover(err))
+
+    async def _join_transition(self, transition: asyncio.Task[None]) -> None:
+        """Await the start or reconnect in progress without being able to abort it.
+
+        Shielded: cancelling the consumer abandons this wait only, and the next
+        __anext__ joins the same task, so a handshake is never repeated, a
+        backoff is never cut short and no retry is charged twice.
+
+        Args:
+            transition: The task running the start or the reconnect.
+
+        Raises:
+            Exception: The failure that ended the stream, as the task raised it.
+        """
+        try:
+            await asyncio.shield(transition)
+        except Exception:
+            self._release_transition(transition)
+            raise
+        # Kept when the wait is cancelled, even after the task finished, so the
+        # outcome reaches the next __anext__ instead of being dropped.
+        self._release_transition(transition)
+
+    def _release_transition(self, transition: asyncio.Task[None]) -> None:
+        """Forget ``transition`` once its outcome has been delivered."""
+        if getattr(self, "_transition", None) is transition:
+            self._transition = None
+
+    async def _establish(self) -> None:
+        """Start the stream, retrying under the shared budget until it runs or closes."""
+        while not self._started and not self._closed:
+            try:
+                await self._start()
+            except Exception as err:
+                # A failure caused by close() stopping the dispatch is the
+                # shutdown the caller asked for, not one to retry or report.
+                if self._closed:
+                    return
+                await self._consume_retry(err)
+                await self._wait_for_backoff()
+
+    async def _recover(self, error: Exception) -> None:
+        """Reconnect after ``error``, charging every attempt to the shared budget."""
+        while True:
+            await self._consume_retry(error)
+            try:
+                await self._reconnect()
+            except Exception as next_error:
+                if self._closed:
+                    return
+                error = next_error
                 continue
+            return
 
     async def aclose(self) -> None:
         """Release the stream from an iteration that ended early.
@@ -555,16 +626,28 @@ class CdcStream:
         await self.close()
 
     async def close(self) -> None:
-        """Stop the stream and release all resources."""
-        if self._closed:
-            return
-        self._closed = True
-        self._started = False
+        """Stop the stream and release all resources.
+
+        The release runs to completion even if the calling task is cancelled:
+        that cancellation is delivered once both handles have been released,
+        and a later call returns once the same release has finished.
+        """
+        teardown = getattr(self, "_teardown", None)
+        if teardown is None:
+            if self._closed:
+                return
+            self._closed = True
+            self._started = False
+            teardown = asyncio.create_task(self._release())
+            self._teardown = teardown
+        await _wait_uncancelled(teardown)
+        teardown.result()
+
+    async def _release(self) -> None:
+        """Interrupt the backoff, settle the in-flight call, then free both handles."""
         backoff_task = getattr(self, "_backoff_task", None)
-        if backoff_task is not None and not backoff_task.done():
+        if backoff_task is not None:
             backoff_task.cancel()
-            with contextlib.suppress(BaseException):
-                await backoff_task
         self._backoff_task = None
         # Destroying a handle a worker thread is still inside is a use-after-free
         # in C, not an exception, so every dispatch has to settle first.
@@ -590,7 +673,9 @@ class CdcStream:
         The stream is at-least-once, not exactly-once. Persist this value only
         after application processing succeeds. The last non-empty value survives
         :meth:`close`, so it can still be read after the ``async with`` scope
-        ends.
+        ends. An empty string means no checkpoint has been established yet:
+        it is never a position to persist or to pass back as ``start_gtid``,
+        where ``""`` requests the empty GTID set.
         """
         self._cache_current_gtid()
         return cast(str, getattr(self, "_last_gtid", ""))
@@ -608,11 +693,13 @@ class CdcStream:
 
         This is the only place a start position is rewritten, so the rule holds
         on every reconnect path. An empty checkpoint means none was ever
-        published: the connection died before its first commit, or it was
-        anchored to a file offset that produces no GTID. Forwarding that as
-        ``start_gtid=""`` would request the empty GTID set, which the server
-        reads as "send every binlog you still retain". Keep the configured start
-        mode instead -- at worst the successor replays from the original anchor.
+        published: the connection died before its first commit, or it started
+        from a file/offset and has not yet passed a PREVIOUS_GTIDS (MySQL) or
+        GTID_LIST (MariaDB) event, normally at the next binlog file. Forwarding
+        that as ``start_gtid=""`` would request the empty GTID set, which the
+        server reads as "send every binlog you still retain". Keep the
+        configured start mode instead -- at worst the successor replays from
+        the original anchor.
 
         Args:
             checkpoint: GTID set reported by the dropped connection, or ``""``.
@@ -676,7 +763,9 @@ class CdcStream:
         # None and crash with AttributeError. A RuntimeError here gives a
         # useful diagnostic even in optimised builds.
         if self._engine is None:
-            raise RuntimeError("Internal error: engine missing during reconnect")
+            raise exception_for_rc(
+                MesErrorCode.INTERNAL, "Internal error: engine missing during reconnect"
+            )
         self._engine.reset()
         self._engine.set_max_event_size(self._max_event_size)
         self._engine.set_max_queue_size(self._max_queue_size)
@@ -685,7 +774,7 @@ class CdcStream:
         # Metadata is optional; column names fall back to indices.
         try:
             await self._enable_metadata()
-        except RuntimeError as exc:
+        except (RuntimeError, MesConnectionError) as exc:
             self._report_metadata_error(exc)
         await self._dispatch(self._client.connect)
         await self._dispatch(self._client.start)
@@ -722,10 +811,8 @@ class CdcStream:
         task = asyncio.create_task(asyncio.sleep(delay))
         self._backoff_task = task
         try:
-            await task
-        except asyncio.CancelledError:
-            if not self._closed:
-                raise
+            # close() cancels the sleep; wait() returns either way.
+            await asyncio.wait({task})
         finally:
             if self._backoff_task is task:
                 self._backoff_task = None
@@ -767,7 +854,7 @@ class CdcStream:
         try:
             try:
                 await self._enable_metadata()
-            except RuntimeError as exc:
+            except (RuntimeError, MesConnectionError) as exc:
                 self._report_metadata_error(exc)
             await self._dispatch(self._client.connect)
             await self._dispatch(self._client.start)
@@ -792,10 +879,14 @@ class CdcStream:
         run on the loop thread.
 
         Raises:
-            RuntimeError: If the metadata connection cannot be enabled.
+            MesConnectionError: If the metadata connection cannot reach the
+                server.
+            RuntimeError: If it cannot be enabled for any other reason.
         """
         if self._engine is None:
-            raise RuntimeError("Internal error: engine missing during metadata setup")
+            raise exception_for_rc(
+                MesErrorCode.INTERNAL, "Internal error: engine missing during metadata setup"
+            )
         await self._dispatch(
             self._engine.enable_metadata,
             host=self._host,
@@ -820,7 +911,7 @@ class CdcStream:
         self._engine.set_include_tables(self._include_tables)
         self._engine.set_exclude_tables(self._exclude_tables)
 
-    def _report_metadata_error(self, error: RuntimeError) -> None:
+    def _report_metadata_error(self, error: Exception) -> None:
         """Report optional metadata failures consistently on start and reconnect.
 
         Without a handler the failure is silent: the library never writes
@@ -830,3 +921,27 @@ class CdcStream:
         """
         if self._on_metadata_error is not None:
             self._on_metadata_error(error)
+
+
+async def _wait_uncancelled(future: asyncio.Future[Any]) -> None:
+    """Wait until ``future`` is done, delivering a cancellation only afterwards.
+
+    For waits that guard a handle: a worker thread cannot be cancelled, so
+    neither can the wait for it. The single place a ``CancelledError`` aimed at
+    the waiting task is caught, and it is always re-raised.
+
+    Args:
+        future: The dispatch or teardown to wait for. Its outcome is not
+            retrieved here.
+
+    Raises:
+        asyncio.CancelledError: If the waiting task was cancelled meanwhile.
+    """
+    cancelled: asyncio.CancelledError | None = None
+    while not future.done():
+        try:
+            await asyncio.wait({future})
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled

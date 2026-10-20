@@ -144,7 +144,11 @@ class ChangeEvent:
 
     - A BIGINT UNSIGNED, SET, or BIT value above ``INT64_MAX`` arrives as an
       exact decimal ``str`` rather than an overflowing integer, because the
-      core cannot represent it as an integer.
+      core cannot represent it as an integer. This needs the column's
+      signedness, which comes from TABLE_MAP optional metadata
+      (``binlog_row_metadata=MINIMAL`` or ``FULL``) or from the metadata
+      side-connection. With neither, every numeric column is read as signed,
+      so an UNSIGNED value above the signed range of its width reads negative.
     - Every TIMESTAMP variant is a ``str`` holding decimal Unix epoch seconds,
       with as many fractional digits as the column's declared precision (for
       example ``"1735689600"`` or ``"1735689600.123456"``). DECIMAL and the
@@ -154,9 +158,12 @@ class ChangeEvent:
     - SET columns arrive as a numeric bitmask (``int``); bit i (LSB first)
       is set when the i-th member of the SET definition is present.
     - BIT columns arrive as an integer (``int``) holding the bit value.
-    - JSON columns arrive as raw ``bytes`` holding MySQL's binary JSON
-      representation (not decoded text). Use a MySQL binary-JSON parser to
-      obtain a structured value.
+    - JSON columns on MySQL arrive as raw ``bytes`` holding MySQL's binary
+      JSON representation (not decoded text). Use a MySQL binary-JSON parser
+      to obtain a structured value. On MariaDB, ``JSON`` is an alias for
+      ``LONGTEXT`` and the binlog carries plain text, so the value follows the
+      character-column rule below: ``str`` with charset metadata, ``bytes``
+      without.
     - Character and BLOB-family columns follow their charset, so a TEXT column
       declared with a binary collation arrives as ``bytes`` and a BLOB with a
       text collation as ``str``. This distinction uses TABLE_MAP charset
@@ -348,14 +355,20 @@ class ChecksumError(MesError):
     """Raised when a CRC32 mismatch is detected on a binlog event."""
 
 
-_Refusal = TypeVar("_Refusal", TypeError, ValueError, OSError)
+#: The C ABI's connection-error range, raised as :class:`MesConnectionError` by
+#: every call that reaches the server.
+CONNECTION_ERROR_CODES = range(MesErrorCode.CONNECT, MesErrorCode.CONNECT + 100)
+
+
+_Refusal = TypeVar("_Refusal", TypeError, ValueError, OSError, RuntimeError)
 
 
 def mes_validation_error(error: _Refusal) -> _Refusal:
     """Present a refused argument the way every other failure is presented.
 
-    The built-in class is kept, so ``except TypeError``, ``except ValueError``
-    and ``except OSError`` still hold; ``code`` is set to
+    The built-in class is kept, so ``except TypeError``, ``except ValueError``,
+    ``except OSError`` and ``except RuntimeError`` (a call refused in the
+    object's current lifecycle state) still hold; ``code`` is set to
     :attr:`MesErrorCode.INVALID_ARG`, so a handler branching on ``code``
     classifies a refusal like any native failure. Every argument refusal in
     this package, a library that cannot be loaded included, is built through

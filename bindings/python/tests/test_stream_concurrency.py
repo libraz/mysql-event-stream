@@ -15,8 +15,16 @@ from unittest.mock import patch
 
 import pytest
 
+from mysql_event_stream._ffi import MES_ERR_STREAM
 from mysql_event_stream.stream import CdcStream
-from mysql_event_stream.types import BinlogPosition, ChangeEvent, EventType, PollResult
+from mysql_event_stream.types import (
+    BinlogPosition,
+    ChangeEvent,
+    EventType,
+    MesConnectionError,
+    MesErrorCode,
+    PollResult,
+)
 
 # Upper bound for a double that parks a worker thread: keeps a regression from
 # hanging the suite instead of failing it.
@@ -62,6 +70,7 @@ class _FakeEngine:
         self.next_event_threads: list[int] = []
         self.metadata_thread: int | None = None
         self.closed = False
+        self.close_calls = 0
 
     def feed(self, chunk: bytes) -> int:
         self.feed_calls.append(chunk)
@@ -106,6 +115,7 @@ class _FakeEngine:
 
     def close(self) -> None:
         self.closed = True
+        self.close_calls += 1
 
 
 class _BlockingFeedEngine(_FakeEngine):
@@ -131,7 +141,7 @@ class _BlockingFeedEngine(_FakeEngine):
 
 
 class _FakeClient:
-    """Client double whose ``poll()`` returns one chunk without blocking."""
+    """Client double whose ``poll_batch()`` returns one chunk without blocking."""
 
     def __init__(self, chunk: bytes = b"\x01\x02") -> None:
         self._chunk = chunk
@@ -149,9 +159,9 @@ class _FakeClient:
     def start(self) -> None:
         self.start_thread = threading.get_ident()
 
-    def poll(self) -> PollResult:
+    def poll_batch(self) -> list[PollResult]:
         self.poll_calls += 1
-        return PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)
+        return [PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)]
 
     def stop(self) -> None:
         self.stop_calls += 1
@@ -161,23 +171,79 @@ class _FakeClient:
 
 
 class _BlockingPollClient(_FakeClient):
-    """Client double that parks a worker thread inside ``poll()``."""
+    """Client double that parks a worker thread inside ``poll_batch()``."""
 
     def __init__(self) -> None:
         super().__init__()
         self.entered_poll = threading.Event()
         self.release_poll = threading.Event()
 
-    def poll(self) -> PollResult:
+    def poll_batch(self) -> list[PollResult]:
         # Counted on entry, so a test can observe the call while it is blocked.
         self.poll_calls += 1
         self.entered_poll.set()
         self.release_poll.wait(_BLOCK_TIMEOUT_S)
-        return PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)
+        return [PollResult(data=self._chunk, is_heartbeat=False, checksum_enabled=True)]
 
     def stop(self) -> None:
         super().stop()
         self.release_poll.set()
+
+
+class _SlowConnectClient(_FakeClient):
+    """Client double whose ``connect()`` parks a worker that ``stop()`` cannot free."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered_connect = threading.Event()
+        self.release_connect = threading.Event()
+        self.connect_returned = False
+        self.start_calls = 0
+        self.close_calls = 0
+        self.destroyed_during_connect = False
+
+    def connect(self) -> None:
+        self.entered_connect.set()
+        self.release_connect.wait(_BLOCK_TIMEOUT_S)
+        self.connect_returned = True
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def close(self) -> None:
+        if self.entered_connect.is_set() and not self.connect_returned:
+            self.destroyed_during_connect = True
+        self.close_calls += 1
+        super().close()
+
+
+class _TimedConnectClient(_FakeClient):
+    """Client double whose handshake takes a fixed time on the worker."""
+
+    def __init__(self, connect_s: float) -> None:
+        super().__init__()
+        self._connect_s = connect_s
+        self.connect_calls = 0
+
+    def connect(self) -> None:
+        self.connect_calls += 1
+        time.sleep(self._connect_s)
+
+
+class _DroppingClient(_FakeClient):
+    """Client double whose stream drops on the first poll."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    def poll_batch(self) -> list[PollResult]:
+        self.poll_calls += 1
+        raise MesConnectionError("stream dropped", MES_ERR_STREAM)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
 
 
 def _started_stream(client: object, engine: object) -> CdcStream:
@@ -204,15 +270,17 @@ class TestSingleIteration:
 
         # Direct __anext__ and a second async-for are the two entry paths, and
         # both must be refused before any native call is dispatched.
-        with pytest.raises(RuntimeError, match="already being iterated"):
+        with pytest.raises(RuntimeError, match="already being iterated") as direct:
             await stream.__anext__()
+        assert direct.value.code == MesErrorCode.INVALID_ARG  # type: ignore[attr-defined]
 
         async def second_loop() -> None:
             async for _ in stream:
                 break
 
-        with pytest.raises(RuntimeError, match="already being iterated"):
+        with pytest.raises(RuntimeError, match="already being iterated") as looped:
             await second_loop()
+        assert looped.value.code == MesErrorCode.INVALID_ARG  # type: ignore[attr-defined]
 
         assert client.poll_calls == 1
         assert engine.feed_calls == []
@@ -222,9 +290,9 @@ class TestSingleIteration:
         await stream.close()
 
     @pytest.mark.timeout(20)
-    async def test_a_later_iteration_is_accepted_once_the_first_returns(self) -> None:
-        # The guard is scoped to concurrency: it must be released on every exit
-        # path, or one delivered event would poison the stream for good.
+    async def test_a_second_iteration_is_refused_after_the_first_ends(self) -> None:
+        # One stream supports one iteration: a later loop would silently resume
+        # mid-stream, after events the first loop already took.
         client = _FakeClient()
         expected = [_change_event("first"), _change_event("second")]
         engine = _FakeEngine(events=list(expected))
@@ -233,9 +301,26 @@ class TestSingleIteration:
         async for received in stream:
             assert received == expected[0]
             break
-        async for received in stream:
-            assert received == expected[1]
-            break
+
+        with pytest.raises(RuntimeError, match="already being iterated") as refused:
+            async for _ in stream:
+                break
+        assert refused.value.code == MesErrorCode.INVALID_ARG  # type: ignore[attr-defined]
+        assert client.poll_calls == 1
+
+        await stream.close()
+
+    @pytest.mark.timeout(20)
+    async def test_the_concurrency_guard_is_released_between_steps(self) -> None:
+        # The concurrency guard must be released on every exit path, or one
+        # delivered event would poison the iteration for good.
+        client = _FakeClient()
+        expected = [_change_event("first"), _change_event("second")]
+        engine = _FakeEngine(events=list(expected))
+        stream = _started_stream(client, engine)
+
+        assert await stream.__anext__() == expected[0]
+        assert await stream.__anext__() == expected[1]
 
         await stream.close()
 
@@ -317,6 +402,28 @@ class TestCancelledAwaitResumes:
         await stream.close()
 
     @pytest.mark.timeout(20)
+    async def test_a_cancel_landing_after_the_poll_returned_keeps_its_result(self) -> None:
+        client = _BlockingPollClient()
+        expected = _change_event("orders")
+        engine = _FakeEngine(events=[expected])
+        stream = _started_stream(client, engine)
+
+        consumer = asyncio.create_task(stream.__anext__())
+        await _wait_for(client.entered_poll)
+        dispatch = stream._native_task
+        assert dispatch is not None
+        # Runs after the shield has taken the result, before the consumer
+        # resumes: the cancellation lands on a call that already finished.
+        dispatch.add_done_callback(lambda _: consumer.cancel())
+        client.release_poll.set()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+        assert await asyncio.wait_for(stream.__anext__(), _BLOCK_TIMEOUT_S) == expected
+        assert client.poll_calls == 1
+        await stream.close()
+
+    @pytest.mark.timeout(20)
     async def test_a_cancelled_await_resumes_the_in_flight_feed(self) -> None:
         client = _FakeClient()
         expected = _change_event("orders")
@@ -338,6 +445,131 @@ class TestCancelledAwaitResumes:
         await stream.close()
 
 
+class TestCancellationNeverOutrunsAWorker:
+    """A cancelled wait that guards a handle ends only once the worker has left it."""
+
+    @pytest.mark.timeout(20)
+    async def test_a_cancelled_quiesce_waits_and_dispatches_nothing_new(self) -> None:
+        client = _SlowConnectClient()
+        stream = _started_stream(client, _FakeEngine())
+
+        abandoned = asyncio.create_task(stream._dispatch(client.connect))
+        await _wait_for(client.entered_connect)
+        abandoned.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await abandoned
+
+        successor = asyncio.create_task(stream._dispatch(client.start))
+        await asyncio.sleep(0.05)
+        successor.cancel()
+        await asyncio.sleep(0.1)
+        assert not successor.done(), "the cancelled wait returned while connect() was running"
+
+        client.release_connect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(successor, _BLOCK_TIMEOUT_S)
+        # The cancellation arrived before the predecessor settled, so the call
+        # that was waiting behind it never ran.
+        assert client.start_calls == 0
+        assert stream._native_task is None
+        await stream.close()
+
+    @pytest.mark.timeout(20)
+    async def test_a_cancelled_close_releases_each_handle_exactly_once(self) -> None:
+        client = _SlowConnectClient()
+        engine = _FakeEngine()
+        stream = _started_stream(client, engine)
+
+        connecting = asyncio.create_task(stream._dispatch(client.connect))
+        await _wait_for(client.entered_connect)
+
+        closing = asyncio.create_task(stream.close())
+        await asyncio.sleep(0.05)
+        closing.cancel()
+        await asyncio.sleep(0.1)
+        assert not closing.done(), "close() gave up its wait while connect() was running"
+        assert client.close_calls == 0
+        assert engine.close_calls == 0
+
+        client.release_connect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(closing, _BLOCK_TIMEOUT_S)
+        await asyncio.wait_for(stream.close(), _BLOCK_TIMEOUT_S)
+
+        assert client.close_calls == 1
+        assert engine.close_calls == 1
+        assert not client.destroyed_during_connect
+        await connecting
+
+
+class TestCancelledLifecycleResumes:
+    """A timed-out await during start or reconnect resumes the same sequence."""
+
+    @pytest.mark.timeout(20)
+    async def test_timed_out_awaits_during_startup_complete_one_handshake(self) -> None:
+        client = _TimedConnectClient(connect_s=0.3)
+        expected = _change_event("orders")
+        engine = _FakeEngine(events=[expected])
+
+        with (
+            patch("mysql_event_stream.stream.CdcEngine", return_value=engine) as engine_cls,
+            patch("mysql_event_stream.stream.BinlogClient", return_value=client) as client_cls,
+        ):
+            stream = CdcStream(host="127.0.0.1")
+            timeouts = 0
+            while True:
+                try:
+                    received = await asyncio.wait_for(stream.__anext__(), 0.2)
+                    break
+                except TimeoutError:
+                    timeouts += 1
+                    assert timeouts < 50, "the event never arrived"
+
+        assert received == expected
+        assert timeouts >= 1
+        assert client_cls.call_count == 1
+        assert engine_cls.call_count == 1
+        assert client.connect_calls == 1
+        assert not engine.closed
+        await stream.close()
+
+    @pytest.mark.timeout(20)
+    async def test_timed_out_awaits_during_reconnect_charge_one_retry(self) -> None:
+        dropping = _DroppingClient()
+        healthy = _FakeClient()
+        expected = _change_event("orders")
+        engine = _FakeEngine(events=[expected])
+
+        with (
+            patch("mysql_event_stream.stream.backoff_delay_ms", return_value=200),
+            patch("mysql_event_stream.stream.CdcEngine", return_value=engine),
+            patch(
+                "mysql_event_stream.stream.BinlogClient", side_effect=[dropping, healthy]
+            ) as client_cls,
+        ):
+            stream = CdcStream(host="127.0.0.1")
+            timeouts = 0
+            attempts_seen: set[int] = set()
+            while True:
+                try:
+                    received = await asyncio.wait_for(stream.__anext__(), 0.05)
+                    break
+                except TimeoutError:
+                    timeouts += 1
+                    attempts_seen.add(stream._reconnect_attempts)
+                    assert timeouts < 100, "the event never arrived"
+
+        assert received == expected
+        # The backoff outlasted several awaits, and none of them restarted it.
+        assert timeouts >= 2
+        assert 1 in attempts_seen
+        assert attempts_seen <= {0, 1}
+        assert client_cls.call_count == 2
+        assert dropping.close_calls == 1
+        assert healthy.poll_calls == 1
+        await stream.close()
+
+
 class _PromoteOnStopClient(_FakeClient):
     """Client double that promotes the last polled batch's checkpoint on stop().
 
@@ -351,11 +583,11 @@ class _PromoteOnStopClient(_FakeClient):
         self.current_gtid = "uuid:1"
         self._delivered = ""
 
-    def poll(self) -> PollResult:
+    def poll_batch(self) -> list[PollResult]:
         if self._delivered:
             self.current_gtid = self._delivered
         self._delivered = "uuid:1-2"
-        return super().poll()
+        return super().poll_batch()
 
     def stop(self) -> None:
         super().stop()

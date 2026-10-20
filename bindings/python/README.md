@@ -39,7 +39,9 @@ async def run() -> None:
         async for event in stream:
             print(event.type, f"{event.database}.{event.table}")
             await handle(event)  # idempotent
-            await save_checkpoint(stream.current_gtid)
+            # "" means no checkpoint yet; never persist it as a start position.
+            if checkpoint := stream.current_gtid:
+                await save_checkpoint(checkpoint)
 ```
 
 An `UPDATE` arrives with both images of the row. `type` is the `EventType.UPDATE` enum member, not the string `"UPDATE"` — compare it with `==`, not against a string:
@@ -72,18 +74,12 @@ with CdcEngine() as engine:
             print(event.type, event.database, event.table)
 
         if offset < len(chunk):
-            consumed = engine.feed(chunk[offset:])
-            offset += consumed
-
-            # Nothing consumed and nothing queued: the tail is a partial
-            # event. Keep chunk[offset:] and prepend it to the next chunk.
-            if consumed == 0 and not engine.has_events():
-                break
+            offset += engine.feed(chunk[offset:])
 ```
 
 ## Server requirements
 
-MySQL 8.4+ or MariaDB 10.11+, logging in row format with `binlog_row_image=FULL` and GTIDs enabled, and an account with `REPLICATION SLAVE` and `REPLICATION CLIENT`. Column names need either `binlog_row_metadata=FULL` or a `SELECT` grant on the streamed tables.
+MySQL 8.4+ or MariaDB 10.11+, logging in row format with `binlog_row_image=FULL` and GTIDs enabled, and an account with `REPLICATION SLAVE` and `REPLICATION CLIENT`. Column names need either `binlog_row_metadata=FULL` or a `SELECT` grant on the streamed tables. On MariaDB, set `binlog_row_metadata=MINIMAL` or `FULL`: its default `NO_LOG` delivers text columns as bytes.
 
 [Server setup](https://github.com/libraz/mysql-event-stream/blob/main/docs/en/server-setup.md) has the full configuration, the grants, and the replica identity rule that two processes on defaults will violate.
 

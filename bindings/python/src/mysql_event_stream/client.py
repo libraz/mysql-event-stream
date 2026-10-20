@@ -11,7 +11,6 @@ from ._contract import (
     POLL_BATCH_MIN_MAX_EVENTS,
 )
 from ._ffi import (
-    MES_ERR_CONNECT,
     MES_ERR_INVALID_ARG,
     MES_OK,
     MESClientConfig,
@@ -19,8 +18,9 @@ from ._ffi import (
     get_library,
     load_client_library,
 )
-from ._options import validate_option, validate_options
+from ._options import refuse_unknown_options, validate_option, validate_options
 from .types import (
+    CONNECTION_ERROR_CODES,
     ClientConfig,
     MesConnectionError,
     PollResult,
@@ -28,9 +28,6 @@ from .types import (
     exception_for_rc,
     mes_validation_error,
 )
-
-#: The C ABI's connection-error range, raised from connect() as MesConnectionError.
-_CONNECTION_ERROR_CODES = range(MES_ERR_CONNECT, MES_ERR_CONNECT + 100)
 
 
 def validate_poll_batch_size(max_events: int) -> None:
@@ -78,6 +75,7 @@ class BinlogClient:
                             print(event)
     """
 
+    @refuse_unknown_options
     def __init__(
         self,
         *,
@@ -156,9 +154,11 @@ class BinlogClient:
             lib_path: Explicit path to libmes shared library.
 
         Raises:
-            TypeError: If an option has the wrong type.
-            ValueError: If an option falls outside its accepted range, or if
-                the configuration names two start modes that exclude each other.
+            TypeError: If an option is unrecognized or has the wrong type.
+            ValueError: If an option falls outside its accepted range, if the
+                configuration names two start modes that exclude each other,
+                or if ``max_queue_bytes`` cannot admit one ``max_event_size``
+                event.
             RuntimeError: If the loaded library does not export the
                 ``mes_client`` entry points.
             OSError: If the shared library cannot be found.
@@ -344,7 +344,7 @@ class BinlogClient:
                 base_msg = _error_message(self._lib, rc)
                 # Failing to reach or negotiate with the server is an OS-level
                 # failure; any other code is classified as it is everywhere.
-                if rc in _CONNECTION_ERROR_CODES:
+                if rc in CONNECTION_ERROR_CODES:
                     raise MesConnectionError(f"{base_msg}: {error_msg}", rc)
                 raise exception_for_rc(rc, f"{base_msg}: {error_msg}")
 
@@ -519,10 +519,17 @@ class BinlogClient:
 
     @property
     def is_streaming(self) -> bool:
-        """Check whether poll() can still drain data or a terminal error."""
+        """Check whether poll() can still drain data or a terminal error.
+
+        Stays true while a terminal error held back from the last
+        :meth:`poll_batch` is still to be raised, so a loop polling while this
+        holds always meets that error.
+        """
         with self._handle_lock:
             if self._handle is None:
                 return False
+            if self._latched_error is not None:
+                return True
             return bool(self._lib.mes_client_is_streaming(self._handle) != 0)
 
     @property
@@ -531,6 +538,9 @@ class BinlogClient:
 
         The value advances after polling past a commit boundary. It is not a
         durable acknowledgement; persist it only after processing succeeds.
+        An empty string means no checkpoint has been established yet: it is
+        never a position to persist or to pass back as ``start_gtid``, where
+        ``""`` requests the empty GTID set.
         """
         with self._handle_lock:
             if self._handle is None:

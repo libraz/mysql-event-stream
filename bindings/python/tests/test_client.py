@@ -223,6 +223,28 @@ def test_a_latched_terminal_error_also_surfaces_from_poll(
 
 @patch("mysql_event_stream.client.load_client_library", return_value=True)
 @patch("mysql_event_stream.client.get_library")
+def test_is_streaming_holds_until_a_latched_terminal_error_is_raised(
+    mock_load: MagicMock, mock_load_client: MagicMock
+) -> None:
+    # The native stream has already ended, but the error that ended it is
+    # still owed to the caller; a loop polling while is_streaming must meet it.
+    lib = MagicMock()
+    lib.mes_client_poll_batch.side_effect = _batch_of(MES_OK, MES_ERR_DISCONNECTED)
+    lib.mes_client_is_streaming.return_value = 0
+    mock_load.return_value = lib
+
+    client = _make_client(lib)
+    assert len(client.poll_batch(8)) == 1
+    assert client.is_streaming is True
+    with pytest.raises(MesError) as excinfo:
+        client.poll_batch(8)
+    assert excinfo.value.code == MES_ERR_DISCONNECTED
+    assert client.is_streaming is False
+    client.close()
+
+
+@patch("mysql_event_stream.client.load_client_library", return_value=True)
+@patch("mysql_event_stream.client.get_library")
 def test_every_native_failure_carries_the_c_abi_code(
     mock_load: MagicMock, mock_load_client: MagicMock
 ) -> None:

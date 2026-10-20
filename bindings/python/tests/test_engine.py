@@ -11,7 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mysql_event_stream import CdcEngine, ChecksumError, EventType, MesError, ParseError
+from mysql_event_stream import (
+    CdcEngine,
+    ChecksumError,
+    EventType,
+    MesConnectionError,
+    MesError,
+    ParseError,
+)
 from mysql_event_stream._ffi import (
     MES_COL_BYTES,
     MES_COL_INT,
@@ -88,7 +95,7 @@ class TestFeed:
     def test_negative_max_queue_size_rejected(self, lib_path: str) -> None:
         with (
             CdcEngine(lib_path=lib_path) as engine,
-            pytest.raises(ValueError, match="non-negative"),
+            pytest.raises(ValueError, match="max_queue_size must be between 0"),
         ):
             engine.set_max_queue_size(-1)
 
@@ -97,7 +104,7 @@ class TestFeed:
         """A bool would otherwise pass as a queue of one event."""
         with (
             CdcEngine(lib_path=lib_path) as engine,
-            pytest.raises(TypeError, match="max_size must be an integer"),
+            pytest.raises(TypeError, match="max_queue_size must be an integer"),
         ):
             engine.set_max_queue_size(value)  # type: ignore[arg-type]
 
@@ -161,9 +168,24 @@ class TestMaxQueueBytes:
     def test_negative_max_queue_bytes_rejected(self, lib_path: str) -> None:
         with (
             CdcEngine(lib_path=lib_path) as engine,
-            pytest.raises(ValueError, match="non-negative"),
+            pytest.raises(ValueError, match="max_queue_bytes must be between 0"),
         ):
             engine.set_max_queue_bytes(-1)
+
+    def test_queue_limits_past_the_contract_ceiling_are_refused(self, lib_path: str) -> None:
+        # A c_size_t argument is not range-checked, so 2**64 + 5 would reach
+        # the engine as 5.
+        with CdcEngine(lib_path=lib_path) as engine:
+            with pytest.raises(ValueError, match="max_queue_size must be between 0") as size:
+                engine.set_max_queue_size(2**64 + 5)
+            assert size.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+            with pytest.raises(ValueError, match="max_queue_bytes must be between 0") as budget:
+                engine.set_max_queue_bytes(2**53)
+            assert budget.value.code == MES_ERR_INVALID_ARG  # type: ignore[attr-defined]
+            assert engine.get_max_queue_bytes() == 48 * 1024 * 1024
+
+            engine.set_max_queue_bytes(2**53 - 1)
+            assert engine.get_max_queue_bytes() == 2**53 - 1
 
     @pytest.mark.parametrize("value", ["1048576", 1.5, True, None])
     def test_wrong_typed_max_queue_bytes_rejected(self, lib_path: str, value: object) -> None:
@@ -951,12 +973,14 @@ class TestNativeErrorCodes:
         engine.close()
 
     def test_metadata_connection_failure_carries_the_code(self) -> None:
+        # A connection-range code is a failure to reach the server, raised as
+        # the same class BinlogClient.connect() raises for it.
         lib = MagicMock()
         lib.mes_engine_set_metadata_conn.return_value = MES_ERR_AUTH
         engine = self._engine(lib)
         with (
             patch("mysql_event_stream.engine.load_client_library", return_value=True),
-            pytest.raises(MesError) as excinfo,
+            pytest.raises(MesConnectionError) as excinfo,
         ):
             engine.enable_metadata(host="127.0.0.1", port=3306)
         assert excinfo.value.code == MES_ERR_AUTH

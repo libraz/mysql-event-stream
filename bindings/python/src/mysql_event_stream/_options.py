@@ -11,7 +11,10 @@ another and reinterpreted by the ctypes layer.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import functools
+import inspect
+from collections.abc import Callable, Mapping
+from typing import ParamSpec, TypeVar
 
 from ._contract import (
     CONDITIONAL_OPTION_MINIMUMS,
@@ -40,6 +43,22 @@ _BOOL_OPTIONS = frozenset({"allow_public_key_retrieval"})
 
 #: Options whose value must be callable or ``None``.
 _CALLBACK_OPTIONS = frozenset({"on_metadata_error"})
+
+#: Queue byte budget a ``max_queue_bytes`` of 0 resolves to (MES_DEFAULT_QUEUE_BYTES).
+_DEFAULT_QUEUE_BYTES = 48 * 1024 * 1024
+
+#: Event-size ceiling a ``max_event_size`` of 0, or one above it, resolves to.
+_MAX_EVENT_SIZE_CAP = 1024 * 1024 * 1024
+
+#: Smallest event-size ceiling the core accepts: a header plus a checksum.
+_MIN_EVENT_SIZE = 19 + 4
+
+#: What the client queue charges beside one event: its packet-prefix byte and
+#: the one-MiB reserve for the checkpoint held with it.
+_QUEUED_EVENT_OVERHEAD = 1 + 1024 * 1024
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 def validate_option(key: str, value: object) -> None:
@@ -86,6 +105,32 @@ def validate_option(key: str, value: object) -> None:
             raise mes_validation_error(TypeError(f"{key} must be callable or None"))
         return
     raise mes_validation_error(TypeError(f"Unknown config key: {key!r}"))
+
+
+def refuse_unknown_options(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Refuse a keyword the wrapped entry point does not declare, with a code.
+
+    Python's own refusal of an unexpected keyword is a ``TypeError`` without
+    ``code``; this raises the same coded refusal ``validate_option`` raises for
+    an unknown key. A key that is an option of some other entry point is still
+    unknown here. The wrapped signature is kept for introspection.
+
+    Args:
+        func: Entry point taking its options as keyword-only parameters.
+
+    Returns:
+        ``func`` wrapped so an undeclared keyword raises before it runs.
+    """
+    declared = frozenset(inspect.signature(func).parameters)
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        for key in kwargs:
+            if key not in declared:
+                raise mes_validation_error(TypeError(f"Unknown config key: {key!r}"))
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 def _is_supplied(options: Mapping[str, object], key: str) -> bool:
@@ -168,6 +213,39 @@ def _validate_conditional_minimums(options: Mapping[str, object]) -> None:
         )
 
 
+def _validate_queue_admission(options: Mapping[str, object]) -> None:
+    """Reject a queue byte budget too small to admit one maximum-sized event.
+
+    The native client refuses such a configuration only when streaming starts,
+    so it is checked over the resolved pair here, where it is accepted.
+
+    Args:
+        options: Every option the configuration carries, unset keys included.
+
+    Raises:
+        ValueError: If the resolved ``max_queue_bytes`` is below the resolved
+            ``max_event_size`` plus the queue's per-event overhead.
+    """
+    if "max_event_size" not in options or "max_queue_bytes" not in options:
+        return
+    event_size = options["max_event_size"]
+    queue_bytes = options["max_queue_bytes"]
+    if not isinstance(event_size, int) or not isinstance(queue_bytes, int):
+        return
+    if event_size == 0 or event_size > _MAX_EVENT_SIZE_CAP:
+        event_size = _MAX_EVENT_SIZE_CAP
+    event_size = max(event_size, _MIN_EVENT_SIZE)
+    queue_bytes = queue_bytes or _DEFAULT_QUEUE_BYTES
+    required = event_size + _QUEUED_EVENT_OVERHEAD
+    if queue_bytes < required:
+        raise mes_validation_error(
+            ValueError(
+                f"max_queue_bytes resolves to {queue_bytes}, below the {required} bytes "
+                f"one max_event_size event of {event_size} bytes needs"
+            )
+        )
+
+
 def validate_options(
     options: Mapping[str, object], base: Mapping[str, object] | None = None
 ) -> None:
@@ -184,8 +262,9 @@ def validate_options(
         ValueError: If an integer option falls outside its accepted range, if
             an option that has to name something is supplied empty, if one
             option of a required-together pair is supplied alone, if two
-            options naming competing start modes are supplied together, or if a
-            value is below the floor its companion brings into force.
+            options naming competing start modes are supplied together, if a
+            value is below the floor its companion brings into force, or if
+            ``max_queue_bytes`` cannot admit one ``max_event_size`` event.
     """
     for key, value in options.items():
         validate_option(key, value)
@@ -193,3 +272,4 @@ def validate_options(
     _validate_required_together(effective)
     _validate_mutually_exclusive(effective)
     _validate_conditional_minimums(effective)
+    _validate_queue_admission(effective)
