@@ -897,6 +897,35 @@ class TestCloseDuringConnect:
         assert mock_client_cls.call_count == 2
         assert stream._reconnect_attempts == 1
 
+    @pytest.mark.asyncio
+    async def test_a_failure_whose_join_was_cancelled_reaches_the_next_call(self) -> None:
+        stream = CdcStream(host="127.0.0.1", max_reconnect_attempts=0)
+        gate = asyncio.Event()
+        failure = MesConnectionError("connection refused", MES_ERR_CONNECT)
+
+        async def start(_: CdcStream) -> None:
+            await gate.wait()
+            raise failure
+
+        with patch.object(CdcStream, "_start", new=start):
+            iteration = asyncio.create_task(stream.__anext__())
+            await asyncio.sleep(0)
+            iteration.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await iteration
+            transition = stream._transition
+            assert transition is not None
+            gate.set()
+            await asyncio.wait({transition})
+
+            # The exhausted budget closed the stream before the error was raised.
+            assert stream._closed
+            with pytest.raises(MesConnectionError) as raised:
+                await stream.__anext__()
+            assert raised.value is failure
+            with pytest.raises(StopAsyncIteration):
+                await stream.__anext__()
+
 
 class TestRetryClassification:
     """Every contract error code has to be classified the same on both surfaces."""

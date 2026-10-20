@@ -463,6 +463,7 @@ class CdcStream:
         # thread inside poll(). The next __anext__ iteration will then
         # observe _closed and return StopAsyncIteration cleanly.
         if self._closed:
+            self._raise_undelivered_failure()
             raise StopAsyncIteration
         # The engine and client have a single owner, so a second consumer is
         # refused here -- before any native call is dispatched -- instead of
@@ -584,6 +585,23 @@ class CdcStream:
         # Kept when the wait is cancelled, even after the task finished, so the
         # outcome reaches the next __anext__ instead of being dropped.
         self._release_transition(transition)
+
+    def _raise_undelivered_failure(self) -> None:
+        """Deliver the failure of a transition whose joining await was cancelled.
+
+        A retry budget running out closes the stream before its error is
+        raised, so the next __anext__ sees a closed stream. The error still ends
+        the iteration once, in place of a clean StopAsyncIteration.
+
+        Raises:
+            Exception: The failure that ended the stream, as the task raised it.
+        """
+        transition = getattr(self, "_transition", None)
+        if transition is None or not transition.done():
+            return
+        self._release_transition(transition)
+        if not transition.cancelled() and transition.exception() is not None:
+            raise cast(Exception, transition.exception())
 
     def _release_transition(self, transition: asyncio.Task[None]) -> None:
         """Forget ``transition`` once its outcome has been delivered."""
