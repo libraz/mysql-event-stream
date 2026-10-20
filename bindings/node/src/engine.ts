@@ -67,7 +67,8 @@ export class CdcEngine {
    */
   feed(data: Uint8Array): number {
     this.ensureNotDestroyed();
-    if (data.length === 0) return 0;
+    // A non-binary argument goes to the addon, which refuses it with a numeric code.
+    if (data?.length === 0) return 0;
     return this.engine!.feed(data);
   }
 

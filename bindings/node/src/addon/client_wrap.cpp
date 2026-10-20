@@ -55,6 +55,10 @@ class PollWorker : public Napi::AsyncWorker {
 
   void OnOK() override {
     Napi::Env env = Env();
+    if (!mes_node::CanCallIntoJs(env)) {
+      wrap_->OnPollWorkerComplete();
+      return;
+    }
 
     if (error_ != MES_OK) {
       deferred_.Reject(
@@ -83,7 +87,7 @@ class PollWorker : public Napi::AsyncWorker {
   }
 
   void OnError(const Napi::Error& error) override {
-    deferred_.Reject(error.Value());
+    if (mes_node::CanCallIntoJs(Env())) deferred_.Reject(error.Value());
     wrap_->OnPollWorkerComplete();
   }
 
@@ -136,6 +140,10 @@ class PollBatchWorker : public Napi::AsyncWorker {
 
   void OnOK() override {
     Napi::Env env = Env();
+    if (!mes_node::CanCallIntoJs(env)) {
+      wrap_->OnPollWorkerComplete();
+      return;
+    }
     if (error_ != MES_OK && !results_.empty()) {
       // Deliver what the batch already produced, then surface the terminal
       // error from the next poll/pollBatch call. Dropping these results would
@@ -173,7 +181,7 @@ class PollBatchWorker : public Napi::AsyncWorker {
   }
 
   void OnError(const Napi::Error& error) override {
-    deferred_.Reject(error.Value());
+    if (mes_node::CanCallIntoJs(Env())) deferred_.Reject(error.Value());
     wrap_->OnPollWorkerComplete();
   }
 
@@ -583,6 +591,9 @@ Napi::Value ClientWrap::GetIsConnected(const Napi::CallbackInfo& info) {
 Napi::Value ClientWrap::GetIsStreaming(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (!client_) return Napi::Boolean::New(env, false);
+  // A latched terminal error is still owed to the next poll, so a
+  // `while (client.isStreaming)` loop must run once more to receive it.
+  if (latched_error_ != MES_OK) return Napi::Boolean::New(env, true);
   return Napi::Boolean::New(env, mes_client_is_streaming(client_) == 1);
 }
 

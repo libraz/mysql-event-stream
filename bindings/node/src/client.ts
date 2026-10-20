@@ -5,7 +5,7 @@ import { POLL_BATCH } from "./contract.js";
 import { loadNativeAddon } from "./native.js";
 import type { ClientConfig, PollResult, ServerFlavor } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { REFUSAL_ERROR_NAME, validatePollBatchSize, validateStreamOptions } from "./validation.js";
+import { REFUSAL_ERROR_NAME, validateClientOptions, validatePollBatchSize } from "./validation.js";
 
 interface NativeAddon {
   BinlogClient: new () => NativeClient;
@@ -45,7 +45,7 @@ export class BinlogClient {
   private client: NativeClient | null;
 
   constructor(config: ClientConfig) {
-    validateStreamOptions(config);
+    validateClientOptions(config);
     // If new addon.BinlogClient() throws, the exception propagates before
     // assignment completes — this.client stays null and the try block is
     // never entered. The catch below only handles connect() failures.
@@ -130,6 +130,8 @@ export class BinlogClient {
   /**
    * Get the delivered, committed checkpoint candidate. This advances only
    * after the caller polls past a commit boundary; it is not a durable ack.
+   * An empty string means no checkpoint has been published yet and must not
+   * be persisted or fed back as `startGtid`.
    */
   get currentGtid(): string {
     return this.client?.currentGtid ?? "";

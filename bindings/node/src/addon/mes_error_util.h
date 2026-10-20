@@ -68,6 +68,22 @@ enum class MesErrorClass {
   kRange,
 };
 
+/**
+ * @brief Whether the environment can still run JavaScript.
+ *
+ * An AsyncWorker completion can run while its environment is being torn down
+ * (a Worker exiting or terminated with the call in flight). There every
+ * N-API call that creates or throws a JS value is fatal, so a completion
+ * checks this first and releases native state only. The probe is an N-API
+ * call that is refused once the environment stops accepting JS work.
+ */
+inline bool CanCallIntoJs(Napi::Env env) {
+  napi_value global;
+  bool has = false;
+  if (napi_get_global(env, &global) != napi_ok) return false;
+  return napi_has_named_property(env, global, "undefined", &has) == napi_ok;
+}
+
 /** @brief Construct an empty error object of the requested JavaScript class. */
 inline Napi::Error NewErrorOfClass(Napi::Env env, const std::string& message,
                                    MesErrorClass error_class) {

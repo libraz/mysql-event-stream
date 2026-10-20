@@ -46,6 +46,10 @@ class EnableMetadataWorker : public Napi::AsyncWorker {
 
   void OnOK() override {
     Napi::Env env = Env();
+    if (!mes_node::CanCallIntoJs(env)) {
+      wrap_->OnMetadataWorkerComplete();
+      return;
+    }
     if (error_ != MES_OK) {
       deferred_.Reject(
           mes_node::MakeMesError(
@@ -58,7 +62,7 @@ class EnableMetadataWorker : public Napi::AsyncWorker {
   }
 
   void OnError(const Napi::Error& error) override {
-    deferred_.Reject(error.Value());
+    if (mes_node::CanCallIntoJs(Env())) deferred_.Reject(error.Value());
     wrap_->OnMetadataWorkerComplete();
   }
 

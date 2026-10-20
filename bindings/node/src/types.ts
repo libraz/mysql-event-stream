@@ -110,6 +110,10 @@ export type ServerFlavor = (typeof ServerFlavor)[keyof typeof ServerFlavor];
  *   numeric bitmask, BIT the integer value of its bits.
  * - A BIGINT UNSIGNED, SET, or BIT value above signed `int64_t` arrives as an
  *   exact decimal `string`, because the core cannot represent it as an integer.
+ *   This needs the column's signedness, which comes from TABLE_MAP optional
+ *   metadata (`binlog_row_metadata=MINIMAL` or `FULL`) or from the metadata
+ *   side-connection. With neither, every numeric column is read as signed, so
+ *   an UNSIGNED value above the signed range of its width arrives negative.
  * - Every TIMESTAMP variant is a `string` holding decimal Unix epoch seconds,
  *   with as many fractional digits as the column's declared precision (for
  *   example `"1735689600"` or `"1735689600.123456"`). DECIMAL and the other
@@ -117,7 +121,10 @@ export type ServerFlavor = (typeof ServerFlavor)[keyof typeof ServerFlavor];
  * - Character and BLOB-family columns follow their charset, so a TEXT column
  *   with a binary collation is a `Uint8Array` and a BLOB with a text collation
  *   is a `string`. JSON arrives as raw bytes in MySQL's internal binary JSON
- *   format, not as a decoded string or object.
+ *   format, not as a decoded string or object. On MariaDB, JSON is an alias
+ *   for LONGTEXT and the binlog carries plain text, so it follows the
+ *   character rule above: a `string` with charset metadata, `Uint8Array`
+ *   without.
  *
  * String limitation: textual columns are decoded as UTF-8. Data stored in a
  * non-UTF-8 character set (e.g. latin1, sjis) is not transcoded; invalid byte

@@ -46,6 +46,8 @@ for await (const event of stream) {
 }
 ```
 
+`currentGtid` stays an empty string until the stream passes a `PREVIOUS_GTIDS` (MySQL) or `GTID_LIST` (MariaDB) event, normally at the next binlog file; an empty value means no checkpoint yet and must not be saved.
+
 An `UPDATE` arrives with both images of the row:
 
 ```json
@@ -75,11 +77,7 @@ try {
       console.log(e.type, e.database, e.table);
     }
     if (offset < chunk.length) {
-      const consumed = engine.feed(chunk.subarray(offset));
-      offset += consumed;
-      // Nothing consumed and nothing queued: the tail is a partial event.
-      // Keep chunk.subarray(offset) and prepend it to the next chunk.
-      if (consumed === 0 && !engine.hasEvents()) break;
+      offset += engine.feed(chunk.subarray(offset));
     }
   }
 } finally {
@@ -89,7 +87,7 @@ try {
 
 ## Server requirements
 
-MySQL 8.4+ or MariaDB 10.11+, logging in row format with `binlog_row_image=FULL` and GTIDs enabled, and an account with `REPLICATION SLAVE` and `REPLICATION CLIENT`. Column names need either `binlog_row_metadata=FULL` or a `SELECT` grant on the streamed tables.
+MySQL 8.4+ or MariaDB 10.11+, logging in row format with `binlog_row_image=FULL` and GTIDs enabled, and an account with `REPLICATION SLAVE` and `REPLICATION CLIENT`. Column names need either `binlog_row_metadata=FULL` or a `SELECT` grant on the streamed tables. On MariaDB, set `binlog_row_metadata=MINIMAL` or `FULL`: its default `NO_LOG` delivers text columns as bytes.
 
 [Server setup](https://github.com/libraz/mysql-event-stream/blob/main/docs/en/server-setup.md) has the full configuration, the grants, and the replica identity rule that two processes on defaults will violate.
 

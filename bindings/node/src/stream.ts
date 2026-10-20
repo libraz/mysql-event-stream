@@ -100,6 +100,9 @@ function errorCode(err: unknown): number | undefined {
  */
 export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   private config!: StreamConfig;
+  // The options the caller supplied, without defaults: checks that span two
+  // options must not see a default the caller never chose.
+  private supplied!: StreamConfig;
   private client: BinlogClient | null = null;
   private engine: CdcEngine | null = null;
   private closed = false;
@@ -124,6 +127,12 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
       configurable: true,
       enumerable: false,
     });
+    Object.defineProperty(this, "supplied", {
+      value: cloneFilterArrays(config),
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
   }
 
   /**
@@ -138,7 +147,8 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
     if (this.iterator) {
       throw invalidArgument("Cannot configure after streaming has started");
     }
-    validateStreamOptions(overrides, this.config);
+    validateStreamOptions(overrides, this.supplied);
+    this.supplied = cloneFilterArrays({ ...this.supplied, ...overrides });
     this.config = cloneFilterArrays({ ...this.config, ...overrides });
   }
 
@@ -177,7 +187,9 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
    * Get the delivered, committed checkpoint candidate. Persist it only after
    * application processing succeeds; the stream does not provide exactly-once
    * delivery. The last non-empty value survives {@link close}, so it can still
-   * be read after the iteration scope ends.
+   * be read after the iteration scope ends. An empty string means no
+   * checkpoint has been published yet and must not be persisted or fed back
+   * as `startGtid`.
    */
   get currentGtid(): string {
     this.cacheCurrentGtid();
@@ -204,25 +216,25 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
   }
 
   private async *generate(): AsyncGenerator<ChangeEvent> {
-    this.engine = new CdcEngine();
-    this.engine.setMaxEventSize(this.config.maxEventSize ?? STREAM_DEFAULTS.maxEventSize);
-    this.engine.setMaxQueueSize(this.config.maxQueueSize ?? STREAM_DEFAULTS.maxQueueSize);
-    this.engine.setMaxQueueBytes(this.config.maxQueueBytes ?? STREAM_DEFAULTS.maxQueueBytes);
-    // The client's reader thread already verified every queued event's CRC32
-    // before it reached pollBatch(), so the engine frames the trailer without
-    // computing it a second time. Set once: state_machine's reset() does not
-    // clear this flag, so it holds across every reconnect on this engine.
-    this.engine.setTrailerPreVerified(true);
-    this.applyFilters();
-    await this.enableMetadataSafe();
-
-    let reconnectAttempts = 0;
-    const maxAttempts = Math.max(
-      0,
-      this.config.maxReconnectAttempts ?? STREAM_DEFAULTS.maxReconnectAttempts,
-    );
-
     try {
+      this.engine = new CdcEngine();
+      this.engine.setMaxEventSize(this.config.maxEventSize ?? STREAM_DEFAULTS.maxEventSize);
+      this.engine.setMaxQueueSize(this.config.maxQueueSize ?? STREAM_DEFAULTS.maxQueueSize);
+      this.engine.setMaxQueueBytes(this.config.maxQueueBytes ?? STREAM_DEFAULTS.maxQueueBytes);
+      // The client's reader thread already verified every queued event's CRC32
+      // before it reached pollBatch(), so the engine frames the trailer without
+      // computing it a second time. Set once: state_machine's reset() does not
+      // clear this flag, so it holds across every reconnect on this engine.
+      this.engine.setTrailerPreVerified(true);
+      this.applyFilters();
+      await this.enableMetadataSafe();
+
+      let reconnectAttempts = 0;
+      const maxAttempts = Math.max(
+        0,
+        this.config.maxReconnectAttempts ?? STREAM_DEFAULTS.maxReconnectAttempts,
+      );
+
       while (!this.closed) {
         // Bytes waiting for the engine, each run paired with the checksum
         // framing the client read it under. Consecutive events read under the
@@ -236,7 +248,7 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
         try {
           // Construction performs connect(), so it belongs to the same retry
           // budget as start() and poll().
-          this.client = new BinlogClient(this.config);
+          this.client = new BinlogClient(clientConfigOf(this.config));
           this.client.start();
 
           while (!this.closed) {
@@ -347,8 +359,8 @@ export class CdcStream implements AsyncIterable<ChangeEvent>, AsyncDisposable {
    *
    * This is the only place a start position is rewritten, so the rule holds on
    * every reconnect path. An empty checkpoint means none was ever published:
-   * the connection died before its first commit, or it was anchored to a file
-   * offset that produces no GTID. Forwarding that as `startGtid: ""` would
+   * the connection died before the stream passed a PREVIOUS_GTIDS / GTID_LIST
+   * event, or it was anchored to a file offset that produces no GTID. Forwarding that as `startGtid: ""` would
    * request the empty GTID set, which the server reads as "send every binlog
    * you still retain". Keep the configured start mode instead — at worst the
    * successor replays from the original anchor.

@@ -272,4 +272,29 @@ describe("native config parsing", () => {
       expect(rejection?.code, option.node).toBe(MesErrorCode.InvalidArg);
     }
   });
+
+  it("refuses a queue budget too small to admit one event on every entry path", () => {
+    const tooSmall = { maxEventSize: 1024 * 1024, maxQueueBytes: 1024 * 1024 };
+    const rejections = [
+      rejectionFrom(() => {
+        new CdcStream({ host: "127.0.0.1", ...tooSmall });
+      }),
+      rejectionFrom(() => {
+        new CdcStream({ host: "127.0.0.1" }).configure(tooSmall);
+      }),
+      rejectionFrom(() => {
+        new BinlogClient({ host: "127.0.0.1", port: 19999, ...tooSmall });
+      }),
+    ];
+    for (const rejection of rejections) {
+      expect(rejection?.code).toBe(MesErrorCode.InvalidArg);
+      expect(rejection?.message).toContain("maxQueueBytes");
+    }
+    // A zero budget resolves to the default, which admits a 1 MiB event.
+    expect(
+      rejectionFrom(() => {
+        new CdcStream({ host: "127.0.0.1", maxEventSize: 1024 * 1024, maxQueueBytes: 0 });
+      }),
+    ).toBeNull();
+  });
 });

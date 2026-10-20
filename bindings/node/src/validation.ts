@@ -227,6 +227,43 @@ function validateConditionalMinimums(supplied: Record<string, unknown>): void {
   }
 }
 
+/** Queue byte budget a `maxQueueBytes` of 0 resolves to (MES_DEFAULT_QUEUE_BYTES). */
+const DEFAULT_QUEUE_BYTES = 48 * 1024 * 1024;
+/** Largest event size the core accepts; 0 and anything above resolve to it. */
+const MAX_EVENT_SIZE_CAP = 1024 * 1024 * 1024;
+/** Smallest event the core can parse: a 19-byte header and a 4-byte checksum. */
+const MIN_EVENT_SIZE = 19 + 4;
+/** Per-event bookkeeping the queue charges on top of the wire payload. */
+const QUEUED_EVENT_OVERHEAD = 1 + 1024 * 1024;
+
+/**
+ * Reject a queue byte budget too small to admit one maximum-sized event.
+ *
+ * The native client refuses such a configuration only when streaming starts,
+ * so it is checked here over the resolved pair, where it is accepted.
+ *
+ * @param supplied Every option the configuration carries, unset keys included.
+ */
+function validateQueueAdmission(supplied: Record<string, unknown>): void {
+  const suppliedEventSize = supplied.maxEventSize;
+  const suppliedQueueBytes = supplied.maxQueueBytes;
+  if (typeof suppliedEventSize !== "number" || typeof suppliedQueueBytes !== "number") return;
+  const eventSize = Math.max(
+    suppliedEventSize === 0 || suppliedEventSize > MAX_EVENT_SIZE_CAP
+      ? MAX_EVENT_SIZE_CAP
+      : suppliedEventSize,
+    MIN_EVENT_SIZE,
+  );
+  const queueBytes = suppliedQueueBytes || DEFAULT_QUEUE_BYTES;
+  const required = eventSize + QUEUED_EVENT_OVERHEAD;
+  if (queueBytes < required) {
+    throw invalidArgument(
+      `maxQueueBytes resolves to ${queueBytes}, below the ${required} bytes ` +
+        `one maxEventSize event of ${eventSize} bytes needs`,
+    );
+  }
+}
+
 /**
  * Validate a supplied configuration against a declared option table in full:
  * unrecognized keys, values that do not match their declared type, integers
@@ -273,6 +310,7 @@ function validateOptionsAgainst(
   validateRequiredTogether(effective);
   validateMutuallyExclusive(effective);
   validateConditionalMinimums(effective);
+  validateQueueAdmission(effective);
 }
 
 /**

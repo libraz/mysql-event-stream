@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CdcEngine } from "../src/engine.js";
-import { type ChangeEvent, MesErrorCode } from "../src/types.js";
+import { type ChangeEvent, isMesError, MesErrorCode } from "../src/types.js";
 import {
   buildColumnEvents,
   Collation,
@@ -49,6 +49,20 @@ describe("CdcEngine", () => {
     engine = await CdcEngine.create();
     const consumed = engine.feed(new Uint8Array(0));
     expect(consumed).toBe(0);
+  });
+
+  it.each([null, undefined])("refuses feed(%s) with a coded error", async (value) => {
+    engine = await CdcEngine.create();
+    const refusal = (() => {
+      try {
+        engine.feed(value as unknown as Uint8Array);
+      } catch (error) {
+        return error;
+      }
+      return null;
+    })();
+    expect(isMesError(refusal)).toBe(true);
+    expect(refusal).toMatchObject({ code: MesErrorCode.InvalidArg });
   });
 
   it("should parse INSERT event", async () => {

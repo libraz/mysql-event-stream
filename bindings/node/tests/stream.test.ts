@@ -43,6 +43,11 @@ const mocks = vi.hoisted(() => ({
   stopImpl: vi.fn(),
   currentGtidImpl: vi.fn(() => ""),
   nextEventImpl: vi.fn<() => ChangeEvent | null>(() => null),
+  // Outcome of the engine's metadata enable. Default: succeeds.
+  enableMetadataImpl: vi.fn<() => Promise<void>>(() => Promise.resolve()),
+  engineDestroyImpl: vi.fn(),
+  // Results for a multi-result batch. Default: undefined, which wraps one poll.
+  pollBatchImpl: vi.fn<() => PollResult[] | undefined>(() => undefined),
 }));
 
 vi.mock("../src/client.js", () => ({
@@ -57,6 +62,8 @@ vi.mock("../src/client.js", () => ({
       return mocks.pollImpl();
     }
     pollBatch(): Promise<PollResult[]> {
+      const batch = mocks.pollBatchImpl();
+      if (batch !== undefined) return Promise.resolve(batch);
       return this.poll().then((result) => [result]);
     }
     get currentGtid(): string {
@@ -77,7 +84,7 @@ vi.mock("../src/engine.js", () => ({
   CdcEngine: class {
     enableMetadata(): void {}
     enableMetadataAsync(): Promise<void> {
-      return Promise.resolve();
+      return mocks.enableMetadataImpl();
     }
     feed(chunk: Uint8Array): number {
       return mocks.feedImpl(chunk);
@@ -110,7 +117,9 @@ vi.mock("../src/engine.js", () => ({
       mocks.excludeTablesImpl(tables);
     }
     reset(): void {}
-    destroy(): void {}
+    destroy(): void {
+      mocks.engineDestroyImpl();
+    }
   },
 }));
 
@@ -152,7 +161,41 @@ function constructedConfig(index: number): StreamConfig {
   return call[0];
 }
 
+/** Make every poll wait until the stream is stopped, so an idle stream does not spin. */
+function holdPollsUntilStop(): void {
+  let release: (() => void) | undefined;
+  mocks.pollImpl.mockReset();
+  mocks.pollImpl.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        release = () => resolve({ data: null, isHeartbeat: false, checksumEnabled: false });
+      }),
+  );
+  mocks.stopImpl.mockReset();
+  mocks.stopImpl.mockImplementation(() => release?.());
+}
+
 describe("CdcStream", () => {
+  it("hands the client only the client option subset", async () => {
+    mocks.clientCtor.mockClear();
+    holdPollsUntilStop();
+    const stream = new CdcStream({
+      host: "127.0.0.1",
+      includeTables: ["mydb.orders"],
+      maxReconnectAttempts: 3,
+      onMetadataError: () => {},
+    });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.clientCtor).toHaveBeenCalledTimes(1));
+    const keys = Object.keys(constructedConfig(0));
+    expect(keys).toContain("host");
+    expect(keys).not.toContain("includeTables");
+    expect(keys).not.toContain("maxReconnectAttempts");
+    expect(keys).not.toContain("onMetadataError");
+    await stream.close();
+    await next;
+  });
+
   it("should create with config", () => {
     const stream = new CdcStream({
       host: "127.0.0.1",
@@ -919,5 +962,151 @@ describe("CdcStream", () => {
       await expect(nextPromise).resolves.toEqual({ done: true, value: undefined });
       expect(mocks.startImpl).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("CdcStream metadata enable and batch framing", () => {
+  const bytes = (value: number): Uint8Array => new Uint8Array([value]);
+  const framed = (value: number, checksumEnabled: boolean): PollResult => ({
+    data: bytes(value),
+    isHeartbeat: false,
+    checksumEnabled,
+  });
+
+  function resetMocks(): void {
+    mocks.clientCtor.mockReset();
+    mocks.startImpl.mockReset();
+    mocks.startImpl.mockImplementation(() => {});
+    holdPollsUntilStop();
+    mocks.pollBatchImpl.mockReset();
+    mocks.pollBatchImpl.mockReturnValue(undefined);
+    mocks.checksumImpl.mockReset();
+    mocks.feedImpl.mockReset();
+    mocks.feedImpl.mockImplementation((chunk: Uint8Array) => chunk.length);
+    mocks.enableMetadataImpl.mockReset();
+    mocks.enableMetadataImpl.mockResolvedValue(undefined);
+    mocks.engineDestroyImpl.mockReset();
+  }
+
+  it("feeds a mixed-framing batch as one run per framing change", async () => {
+    resetMocks();
+    const order: string[] = [];
+    mocks.checksumImpl.mockImplementation((enabled: boolean) => order.push(`flag:${enabled}`));
+    mocks.feedImpl.mockImplementation((chunk: Uint8Array) => {
+      order.push(`feed:${Array.from(chunk).join("+")}`);
+      return chunk.length;
+    });
+    mocks.pollBatchImpl.mockReturnValueOnce([
+      framed(1, false),
+      framed(2, false),
+      framed(3, true),
+      framed(4, true),
+      framed(5, false),
+    ]);
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(order).toHaveLength(6));
+    expect(order).toEqual([
+      "flag:false",
+      "feed:1+2",
+      "flag:true",
+      "feed:3+4",
+      "flag:false",
+      "feed:5",
+    ]);
+    await stream.close();
+    await next;
+  });
+
+  it("starts the client and reports a failed metadata enable once", async () => {
+    resetMocks();
+    const failure = new Error("metadata refused");
+    mocks.enableMetadataImpl.mockRejectedValue(failure);
+    const onMetadataError = vi.fn();
+
+    const stream = new CdcStream({ host: "127.0.0.1", onMetadataError });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.pollImpl).toHaveBeenCalled());
+
+    expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+    expect(onMetadataError).toHaveBeenCalledTimes(1);
+    expect(onMetadataError).toHaveBeenCalledWith(failure);
+    await stream.close();
+    await next;
+  });
+
+  it("tolerates a failed metadata enable with no handler set", async () => {
+    resetMocks();
+    mocks.enableMetadataImpl.mockRejectedValue(new Error("metadata refused"));
+
+    const stream = new CdcStream({ host: "127.0.0.1" });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.pollImpl).toHaveBeenCalled());
+    expect(mocks.startImpl).toHaveBeenCalledTimes(1);
+    await stream.close();
+    await next;
+  });
+
+  it("reports a failed metadata enable on reconnect and keeps iterating", async () => {
+    resetMocks();
+    mocks.startImpl.mockImplementationOnce(() => {
+      throw new Error("temporary outage");
+    });
+    const failure = new Error("metadata refused");
+    mocks.enableMetadataImpl.mockResolvedValueOnce(undefined).mockRejectedValueOnce(failure);
+    const onMetadataError = vi.fn();
+
+    const stream = new CdcStream({ host: "127.0.0.1", maxReconnectAttempts: 2, onMetadataError });
+    const next = stream[Symbol.asyncIterator]().next();
+    await vi.waitFor(() => expect(mocks.pollImpl).toHaveBeenCalled());
+
+    expect(mocks.clientCtor).toHaveBeenCalledTimes(2);
+    expect(onMetadataError).toHaveBeenCalledTimes(1);
+    expect(onMetadataError).toHaveBeenCalledWith(failure);
+    await stream.close();
+    await next;
+  });
+
+  it("propagates a throwing handler at start without retry and destroys the engine", async () => {
+    resetMocks();
+    mocks.enableMetadataImpl.mockRejectedValue(new Error("metadata refused"));
+    const onMetadataError = vi.fn(() => {
+      throw new Error("handler failed");
+    });
+
+    const stream = new CdcStream({ host: "127.0.0.1", maxReconnectAttempts: 3, onMetadataError });
+    await expect(async () => {
+      for await (const _ of stream) {
+        // no events expected
+      }
+    }).rejects.toThrow("handler failed");
+
+    expect(mocks.clientCtor).not.toHaveBeenCalled();
+    expect(onMetadataError).toHaveBeenCalledTimes(1);
+    expect(mocks.engineDestroyImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a throwing handler on reconnect without a further retry", async () => {
+    resetMocks();
+    mocks.startImpl.mockImplementation(() => {
+      throw new Error("temporary outage");
+    });
+    mocks.enableMetadataImpl
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error("metadata refused"));
+    const onMetadataError = vi.fn(() => {
+      throw new Error("handler failed");
+    });
+
+    const stream = new CdcStream({ host: "127.0.0.1", maxReconnectAttempts: 5, onMetadataError });
+    await expect(async () => {
+      for await (const _ of stream) {
+        // no events expected
+      }
+    }).rejects.toThrow("handler failed");
+
+    expect(mocks.clientCtor).toHaveBeenCalledTimes(1);
+    expect(mocks.engineDestroyImpl).toHaveBeenCalledTimes(1);
   });
 });

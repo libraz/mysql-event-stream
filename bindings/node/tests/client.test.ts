@@ -46,6 +46,18 @@ describe("BinlogClient", () => {
     throw new Error("expected constructor to reject serverId=0");
   });
 
+  it("refuses stream-only options with a coded error", () => {
+    for (const options of [
+      { includeTables: ["a"] },
+      { maxReconnectAttempts: 3 },
+      { onMetadataError: () => {} },
+    ]) {
+      expect(() => new BinlogClient({ host: "127.0.0.1", port: 19999, ...options })).toThrow(
+        expect.objectContaining({ code: MesErrorCode.InvalidArg, name: "MesError" }),
+      );
+    }
+  });
+
   it("connects during construction", () => {
     // Constructor connection is part of the Node lifecycle contract. With no
     // server on this port it must fail during construction, not at start().
