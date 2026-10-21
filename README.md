@@ -15,7 +15,7 @@ An embeddable CDC engine for MySQL and MariaDB. It reads the binary log as a rep
 
 ![From a binlog stream to row-level change events](docs/images/pipeline.svg)
 
-A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, `caching_sha2_password`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it. A C ABI publishes that core, and a Node.js N-API addon and a Python `ctypes` package sit on it. Release artifacts link OpenSSL and zlib statically and depend on nothing else.
+A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, `caching_sha2_password`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it. A C ABI publishes that core, and a Node.js N-API addon and a Python `ctypes` package sit on it. Published artifacts link OpenSSL and zlib statically; [Architecture](docs/en/architecture.md#no-client-library) lists what each one depends on.
 
 ## What it does
 
@@ -80,7 +80,7 @@ npm install @libraz/mysql-event-stream
 pip install mysql-event-stream
 ```
 
-Node.js 22 or later; Python 3.11 or later. A C or C++ program links `libmes` instead — see [Getting started](docs/en/getting-started.md#building-from-source).
+Node.js 22 or later; Python 3.11 or later. The npm package ships one addon, built for linux-x64 with glibc 2.39 or newer; elsewhere, build it [from source](docs/en/getting-started.md#building-from-source). A C or C++ program links `libmes` instead — see [Getting started](docs/en/getting-started.md#building-from-source).
 
 The source must be MySQL 8.4+ or MariaDB 10.11+, logging in row format with `binlog_row_image=FULL`, and the account needs `REPLICATION SLAVE` and `REPLICATION CLIENT`. [Server setup](docs/en/server-setup.md) has the rest, including the replica identity rule two processes on defaults will violate.
 

@@ -155,7 +155,8 @@ target_include_directories(mes-shared PUBLIC
 set_target_properties(mes-shared PROPERTIES
   OUTPUT_NAME mes
   VERSION ${PROJECT_VERSION}
-  # Tracks MES_ABI_VERSION, not the package major; bump only when the ABI breaks.
+  # Independent of MES_ABI_VERSION and the package major: changes only on a
+  # backward-incompatible ABI break, which additive MES_ABI_VERSION bumps are not.
   SOVERSION 1
 )
 

@@ -1,7 +1,10 @@
 node_modules/
 dist/
-# Locally built native addon; prebuilt platform packages are produced in CI.
+# Locally built native addon; the published addon is built in CI.
 *.node
 .yarn/*
 !.yarn/releases
 !.yarn/plugins
+# License texts staged from the repository root at pack time.
+/LICENSE
+/licenses/

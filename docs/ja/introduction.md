@@ -8,7 +8,7 @@ mysql-event-stream は、MySQL や MariaDB のバイナリログを行単位の�
 
 ## 中身
 
-C++17 のコアが、MySQL のワイヤプロトコルを OpenSSL の上に直接実装しています。ハンドシェイク、ケイパビリティ交渉、`caching_sha2_password` とネイティブ認証、`COM_QUERY`、`COM_BINLOG_DUMP_GTID`、そしてその上に載る binlog パーサと行デコーダです。クライアントライブラリは一切リンクしません。それがこのプロジェクトの存在理由で、リリース成果物が静的に抱えるのは OpenSSL と zlib だけです。
+C++17 のコアが、MySQL のワイヤプロトコルを OpenSSL の上に直接実装しています。ハンドシェイク、ケイパビリティ交渉、`caching_sha2_password` とネイティブ認証、`COM_QUERY`、`COM_BINLOG_DUMP_GTID`、そしてその上に載る binlog パーサと行デコーダです。クライアントライブラリは一切リンクしません。それがこのプロジェクトの存在理由です。公開する各成果物が何をリンクしているかは[アーキテクチャ](architecture.md#クライアントライブラリを使わない)にあります。
 
 このコアは C ABI として公開され、その上に 2 つのバインディングが載ります。Node.js の N-API アドオンと、Python の `ctypes` パッケージです。C や C++ のプログラムは `libmes` をリンクして、バインディングと同じエントリポイントを使います。
 

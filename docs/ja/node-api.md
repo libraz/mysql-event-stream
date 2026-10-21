@@ -4,7 +4,7 @@
 npm install @libraz/mysql-event-stream
 ```
 
-Node.js 22 以降が必要です。パッケージは ESM で TypeScript の型定義付き、アドオンはオプショナルなプラットフォーム依存で選ぶのではなく同梱してあります。ビルド対象に含まれないランタイムで動かすには[ソースからビルド](getting-started.md#ソースからのビルド)してください。
+Node.js 22 以降が必要です。パッケージは ESM で TypeScript の型定義付き、アドオンはオプショナルなプラットフォーム依存で選ぶのではなく 1 つだけ同梱してあります。このアドオンは linux-x64、glibc 2.39 以降向けのビルドです。それ以外のプラットフォームやアーキテクチャで動かすには[ソースからビルド](getting-started.md#ソースからのビルド)してください。
 
 ```typescript
 import {

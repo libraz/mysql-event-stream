@@ -7,8 +7,8 @@ project(mes-node LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Release prebuilds bundle these libraries so an installed addon never relies
-# on a package-manager OpenSSL/ZLIB or a particular Linux C++ runtime.
+# ON for the published addon (`build:release`); `check:linkage` verifies the
+# result has no dynamic OpenSSL, ZLIB or GNU C++ runtime dependency.
 option(MES_BUNDLE_DEPENDENCIES "Statically link OpenSSL, ZLIB, and the GNU C++ runtime" OFF)
 
 # node-addon-api include path

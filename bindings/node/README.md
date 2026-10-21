@@ -33,6 +33,8 @@ sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 yarn install
 yarn build          # native addon + TypeScript
 yarn build:native   # native addon only
+yarn build:release  # addon with OpenSSL, zlib and the C++ runtime linked statically
+yarn check:linkage  # fail if the built addon depends on them dynamically
 
 yarn test           # unit tests (Vitest)
 yarn test:e2e       # E2E tests (requires the Docker MySQL from bindings/node/e2e/docker)
@@ -60,11 +62,11 @@ src/
   types.ts            # public type definitions
 ```
 
-The addon statically links the C++ core — protocol layer, engine, client — together with OpenSSL and zlib. The TypeScript layer adds typed wrappers, option validation, and the `CdcStream` async iterator.
+The addon compiles the C++ core — protocol layer, engine, client — into itself. `yarn build` links the system OpenSSL and zlib dynamically; `yarn build:release`, which the published addon comes from, links them and the GNU C++ runtime statically, and `yarn check:linkage` fails if the result still depends on any of them. The TypeScript layer adds typed wrappers, option validation, and the `CdcStream` async iterator.
 
 ## Publishing
 
-Automated by GitHub Actions on a `v*.*.*` tag: build and test the core, build and test the binding, create a GitHub Release, publish to npm with `--provenance`. The `prepack` script swaps `README.md` for `README.npm.md` so the registry shows the user-facing page.
+Automated by GitHub Actions on a `v*.*.*` tag: build and test the core, build the pinned static OpenSSL and zlib, build the binding with `build:release`, check its linkage and test it, create a GitHub Release, publish to npm with `--provenance`. The `prepack` script swaps `README.md` for `README.npm.md` so the registry shows the user-facing page.
 
 ## Exports
 

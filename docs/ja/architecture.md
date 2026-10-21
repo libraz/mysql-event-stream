@@ -4,7 +4,9 @@
 
 ## クライアントライブラリを使わない
 
-MySQL のワイヤプロトコルは OpenSSL の上に直接実装しています。ハンドシェイク、capability negotiation、`caching_sha2_password` と `mysql_native_password`、`COM_QUERY`、`COM_BINLOG_DUMP` と `COM_BINLOG_DUMP_GTID` です。クライアントライブラリをリンクすれば、このプロジェクトが存在する理由が失われます。リリース成果物は OpenSSL と zlib を静的に取り込み、それ以外には何も依存しません。
+MySQL のワイヤプロトコルは OpenSSL の上に直接実装しています。ハンドシェイク、capability negotiation、`caching_sha2_password` と `mysql_native_password`、`COM_QUERY`、`COM_BINLOG_DUMP` と `COM_BINLOG_DUMP_GTID` です。クライアントライブラリをリンクすれば、このプロジェクトが存在する理由が失われます。
+
+公開する成果物はすべて OpenSSL と zlib を静的にリンクし、Linux 向けでは GNU C++ ランタイムも静的にリンクします。npm パッケージの linux-x64 アドオンと Linux 向け wheel が依存するのは glibc だけで、macOS 向け wheel が依存するのはシステムライブラリだけです。リリースビルドは出荷前に各バイナリの動的依存を検査し、各成果物には OpenSSL と zlib のライセンス文を同梱しています。
 
 ## プロトコル
 

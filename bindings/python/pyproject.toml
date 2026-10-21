@@ -8,6 +8,8 @@ version = "1.7.1"
 description = "MySQL 8.4+ / MariaDB 10.11+ CDC engine - Python binding (native ctypes)"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+# Staged from the repository root by build_native.sh.
+license-files = ["LICENSE", "licenses/*"]
 dependencies = []
 authors = [{ name = "libraz" }]
 readme = "README.md"

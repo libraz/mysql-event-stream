@@ -4,7 +4,9 @@
 
 ## No client library
 
-The MySQL wire protocol is implemented directly on OpenSSL: the handshake, capability negotiation, `caching_sha2_password` and `mysql_native_password`, `COM_QUERY`, `COM_BINLOG_DUMP` and `COM_BINLOG_DUMP_GTID`. Linking a client library would undo the reason the project exists — a release artifact carries OpenSSL and zlib statically and depends on nothing else.
+The MySQL wire protocol is implemented directly on OpenSSL: the handshake, capability negotiation, `caching_sha2_password` and `mysql_native_password`, `COM_QUERY`, `COM_BINLOG_DUMP` and `COM_BINLOG_DUMP_GTID`. Linking a client library would undo the reason the project exists.
+
+Every published artifact links OpenSSL and zlib statically, and on Linux the GNU C++ runtime too: the npm package's linux-x64 addon and the Linux wheels depend only on glibc, and the macOS wheels only on system libraries. The release build checks each binary's dynamic dependencies before it ships, and each artifact carries the OpenSSL and zlib license texts.
 
 ## Protocol
 

@@ -10,7 +10,7 @@ npm install @libraz/mysql-event-stream
 pip install mysql-event-stream
 ```
 
-Node.js 22 or later; Python 3.11 or later. The Python package publishes platform wheels. The npm package bundles a prebuilt addon rather than selecting one through optional platform dependencies, so a runtime it was not built for needs a [build from source](#building-from-source).
+Node.js 22 or later; Python 3.11 or later. The Python package publishes platform wheels. The npm package bundles one prebuilt addon rather than selecting one through optional platform dependencies; it is built for linux-x64 with glibc 2.39 or newer, so any other platform or architecture needs a [build from source](#building-from-source).
 
 A C or C++ program links the core library instead; see [Building from source](#building-from-source) and the [C API](c-api.md).
 

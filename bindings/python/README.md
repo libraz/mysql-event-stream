@@ -111,4 +111,4 @@ npm install @libraz/mysql-event-stream  # Node.js binding
 
 ## License
 
-[Apache-2.0](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
+[Apache-2.0](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE). Each wheel includes it, and the license texts of the statically linked OpenSSL and zlib, in its `.dist-info/licenses/`.

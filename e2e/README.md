@@ -17,9 +17,9 @@ Node.js suite uses its own container, so the two never collide on a port.
 - Pull requests run all three surfaces against MySQL 8.4 and MariaDB 11.8.
 - The scheduled workflow runs the full MySQL 8.4/9.7 and MariaDB 10.11/11.8/12.3
   matrix.
-- Tag publication calls the same full workflow first; Node prebuilds and Python
-  wheels declare that E2E job as a dependency, so no registry publication can
-  begin after a protocol-matrix failure.
+- Tag publication calls the same full workflow first; the npm addon build and
+  the Python wheels declare that E2E job as a dependency, so no registry
+  publication can begin after a protocol-matrix failure.
 - A separate nightly safety workflow runs ASan, UBSan, TSan, and a three-minute
   libFuzzer parser corpus.
 

@@ -8,3 +8,6 @@ dist/
 wheelhouse/
 wheelhouse-repaired/
 *.whl
+# License texts staged from the repository root by build_native.sh.
+/LICENSE
+/licenses/

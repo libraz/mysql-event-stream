@@ -7,12 +7,17 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist/",
-    "build/Release/*.node"
+    "build/Release/*.node",
+    "LICENSE",
+    "licenses/"
   ],
   "scripts": {
     "build:native": "cmake-js compile",
+    "build:native:release": "cmake-js rebuild --CDMES_BUNDLE_DEPENDENCIES=ON",
     "build:js": "tsc",
     "build": "npm run build:native && npm run build:js",
+    "build:release": "npm run build:native:release && npm run build:js",
+    "check:linkage": "bash scripts/check-addon-linkage.sh",
     "check": "biome check src/ tests/",
     "check:fix": "biome check --write src/ tests/",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tests/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json",
@@ -20,9 +25,9 @@
     "test:ci": "../../scripts/run-suite-guarded.sh --runner=vitest npm run test",
     "test:e2e": "../../scripts/run-suite-guarded.sh --runner=vitest vitest run --config e2e/vitest.config.ts",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build && npm run check && npm run test:ci",
-    "prepack": "cp README.md .readme-backup && cp README.npm.md README.md",
-    "postpack": "mv .readme-backup README.md"
+    "prepublishOnly": "npm run build:release && npm run check:linkage && npm run check && npm run test:ci",
+    "prepack": "cp README.md .readme-backup && cp README.npm.md README.md && cp ../../LICENSE LICENSE && cp -R ../../licenses licenses",
+    "postpack": "mv .readme-backup README.md && rm -rf LICENSE licenses"
   },
   "repository": {
     "type": "git",

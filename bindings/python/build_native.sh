@@ -37,6 +37,11 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   cmake_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET")
 fi
 
+# The wheel carries the project license and those of the libraries linked into it.
+cp "$PROJECT_ROOT/LICENSE" "$SCRIPT_DIR/LICENSE"
+rm -rf "$SCRIPT_DIR/licenses"
+cp -R "$PROJECT_ROOT/licenses" "$SCRIPT_DIR/licenses"
+
 cmake "${cmake_args[@]}"
 cmake --build "$BUILD_DIR" --config Release --parallel
 

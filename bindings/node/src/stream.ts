@@ -1,6 +1,9 @@
 // Copyright 2024 mysql-event-stream Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// Kept in the emitted declarations so a consumer without @types/node still has AsyncDisposable.
+/// <reference lib="esnext.disposable" preserve="true" />
+
 import { BinlogClient } from "./client.js";
 import { backoffDelayMs, NON_RETRYABLE_ERROR_CODES, STREAM_DEFAULTS } from "./contract.js";
 import { CdcEngine } from "./engine.js";

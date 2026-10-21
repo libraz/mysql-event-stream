@@ -1,6 +1,6 @@
 # mysql-event-stream
 
-An embeddable CDC engine for MySQL 8.4+ and MariaDB 10.11+, as a native N-API addon. It reads the binary log as a replica would and emits row-level change events. No libmysqlclient: the wire protocol is implemented directly, and OpenSSL and zlib are bundled.
+An embeddable CDC engine for MySQL 8.4+ and MariaDB 10.11+, as a native N-API addon. It reads the binary log as a replica would and emits row-level change events. No libmysqlclient: the wire protocol is implemented directly, and OpenSSL, zlib and the GNU C++ runtime are linked into the addon statically.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mysql-event-stream/ci.yml?branch=main&label=CI)](https://github.com/libraz/mysql-event-stream/actions)
 [![npm](https://img.shields.io/npm/v/@libraz/mysql-event-stream?logo=npm)](https://www.npmjs.com/package/@libraz/mysql-event-stream)
@@ -16,7 +16,7 @@ An embeddable CDC engine for MySQL 8.4+ and MariaDB 10.11+, as a native N-API ad
 npm install @libraz/mysql-event-stream
 ```
 
-Node.js 22 or later. The package uses neither optional platform dependencies nor an install-time prebuild downloader: its archive contains the addon produced at publish time, so use it when that addon matches your Node runtime and platform. Otherwise build from the repository with Node.js 22+, CMake, OpenSSL, zlib and a C++17 compiler:
+Node.js 22 or later. The package uses neither optional platform dependencies nor an install-time prebuild downloader: its archive contains one addon, built at publish time for linux-x64 with glibc 2.39 or newer, which depends on nothing else. On any other platform or architecture (macOS, linux-arm64, musl-based distributions such as Alpine) installation still succeeds but the first import fails, so build from the repository with Node.js 22+, CMake, OpenSSL, zlib and a C++17 compiler:
 
 ```bash
 git clone https://github.com/libraz/mysql-event-stream.git
@@ -107,4 +107,4 @@ pip install mysql-event-stream  # Python binding
 
 ## License
 
-[Apache-2.0](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE)
+[Apache-2.0](https://github.com/libraz/mysql-event-stream/blob/main/LICENSE). The archive includes it as `LICENSE`, and the license texts of the statically linked OpenSSL and zlib under `licenses/`.

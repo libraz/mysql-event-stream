@@ -4,7 +4,7 @@
 npm install @libraz/mysql-event-stream
 ```
 
-Node.js 22 or later. The package is ESM with TypeScript declarations, and the addon is bundled rather than selected through optional platform dependencies — build [from source](getting-started.md#building-from-source) for a runtime it was not built for.
+Node.js 22 or later. The package is ESM with TypeScript declarations, and one addon is bundled rather than selected through optional platform dependencies. It is built for linux-x64 with glibc 2.39 or newer; on any other platform or architecture, build [from source](getting-started.md#building-from-source).
 
 ```typescript
 import {

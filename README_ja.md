@@ -15,7 +15,7 @@ MySQL / MariaDB 向けの、組み込み可能な CDC エンジンです。レ�
 
 ![binlog ストリームから行単位の変更イベントへ](docs/images/pipeline-ja.svg)
 
-C++17 のコアが、MySQL のワイヤプロトコル（ハンドシェイク、`caching_sha2_password`、`COM_BINLOG_DUMP_GTID`）を OpenSSL 上に直接実装し、その上に binlog パーサーと行デコーダーを載せています。コアは C ABI として公開され、その上に Node.js の N-API アドオンと Python の `ctypes` パッケージが乗ります。リリース成果物は OpenSSL と zlib を静的にリンクし、ほかには何も依存しません。
+C++17 のコアが、MySQL のワイヤプロトコル（ハンドシェイク、`caching_sha2_password`、`COM_BINLOG_DUMP_GTID`）を OpenSSL 上に直接実装し、その上に binlog パーサーと行デコーダーを載せています。コアは C ABI として公開され、その上に Node.js の N-API アドオンと Python の `ctypes` パッケージが乗ります。公開する成果物は OpenSSL と zlib を静的にリンクしています。それぞれが何に依存するかは[アーキテクチャ](docs/ja/architecture.md#クライアントライブラリを使わない)にあります。
 
 ## できること
 
@@ -80,7 +80,7 @@ npm install @libraz/mysql-event-stream
 pip install mysql-event-stream
 ```
 
-Node.js 22 以降、Python 3.11 以降が必要です。C / C++ からは `libmes` をリンクします（[はじめかた](docs/ja/getting-started.md#ソースからのビルド)を参照）。
+Node.js 22 以降、Python 3.11 以降が必要です。npm パッケージが同梱するアドオンは linux-x64、glibc 2.39 以降向けの 1 つだけで、それ以外の環境では[ソースからビルド](docs/ja/getting-started.md#ソースからのビルド)します。C / C++ からは `libmes` をリンクします（[はじめかた](docs/ja/getting-started.md#ソースからのビルド)を参照）。
 
 接続先は MySQL 8.4 以降または MariaDB 10.11 以降で、`binlog_row_image=FULL` の行形式でログを取っている必要があります。アカウントには `REPLICATION SLAVE` と `REPLICATION CLIENT` が要ります。残りは[サーバー設定](docs/ja/server-setup.md)にまとめてあります。既定値のままの 2 プロセスが衝突するレプリカ識別子の規則も、そこに書いてあります。
 
