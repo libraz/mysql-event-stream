@@ -15,16 +15,16 @@ Prerequisites:
        cmake -B build-client
        cmake --build build-client --parallel
 
-Usage:
+Usage (run from bindings/python):
     # Stream all changes from current position
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_streaming.py
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cdc_streaming.py
 
     # Stream from a specific GTID
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_streaming.py \
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cdc_streaming.py \
         --gtid "uuid:1-100"
 
     # Filter by table
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_streaming.py --table items
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cdc_streaming.py --table items
 
 Example output:
     mysql-event-stream CDC Streaming (CdcStream)
@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import signal
 import sys
 from pathlib import Path
@@ -126,39 +125,7 @@ def install_shutdown_handlers(stream: CdcStream) -> None:
         loop.add_signal_handler(sig, on_signal)
 
 
-def find_lib_path() -> str:
-    """Find the libmes shared library.
-
-    Checks in order:
-    1. MES_LIB_PATH environment variable
-    2. build-client/core/
-    3. build/core/
-    """
-    env_path = os.environ.get("MES_LIB_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
-
-    project_root = Path(__file__).parent.parent.parent.parent
-    lib_name = "libmes.dylib" if sys.platform == "darwin" else "libmes.so"
-
-    # Prefer build-client
-    client_path = project_root / "build-client" / "core" / lib_name
-    if client_path.exists():
-        return str(client_path)
-
-    # Fall back to standard build directory
-    build_path = project_root / "build" / "core" / lib_name
-    if build_path.exists():
-        return str(build_path)
-
-    print("Error: libmes not found.", file=sys.stderr)
-    print(f"  Checked: {client_path}", file=sys.stderr)
-    print(f"  Checked: {build_path}", file=sys.stderr)
-    print("Set MES_LIB_PATH or install OpenSSL and rebuild.", file=sys.stderr)
-    sys.exit(1)
-
-
-async def async_main(args: argparse.Namespace, lib_path: str) -> None:
+async def async_main(args: argparse.Namespace) -> None:
     total_events = 0
 
     async with CdcStream(
@@ -170,7 +137,6 @@ async def async_main(args: argparse.Namespace, lib_path: str) -> None:
         allow_public_key_retrieval=True,
         server_id=args.server_id,
         start_gtid=args.gtid,
-        lib_path=lib_path,
     ) as stream:
         install_shutdown_handlers(stream)
         async for event in stream:
@@ -194,8 +160,6 @@ def main() -> None:
     parser.add_argument("--server-id", type=int, default=2, help="Replica server ID")
     args = parser.parse_args()
 
-    lib_path = find_lib_path()
-
     print("mysql-event-stream CDC Streaming (CdcStream)")
     print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     if args.gtid:
@@ -205,7 +169,7 @@ def main() -> None:
     print()
     print("Waiting for changes... (Ctrl+C to stop)\n")
 
-    asyncio.run(async_main(args, lib_path))
+    asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":

@@ -67,14 +67,13 @@ Prerequisites:
        cmake --build build-client --parallel
     3. Create the tables (DDL above)
 
-Usage:
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cache_invalidation.py
+Usage (run from bindings/python):
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cache_invalidation.py
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import signal
 import sys
 from collections.abc import Callable
@@ -115,43 +114,47 @@ def cache_delete(key: str) -> bool:
 
 # --- Event handlers ---
 
+Row = dict[str, Any]
 
-def handle_sessions(event: ChangeEvent) -> None:
+
+def session_key(row: Row) -> str:
+    return f"session:{row['id']}"
+
+
+def settings_key(row: Row) -> str:
+    return f"user:{row['user_id']}:settings"
+
+
+def handle_sessions(event_type: EventType, before: Row | None, after: Row | None) -> None:
     """Handle session table changes."""
-    if event.type == EventType.INSERT and event.after:
-        session_id = event.after["id"]
-        user_id = event.after["user_id"]
-        ip = event.after.get("ip_address", "unknown")
-        cache_set(f"session:{session_id}", event.after)
-        print(f"  [CACHE] sessions: new session {session_id} for user {user_id} ({ip})")
-
-    elif event.type == EventType.DELETE and event.before:
-        session_id = event.before["id"]
-        cache_delete(f"session:{session_id}")
+    if event_type == EventType.DELETE and before:
+        cache_delete(session_key(before))
         stats["cache_evict"] += 1
-        print(f"  [CACHE] sessions: evict session {session_id}")
+        print(f"  [CACHE] sessions: evict session {before['id']}")
 
-    elif event.type == EventType.UPDATE and event.after:
-        session_id = event.after["id"]
-        cache_set(f"session:{session_id}", event.after)
-        print(f"  [CACHE] sessions: refresh session {session_id}")
+    elif after:
+        cache_set(session_key(after), after)
+        if event_type == EventType.INSERT:
+            ip = after.get("ip_address", "unknown")
+            print(
+                f"  [CACHE] sessions: new session {after['id']} for user {after['user_id']} ({ip})"
+            )
+        else:
+            print(f"  [CACHE] sessions: refresh session {after['id']}")
 
 
-def handle_user_settings(event: ChangeEvent) -> None:
+def handle_user_settings(event_type: EventType, before: Row | None, after: Row | None) -> None:
     """Handle user_settings table changes."""
-    if event.type != EventType.UPDATE:
-        return
-    if not event.before or not event.after:
+    if event_type != EventType.UPDATE or not before or not after:
         return
 
-    user_id = event.after["user_id"]
-    cache_key = f"user:{user_id}:settings"
+    cache_key = settings_key(after)
 
     # Log what changed
     changes: list[str] = []
     for col in ("theme", "language", "timezone"):
-        old = event.before.get(col)
-        new = event.after.get(col)
+        old = before.get(col)
+        new = after.get(col)
         if old != new:
             changes.append(f"{col}: {old} -> {new}")
 
@@ -160,11 +163,35 @@ def handle_user_settings(event: ChangeEvent) -> None:
     print(f"  [CACHE] user_settings: invalidate {cache_key} ({', '.join(changes)})")
 
 
-# Dispatch table -> handler
-HANDLERS: dict[str, Callable[[ChangeEvent], None]] = {
-    "sessions": handle_sessions,
-    "user_settings": handle_user_settings,
+# Dispatch table -> (cache key of a row, handler)
+HANDLERS: dict[str, tuple[Callable[[Row], str], Callable[..., None]]] = {
+    "sessions": (session_key, handle_sessions),
+    "user_settings": (settings_key, handle_user_settings),
 }
+
+
+def handle_event(event: ChangeEvent) -> bool:
+    """Apply one row event to the cache; returns False when it was skipped.
+
+    Rows are read by column name, so an event whose names could not be resolved
+    is skipped. An UPDATE that changes the cache key also drops the old entry.
+    """
+    entry = HANDLERS.get(event.table)
+    if entry is None:
+        return False
+    if not event.names_resolved:
+        print(f"  [SKIP] {event.type.name} on {event.table}: column names unresolved")
+        return False
+
+    key_of, handler = entry
+    before, after = event.before, event.after
+    old_key = key_of(before) if event.type == EventType.UPDATE and before and after else None
+    if old_key is not None and after and old_key != key_of(after) and cache_delete(old_key):
+        stats["cache_evict"] += 1
+        print(f"  [CACHE] {event.table}: evict stale {old_key}")
+    handler(event.type, before, after)
+    return True
+
 
 # --- Main ---
 
@@ -183,31 +210,7 @@ def install_shutdown_handlers(stream: CdcStream) -> None:
         loop.add_signal_handler(sig, on_signal)
 
 
-def find_lib_path() -> str:
-    """Find the libmes shared library.
-
-    Checks in order:
-    1. MES_LIB_PATH environment variable
-    2. build-client/core/
-    3. build/core/
-    """
-    env_path = os.environ.get("MES_LIB_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
-
-    project_root = Path(__file__).parent.parent.parent.parent
-    lib_name = "libmes.dylib" if sys.platform == "darwin" else "libmes.so"
-
-    for subdir in ("build-client", "build"):
-        candidate = project_root / subdir / "core" / lib_name
-        if candidate.exists():
-            return str(candidate)
-
-    print("Error: libmes not found. Set MES_LIB_PATH.", file=sys.stderr)
-    sys.exit(1)
-
-
-async def async_main(lib_path: str) -> None:
+async def async_main() -> None:
     """Stream CDC events and dispatch to table-specific handlers."""
     global total_events
 
@@ -219,26 +222,21 @@ async def async_main(lib_path: str) -> None:
         # Local test server only; use verified TLS (ssl_mode/ssl_ca) in production.
         allow_public_key_retrieval=True,
         server_id=3,
-        lib_path=lib_path,
     ) as stream:
         install_shutdown_handlers(stream)
         async for event in stream:
-            handler = HANDLERS.get(event.table)
-            if handler:
-                handler(event)
+            if handle_event(event):
                 total_events += 1
 
 
 def main() -> None:
     """Entry point for the cache invalidation example."""
-    lib_path = find_lib_path()
-
     print("Cache Invalidation Example")
     print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     print(f"  Tables: {', '.join(HANDLERS)}\n")
     print("Watching for changes... (Ctrl+C to stop)\n")
 
-    asyncio.run(async_main(lib_path))
+    asyncio.run(async_main())
 
     s = stats
     print(

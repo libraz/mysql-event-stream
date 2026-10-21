@@ -123,8 +123,7 @@ function indexProduct(row: Record<string, unknown>): void {
   }
 }
 
-function removeProduct(row: Record<string, unknown>): void {
-  const id = row.id as number;
+function removeProduct(id: number): void {
   if (index.delete(id)) {
     console.log(`  [INDEX] - product ${id}: removed from index`);
     stats.removed++;
@@ -133,20 +132,23 @@ function removeProduct(row: Record<string, unknown>): void {
 
 // --- Event handler ---
 
+/**
+ * Applies one row event. Rows are read by column name, so an event whose names
+ * could not be resolved is skipped; an UPDATE that changes the id also drops
+ * the document under the old id.
+ */
 function handleEvent(event: ChangeEvent): void {
   if (event.table !== "products") return;
-
-  switch (event.type) {
-    case "INSERT":
-      if (event.after) indexProduct(event.after);
-      break;
-    case "UPDATE":
-      if (event.after) indexProduct(event.after);
-      break;
-    case "DELETE":
-      if (event.before) removeProduct(event.before);
-      break;
+  if (!event.namesResolved) {
+    console.warn(`  [SKIP] ${event.type} on products: column names unresolved`);
+    return;
   }
+
+  const { before, after } = event;
+  if (before && (event.type === "DELETE" || after?.id !== before.id)) {
+    removeProduct(before.id as number);
+  }
+  if (after) indexProduct(after);
 }
 
 // --- Main ---

@@ -15,12 +15,12 @@ Prerequisites:
        cmake -B build-client
        cmake --build build-client --parallel
 
-Usage:
+Usage (run from bindings/python):
     # Watch all tables
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_watcher.py
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cdc_watcher.py
 
     # Watch specific table
-    MES_LIB_PATH=./build-client/core/libmes.dylib python examples/cdc_watcher.py --table items
+    MES_LIB_PATH=../../build-client/core/libmes.dylib python examples/cdc_watcher.py --table items
 
 Example output:
     mysql-event-stream CDC Watcher
@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import signal
 import sys
 from pathlib import Path
@@ -122,31 +121,7 @@ def install_shutdown_handlers(stream: CdcStream) -> None:
         loop.add_signal_handler(sig, on_signal)
 
 
-def find_lib_path() -> str:
-    """Find the libmes shared library."""
-    env_path = os.environ.get("MES_LIB_PATH")
-    if env_path and Path(env_path).exists():
-        return env_path
-
-    project_root = Path(__file__).parent.parent.parent.parent
-    lib_name = "libmes.dylib" if sys.platform == "darwin" else "libmes.so"
-
-    client_path = project_root / "build-client" / "core" / lib_name
-    if client_path.exists():
-        return str(client_path)
-
-    build_path = project_root / "build" / "core" / lib_name
-    if build_path.exists():
-        return str(build_path)
-
-    print("Error: libmes not found.", file=sys.stderr)
-    print(f"  Checked: {client_path}", file=sys.stderr)
-    print(f"  Checked: {build_path}", file=sys.stderr)
-    print("Set MES_LIB_PATH or install OpenSSL and rebuild.", file=sys.stderr)
-    sys.exit(1)
-
-
-async def async_main(args: argparse.Namespace, lib_path: str) -> None:
+async def async_main(args: argparse.Namespace) -> None:
     total_events = 0
 
     async with CdcStream(
@@ -157,7 +132,6 @@ async def async_main(args: argparse.Namespace, lib_path: str) -> None:
         # Local test server only; use verified TLS (ssl_mode/ssl_ca) in production.
         allow_public_key_retrieval=True,
         server_id=args.server_id,
-        lib_path=lib_path,
     ) as stream:
         install_shutdown_handlers(stream)
         async for event in stream:
@@ -175,15 +149,13 @@ def main() -> None:
     parser.add_argument("--server-id", type=int, default=4, help="Replica server ID")
     args = parser.parse_args()
 
-    lib_path = find_lib_path()
-
     print("mysql-event-stream CDC Watcher")
     print(f"  Server: {MYSQL_HOST}:{MYSQL_PORT} (MySQL or MariaDB)")
     if args.table:
         print(f"  Filter: table={args.table}")
     print("\nWaiting for changes... (Ctrl+C to stop)\n")
 
-    asyncio.run(async_main(args, lib_path))
+    asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":

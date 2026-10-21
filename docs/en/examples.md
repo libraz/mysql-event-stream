@@ -18,6 +18,8 @@ await using stream = new CdcStream({
 });
 
 for await (const event of stream) {
+  // handle() reads columns by name; throw before the checkpoint rather than skip past the event.
+  if (!event.namesResolved) throw new Error("column names unresolved");
   await handle(event); // idempotent
   if (stream.currentGtid) await saveCheckpoint(stream.currentGtid);
 }
@@ -40,6 +42,9 @@ async def run() -> None:
         on_metadata_error=lambda err: logger.warning("column names unavailable: %s", err),
     ) as stream:
         async for event in stream:
+            # handle() reads columns by name; raise before the checkpoint rather than skip past the event.
+            if not event.names_resolved:
+                raise RuntimeError("column names unresolved")
             await handle(event)  # idempotent
             if stream.current_gtid:
                 await save_checkpoint(stream.current_gtid)
@@ -54,6 +59,8 @@ A row changed, so the cache entry keyed on it is stale. Both images are availabl
 ```typescript
 for await (const event of stream) {
   if (event.table !== "products") continue;
+  // Keys come from column names; throw before the checkpoint rather than skip past the event.
+  if (!event.namesResolved) throw new Error("column names unresolved");
 
   const keys = new Set<string>();
   if (event.before) keys.add(`product:${event.before.id}`);
@@ -89,9 +96,10 @@ Watch the log for `include_filter_matched_nothing`: a filter matching nothing lo
 ```typescript
 import { BinlogClient, CdcEngine } from "@libraz/mysql-event-stream";
 
-const client = new BinlogClient({ host: "mysql.example.com", serverId: 1003 });
+const conn = { host: "mysql.example.com", user: "replicator", password: secret };
+const client = new BinlogClient({ ...conn, serverId: 1003 });
 const engine = new CdcEngine();
-engine.enableMetadata({ host: "mysql.example.com", user: "replicator", password: secret });
+engine.enableMetadata(conn);
 
 client.start();
 try {
