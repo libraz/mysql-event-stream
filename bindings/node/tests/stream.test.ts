@@ -261,20 +261,26 @@ describe("CdcStream", () => {
         ),
     );
 
+    // Zero jitter makes the reconnect backoff its 500 ms floor, well inside
+    // the waitFor window; the full jitter range reaches that window's edge.
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
     const includeTables = ["mydb.orders"];
     const stream = new CdcStream({ host: "127.0.0.1", includeTables, maxReconnectAttempts: 1 });
     const next = stream[Symbol.asyncIterator]().next();
-    await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(1));
+    try {
+      await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(1));
 
-    // Mutate the caller's own array after construction, before the reconnect.
-    includeTables.push("mydb.audit_log");
-    await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(2));
+      // Mutate the caller's own array after construction, before the reconnect.
+      includeTables.push("mydb.audit_log");
+      await vi.waitFor(() => expect(mocks.includeTablesImpl).toHaveBeenCalledTimes(2));
 
-    expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(1, ["mydb.orders"]);
-    expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(2, ["mydb.orders"]);
-
-    await stream.close();
-    await next.catch(() => {});
+      expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(1, ["mydb.orders"]);
+      expect(mocks.includeTablesImpl).toHaveBeenNthCalledWith(2, ["mydb.orders"]);
+    } finally {
+      random.mockRestore();
+      await stream.close();
+      await next.catch(() => {});
+    }
   });
 
   it("does not let a caller's later mutation of a configure() filter array change what applyFilters uses", async () => {
