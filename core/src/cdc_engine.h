@@ -275,6 +275,13 @@ class CdcEngine {
   bool IsTableAllowed(const std::string& database, const std::string& table) const;
   void RebuildBlockedTableIds();
 
+  /**
+   * @brief Resolve column names and signedness for an allowed registered table.
+   * @param table_id Registered table to resolve.
+   * @param keep_if_same Keep the registered object when resolution adds nothing.
+   */
+  void ResolveTableMetadata(uint64_t table_id, bool keep_if_same);
+
   std::unordered_set<std::string> include_databases_;
   std::unordered_set<std::string> include_tables_;
   std::unordered_set<std::string> exclude_tables_;

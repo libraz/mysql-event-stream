@@ -335,14 +335,67 @@ void CdcEngine::ResetIncludeFilterMatchState() {
   include_filter_matched_ = false;
 }
 
+void CdcEngine::ResolveTableMetadata(uint64_t table_id, bool keep_if_same) {
+  const TableMetadata* meta = table_registry_.Lookup(table_id);
+  if (meta == nullptr) return;
+  // Events that are already queued read their column names straight out
+  // of the registered TableMetadata, so the resolution below is written
+  // into a copy that then replaces the registry entry. Writing the names
+  // into the registered object would change what an event decoded earlier
+  // reports, and on reallocation would leave its views dangling.
+  TableMetadata resolved = *meta;
+  bool needs_column_names = metadata_fetcher_ && !resolved.columns.empty() &&
+                            std::any_of(resolved.columns.begin(), resolved.columns.end(),
+                                        [](const ColumnMetadata& c) { return c.name.empty(); });
+  bool signedness_from_metadata_conn = false;
+  if (needs_column_names) {
+    auto infos = metadata_fetcher_->FetchColumnInfo(resolved.database_name, resolved.table_name,
+                                                    resolved.columns.size());
+    // FetchColumnInfo returns an empty vector on any failure (connection
+    // loss, lost SELECT privilege, column-count mismatch).
+    signedness_from_metadata_conn = !infos.empty();
+    for (size_t i = 0; i < infos.size() && i < resolved.columns.size(); i++) {
+      resolved.columns[i].name = infos[i].name;
+      // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
+      // default) is authoritative for the exact schema at this position.
+      // Only fall back to the side-connection's signedness when the
+      // binlog did not carry it (very old servers).
+      if (!resolved.signedness_from_binlog) {
+        resolved.columns[i].is_unsigned = infos[i].is_unsigned;
+      }
+    }
+  }
+  // A TABLE_MAP may carry names itself, or the metadata side-connection
+  // may have supplied them above. The flag must describe the resulting
+  // metadata, not whether a lookup was attempted.
+  resolved.names_resolved = std::none_of(resolved.columns.begin(), resolved.columns.end(),
+                                         [](const ColumnMetadata& c) { return c.name.empty(); });
+  if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
+    ReportUnknownSignedness(&resolved);
+  }
+  // Resolution that yields nothing new keeps the registered object, so
+  // queued events keep sharing one instance while the retry goes on.
+  if (keep_if_same && SameResolution(*meta, resolved)) return;
+  std::vector<uint64_t> evicted_table_ids;
+  table_registry_.ReplaceMetadata(table_id, std::move(resolved), &evicted_table_ids);
+  for (uint64_t evicted : evicted_table_ids) blocked_table_ids_.erase(evicted);
+}
+
 void CdcEngine::RebuildBlockedTableIds() {
+  const std::unordered_set<uint64_t> previously_blocked = std::move(blocked_table_ids_);
   blocked_table_ids_.clear();
-  table_registry_.ForEach([this](uint64_t table_id, const TableMetadata& metadata) {
+  std::vector<uint64_t> newly_allowed;
+  table_registry_.ForEach([&](uint64_t table_id, const TableMetadata& metadata) {
     NoteTableMapForIncludeFilters(metadata);
     if (!IsTableAllowed(metadata.database_name, metadata.table_name)) {
       blocked_table_ids_.insert(table_id);
+    } else if (previously_blocked.count(table_id) != 0) {
+      newly_allowed.push_back(table_id);
     }
   });
+  // A table skipped before name resolution has no resolved names, and its next
+  // TABLE_MAP may be byte-identical and exit early, so resolve it now.
+  for (uint64_t table_id : newly_allowed) ResolveTableMetadata(table_id, /*keep_if_same=*/true);
 }
 
 void CdcEngine::SetMetadataFetcher(ColumnNameSource* fetcher) { metadata_fetcher_ = fetcher; }
@@ -435,49 +488,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
           break;
         }
         blocked_table_ids_.erase(table_id);
-        // Events that are already queued read their column names straight out
-        // of the registered TableMetadata, so the resolution below is written
-        // into a copy that then replaces the registry entry. Writing the names
-        // into the registered object would change what an event decoded earlier
-        // reports, and on reallocation would leave its views dangling.
-        TableMetadata resolved = *meta;
-        bool needs_column_names =
-            metadata_fetcher_ && !resolved.columns.empty() &&
-            std::any_of(resolved.columns.begin(), resolved.columns.end(),
-                        [](const ColumnMetadata& c) { return c.name.empty(); });
-        bool signedness_from_metadata_conn = false;
-        if (needs_column_names) {
-          auto infos = metadata_fetcher_->FetchColumnInfo(
-              resolved.database_name, resolved.table_name, resolved.columns.size());
-          // FetchColumnInfo returns an empty vector on any failure (connection
-          // loss, lost SELECT privilege, column-count mismatch).
-          signedness_from_metadata_conn = !infos.empty();
-          for (size_t i = 0; i < infos.size() && i < resolved.columns.size(); i++) {
-            resolved.columns[i].name = infos[i].name;
-            // Binlog TABLE_MAP signedness (present in MINIMAL mode, the MySQL
-            // default) is authoritative for the exact schema at this position.
-            // Only fall back to the side-connection's signedness when the
-            // binlog did not carry it (very old servers).
-            if (!resolved.signedness_from_binlog) {
-              resolved.columns[i].is_unsigned = infos[i].is_unsigned;
-            }
-          }
-        }
-        // A TABLE_MAP may carry names itself, or the metadata side-connection
-        // may have supplied them above. The flag must describe the resulting
-        // metadata, not whether a lookup was attempted.
-        resolved.names_resolved =
-            std::none_of(resolved.columns.begin(), resolved.columns.end(),
-                         [](const ColumnMetadata& c) { return c.name.empty(); });
-        if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
-          ReportUnknownSignedness(&resolved);
-        }
-        // Resolution that yields nothing new keeps the registered object, so
-        // queued events keep sharing one instance while the retry goes on.
-        if (unchanged && SameResolution(*meta, resolved)) break;
-        evicted_table_ids.clear();
-        table_registry_.ReplaceMetadata(table_id, std::move(resolved), &evicted_table_ids);
-        for (uint64_t evicted : evicted_table_ids) blocked_table_ids_.erase(evicted);
+        ResolveTableMetadata(table_id, unchanged);
       }
       break;
     }

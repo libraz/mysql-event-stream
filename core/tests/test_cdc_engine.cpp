@@ -2297,6 +2297,152 @@ TEST(CdcEngineTest, RuntimeFilterChangesReevaluateExistingTableMap) {
   EXPECT_FALSE(engine.IsError());
 }
 
+TEST(CdcEngineTest, RejectedTableNeverReachesTheColumnNameSource) {
+  CdcEngine engine;
+  FakeColumnNameSource source;
+  source.SetNames({"id"});
+  engine.SetMetadataFetcher(&source);
+  engine.SetIncludeTables({"mydb.users"});
+
+  const auto rejected_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                       100, BuildTableMapBody(1, "mydb", "logs"));
+  const auto rejected_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
+                                       200, BuildWriteRowsBody(1, 10));
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_EQ(engine.Feed(rejected_map.data(), rejected_map.size()), rejected_map.size());
+    ASSERT_EQ(engine.Feed(rejected_row.data(), rejected_row.size()), rejected_row.size());
+  }
+  EXPECT_EQ(source.FetchCount(), 0);
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+
+  // The source is wired: an allowed table does reach it.
+  const auto allowed_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002,
+                                      300, BuildTableMapBody(2, "mydb", "users"));
+  ASSERT_EQ(engine.Feed(allowed_map.data(), allowed_map.size()), allowed_map.size());
+  EXPECT_EQ(source.FetchCount(), 1);
+  EXPECT_EQ(source.LastTable(), "users");
+}
+
+TEST(CdcEngineTest, FiltersSurviveReset) {
+  CdcEngine engine;
+  engine.SetIncludeDatabases({"mydb"});
+
+  const auto excluded_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                       100, BuildTableMapBody(1, "otherdb", "t"));
+  const auto excluded_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
+                                       200, BuildWriteRowsBody(1, 10));
+  const auto allowed_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002,
+                                      300, BuildTableMapBody(2, "mydb", "users"));
+  const auto allowed_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
+                                      400, BuildWriteRowsBody(2, 20));
+
+  engine.Reset();
+
+  ASSERT_EQ(engine.Feed(excluded_map.data(), excluded_map.size()), excluded_map.size());
+  ASSERT_EQ(engine.Feed(excluded_row.data(), excluded_row.size()), excluded_row.size());
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+
+  ASSERT_EQ(engine.Feed(allowed_map.data(), allowed_map.size()), allowed_map.size());
+  ASSERT_EQ(engine.Feed(allowed_row.data(), allowed_row.size()), allowed_row.size());
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "users");
+  EXPECT_FALSE(engine.HasEvents());
+  EXPECT_FALSE(engine.IsError());
+}
+
+class FilterClearTest : public ::testing::TestWithParam<int> {};
+
+TEST_P(FilterClearTest, EmptyListLiftsTheRestrictionOnARegisteredTable) {
+  CdcEngine engine;
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "users"));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+
+  const auto apply = [&engine](int setter, const std::vector<std::string>& values) {
+    switch (setter) {
+      case 0:
+        engine.SetIncludeDatabases(values);
+        break;
+      case 1:
+        engine.SetIncludeTables(values);
+        break;
+      default:
+        engine.SetExcludeTables(values);
+        break;
+    }
+  };
+  const int setter = GetParam();
+  apply(setter, {setter == 0 ? "otherdb" : setter == 1 ? "mydb.other" : "mydb.users"});
+
+  const auto blocked = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                                  BuildWriteRowsBody(1, 10));
+  ASSERT_EQ(engine.Feed(blocked.data(), blocked.size()), blocked.size());
+  ASSERT_FALSE(engine.HasEvents());
+
+  apply(setter, {});
+  const auto delivered = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+                                    300, BuildWriteRowsBody(1, 20));
+  ASSERT_EQ(engine.Feed(delivered.data(), delivered.size()), delivered.size());
+
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_EQ(event.table, "users");
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].int_val, 20);
+  EXPECT_FALSE(engine.IsError());
+}
+
+INSTANTIATE_TEST_SUITE_P(Setters, FilterClearTest, ::testing::Values(0, 1, 2));
+
+TEST(CdcEngineTest, WideningFilterResolvesColumnNamesOfNewlyAllowedTable) {
+  CdcEngine engine;
+  FakeColumnNameSource source;
+  source.SetNames({"id"});
+  engine.SetMetadataFetcher(&source);
+  engine.SetIncludeTables({"mydb.other"});
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "users"));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(source.FetchCount(), 0);
+
+  engine.SetIncludeTables({"mydb.users"});
+  EXPECT_EQ(source.FetchCount(), 1);
+
+  const auto row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+                              BuildWriteRowsBody(1, 10));
+  ASSERT_EQ(engine.Feed(row.data(), row.size()), row.size());
+  ChangeEvent event;
+  ASSERT_TRUE(engine.NextEvent(&event));
+  EXPECT_TRUE(event.names_resolved);
+  ASSERT_EQ(event.after.columns.size(), 1u);
+  EXPECT_EQ(event.after.columns[0].name, "id");
+
+  // A byte-identical TABLE_MAP has nothing left to resolve.
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  EXPECT_EQ(source.FetchCount(), 1);
+}
+
+TEST(CdcEngineTest, WideningFilterReportsMissingSignednessOfNewlyAllowedTable) {
+  ScopedEventLogCapture capture("event=table_map_missing_signedness");
+  CdcEngine engine;
+  engine.SetExcludeTables({"users"});
+
+  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+                                    100, BuildTableMapBody(1, "mydb", "users"));
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  ASSERT_EQ(capture.Count(), 0);
+
+  engine.SetExcludeTables({});
+  EXPECT_EQ(capture.Count(), 1);
+
+  ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
+  EXPECT_EQ(capture.Count(), 1);
+}
+
 TEST(CdcEngineTest, TableMapTooShortBodyIsParseError) {
   CdcEngine engine;
 

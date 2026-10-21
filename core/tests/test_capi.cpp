@@ -1918,6 +1918,30 @@ TEST(CApi, FilterSettersAcceptEmptyArrays) {
   mes_destroy(engine);
 }
 
+TEST(CApi, EmptyArrayClearsAnInstalledFilter) {
+  auto* engine = mes_create();
+
+  const char* other_db[] = {"otherdb"};
+  ASSERT_EQ(mes_set_include_databases(engine, other_db, 1), MES_OK);
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "mydb", "t"));
+  ASSERT_EQ(mes_set_include_databases(engine, nullptr, 0), MES_OK);
+  EXPECT_TRUE(FeedInsertFor(engine, 1, "mydb", "t"));
+
+  const char* other_table[] = {"mydb.other"};
+  ASSERT_EQ(mes_set_include_tables(engine, other_table, 1), MES_OK);
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "mydb", "t"));
+  ASSERT_EQ(mes_set_include_tables(engine, nullptr, 0), MES_OK);
+  EXPECT_TRUE(FeedInsertFor(engine, 1, "mydb", "t"));
+
+  const char* drop[] = {"mydb.t"};
+  ASSERT_EQ(mes_set_exclude_tables(engine, drop, 1), MES_OK);
+  EXPECT_FALSE(FeedInsertFor(engine, 1, "mydb", "t"));
+  ASSERT_EQ(mes_set_exclude_tables(engine, nullptr, 0), MES_OK);
+  EXPECT_TRUE(FeedInsertFor(engine, 1, "mydb", "t"));
+
+  mes_destroy(engine);
+}
+
 TEST(CApi, FilterSettersRejectNullArrayWithNonZeroCount) {
   auto* engine = mes_create();
   EXPECT_EQ(mes_set_include_databases(engine, nullptr, 1), MES_ERR_NULL_ARG);

@@ -82,6 +82,19 @@ export class MysqlClient {
     await this.pool.query(sql);
   }
 
+  /** Thread ids of the binlog dump connections the given server user holds. */
+  async dumpThreadIds(user: string): Promise<number[]> {
+    const [rows] = await this.pool.query<mysql.RowDataPacket[]>("SHOW PROCESSLIST");
+    return rows
+      .filter((r) => r.User === user && String(r.Command).startsWith("Binlog Dump"))
+      .map((r) => Number(r.Id));
+  }
+
+  /** Terminate a server connection by thread id. */
+  async killThread(id: number): Promise<void> {
+    await this.pool.query(`KILL ${Math.trunc(id)}`);
+  }
+
   /** Truncate a table. */
   async truncate(table: string): Promise<void> {
     await this.pool.execute(`TRUNCATE TABLE ${table}`);

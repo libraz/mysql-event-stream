@@ -80,6 +80,18 @@ class MysqlClient:
             cur.execute(sql)
             return cur.rowcount
 
+    def dump_thread_ids(self, user: str) -> list[int]:
+        """Thread ids of the binlog dump connections the given server user holds."""
+        return [
+            int(row["Id"])
+            for row in self.execute("SHOW PROCESSLIST")
+            if row["User"] == user and str(row["Command"]).startswith("Binlog Dump")
+        ]
+
+    def kill_thread(self, thread_id: int) -> None:
+        """Terminate a server connection by thread id."""
+        self.execute(f"KILL {int(thread_id)}")
+
     def truncate(self, table: str) -> None:
         """Truncate a table."""
         self.execute(f"TRUNCATE TABLE {table}")
