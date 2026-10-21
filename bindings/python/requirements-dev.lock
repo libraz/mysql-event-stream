@@ -10,17 +10,17 @@
 #   universal: false
 
 -e file:.
-ast-serialize==0.11.2
+ast-serialize==0.13.1
     # via mypy
 cffi==2.1.1
     # via cryptography
-cryptography==50.0.1
+cryptography==50.0.2
 hatchling==1.32.4
-iniconfig==2.3.0
+iniconfig==2.3.1
     # via pytest
 librt==0.16.0
     # via mypy
-mypy==2.3.1
+mypy==2.4.0
 mypy-extensions==1.1.0
     # via mypy
 packaging==26.3
@@ -30,10 +30,10 @@ packaging==26.3
 pathspec==1.1.1
     # via hatchling
     # via mypy
-pluggy==1.6.0
+pluggy==1.7.0
     # via hatchling
     # via pytest
-pycparser==3.0
+pycparser==3.11
     # via cffi
 pygments==2.21.0
     # via pytest
@@ -43,8 +43,8 @@ pytest==9.1.1
     # via pytest-timeout
 pytest-asyncio==1.4.0
 pytest-timeout==2.4.0
-ruff==0.16.9
-tomlkit==0.15.1
+ruff==0.17.1
+tomlkit==0.15.2
     # via hatchling
 trove-classifiers==2026.9.21.13
     # via hatchling

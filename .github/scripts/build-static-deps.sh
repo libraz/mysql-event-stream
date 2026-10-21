@@ -8,8 +8,10 @@ if [[ $# -ne 1 ]]; then
 fi
 
 readonly PREFIX="$1"
-readonly OPENSSL_VERSION="3.5.7"
-readonly OPENSSL_SHA256="a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
+# OpenSSL tracks the 3.5 LTS line, the newest with long-term support; newer
+# feature lines are not taken into shipped binaries.
+readonly OPENSSL_VERSION="3.5.9"
+readonly OPENSSL_SHA256="603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
 readonly ZLIB_VERSION="1.3.2"
 readonly ZLIB_SHA256="bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
 readonly MARKER="$PREFIX/.mes-static-deps-$OPENSSL_VERSION-$ZLIB_VERSION"
