@@ -10,13 +10,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-21
+
+A correctness release with one change to a Python signature, which is why it is
+a minor version: `start_binlog_position` now defaults to `None`. The C ABI is
+unchanged and `mes_abi_version()` still reports 3. The published npm addon now
+carries OpenSSL, zlib and the C++ runtime inside it instead of loading them from
+the host.
+
+### Fixed
+
+- **Checkpoints** — a file/offset start publishes no checkpoint until the first
+  PREVIOUS_GTIDS (MySQL) or GTID_LIST (MariaDB) event, and a MariaDB
+  non-standalone group such as `CREATE TABLE ... SELECT` checkpoints at its XID.
+- **Malformed input fails closed** — a checksummed frame too short for its
+  trailer, a length-encoded integer with a 0xFF or 0xFB prefix or truncated
+  bytes, and a GTID set with an empty colon piece are refused instead of being
+  read past or half-parsed. Tagged MySQL GTID runs parse with the same grammar.
+- **MariaDB `SET STATEMENT ... FOR <DDL>`** is recognised as DDL by the engine
+  and the GTID tracker.
+- **Queue byte budget** — each queued event is charged for its per-row column
+  arrays and the table metadata it pins, with a 1 MiB floor per event.
+- **Client limit setters** return `MES_ERR_INVALID_ARG` while streaming instead
+  of changing limits under a running reader.
+- **Widening a filter at runtime** — a table that a filter setter newly allows is
+  resolved at once, so its rows carry column names without waiting for another
+  TABLE_MAP.
+- **Strings with an embedded NUL** — option strings and filter entries
+  containing U+0000 are refused with `INVALID_ARG` on both bindings. The C ABI
+  used to see only the part before the NUL, so a filter entry could match a
+  different table.
+- **Node: Worker teardown** — ending a Worker while a call is on the thread pool
+  no longer aborts the process, and a Worker terminated mid-poll stops its
+  client instead of waiting for the next heartbeat or the read timeout.
+- **Node: validation matches Python** — `BinlogClient` refuses stream-only
+  options, `feed(null)` is refused with a code, the queue budget and event size
+  combination is checked up front, and an `onMetadataError` throw propagates.
+- **Python: stream lifecycle** — start, reconnect and close run as tracked
+  tasks, so cancelling the consumer never repeats a handshake or drops a
+  finished poll. A failure whose awaiting call was cancelled is raised by the
+  next `__anext__` instead of being lost behind a clean end of iteration.
+- **Python: refusals carry codes** — unknown options and invalid values raise
+  with `INVALID_ARG`, and `enable_metadata` raises `MesConnectionError` for a
+  connection failure.
+- **Neither binding persists an empty checkpoint.**
+- **TLS and authentication hygiene** — handshake state is reset when a
+  connection object is reused, the RSA scramble is wiped on every path, and the
+  OpenSSL error queue is cleared before TLS I/O.
+- **Structured log values are escaped.**
+
 ### Changed
 
-- **Python `start_binlog_position` now defaults to `None`** — on `BinlogClient`,
-  `CdcStream` and `ClientConfig`, `None` is the only way to leave the offset
-  unset, as omitting the key is on Node. An explicit `0` is a supplied value and
-  is refused like on Node: with `start_binlog_file` it is below the accepted
-  range, and without one it is an offset without its file.
+- **Python `start_binlog_position` now defaults to `None`** on `BinlogClient`,
+  `CdcStream` and `ClientConfig`. `None` is the only way to leave the offset
+  unset, as omitting the key is on Node. An explicit `0` is refused like on
+  Node: with `start_binlog_file` it is below the accepted range, and without one
+  it is an offset without its file.
+- **The npm addon bundles its native dependencies** — the linux-x64 addon links
+  OpenSSL 3.5, zlib and the GNU C++ runtime statically and needs glibc 2.39 or
+  newer. The release build refuses to publish an addon with a dynamic
+  dependency on any of them. The load error names the published target and the
+  build-from-source guide.
+- **Licenses ship with the packages** — the npm package and the wheels include
+  `LICENSE` and the OpenSSL and zlib license texts.
+- **TypeScript declarations** reference the disposable lib, so a consumer
+  type-checks without `@types/node`.
+
+### Documentation
+
+- The feed loop no longer re-feeds a buffered partial event; `mes_client_destroy`,
+  event size defaults, column value conditions and the event position are
+  documented as implemented.
+- One account of what each published artifact links, in the architecture page.
+- The examples act on and checkpoint only events whose column names were
+  resolved, drop the old key when an UPDATE changes it, and rely on the
+  package's library resolver.
+
+### Dependencies
+
+- OpenSSL 3.5.9 and zlib 1.3.2 in the bundled builds; Yarn 4.18.1;
+  cibuildwheel 4.3.2; current patch releases of the Node and Python
+  development dependencies.
 
 ## [1.7.1] - 2026-09-29
 
@@ -698,7 +772,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.7.1...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/libraz/mysql-event-stream/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/libraz/mysql-event-stream/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mysql-event-stream/compare/v1.6.0...v1.6.1
