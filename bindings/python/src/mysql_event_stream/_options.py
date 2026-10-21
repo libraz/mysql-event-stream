@@ -59,6 +59,30 @@ _MIN_EVENT_SIZE = 19 + 4
 _QUEUED_EVENT_OVERHEAD = 1 + 1024 * 1024
 
 _P = ParamSpec("_P")
+
+
+def _validate_c_string(key: str, value: object, what: str) -> None:
+    """Refuse a value the NUL-terminated C ABI cannot carry byte-identically.
+
+    This is the one place that decides whether a string is representable at the
+    C ABI: it must be a ``str`` without U+0000, which the ABI would read as the
+    end of the string.
+
+    Args:
+        key: Public option name, for the message.
+        value: Value exactly as the caller supplied it.
+        what: Description of the expected type, for the message.
+
+    Raises:
+        TypeError: If ``value`` is not a ``str``.
+        ValueError: If ``value`` contains U+0000.
+    """
+    if not isinstance(value, str):
+        raise mes_validation_error(TypeError(f"{key} must be {what}"))
+    if "\x00" in value:
+        raise mes_validation_error(ValueError(f"{key} must not contain a NUL character"))
+
+
 _R = TypeVar("_R")
 
 
@@ -72,8 +96,9 @@ def validate_option(key: str, value: object) -> None:
     Raises:
         TypeError: If ``key`` is not a recognized option, or ``value`` does not
             match the type the contract declares for it.
-        ValueError: If an integer option falls outside its accepted range, or an
-            option that has to name something is supplied empty.
+        ValueError: If an integer option falls outside its accepted range, an
+            option that has to name something is supplied empty, or a string
+            contains U+0000.
     """
     if key in OPTION_RANGES:
         if value is None and key in _OPTIONAL_INT_OPTIONS:
@@ -86,18 +111,19 @@ def validate_option(key: str, value: object) -> None:
             raise mes_validation_error(ValueError(f"{key} must be between {minimum} and {upper}"))
         return
     if key in _STRING_OPTIONS:
-        if not isinstance(value, str):
-            raise mes_validation_error(TypeError(f"{key} must be a string"))
+        _validate_c_string(key, value, "a string")
         return
     if key in _OPTIONAL_STRING_OPTIONS:
-        if value is not None and not isinstance(value, str):
-            raise mes_validation_error(TypeError(f"{key} must be a string or None"))
+        if value is not None:
+            _validate_c_string(key, value, "a string or None")
         if value == "" and key in _NON_EMPTY_STRING_OPTIONS:
             raise mes_validation_error(ValueError(f"{key} must name a binlog file"))
         return
     if key in _STRING_LIST_OPTIONS:
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        if not isinstance(value, list):
             raise mes_validation_error(TypeError(f"{key} must be a list of strings"))
+        for item in value:
+            _validate_c_string(key, item, "a list of strings")
         return
     if key in _BOOL_OPTIONS:
         if not isinstance(value, bool):

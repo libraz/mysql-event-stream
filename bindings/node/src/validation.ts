@@ -144,6 +144,28 @@ function validateOptionType(key: string, type: OptionType, value: unknown): void
   }
 }
 
+/**
+ * The one place that decides whether a string is representable at the
+ * NUL-terminated C ABI: U+0000 would read as the end of the string, so a value
+ * carrying it is refused rather than truncated.
+ */
+function validateCString(key: string, value: string): void {
+  if (value.includes("\u0000")) {
+    throw invalidArgument(`${key} must not contain a NUL character`);
+  }
+}
+
+/**
+ * Validate a list of filter entries before it reaches a native filter setter.
+ *
+ * @param key Public option name the list belongs to, for the message.
+ * @param entries Entries exactly as supplied.
+ */
+export function validateFilterEntries(key: string, entries: unknown): void {
+  validateOptionType(key, "stringArray", entries);
+  for (const entry of entries as string[]) validateCString(key, entry);
+}
+
 export function validatePort(port: number | undefined): void {
   if (port === undefined) return;
   validateOptionType("port", "integer", port);
@@ -278,8 +300,13 @@ function validateOptionsAgainst(
     validateOptionType(key, type, value);
     if (type === "integer") {
       validateIntegerRange(key, value as number);
-    } else if (value === "" && NON_EMPTY_STRING_OPTIONS.has(key)) {
-      throw invalidArgument(`${key} must name a binlog file`);
+    } else if (type === "stringArray") {
+      for (const entry of value as string[]) validateCString(key, entry);
+    } else if (type === "string") {
+      validateCString(key, value as string);
+      if (value === "" && NON_EMPTY_STRING_OPTIONS.has(key)) {
+        throw invalidArgument(`${key} must name a binlog file`);
+      }
     }
   }
   const effective = { ...base, ...config };

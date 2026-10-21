@@ -4,7 +4,7 @@
 import { loadNativeAddon } from "./native.js";
 import type { ChangeEvent, ClientConfig } from "./types.js";
 import { MesErrorCode } from "./types.js";
-import { REFUSAL_ERROR_NAME, validateClientOptions } from "./validation.js";
+import { REFUSAL_ERROR_NAME, validateClientOptions, validateFilterEntries } from "./validation.js";
 
 interface NativeAddon {
   CdcEngine: new () => NativeEngine;
@@ -197,6 +197,7 @@ export class CdcEngine {
   /** Set database include filter. Only events from these databases are processed. Empty array = all. */
   setIncludeDatabases(databases: string[]): void {
     this.ensureNotDestroyed();
+    validateFilterEntries("includeDatabases", databases);
     this.engine!.setIncludeDatabases(databases);
   }
 
@@ -205,6 +206,7 @@ export class CdcEngine {
    *  A trailing '*' performs a case-sensitive prefix match. */
   setIncludeTables(tables: string[]): void {
     this.ensureNotDestroyed();
+    validateFilterEntries("includeTables", tables);
     this.engine!.setIncludeTables(tables);
   }
 
@@ -213,6 +215,7 @@ export class CdcEngine {
    *  A trailing '*' performs a case-sensitive prefix match. */
   setExcludeTables(tables: string[]): void {
     this.ensureNotDestroyed();
+    validateFilterEntries("excludeTables", tables);
     this.engine!.setExcludeTables(tables);
   }
 

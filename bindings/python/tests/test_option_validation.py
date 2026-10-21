@@ -503,3 +503,63 @@ class TestEveryRefusalCarriesTheInvalidArgumentCode:
         with pytest.raises(TypeError, match="Unknown config key") as refused:
             _OTHER_REFUSALS[refusal]()
         assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+
+
+_NUL_STRING_OPTIONS = sorted(_STRING_OPTIONS | _OPTIONAL_STRING_OPTIONS)
+_NUL_CASES = [
+    (entry, option)
+    for entry in ENTRY_POINTS
+    for option in entry.options
+    if option in _NUL_STRING_OPTIONS
+]
+_FILTER_SETTERS = {
+    "include_databases": "set_include_databases",
+    "include_tables": "set_include_tables",
+    "exclude_tables": "set_exclude_tables",
+}
+
+
+class TestEmbeddedNulIsRefused:
+    """A string the NUL-terminated C ABI would truncate is refused, never passed on."""
+
+    def test_the_matrix_covers_every_string_option(self) -> None:
+        covered = {option for _, option in _NUL_CASES}
+        assert set(_NUL_STRING_OPTIONS) - covered == set()
+
+    @pytest.mark.parametrize("case", _NUL_CASES, ids=lambda c: f"{c[0].name}-{c[1]}")
+    @pytest.mark.parametrize("value", ["a\x00b", "\x00"], ids=["embedded", "lone"])
+    def test_rejects_a_string_with_nul(self, case: tuple[EntryPoint, str], value: str) -> None:
+        entry, option = case
+        with pytest.raises(ValueError, match=option) as refused:
+            entry.invoke(option, value)
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+
+    @pytest.mark.parametrize("option", sorted(_STRING_LIST_OPTIONS))
+    def test_rejects_a_filter_entry_with_nul_on_the_stream(self, option: str) -> None:
+        with pytest.raises(ValueError, match=option) as refused:
+            CdcStream(**_override(option, ["ok.t", "db\x00x.t"]))
+        assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+        with pytest.raises(ValueError, match=option):
+            CdcStream().configure(**_override(option, ["db\x00x.t"]))
+
+    @pytest.mark.parametrize("option", sorted(_FILTER_SETTERS))
+    def test_rejects_a_filter_entry_with_nul_on_the_engine(self, option: str) -> None:
+        lib = MagicMock()
+        lib.mes_create.return_value = 0xE0
+        getattr(lib, f"mes_{_FILTER_SETTERS[option]}").return_value = 0
+        with patch("mysql_event_stream.engine.get_library", return_value=lib):
+            engine = CdcEngine()
+        try:
+            with pytest.raises(ValueError, match=option) as refused:
+                getattr(engine, _FILTER_SETTERS[option])(["ok.t", "db\x00x.t"])
+            assert getattr(refused.value, "code", None) == MesErrorCode.INVALID_ARG
+            getattr(lib, f"mes_{_FILTER_SETTERS[option]}").assert_not_called()
+            getattr(engine, _FILTER_SETTERS[option])(["db.t"])
+            getattr(lib, f"mes_{_FILTER_SETTERS[option]}").assert_called_once()
+        finally:
+            engine.close()
+
+    def test_an_ordinary_string_still_passes(self) -> None:
+        for option in _NUL_STRING_OPTIONS:
+            validate_option(option, "plain-value")
+        validate_option("include_tables", ["db.t", "db2.*"])
