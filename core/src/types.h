@@ -318,6 +318,31 @@ inline size_t RowDataCharge(const RowData& row) {
 }
 
 /**
+ * @brief The part of ChangeEventCharge() that is not row images: the names,
+ *   filename and statement @p event references and the TableMetadata it pins.
+ *
+ * Every ChangeEvent of one ROWS event references the same of each, so a caller
+ * queuing them may compute this once and pass it to the two-argument overload.
+ */
+inline size_t ChangeEventBookkeepingCharge(const ChangeEvent& event) {
+  size_t metadata_bytes = 0;
+  if (event.table_metadata) {
+    metadata_bytes = sizeof(TableMetadata) + TableMetadataContentBytes(*event.table_metadata);
+  }
+  return event.database.size() + event.table.size() + event.position.BinlogFile().size() +
+         event.SourceSql().size() + metadata_bytes;
+}
+
+/**
+ * @brief ChangeEventCharge() with its bookkeeping part already computed.
+ * @param bookkeeping_bytes ChangeEventBookkeepingCharge() of @p event.
+ */
+inline size_t ChangeEventCharge(const ChangeEvent& event, size_t bookkeeping_bytes) {
+  return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
+                           bookkeeping_bytes);
+}
+
+/**
  * @brief Bytes a queued ChangeEvent charges to the engine's queue byte budget.
  *
  * The decoded column payloads are the term that matters: a compressed column's
@@ -335,14 +360,7 @@ inline size_t RowDataCharge(const RowData& row) {
  *     instance while queued events still hold it.
  */
 inline size_t ChangeEventCharge(const ChangeEvent& event) {
-  size_t metadata_bytes = 0;
-  if (event.table_metadata) {
-    metadata_bytes = sizeof(TableMetadata) + TableMetadataContentBytes(*event.table_metadata);
-  }
-  return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
-                           event.database.size() + event.table.size() +
-                               event.position.BinlogFile().size() + event.SourceSql().size() +
-                               metadata_bytes);
+  return ChangeEventCharge(event, ChangeEventBookkeepingCharge(event));
 }
 
 }  // namespace mes

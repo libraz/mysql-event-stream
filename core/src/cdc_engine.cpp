@@ -40,6 +40,8 @@ namespace {
 // Row scratch capacity kept between events; one outsized event must not pin
 // its row array for the life of the engine.
 constexpr size_t kRetainedScratchRows = 1024;
+// Decoded-image capacity kept between events, for the same reason.
+constexpr size_t kRetainedScratchColumns = 1024;
 
 // Floor under the per-event decode budget, so a small queue byte budget still
 // decodes an ordinary row (a maximal-width row's column array alone is ~256 KiB)
@@ -129,6 +131,31 @@ bool EndsAnnotatedStatement(uint8_t type_code) {
     default:
       return true;
   }
+}
+
+// Where VisitRowsEvent() renders each row of a rows event.
+struct RenderSink {
+  std::vector<RowData>* rows;    // WRITE/DELETE image, or UPDATE after image
+  std::vector<RowData>* before;  // UPDATE before image; null otherwise
+  mybinlog::DecodeBudget* budget;
+  bool render_failed;  // a value had no representation, or the budget ran out
+};
+
+mybinlog::Status RenderVisitedRow(void* ctx, mybinlog::Row* row, mybinlog::Row* after) {
+  RenderSink* sink = static_cast<RenderSink*>(ctx);
+  bool ok = true;
+  if (after != nullptr) {
+    sink->before->emplace_back();
+    ok = RenderRow(std::move(*row), &sink->before->back(), sink->budget);
+    row = after;
+  }
+  if (ok) {
+    sink->rows->emplace_back();
+    ok = RenderRow(std::move(*row), &sink->rows->back(), sink->budget);
+  }
+  if (ok) return mybinlog::Status::kOk;
+  sink->render_failed = true;
+  return mybinlog::Status::kMalformedValue;
 }
 
 }  // namespace
@@ -232,23 +259,22 @@ bool CdcEngine::QueueAtCapacity() const {
   return queued_bytes_ >= max_queue_bytes_;
 }
 
-void CdcEngine::EnqueueEvent(ChangeEvent&& event) {
-  // Charged before the move, while the event still owns its payloads, and
-  // released again by the same function in NextEvent().
-  queued_bytes_ += ChangeEventCharge(event);
-  event_queue_.push(std::move(event));
+void CdcEngine::EnqueueEvent(ChangeEvent&& event, size_t bookkeeping_charge) {
+  // Charged before the move, while the event still owns its payloads, and kept
+  // with the entry so NextEvent() releases exactly what was charged.
+  const size_t charge = ChangeEventCharge(event, bookkeeping_charge);
+  queued_bytes_ += charge;
+  event_queue_.push(QueuedEvent{std::move(event), charge});
 }
 
 bool CdcEngine::NextEvent(ChangeEvent* event) {
   if (event_queue_.empty() || event == nullptr) {
     return false;
   }
-  // Recomputed rather than stored alongside the entry: nothing mutates a queued
-  // event, so this is the same charge EnqueueEvent() applied. The subtraction is
-  // floored regardless -- an underflow would wedge Feed() behind a queue that
-  // looks permanently full instead of failing visibly.
-  const size_t charge = ChangeEventCharge(event_queue_.front());
-  *event = std::move(event_queue_.front());
+  // The subtraction is floored regardless -- an underflow would wedge Feed()
+  // behind a queue that looks permanently full instead of failing visibly.
+  const size_t charge = event_queue_.front().charge;
+  *event = std::move(event_queue_.front().event);
   event_queue_.pop();
   queued_bytes_ -= std::min(charge, queued_bytes_);
   return true;
@@ -532,13 +558,21 @@ void CdcEngine::ProcessEvent(const mybinlog::EventHeader& header, const uint8_t*
                     "PARTIAL_JSON after images are not decoded");
         break;
       }
-      ProcessRowEvent(header, body, body_len);
+      mybinlog::RowsEventHeader rows_header;
+      if (mybinlog::ParseRowsEventHeader(header, body, body_len, &rows_header) !=
+          mybinlog::Status::kOk) {
+        last_error_ = MES_ERR_DECODE_ROW;
+        StructuredLog()
+            .Event("row_decode_failed")
+            .Field("kind", "row_event_header")
+            .Field("reason", "body_too_short")
+            .Warn();
+        break;
+      }
+      ProcessRowEvent(header, rows_header, body, body_len);
       // The statement's annotation ends with its last ROWS event, so a later
       // unannotated statement in the same transaction does not inherit it.
-      mybinlog::RowsEventHeader rows_header;
-      if (mybinlog::ParseRowsEventHeader(header, body, body_len, &rows_header) ==
-              mybinlog::Status::kOk &&
-          (rows_header.flags & mybinlog::kRowsStatementEndFlag) != 0) {
+      if ((rows_header.flags & mybinlog::kRowsStatementEndFlag) != 0) {
         pending_source_sql_.reset();
       }
       break;
@@ -678,20 +712,9 @@ EventPosition CdcEngine::CurrentEventPosition() const {
   return EventPosition{position_binlog_file_, position_.offset};
 }
 
-void CdcEngine::ProcessRowEvent(const mybinlog::EventHeader& header, const uint8_t* body,
+void CdcEngine::ProcessRowEvent(const mybinlog::EventHeader& header,
+                                const mybinlog::RowsEventHeader& rows_header, const uint8_t* body,
                                 size_t body_len) {
-  mybinlog::RowsEventHeader rows_header;
-  if (mybinlog::ParseRowsEventHeader(header, body, body_len, &rows_header) !=
-      mybinlog::Status::kOk) {
-    last_error_ = MES_ERR_DECODE_ROW;
-    StructuredLog()
-        .Event("row_decode_failed")
-        .Field("kind", "row_event_header")
-        .Field("reason", "body_too_short")
-        .Warn();
-    return;
-  }
-
   const uint64_t table_id = rows_header.table_id;
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const auto meta = table_registry_.SharedLookup(table_id);
@@ -728,35 +751,16 @@ void CdcEngine::ProcessRowEvent(const mybinlog::EventHeader& header, const uint8
   options.per_value_overhead = sizeof(ColumnValue);
   options.per_row_overhead = sizeof(ChangeEvent);
 
-  mybinlog::RowsEvent decoded;
-  const mybinlog::Status status =
-      mybinlog::DecodeRowsEvent(header, body, body_len, *meta, options, &decoded);
-  if (status != mybinlog::Status::kOk) {
-    LogRowDecodeFailure(kind, *meta, mybinlog::StatusName(status));
-    return;
-  }
-
   // Every row renders before any is queued, so a failure queues nothing.
   row_buf_.clear();
   before_buf_.clear();
-  bool rendered = true;
-  if (is_update) {
-    row_buf_.resize(decoded.updates.size());
-    before_buf_.resize(decoded.updates.size());
-    for (size_t i = 0; rendered && i < decoded.updates.size(); ++i) {
-      rendered = RenderRow(std::move(decoded.updates[i].first), &before_buf_[i], &budget) &&
-                 RenderRow(std::move(decoded.updates[i].second), &row_buf_[i], &budget);
-    }
-  } else {
-    row_buf_.resize(decoded.rows.size());
-    for (size_t i = 0; rendered && i < decoded.rows.size(); ++i) {
-      rendered = RenderRow(std::move(decoded.rows[i]), &row_buf_[i], &budget);
-    }
-  }
-
-  if (rendered) {
+  RenderSink sink{&row_buf_, is_update ? &before_buf_ : nullptr, &budget, false};
+  const mybinlog::Status status = mybinlog::VisitRowsEvent(header, body, body_len, *meta, options,
+                                                           &row_scratch_, &RenderVisitedRow, &sink);
+  if (status == mybinlog::Status::kOk) {
     const EventType event_type =
         is_write ? EventType::kInsert : (is_update ? EventType::kUpdate : EventType::kDelete);
+    size_t bookkeeping_charge = 0;
     for (size_t i = 0; i < row_buf_.size(); ++i) {
       ChangeEvent event;
       event.type = event_type;
@@ -778,16 +782,23 @@ void CdcEngine::ProcessRowEvent(const mybinlog::EventHeader& header, const uint8
       event.position = CurrentEventPosition();
       event.source_sql = pending_source_sql_;
       event.names_resolved = meta->names_resolved;
-      EnqueueEvent(std::move(event));
+      // Every row references the same names, file, statement and metadata.
+      if (i == 0) bookkeeping_charge = ChangeEventBookkeepingCharge(event);
+      EnqueueEvent(std::move(event), bookkeeping_charge);
     }
   } else {
-    LogRowDecodeFailure(kind, *meta, "unrepresentable_value");
+    LogRowDecodeFailure(
+        kind, *meta, sink.render_failed ? "unrepresentable_value" : mybinlog::StatusName(status));
   }
 
   row_buf_.clear();
   before_buf_.clear();
   if (row_buf_.capacity() > kRetainedScratchRows) std::vector<RowData>().swap(row_buf_);
   if (before_buf_.capacity() > kRetainedScratchRows) std::vector<RowData>().swap(before_buf_);
+  if (row_scratch_.row.capacity() > kRetainedScratchColumns ||
+      row_scratch_.after.capacity() > kRetainedScratchColumns) {
+    row_scratch_ = mybinlog::RowScratch();
+  }
 }
 
 void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta,

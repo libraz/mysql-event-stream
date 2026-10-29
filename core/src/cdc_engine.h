@@ -24,6 +24,7 @@
 
 #include "mes.h"
 #include "mybinlog/event_header.h"
+#include "mybinlog/row_decoder.h"
 #include "mybinlog/server_flavor.h"
 #include "state_machine.h"
 #include "table_map.h"
@@ -212,11 +213,12 @@ class CdcEngine {
 
  private:
   void ProcessEvent(const mybinlog::EventHeader& header, const uint8_t* body, size_t body_len);
-  void ProcessRowEvent(const mybinlog::EventHeader& header, const uint8_t* body, size_t body_len);
+  void ProcessRowEvent(const mybinlog::EventHeader& header, const mybinlog::RowsEventHeader& rows,
+                       const uint8_t* body, size_t body_len);
   /** @brief Refuse an event this engine cannot represent, keeping the position before it. */
   void RefuseEvent(const mybinlog::EventHeader& header, const char* event, const char* reason);
   /** @brief Queue one decoded event, charging what it keeps resident. */
-  void EnqueueEvent(ChangeEvent&& event);
+  void EnqueueEvent(ChangeEvent&& event, size_t bookkeeping_charge);
   /** @brief Whether the queue has reached either configured limit. */
   bool QueueAtCapacity() const;
   void LogRowDecodeFailure(const char* kind, const TableMetadata& meta, const char* reason);
@@ -249,7 +251,12 @@ class CdcEngine {
   // row -- and a statement the server split across several ROWS events is
   // still stored once. Null when no annotation is in effect.
   std::shared_ptr<const std::string> pending_source_sql_;
-  std::queue<ChangeEvent> event_queue_;
+  // Each event with the charge EnqueueEvent() applied, which NextEvent() releases.
+  struct QueuedEvent {
+    ChangeEvent event;
+    size_t charge = 0;
+  };
+  std::queue<QueuedEvent> event_queue_;
   // Raw-feed users, including CdcStream, must not accumulate an unbounded
   // ChangeEvent queue when a producer temporarily outpaces the consumer.
   // This matches the asynchronous client's event-count default.
@@ -266,6 +273,8 @@ class CdcEngine {
   // contract.
   std::vector<RowData> row_buf_;
   std::vector<RowData> before_buf_;
+  // Decoded images the codec reuses across ROWS events before they render.
+  mybinlog::RowScratch row_scratch_;
 
   // Flavor named by the last FORMAT_DESCRIPTION_EVENT; it decides how TABLE_MAP
   // charset metadata is indexed and which flavor's events are expected. Unset
