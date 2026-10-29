@@ -162,11 +162,7 @@ mybinlog::Status RenderVisitedRow(void* ctx, mybinlog::Row* row, mybinlog::Row* 
 
 CdcEngine::~CdcEngine() { WarnIfIncludeFiltersMatchedNothing(); }
 
-// Extract the SQL statement from a QUERY_EVENT body and decide whether it is a
-// DDL statement that may alter table schema. QUERY_EVENT (v4) body layout:
-//   [0..4)  thread_id, [4..8) exec_time, [8] db_len, [9..11) error_code,
-//   [11..13) status_vars_len, status_vars(status_vars_len), db_name(db_len),
-//   '\0', query statement (remainder).
+// Decide whether a QUERY_EVENT statement may alter a table schema.
 bool IsDdlStatement(std::string_view statement) {
   const char* stmt = statement.data();
   const size_t stmt_len = statement.size();

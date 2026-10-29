@@ -161,9 +161,22 @@ bool RenderValue(mybinlog::Value&& value, ColumnValue* out) {
 }
 
 bool RenderRow(mybinlog::Row&& row, RowData* out, mybinlog::DecodeBudget* budget) {
+  using Kind = mybinlog::Value::Kind;
+  out->columns.clear();
   out->columns.resize(row.size());
   for (size_t i = 0; i < row.size(); ++i) {
     mybinlog::Value& value = row[i];
+    // Every column starts as a default ColumnValue, so a payload the decode
+    // already charged is taken without resetting the other fields.
+    if (value.kind == Kind::kText || value.kind == Kind::kDecimal || value.kind == Kind::kBytes ||
+        value.kind == Kind::kJson) {
+      ColumnValue& column = out->columns[i];
+      column.type = value.type;
+      column.is_null = false;
+      column.is_binary = value.kind == Kind::kBytes || value.kind == Kind::kJson;
+      column.string_val.swap(value.bytes);
+      continue;
+    }
     // The decode already charged the payload it materialized; text rendered
     // here from fields is new.
     const size_t charged = value.bytes.size();
