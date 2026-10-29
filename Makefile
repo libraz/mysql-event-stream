@@ -135,12 +135,12 @@ uninstall:
 
 format: node-fix py-format
 	@echo "Formatting C++ code..."
-	@find core/src core/include core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) -i
+	@find core/src core/include core/codec core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) -i
 	@echo "Format complete!"
 
 format-check:
 	@echo "Checking C++ code formatting..."
-	@find core/src core/include core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) --dry-run --Werror
+	@find core/src core/include core/codec core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) --dry-run --Werror
 	@echo "Format check passed!"
 
 # ============================================================================

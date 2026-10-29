@@ -33,6 +33,9 @@ if(MES_ZLIB_STATIC)
 endif()
 message(STATUS "ZLIB found: ${ZLIB_VERSION_STRING} (static=${MES_ZLIB_STATIC})")
 
+# Shared binlog codec (reuses the ZLIB::ZLIB target found above)
+add_subdirectory(codec)
+
 # Linux wheels use this to avoid a host libstdc++/libgcc runtime requirement.
 option(MES_PORTABLE_RUNTIME "Statically link the GNU C++ runtime into shared artifacts" OFF)
 
@@ -98,7 +101,7 @@ target_compile_options(mes-objects PRIVATE
 )
 
 # OpenSSL include directories needed at compile time
-target_link_libraries(mes-objects PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
+target_link_libraries(mes-objects PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB mes::codec)
 
 # Sanitizers (applied to OBJECT library so both static and shared inherit them)
 if(MES_ENABLE_ASAN)
@@ -128,6 +131,7 @@ target_include_directories(mes-core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+target_link_libraries(mes-core PUBLIC mes::codec)
 target_link_libraries(mes-core PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 
 # Propagate sanitizer/coverage link flags to consumers (PUBLIC required for static lib)
@@ -160,7 +164,7 @@ set_target_properties(mes-shared PROPERTIES
   SOVERSION 1
 )
 
-target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
+target_link_libraries(mes-shared PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB mes::codec)
 
 if(MES_PORTABLE_RUNTIME AND UNIX AND NOT APPLE)
   target_link_options(mes-shared PRIVATE -static-libgcc -static-libstdc++)
