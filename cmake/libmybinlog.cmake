@@ -8,7 +8,7 @@ if(NOT TARGET mybinlog::mybinlog)
   endif()
   FetchContent_Declare(libmybinlog
     GIT_REPOSITORY https://github.com/libraz/libmybinlog.git
-    GIT_TAG 7147b0de6610d3c2091cdfa149c21d66bb7cfd16
+    GIT_TAG v0.1.0
   )
   FetchContent_MakeAvailable(libmybinlog)
 endif()
