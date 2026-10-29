@@ -128,14 +128,12 @@ try {
 
 ## 別の経路で届いたバイト列をデコードする
 
-エンジンは、バイト列の出どころを問いません。ただしイベント境界から始まっている必要があります。生の binlog ファイルは先頭に 4 バイトのマジックナンバーがあり、これ自体はイベントではないので、最初の `feed()` の前に読み飛ばしてください。
+エンジンは、バイト列の出どころを問いません。ただしイベント境界から始まっている必要があります。生の binlog ファイルは先頭に 4 バイトのマジックナンバーがあり、これ自体はイベントではないので、最初の `feed()` の前に読み飛ばしてください。チェックサムのフレーミングを設定する必要はありません。各ファイルの `FORMAT_DESCRIPTION_EVENT` がアルゴリズムを示すので、`binlog_checksum=NONE` で書かれたファイルも CRC32 のファイルと同じようにデコードできます。
 
 ```python
 from mysql_event_stream import CdcEngine
 
 with CdcEngine() as engine:
-    engine.set_checksum_enabled(True)  # このバイト列が書かれたときのフレーミング
-
     with open("captured.binlog", "rb") as fh:
         fh.read(4)  # ファイル先頭のマジックナンバー。イベントではない
         while chunk := fh.read(1 << 20):

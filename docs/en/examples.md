@@ -128,14 +128,12 @@ try {
 
 ## Decoding bytes that arrived some other way
 
-The engine does not care where its bytes came from, as long as they start at an event boundary. A raw binlog file opens with a 4-byte magic number that is not itself an event, so skip it before the first `feed()`.
+The engine does not care where its bytes came from, as long as they start at an event boundary. A raw binlog file opens with a 4-byte magic number that is not itself an event, so skip it before the first `feed()`. The checksum framing needs no setting: each file's `FORMAT_DESCRIPTION_EVENT` names its algorithm, so a file written under `binlog_checksum=NONE` decodes the same way as a CRC32 one.
 
 ```python
 from mysql_event_stream import CdcEngine
 
 with CdcEngine() as engine:
-    engine.set_checksum_enabled(True)  # the framing these bytes were written under
-
     with open("captured.binlog", "rb") as fh:
         fh.read(4)  # the file's leading magic number, not an event
         while chunk := fh.read(1 << 20):

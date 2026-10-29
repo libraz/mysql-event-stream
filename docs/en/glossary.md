@@ -34,7 +34,7 @@ The position a stream can resume from, published as `currentGtid` / `current_gti
 
 ### checksum framing
 
-Whether an event's last four bytes are a CRC32 trailer. A `FORMAT_DESCRIPTION_EVENT` can change it mid-stream, so the framing travels with the event on the poll result rather than being sampled once from the client.
+Whether an event's last four bytes are a CRC32 trailer. Each `FORMAT_DESCRIPTION_EVENT` states it for the file that follows and can change it mid-stream, so the framing travels with the event on the poll result rather than being sampled once from the client.
 
 ### COM_BINLOG_DUMP_GTID
 
@@ -42,11 +42,11 @@ The protocol command that asks the server to start streaming from a GTID set. Ma
 
 ### FORMAT_DESCRIPTION_EVENT
 
-The event that opens a binlog stream and states how the events after it are framed — header length, checksum algorithm.
+The event that opens each binlog file and states how the events after it are framed — header length, checksum algorithm. The engine reads the algorithm from every one it sees, and refuses one it cannot parse.
 
 ### GTID (Global Transaction Identifier)
 
-A server-independent name for a transaction. MySQL spells one `uuid:seq`, MariaDB `domain-server-seq`. A GTID set is what a stream resumes from.
+A server-independent name for a transaction. MySQL spells one `uuid:seq`, or `uuid:tag:seq` for a tagged GTID (MySQL 8.4 and later); MariaDB spells one `domain-server-seq`. A GTID set is what a stream resumes from.
 
 ### heartbeat
 

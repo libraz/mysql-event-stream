@@ -135,6 +135,8 @@ int         mes_get_trailer_pre_verified(mes_engine_t* engine);
 
 `mes_set_checksum_enabled()` には、そのバイト列を返した poll 結果の `checksum_enabled` フィールドを渡します。クライアントの現在の見え方ではありません。`FORMAT_DESCRIPTION_EVENT` がその見え方を動かしても、直前の設定で読まれたイベントはまだキューに残っています。
 
+`FORMAT_DESCRIPTION_EVENT` を含むバイト列は、フレーミングを自分で決めます。エンジンは FDE ごとにチェックサムアルゴリズムを読み取り、後続のイベントに適用します。FDE で始まる生の binlog ファイルは、`binlog_checksum=NONE` で書かれたものも含めて、この呼び出しを必要としません。パースできない FDE は、直前のフレーミングを残さず `MES_ERR_PARSE` で失敗します。`mes_set_checksum_enabled()` の呼び出しは、次の FDE が置き換えるまで、その後に渡すイベントのフレーミングを決めます。
+
 `mes_set_trailer_pre_verified()` は、各イベントの CRC32 を上流がすでに検証したと宣言し、エンジンが二度目の計算をしないようにします。この宣言を裏付ける仕組みはありません。検証されていないストリームに設定すると、壊れたイベントが黙って受理されます。
 
 ### フィルタ

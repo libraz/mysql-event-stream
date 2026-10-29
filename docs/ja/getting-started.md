@@ -140,6 +140,8 @@ brew install cmake openssl zlib
 sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 ```
 
+binlog コーデックの [libmybinlog](https://github.com/libraz/libmybinlog) は CMake の初回構成時に GitHub から取得するため、この段階ではネットワーク接続が必要です。手元のチェックアウトでビルドするには、`MYBINLOG_SOURCE_DIR` にそのパスを設定します。
+
 コアのビルドとテストは `make` で行い、`make install` は `libmes` と `mes.h` を C や C++ のプロジェクトから見つかる場所に置きます。
 
 ```sh

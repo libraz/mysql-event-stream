@@ -18,8 +18,8 @@ Every failure carries a stable numeric code from the C ABI's `mes_error_t`. Bran
 | Codes | Meaning | Retry guidance |
 | --- | --- | --- |
 | 1–2 | Invalid API argument | Fix the call; do not retry. |
-| 100–101 | Parse or checksum failure | Reset or reconnect only after diagnosing the input. |
-| 200–202 | Row decode failure | Do not retry unchanged input. |
+| 100–101 | Parse or checksum failure, including an event the stream refuses ([Server setup](server-setup.md#events-that-stop-the-stream)) | Reset or reconnect only after diagnosing the input. |
+| 200–202 | Row decode failure, including a value that cannot exist for its column type ([Column values](column-values.md#reading-the-rows)) | Do not retry unchanged input. |
 | 301 (event queue) | An event larger than the whole queue byte budget | Raise `maxQueueBytes` / `max_queue_bytes`; do not retry unchanged input. |
 | 301 (query result) | A side query — configuration validation, GTID lookup, column metadata — retained more than 100,000 rows or 64 MiB | The caps are compile-time constants and the failure closes the connection; reconnect before querying again. |
 | 400 | Connection failure — the handshake, an ERR packet in place of the server's greeting, or a transport failure before authentication | Retry; usually transient. |

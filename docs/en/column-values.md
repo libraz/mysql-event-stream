@@ -23,6 +23,8 @@ Three conditions refine this table: signedness metadata for large unsigned value
 
 **Temporal types and DECIMAL** are formatted as text by the core. Every `TIMESTAMP` variant is a string of decimal Unix epoch seconds carrying as many fractional digits as the column's declared precision — `"1735689600"`, or `"1735689600.123456"` for `TIMESTAMP(6)`.
 
+**A value that cannot exist** fails with `DecodeRow` (202) rather than being rendered as a guess: a temporal field outside its range (a month above 12, an hour above 23 in a `DATETIME`), DECIMAL metadata outside precision 1–65 or scale 0–38, a length prefix declared zero bytes wide, or a column type the decoder does not know. Zero dates such as `0000-00-00` are in range and render as written.
+
 **JSON** on MySQL arrives as raw bytes in MySQL's internal binary JSON format. It is not decoded text and not a parsed object; reading it needs a binary-JSON parser. On MariaDB, `JSON` is an alias for `LONGTEXT` and the binlog carries plain text, so the value follows the text rule below: a string with charset metadata, bytes without.
 
 **VECTOR** (MySQL 9.0 and later) arrives as raw bytes.

@@ -24,9 +24,15 @@ The client does not decode. What it hands back is one event's raw bytes plus the
 
 ## Engine
 
-`core/src` owns decoding. It buffers a partial byte stream across feeds, parses event headers, verifies CRC32 trailers where the framing says there is one, keeps the `TABLE_MAP` registry that gives later row events their column layout, and decodes row images into typed column values. Filters are applied here, before a dropped event is decoded.
+`core/src` owns decoding. It buffers a partial byte stream across feeds, takes the checksum algorithm from each file's `FORMAT_DESCRIPTION_EVENT` and verifies CRC32 trailers under it, keeps the `TABLE_MAP` registry that gives later row events their column layout, and decodes row images into typed column values. Filters are applied here, before a dropped event is decoded. An event that cannot become a faithful change event stops the stream with an error instead of being skipped; [Server setup](server-setup.md#events-that-stop-the-stream) lists them.
 
 The engine has no network and no thread of its own. It decodes whatever bytes it is fed, which is what makes replay and offline decoding the same code path as live streaming.
+
+## Binlog codec
+
+The binlog wire format is decoded by [libmybinlog](https://github.com/libraz/libmybinlog), a separate library fetched at build time through CMake `FetchContent`; `cmake/libmybinlog.cmake` pins the revision. It covers event framing and checksums, `TABLE_MAP`, `QUERY`, row images and their values, MySQL and MariaDB GTIDs, the classification of every event type, and the server-setting rules `ConnectionValidator` applies.
+
+The client and the engine call into it. What stays in this repository is the connection, the queue, the filters, the C ABI, and `value_render`, which turns decoded values into the strings `mes.h` publishes. A wire-format defect is fixed in libmybinlog, and both the client and the engine pick it up.
 
 ## C ABI
 

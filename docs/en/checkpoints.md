@@ -62,6 +62,8 @@ The two explicit modes cannot be combined: they name different start points and 
 
 A MySQL entry naming a bare transaction number is widened before it goes on the wire. `uuid:N` resumes from `uuid:1-N`, and the tagged form `uuid:tag:N` from `uuid:tag:1-N`, so transactions 1 through N-1 are never delivered. An entry that already states an interval such as `uuid:5-9` is sent as written, and `uuid:0` contributes nothing.
 
+Tagged GTIDs, which MySQL 8.4 and later write as `uuid:tag:N`, are tracked like untagged ones. They appear in `currentGtid` / `current_gtid` in that form, and a checkpoint containing them resumes as written.
+
 MariaDB GTIDs use the `domain-server-seq` form and are sent verbatim.
 
 ## Purged positions

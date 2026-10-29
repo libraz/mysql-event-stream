@@ -135,6 +135,8 @@ int         mes_get_trailer_pre_verified(mes_engine_t* engine);
 
 Set `mes_set_checksum_enabled()` from the `checksum_enabled` field on the poll result that produced the bytes, not from the client's current view — a `FORMAT_DESCRIPTION_EVENT` moves that view while events read under the previous one are still queued.
 
+Bytes that contain a `FORMAT_DESCRIPTION_EVENT` set their own framing. The engine reads the checksum algorithm from each one and applies it to the events that follow, so a raw binlog file, which opens with one, needs no call, including one written under `binlog_checksum=NONE`. An FDE that cannot be parsed fails with `MES_ERR_PARSE` rather than leaving the previous framing in force. A call to `mes_set_checksum_enabled()` frames the events fed after it until the next FDE replaces it.
+
 `mes_set_trailer_pre_verified()` declares that something upstream has already verified each event's CRC32, so the engine does not compute it twice. Nothing verifies the promise: set it on an unvalidated stream and a corrupt event is accepted in silence.
 
 ### Filters

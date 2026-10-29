@@ -47,6 +47,17 @@ log_bin_compress=OFF
 
 MariaDB has no `gtid_mode` variable — GTID logging follows from `log_bin` — so that check is skipped for a MariaDB source. `log_bin_compress=ON` is rejected for the same reason MySQL's transaction compression is. MariaDB defaults `binlog_row_metadata` to `NO_LOG`, which delivers text columns as bytes; `MINIMAL` (the MySQL default) or `FULL` restores strings. See [Column values](column-values.md#text-and-binary).
 
+## Events that stop the stream
+
+A few events cannot become change events without publishing a change the source never committed, or without leaving a gap the checkpoint cannot describe. The stream stops at them with code 100 (`MES_ERR_PARSE`) instead of skipping them, because a skipped event lets the checkpoint move past changes no consumer received.
+
+- `XA_PREPARE` — the first phase of an XA transaction. A prepared XA transaction can still roll back, so publishing its rows would publish changes that may never commit. A MySQL source that runs XA transactions cannot be streamed.
+- `ANONYMOUS_GTID` — a transaction logged without a GTID, which happens while `gtid_mode` is not `ON`. A GTID checkpoint cannot cover it.
+- `EXECUTE_LOAD_QUERY` — a statement-based `LOAD DATA INFILE`. Its rows are never written to the log.
+- `INCIDENT` — the source declared that it lost events.
+- Compressed transaction payloads and `PARTIAL_UPDATE_ROWS` — the configuration checks above already reject the settings that produce them.
+- An event type the decoder does not know. One the source marks with `LOG_EVENT_IGNORABLE_F` is skipped, as the flag permits; without the flag it stops the stream.
+
 ## Column metadata
 
 `binlog_row_metadata=FULL` puts column names into the `TABLE_MAP` event, and then nothing else is needed for `before` and `after` to be keyed by name. Without it, names come from a separate connection that runs `SHOW COLUMNS`, which needs `SELECT` on the streamed tables. [Column names](column-names.md) covers the trade-off, and why the second route is not safe for replay from an old position.

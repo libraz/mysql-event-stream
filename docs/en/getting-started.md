@@ -140,6 +140,8 @@ brew install cmake openssl zlib
 sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 ```
 
+The binlog codec, [libmybinlog](https://github.com/libraz/libmybinlog), is fetched from GitHub when CMake first configures, so that step needs network access. To build against a local checkout instead, set `MYBINLOG_SOURCE_DIR` to its path.
+
 The core builds and tests with `make`, and `make install` puts `libmes` and `mes.h` where a C or C++ project can find them.
 
 ```sh

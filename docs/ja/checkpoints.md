@@ -62,6 +62,8 @@ async with CdcStream(
 
 トランザクション番号だけを書いた MySQL のエントリは、送信前に区間へ広げられます。`uuid:N` は `uuid:1-N` から再開し、タグ付きの `uuid:tag:N` は `uuid:tag:1-N` から再開するので、1 から N-1 までのトランザクションは配送されません。`uuid:5-9` のようにすでに区間を書いたエントリは書いたまま送られ、`uuid:0` は何も足しません。
 
+MySQL 8.4 以降が `uuid:tag:N` の形で書くタグ付き GTID も、タグなしのものと同じように追跡します。`currentGtid` / `current_gtid` にはその形で現れ、タグ付き GTID を含むチェックポイントは書いたとおりに再開します。
+
 MariaDB の GTID は `domain-server-seq` の形式で、そのまま送られます。
 
 ## パージ済みの位置

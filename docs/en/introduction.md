@@ -8,7 +8,7 @@ The library registers with the source as a replica and reads the same stream a r
 
 ## What is in the box
 
-A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, capability negotiation, `caching_sha2_password` and native authentication, `COM_QUERY`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it. No client library is linked in, which is the reason the project exists; [Architecture](architecture.md#no-client-library) lists what each published artifact links.
+A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, capability negotiation, `caching_sha2_password` and native authentication, `COM_QUERY`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it, which read the wire format through [libmybinlog](https://github.com/libraz/libmybinlog). No client library is linked in, which is the reason the project exists; [Architecture](architecture.md#no-client-library) lists what each published artifact links.
 
 That core is published through a C ABI, and two bindings sit on it: a Node.js N-API addon and a Python `ctypes` package. A C or C++ program links `libmes` and uses the same entry points the bindings do.
 
