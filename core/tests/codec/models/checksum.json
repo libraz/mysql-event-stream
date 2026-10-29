@@ -1,0 +1,32 @@
+{
+  "description": "ChecksumTracker framing scenarios. Rows are implemented by CodecFraming.PairwiseChecksumScenarios in the same order; mandatory rows are separate CodecFraming tests.",
+  "generator": { "tool": "coverwise pairwise_generate", "strength": 2, "seed": 1 },
+  "model": {
+    "algorithm": ["OFF", "CRC32", "UNDEF"],
+    "flavor": ["MySQL", "MariaDB"],
+    "supply": ["raw_feed", "client"],
+    "boundary": ["same_alg", "rotate_new_alg", "artificial_rotate"]
+  },
+  "constraints": [],
+  "columns": ["algorithm", "flavor", "supply", "boundary"],
+  "rows": [
+    ["UNDEF", "MySQL", "raw_feed", "same_alg"],
+    ["OFF", "MariaDB", "raw_feed", "artificial_rotate"],
+    ["UNDEF", "MariaDB", "client", "artificial_rotate"],
+    ["CRC32", "MariaDB", "client", "rotate_new_alg"],
+    ["CRC32", "MySQL", "raw_feed", "rotate_new_alg"],
+    ["OFF", "MySQL", "client", "artificial_rotate"],
+    ["UNDEF", "MySQL", "raw_feed", "rotate_new_alg"],
+    ["CRC32", "MySQL", "raw_feed", "same_alg"],
+    ["OFF", "MySQL", "raw_feed", "rotate_new_alg"],
+    ["OFF", "MariaDB", "client", "same_alg"],
+    ["CRC32", "MariaDB", "raw_feed", "artificial_rotate"]
+  ],
+  "coverage": { "tuples": 37, "covered": 37 },
+  "mandatory": {
+    "CodecFraming.ShortChecksummedFrame": "checksummed frame of 19-22 bytes is kChecksumMismatch",
+    "CodecFraming.DefaultAlgorithmBeforeFde": "no FDE yet, default OFF",
+    "CodecFraming.VerifyDisabledKeepsFraming": "SetVerify(false) strips trailers without comparing CRCs",
+    "CodecFraming.RealNoneChecksumFde": "real MySQL 8.4.13 binlog_checksum=NONE FDE"
+  }
+}
