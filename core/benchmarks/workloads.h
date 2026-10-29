@@ -21,12 +21,14 @@
 #include <string>
 #include <vector>
 
-#include "binary_util.h"
-#include "event_header.h"
 #include "test_helpers.h"
+#include "types.h"
 
 namespace mes {
 namespace bench {
+
+/// Bytes of a bitmap holding @p bits bits.
+inline size_t BitmapBytes(size_t bits) { return (bits + 7) / 8; }
 
 /// One column of a benchmark schema: TABLE_MAP description plus the row bytes
 /// that column contributes to every row image.
@@ -216,7 +218,7 @@ inline std::vector<uint8_t> BuildTableMap(uint64_t table_id, const std::string& 
   b.WriteU8(static_cast<uint8_t>(meta.size()));
   b.WriteBytes(meta);
 
-  const size_t bitmap_bytes = binary::BitmapBytes(columns.size());
+  const size_t bitmap_bytes = BitmapBytes(columns.size());
   for (size_t i = 0; i < bitmap_bytes; ++i) {
     const size_t bits = std::min<size_t>(8, columns.size() - i * 8);
     b.WriteU8(static_cast<uint8_t>((1u << bits) - 1));  // every column nullable
@@ -273,7 +275,7 @@ inline std::vector<uint8_t> BuildRowsBody(uint64_t table_id, const std::vector<C
   b.WriteU16Le(0);
   b.WriteU16Le(2);  // v2 extra header: length only
   b.WriteU8(static_cast<uint8_t>(columns.size()));
-  const size_t bitmap_bytes = binary::BitmapBytes(columns.size());
+  const size_t bitmap_bytes = BitmapBytes(columns.size());
   for (size_t i = 0; i < bitmap_bytes; ++i) {
     const size_t bits = std::min<size_t>(8, columns.size() - i * 8);
     b.WriteU8(static_cast<uint8_t>((1u << bits) - 1));
@@ -296,7 +298,7 @@ inline std::vector<uint8_t> BuildUpdateRowsBody(uint64_t table_id,
   b.WriteU16Le(0);
   b.WriteU16Le(2);
   b.WriteU8(static_cast<uint8_t>(before.size()));
-  const size_t bitmap_bytes = binary::BitmapBytes(before.size());
+  const size_t bitmap_bytes = BitmapBytes(before.size());
   for (int pass = 0; pass < 2; ++pass) {
     for (size_t i = 0; i < bitmap_bytes; ++i) {
       const size_t bits = std::min<size_t>(8, before.size() - i * 8);

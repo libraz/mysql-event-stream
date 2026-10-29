@@ -68,7 +68,7 @@ add_library(mes-objects OBJECT
   src/table_map.cpp
   src/rotate_event.cpp
   src/state_machine.cpp
-  src/row_decoder.cpp
+  src/value_render.cpp
   src/cdc_engine.cpp
   src/capi.cpp
   src/logger.cpp

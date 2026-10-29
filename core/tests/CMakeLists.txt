@@ -39,11 +39,14 @@ mes_add_gtest(test_rotate_event test_rotate_event.cpp)
 # test_state_machine
 mes_add_gtest(test_state_machine test_state_machine.cpp)
 
-# test_row_decoder
-mes_add_gtest(test_row_decoder test_row_decoder.cpp ZLIB::ZLIB)
+# test_value_render
+mes_add_gtest(test_value_render test_value_render.cpp ZLIB::ZLIB)
 
 # test_cdc_engine
 mes_add_gtest(test_cdc_engine test_cdc_engine.cpp)
+
+# test_cdc_engine_fixtures
+mes_add_gtest(test_cdc_engine_fixtures test_cdc_engine_fixtures.cpp)
 
 # test_capi
 mes_add_gtest(test_capi test_capi.cpp)

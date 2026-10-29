@@ -202,42 +202,40 @@ TEST(BinlogPositionTest, SetValues) {
   EXPECT_EQ(pos.offset, 12345u);
 }
 
-// --- ColumnMetadata ---
-
-TEST(ColumnMetadataTest, DefaultValues) {
-  ColumnMetadata meta;
-  EXPECT_EQ(meta.type, ColumnType::kLong);
-  EXPECT_TRUE(meta.name.empty());
-  EXPECT_EQ(meta.metadata, 0);
-  EXPECT_TRUE(meta.is_nullable);
-  EXPECT_FALSE(meta.is_unsigned);
-}
-
 // --- TableMetadata ---
+
+TEST(TableMetadataTest, DefaultValues) {
+  TableMetadata table;
+  EXPECT_EQ(table.table_id, 0u);
+  EXPECT_TRUE(table.columns.empty());
+  EXPECT_FALSE(table.has_signedness);
+  EXPECT_FALSE(table.names_resolved);
+  EXPECT_FALSE(table.unknown_signedness_reported);
+}
 
 TEST(TableMetadataTest, Construction) {
   TableMetadata table;
   table.table_id = 42;
-  table.database_name = "mydb";
-  table.table_name = "users";
+  table.schema = "mydb";
+  table.table = "users";
 
-  ColumnMetadata col;
+  mybinlog::TableMapColumn col;
   col.type = ColumnType::kLong;
   col.name = "id";
   col.is_unsigned = true;
-  col.is_nullable = false;
+  col.nullable = false;
   table.columns.push_back(col);
 
   col.type = ColumnType::kVarchar;
   col.name = "name";
   col.is_unsigned = false;
-  col.is_nullable = true;
-  col.metadata = 255;
+  col.nullable = true;
+  col.meta = 255;
   table.columns.push_back(col);
 
   EXPECT_EQ(table.table_id, 42u);
-  EXPECT_EQ(table.database_name, "mydb");
-  EXPECT_EQ(table.table_name, "users");
+  EXPECT_EQ(table.schema, "mydb");
+  EXPECT_EQ(table.table, "users");
   EXPECT_EQ(table.columns.size(), 2u);
   EXPECT_EQ(table.columns[0].name, "id");
   EXPECT_EQ(table.columns[1].name, "name");

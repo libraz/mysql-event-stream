@@ -43,8 +43,7 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
 
     if (state_ == ParserState::kWaitingHeader) {
       // Parse the header
-      mybinlog::EventHeader wire_header;
-      if (mybinlog::ParseEventHeader(buffer_.data(), buffer_.size(), &wire_header) !=
+      if (mybinlog::ParseEventHeader(buffer_.data(), buffer_.size(), &current_header_) !=
           mybinlog::Status::kOk) {
         state_ = ParserState::kError;
         error_code_ = MES_ERR_PARSE;
@@ -55,16 +54,11 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
             .Error();
         break;
       }
-      current_header_.timestamp = wire_header.timestamp;
-      current_header_.type_code = wire_header.type_code;
-      current_header_.server_id = wire_header.server_id;
-      current_header_.event_length = wire_header.event_length;
-      current_header_.next_position = wire_header.next_position;
-      current_header_.flags = wire_header.flags;
 
       // Validate event_length
+      const bool checksummed = checksum_tracker_.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
       size_t min_event_length =
-          mybinlog::kEventHeaderSize + (has_checksum_ ? mybinlog::kChecksumSize : 0);
+          mybinlog::kEventHeaderSize + (checksummed ? mybinlog::kChecksumSize : 0);
       if (current_header_.event_length < min_event_length) {
         state_ = ParserState::kError;
         error_code_ = MES_ERR_PARSE;
@@ -126,16 +120,16 @@ size_t EventStreamParser::Feed(const uint8_t* data, size_t len) {
 
 bool EventStreamParser::HasEvent() const { return state_ == ParserState::kEventReady; }
 
-const EventHeader& EventStreamParser::CurrentHeader() const { return current_header_; }
+const mybinlog::EventHeader& EventStreamParser::CurrentHeader() const { return current_header_; }
 
 void EventStreamParser::CurrentBody(const uint8_t** body_data, size_t* body_len) const {
   if (body_data != nullptr) {
     *body_data = buffer_.data() + mybinlog::kEventHeaderSize;
   }
   if (body_len != nullptr) {
-    const size_t trailer = current_has_checksum_ ? mybinlog::kChecksumSize : 0;
-    const size_t framing = mybinlog::kEventHeaderSize + trailer;
-    *body_len = current_header_.event_length > framing ? current_header_.event_length - framing : 0;
+    *body_len = current_payload_length_ > mybinlog::kEventHeaderSize
+                    ? current_payload_length_ - mybinlog::kEventHeaderSize
+                    : 0;
   }
 }
 
@@ -149,10 +143,14 @@ void EventStreamParser::Advance() {
   } else {
     buffer_.clear();
   }
-  current_header_ = EventHeader{};
+  current_header_ = mybinlog::EventHeader{};
   state_ = ParserState::kWaitingHeader;
   bytes_needed_ = mybinlog::kEventHeaderSize;
-  current_has_checksum_ = has_checksum_;
+  current_payload_length_ = 0;
+  if (pending_algorithm_.has_value()) {
+    checksum_tracker_.SetDefaultAlgorithm(*pending_algorithm_);
+    pending_algorithm_.reset();
+  }
   error_code_ = MES_OK;
 }
 
@@ -176,47 +174,47 @@ void EventStreamParser::SetMaxEventSize(uint32_t max_event_size) {
 uint32_t EventStreamParser::MaxEventSize() const { return max_event_size_; }
 
 void EventStreamParser::SetChecksumEnabled(bool enabled) {
-  has_checksum_ = enabled;
-  if (state_ == ParserState::kWaitingHeader) current_has_checksum_ = enabled;
+  const mybinlog::ChecksumAlgorithm algorithm =
+      enabled ? mybinlog::ChecksumAlgorithm::kCrc32 : mybinlog::ChecksumAlgorithm::kOff;
+  if (state_ == ParserState::kWaitingHeader) {
+    checksum_tracker_.SetDefaultAlgorithm(algorithm);
+    pending_algorithm_.reset();
+  } else {
+    pending_algorithm_ = algorithm;
+  }
 }
 
-bool EventStreamParser::ChecksumEnabled() const { return has_checksum_; }
+bool EventStreamParser::ChecksumEnabled() const {
+  return StreamAlgorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
+}
 
 void EventStreamParser::SetTrailerPreVerified(bool pre_verified) {
-  trailer_pre_verified_ = pre_verified;
+  checksum_tracker_.SetVerify(!pre_verified);
 }
 
-bool EventStreamParser::TrailerPreVerified() const { return trailer_pre_verified_; }
+bool EventStreamParser::TrailerPreVerified() const { return !checksum_tracker_.verify(); }
 
 mes_error_t EventStreamParser::ErrorCode() const { return error_code_; }
 
+mybinlog::ChecksumAlgorithm EventStreamParser::StreamAlgorithm() const {
+  return pending_algorithm_.value_or(checksum_tracker_.algorithm());
+}
+
 bool EventStreamParser::VerifyChecksum() {
-  // The framing state lives in has_checksum_ / current_has_checksum_, so a
-  // fresh tracker seeded with it frames this one event.
-  mybinlog::ChecksumTracker tracker;
-  tracker.SetDefaultAlgorithm(current_has_checksum_ ? mybinlog::ChecksumAlgorithm::kCrc32
-                                                    : mybinlog::ChecksumAlgorithm::kOff);
-  tracker.SetVerify(!trailer_pre_verified_);
-
-  mybinlog::EventHeader header;
-  header.timestamp = current_header_.timestamp;
-  header.type_code = current_header_.type_code;
-  header.server_id = current_header_.server_id;
-  header.event_length = current_header_.event_length;
-  header.next_position = current_header_.next_position;
-  header.flags = current_header_.flags;
-
   mybinlog::FrameLayout layout;
-  const mybinlog::Status status = tracker.OnEvent(header, buffer_.data(), buffer_.size(), &layout);
+  const mybinlog::Status status =
+      checksum_tracker_.OnEvent(current_header_, buffer_.data(), buffer_.size(), &layout);
 
   // The tracker compares a trailer under CRC32 when verifying, and always
   // checks the dump-start artificial ROTATE under OFF framing.
-  const bool crc32 = tracker.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
+  const bool fde = current_header_.type_code ==
+                   static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent);
+  const bool crc32 = checksum_tracker_.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
   const bool artificial_rotate =
-      header.type_code == static_cast<uint8_t>(mybinlog::EventType::kRotateEvent) &&
-      (header.flags & mybinlog::kLogEventArtificialFlag) != 0 &&
+      current_header_.type_code == static_cast<uint8_t>(mybinlog::EventType::kRotateEvent) &&
+      (current_header_.flags & mybinlog::kLogEventArtificialFlag) != 0 &&
       buffer_.size() >= mybinlog::kEventHeaderSize + mybinlog::kChecksumSize;
-  if ((crc32 && tracker.verify()) || (!crc32 && artificial_rotate)) ++crc32_passes_;
+  if ((crc32 && checksum_tracker_.verify()) || (!crc32 && artificial_rotate)) ++crc32_passes_;
 
   if (status != mybinlog::Status::kOk) {
     const bool mismatch = status == mybinlog::Status::kChecksumMismatch;
@@ -231,12 +229,10 @@ bool EventStreamParser::VerifyChecksum() {
     return false;
   }
 
-  // Only an FDE moves the stream's framing; any other event keeps it and at
-  // most gains a trailer of its own (the artificial ROTATE).
-  current_has_checksum_ = layout.has_trailer;
-  if (header.type_code == static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent)) {
-    has_checksum_ = crc32;
-  }
+  // An FDE re-derives the stream's framing, and it is later than a setter call
+  // made while it was buffered.
+  if (fde) pending_algorithm_.reset();
+  current_payload_length_ = layout.payload_length;
   return true;
 }
 

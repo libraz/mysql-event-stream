@@ -258,10 +258,11 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   if (body_size < kQueryPostHeaderSize) return {};
 
   mybinlog::QueryEvent query;
+  const bool parsed =
+      mybinlog::ParseQueryEvent(header, body, body_size, &query) == mybinlog::Status::kOk;
   std::string first;
   std::string second;
-  if (mybinlog::ParseQueryEvent(header, body, body_size, &query) == mybinlog::Status::kOk &&
-      ExtractQueryKeywords(query.query, &first, &second)) {
+  if (parsed && ExtractQueryKeywords(query.query, &first, &second)) {
     if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
       transaction_open_ = true;
       return {};
@@ -280,7 +281,7 @@ std::string TransactionGtidTracker::Observe(const uint8_t* data, size_t size, bo
   // DDL is classified by the engine's own rule, so both see through the same
   // comments and MariaDB `SET STATEMENT ... FOR` prefixes.
   if (transaction_open_) return {};
-  if (pending_gtid_.standalone || IsDdlQueryEvent(body, body_size)) return CommitPending();
+  if (pending_gtid_.standalone || (parsed && IsDdlStatement(query.query))) return CommitPending();
   return {};
 }
 

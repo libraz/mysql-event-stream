@@ -13,12 +13,19 @@
 #include <utility>
 #include <vector>
 
-#include "binary_util.h"
 #include "client/column_name_source.h"
 #include "logger.h"
-#include "mariadb_event_parser.h"
-#include "rotate_event.h"
+#include "mybinlog/disposition.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/format_description.h"
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/query_event.h"
+#include "mybinlog/rotate.h"
+#include "mybinlog/row_decoder.h"
+#include "mybinlog/status.h"
 #include "sql_statement.h"
+#include "value_render.h"
+#include "wire_util.h"
 
 namespace mes {
 
@@ -52,12 +59,16 @@ constexpr size_t kMinEventDecodeBudget = 1024U * 1024U;
  */
 void ReportUnknownSignedness(TableMetadata* meta) {
   if (meta->unknown_signedness_reported) return;
-  if (std::none_of(meta->columns.begin(), meta->columns.end(), IsNumericColumnType)) return;
+  if (std::none_of(
+          meta->columns.begin(), meta->columns.end(),
+          [](const mybinlog::TableMapColumn& c) { return mybinlog::HasSignednessBit(c.type); })) {
+    return;
+  }
   meta->unknown_signedness_reported = true;
   StructuredLog()
       .Event("table_map_missing_signedness")
-      .Field("db", meta->database_name)
-      .Field("table", meta->table_name)
+      .Field("db", meta->schema)
+      .Field("table", meta->table)
       .Warn();
 }
 
@@ -77,6 +88,49 @@ bool SameResolution(const TableMetadata& a, const TableMetadata& b) {
   return true;
 }
 
+// Flavor an event is classified under. A raw feed may carry no
+// FORMAT_DESCRIPTION_EVENT, and then each type is taken to come from the
+// server family that defines it.
+mybinlog::ServerFlavor ClassificationFlavor(const std::optional<mybinlog::ServerFlavor>& stream,
+                                            uint8_t type_code) {
+  if (stream.has_value()) return *stream;
+  return type_code >= static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent)
+             ? mybinlog::ServerFlavor::kMariaDB
+             : mybinlog::ServerFlavor::kMySQL;
+}
+
+// A type no supported server writes is reported as unknown; a known type this
+// engine cannot represent, as unsupported.
+bool IsObsoleteOrUnknownType(uint8_t type_code) {
+  switch (static_cast<mybinlog::EventType>(type_code)) {
+    case mybinlog::EventType::kUnknown:
+    case mybinlog::EventType::kStartEventV3:
+    case mybinlog::EventType::kSlaveEvent:
+    case mybinlog::EventType::kEnumEndEvent:
+      return true;
+    default:
+      return std::strcmp(mybinlog::EventTypeName(type_code), "UNKNOWN") == 0;
+  }
+}
+
+// Whether a skipped event ends the statement an ANNOTATE_ROWS opened. ROTATE
+// and the MySQL position and Group Replication events carry no statement
+// boundary of their own.
+bool EndsAnnotatedStatement(uint8_t type_code) {
+  switch (static_cast<mybinlog::EventType>(type_code)) {
+    case mybinlog::EventType::kRotateEvent:
+    case mybinlog::EventType::kGtidLogEvent:
+    case mybinlog::EventType::kGtidTaggedLogEvent:
+    case mybinlog::EventType::kPreviousGtidsEvent:
+    case mybinlog::EventType::kTransactionContextEvent:
+    case mybinlog::EventType::kViewChangeEvent:
+    case mybinlog::EventType::kHeartbeatLogEventV2:
+      return false;
+    default:
+      return true;
+  }
+}
+
 }  // namespace
 
 CdcEngine::~CdcEngine() { WarnIfIncludeFiltersMatchedNothing(); }
@@ -86,18 +140,10 @@ CdcEngine::~CdcEngine() { WarnIfIncludeFiltersMatchedNothing(); }
 //   [0..4)  thread_id, [4..8) exec_time, [8] db_len, [9..11) error_code,
 //   [11..13) status_vars_len, status_vars(status_vars_len), db_name(db_len),
 //   '\0', query statement (remainder).
-bool IsDdlQueryEvent(const uint8_t* body, size_t body_len) {
-  if (body == nullptr || body_len < 13) {
-    return false;
-  }
-  uint8_t db_len = body[8];
-  uint16_t status_vars_len = binary::ReadU16Le(body + 11);
-  size_t stmt_offset = 13 + static_cast<size_t>(status_vars_len) + db_len + 1;
-  if (stmt_offset >= body_len) {
-    return false;
-  }
-  const char* stmt = reinterpret_cast<const char*>(body + stmt_offset);
-  size_t stmt_len = body_len - stmt_offset;
+bool IsDdlStatement(std::string_view statement) {
+  const char* stmt = statement.data();
+  const size_t stmt_len = statement.size();
+  if (stmt_len == 0) return false;
 
   size_t pos = 0;
   if (!SkipLeadingSqlTrivia(stmt, stmt_len, &pos)) return false;
@@ -152,7 +198,7 @@ size_t CdcEngine::Feed(const uint8_t* data, size_t len) {
       if (QueueAtCapacity()) {
         break;
       }
-      const EventHeader& header = stream_parser_.CurrentHeader();
+      const mybinlog::EventHeader& header = stream_parser_.CurrentHeader();
       const uint8_t* body = nullptr;
       size_t body_len = 0;
       stream_parser_.CurrentBody(&body, &body_len);
@@ -220,6 +266,7 @@ void CdcEngine::Reset() {
   position_binlog_file_.reset();
   pending_source_sql_.reset();
   blocked_table_ids_.clear();
+  flavor_.reset();
   ResetIncludeFilterMatchState();
   last_error_ = MES_OK;
   // Keep already decoded events. A parse error can follow valid row events
@@ -318,7 +365,7 @@ void CdcEngine::NoteTableMapForIncludeFilters(const TableMetadata& metadata) {
   if (!HasIncludeFilters()) return;
   include_filter_saw_table_map_ = true;
   include_filter_matched_ =
-      include_filter_matched_ || MatchesIncludeFilters(metadata.database_name, metadata.table_name);
+      include_filter_matched_ || MatchesIncludeFilters(metadata.schema, metadata.table);
 }
 
 void CdcEngine::WarnIfIncludeFiltersMatchedNothing() {
@@ -344,12 +391,13 @@ void CdcEngine::ResolveTableMetadata(uint64_t table_id, bool keep_if_same) {
   // into the registered object would change what an event decoded earlier
   // reports, and on reallocation would leave its views dangling.
   TableMetadata resolved = *meta;
-  bool needs_column_names = metadata_fetcher_ && !resolved.columns.empty() &&
-                            std::any_of(resolved.columns.begin(), resolved.columns.end(),
-                                        [](const ColumnMetadata& c) { return c.name.empty(); });
+  bool needs_column_names =
+      metadata_fetcher_ && !resolved.columns.empty() &&
+      std::any_of(resolved.columns.begin(), resolved.columns.end(),
+                  [](const mybinlog::TableMapColumn& c) { return c.name.empty(); });
   bool signedness_from_metadata_conn = false;
   if (needs_column_names) {
-    auto infos = metadata_fetcher_->FetchColumnInfo(resolved.database_name, resolved.table_name,
+    auto infos = metadata_fetcher_->FetchColumnInfo(resolved.schema, resolved.table,
                                                     resolved.columns.size());
     // FetchColumnInfo returns an empty vector on any failure (connection
     // loss, lost SELECT privilege, column-count mismatch).
@@ -360,7 +408,7 @@ void CdcEngine::ResolveTableMetadata(uint64_t table_id, bool keep_if_same) {
       // default) is authoritative for the exact schema at this position.
       // Only fall back to the side-connection's signedness when the
       // binlog did not carry it (very old servers).
-      if (!resolved.signedness_from_binlog) {
+      if (!resolved.has_signedness) {
         resolved.columns[i].is_unsigned = infos[i].is_unsigned;
       }
     }
@@ -368,9 +416,10 @@ void CdcEngine::ResolveTableMetadata(uint64_t table_id, bool keep_if_same) {
   // A TABLE_MAP may carry names itself, or the metadata side-connection
   // may have supplied them above. The flag must describe the resulting
   // metadata, not whether a lookup was attempted.
-  resolved.names_resolved = std::none_of(resolved.columns.begin(), resolved.columns.end(),
-                                         [](const ColumnMetadata& c) { return c.name.empty(); });
-  if (!resolved.signedness_from_binlog && !signedness_from_metadata_conn) {
+  resolved.names_resolved =
+      std::none_of(resolved.columns.begin(), resolved.columns.end(),
+                   [](const mybinlog::TableMapColumn& c) { return c.name.empty(); });
+  if (!resolved.has_signedness && !signedness_from_metadata_conn) {
     ReportUnknownSignedness(&resolved);
   }
   // Resolution that yields nothing new keeps the registered object, so
@@ -387,7 +436,7 @@ void CdcEngine::RebuildBlockedTableIds() {
   std::vector<uint64_t> newly_allowed;
   table_registry_.ForEach([&](uint64_t table_id, const TableMetadata& metadata) {
     NoteTableMapForIncludeFilters(metadata);
-    if (!IsTableAllowed(metadata.database_name, metadata.table_name)) {
+    if (!IsTableAllowed(metadata.schema, metadata.table)) {
       blocked_table_ids_.insert(table_id);
     } else if (previously_blocked.count(table_id) != 0) {
       newly_allowed.push_back(table_id);
@@ -414,7 +463,8 @@ void CdcEngine::SetTrailerPreVerified(bool pre_verified) {
 
 bool CdcEngine::TrailerPreVerified() const { return stream_parser_.TrailerPreVerified(); }
 
-void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
+void CdcEngine::ProcessEvent(const mybinlog::EventHeader& header, const uint8_t* body,
+                             size_t body_len) {
   // Advance the resume position to next_position so events emitted by this
   // call carry the offset to resume from after consuming them. The pre-event
   // offset is saved so it can be restored if processing fails to decode,
@@ -427,44 +477,27 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
     position_.offset = header.next_position;
   }
 
-  // Every type code a supported server can put on the wire is classified by
-  // the switch below, so the default case is reached only by codes no
-  // supported server emits. Sources: MySQL 8.4/9.x Log_event_type in
-  // mysql/binlog/event/binlog_event.h, MariaDB Log_event_type in
-  // sql/log_event.h.
-  //
-  //   decoded: 2 QUERY, 4 ROTATE, 19 TABLE_MAP, 23-25/30-32 ROWS,
-  //     160 MARIADB_ANNOTATE_ROWS
-  //   skipped, no row change this engine represents: 3 STOP, 5 INTVAR,
-  //     9 APPEND_BLOCK, 11 DELETE_FILE, 13 RAND, 14 USER_VAR,
-  //     15 FORMAT_DESCRIPTION, 16 XID, 17 BEGIN_LOAD_QUERY,
-  //     18 EXECUTE_LOAD_QUERY, 27/41 HEARTBEAT, 28 IGNORABLE, 29 ROWS_QUERY,
-  //     33/34/42 GTID, 35 PREVIOUS_GTIDS, 36 TRANSACTION_CONTEXT,
-  //     37 VIEW_CHANGE, 38 XA_PREPARE, 161 MARIADB_BINLOG_CHECKPOINT,
-  //     162 MARIADB_GTID, 163 MARIADB_GTID_LIST, 164 MARIADB_START_ENCRYPTION
-  //   refused loudly, carries a change this engine cannot represent:
-  //     26 INCIDENT, 39 PARTIAL_UPDATE_ROWS, 40 TRANSACTION_PAYLOAD,
-  //     165-171 MariaDB compressed, 172 MARIADB_PARTIAL_ROW_DATA
-  //   default: 0 UNKNOWN, 1 START_V3, 6 LOAD, 7 SLAVE, 8 CREATE_FILE,
-  //     10 EXEC_LOAD, 12 NEW_LOAD, 20-22 PRE_GA_ROWS — obsolete formats
-  //     neither server still writes — plus any code added after this table
-  //
-  // The LOAD DATA family (9/11/17/18) is only written under a non-row binlog
-  // format, where the DML itself already arrives as a QUERY_EVENT this engine
-  // skips. Refusing it would stall the stream rather than surface a change.
-  switch (header.type_code) {
-    case static_cast<uint8_t>(BinlogEventType::kTableMapEvent): {
+  // libmybinlog decides what each type code is; this engine additionally
+  // refuses compressed events and PARTIAL_UPDATE_ROWS, whose rows it does not
+  // decode, rather than advance a CDC checkpoint past changes it cannot
+  // represent. Everything the codec fails closed on is refused as well.
+  const mybinlog::EventDisposition disposition = mybinlog::ClassifyEvent(
+      header.type_code, header.flags, ClassificationFlavor(flavor_, header.type_code));
+  switch (disposition.disposition) {
+    case mybinlog::Disposition::kTableMap: {
       if (body == nullptr || body_len < 6) {
         last_error_ = MES_ERR_PARSE;
         StructuredLog().Event("table_map_parse_failed").Field("reason", "body_too_short").Error();
         break;
       }
-      uint64_t table_id = binary::ReadU48Le(body);
+      uint64_t table_id = wire::ReadU48Le(body);
       // Empty unless the registration evicted, which is the rare case, so this
       // allocates nothing on the ordinary path.
       std::vector<uint64_t> evicted_table_ids;
       bool unchanged = false;
-      if (!table_registry_.ProcessTableMapEvent(body, body_len, &evicted_table_ids, &unchanged)) {
+      if (!table_registry_.ProcessTableMapEvent(body, body_len,
+                                                flavor_.value_or(mybinlog::ServerFlavor::kMySQL),
+                                                &evicted_table_ids, &unchanged)) {
         last_error_ = MES_ERR_PARSE;
         StructuredLog()
             .Event("table_map_parse_failed")
@@ -483,7 +516,7 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
         // resolution that failed once fail for the rest of the binlog file.
         if (unchanged && (metadata_fetcher_ == nullptr || meta->names_resolved)) break;
         NoteTableMapForIncludeFilters(*meta);
-        if (!IsTableAllowed(meta->database_name, meta->table_name)) {
+        if (!IsTableAllowed(meta->schema, meta->table)) {
           blocked_table_ids_.insert(table_id);
           break;
         }
@@ -493,22 +526,25 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
     }
 
-    case static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent):
-    case static_cast<uint8_t>(BinlogEventType::kWriteRowsEventV1):
-    case static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent):
-    case static_cast<uint8_t>(BinlogEventType::kUpdateRowsEventV1):
-    case static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent):
-    case static_cast<uint8_t>(BinlogEventType::kDeleteRowsEventV1):
+    case mybinlog::Disposition::kRows: {
+      if (header.type_code == static_cast<uint8_t>(mybinlog::EventType::kPartialUpdateRowsEvent)) {
+        RefuseEvent(header, "unsupported_binlog_event",
+                    "PARTIAL_JSON after images are not decoded");
+        break;
+      }
       ProcessRowEvent(header, body, body_len);
       // The statement's annotation ends with its last ROWS event, so a later
       // unannotated statement in the same transaction does not inherit it.
-      if (body != nullptr && body_len >= 8 &&
-          (binary::ReadU16Le(body + 6) & kRowsEventStmtEndFlag) != 0) {
+      mybinlog::RowsEventHeader rows_header;
+      if (mybinlog::ParseRowsEventHeader(header, body, body_len, &rows_header) ==
+              mybinlog::Status::kOk &&
+          (rows_header.flags & mybinlog::kRowsStatementEndFlag) != 0) {
         pending_source_sql_.reset();
       }
       break;
+    }
 
-    case static_cast<uint8_t>(BinlogEventType::kQueryEvent): {
+    case mybinlog::Disposition::kQuery: {
       pending_source_sql_.reset();
       // A DDL statement (ALTER/RENAME/DROP/CREATE/TRUNCATE) may change a
       // table's columns while preserving both the column count, which the
@@ -518,7 +554,19 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       // next TABLE_MAP be reported as unchanged and reuse names that describe
       // the pre-DDL schema. The server re-sends a TABLE_MAP before every ROWS
       // event, so dropping the registry costs a re-parse, not a decode.
-      if (IsDdlQueryEvent(body, body_len)) {
+      mybinlog::QueryEvent query;
+      const mybinlog::Status query_status =
+          mybinlog::ParseQueryEvent(header, body, body_len, &query);
+      if (query_status != mybinlog::Status::kOk) {
+        last_error_ = MES_ERR_PARSE;
+        StructuredLog()
+            .Event("query_event_parse_failed")
+            .Field("status", mybinlog::StatusName(query_status))
+            .Field("body_length", static_cast<uint64_t>(body_len))
+            .Error();
+        break;
+      }
+      if (IsDdlStatement(query.query)) {
         if (metadata_fetcher_ != nullptr) metadata_fetcher_->ClearCache();
         table_registry_.Clear();
         blocked_table_ids_.clear();
@@ -527,13 +575,27 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
     }
 
-    case static_cast<uint8_t>(BinlogEventType::kRotateEvent): {
-      RotateEventData rot;
-      if (ParseRotateEvent(body, body_len, &rot)) {
+    case mybinlog::Disposition::kFraming: {
+      if (header.type_code != static_cast<uint8_t>(mybinlog::EventType::kRotateEvent)) {
+        // The parser already took the stream's framing from this FDE; only its
+        // server version is read here, so a body that names none leaves the
+        // flavor as it was.
+        mybinlog::FormatDescriptionEvent fde;
+        if (header.type_code ==
+                static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent) &&
+            mybinlog::ParseFormatDescriptionEvent(header, body, body_len, &fde) ==
+                mybinlog::Status::kOk) {
+          flavor_ = mybinlog::DetectFlavorFromVersion(fde.server_version);
+        }
+        pending_source_sql_.reset();
+        break;
+      }
+      mybinlog::RotateEvent rot;
+      if (mybinlog::ParseRotateEvent(header, body, body_len, &rot) == mybinlog::Status::kOk) {
         // Empty filenames appear in artificial ROTATE events. They carry an
         // updated offset but must not erase the last usable resume filename.
-        if (!rot.new_log_file.empty()) {
-          SetResumeBinlogFile(std::move(rot.new_log_file));
+        if (!rot.next_file.empty()) {
+          SetResumeBinlogFile(std::move(rot.next_file));
         }
         position_.offset = rot.position;
         // A new binlog file reassigns table_ids and re-sends TABLE_MAP events
@@ -551,87 +613,42 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
       break;
     }
 
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent): {
-      // The server emits one ANNOTATE_ROWS per statement, not per ROWS event:
-      // a statement whose row data exceeds the per-event size limit produces
-      // several consecutive ROWS events under a single annotation. The
-      // statement is therefore held past a ROWS event and ends at the ROWS
-      // event flagged STMT_END_F, the next annotation or the next control
-      // event. One allocation is shared by
-      // every row it annotates instead of copied once per row.
-      auto sql = std::make_shared<std::string>();
-      if (MariaDBEventParser::ExtractAnnotateRowsBody(body, body_len, sql.get()) != MES_OK) {
-        last_error_ = MES_ERR_PARSE;
-        StructuredLog().Event("mariadb_annotate_rows_parse_failed").Error();
+    case mybinlog::Disposition::kDataNeutral:
+      if (header.type_code ==
+          static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent)) {
+        // The server emits one ANNOTATE_ROWS per statement, not per ROWS event:
+        // a statement whose row data exceeds the per-event size limit produces
+        // several consecutive ROWS events under a single annotation. The
+        // statement is therefore held past a ROWS event and ends at the ROWS
+        // event flagged STMT_END_F, the next annotation or the next control
+        // event. One allocation is shared by every row it annotates instead of
+        // copied once per row.
+        mybinlog::MariaDbAnnotateRowsEvent annotate;
+        if (mybinlog::ParseMariaDbAnnotateRowsEvent(header, body, body_len, &annotate) !=
+            mybinlog::Status::kOk) {
+          last_error_ = MES_ERR_PARSE;
+          StructuredLog().Event("mariadb_annotate_rows_parse_failed").Error();
+          break;
+        }
+        pending_source_sql_ = std::make_shared<const std::string>(std::move(annotate.query));
         break;
       }
-      pending_source_sql_ = std::move(sql);
-      break;
-    }
-
-    // Standard control events and MariaDB-specific events without a row-level
-    // representation. They carry no change this engine can surface, so the
-    // stream position advances past them.
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBBinlogCheckpointEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBStartEncryptionEvent):
-    case static_cast<uint8_t>(BinlogEventType::kHeartbeatLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kIgnorableLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kRowsQueryLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent):
-    case static_cast<uint8_t>(BinlogEventType::kXidEvent):
-    case static_cast<uint8_t>(BinlogEventType::kStopEvent):
-    case static_cast<uint8_t>(BinlogEventType::kIntvarEvent):
-    case static_cast<uint8_t>(BinlogEventType::kRandEvent):
-    case static_cast<uint8_t>(BinlogEventType::kUserVarEvent):
-    case static_cast<uint8_t>(BinlogEventType::kAppendBlockEvent):
-    case static_cast<uint8_t>(BinlogEventType::kDeleteFileEvent):
-    case static_cast<uint8_t>(BinlogEventType::kBeginLoadQueryEvent):
-    case static_cast<uint8_t>(BinlogEventType::kExecuteLoadQueryEvent):
-    case static_cast<uint8_t>(BinlogEventType::kXaPrepareLogEvent):
-      pending_source_sql_.reset();
+      // Carries no change this engine can surface, so the stream position
+      // advances past it.
+      if (EndsAnnotatedStatement(header.type_code)) pending_source_sql_.reset();
       break;
 
-    case static_cast<uint8_t>(BinlogEventType::kGtidLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kGtidTaggedLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kAnonymousGtidLogEvent):
-    case static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent):
-    case static_cast<uint8_t>(BinlogEventType::kTransactionContextEvent):
-    case static_cast<uint8_t>(BinlogEventType::kViewChangeEvent):
-    case static_cast<uint8_t>(BinlogEventType::kHeartbeatLogEventV2):
+    case mybinlog::Disposition::kGtid:
+    case mybinlog::Disposition::kTransactionBoundary:
+      if (EndsAnnotatedStatement(header.type_code)) pending_source_sql_.reset();
       break;
 
-    // PARTIAL_JSON, transaction payload compression and MariaDB
-    // log_bin_compress need decoders that preserve full row values; INCIDENT
-    // reports that the server itself lost events. Refuse them rather than
-    // silently advancing a CDC checkpoint past changes we cannot represent.
-    case static_cast<uint8_t>(BinlogEventType::kIncidentEvent):
-    case static_cast<uint8_t>(BinlogEventType::kTransactionPayloadEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBPartialRowDataEvent):
-    case static_cast<uint8_t>(BinlogEventType::kPartialUpdateRowsEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBQueryCompressedEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEventV1):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBUpdateRowsCompressedEventV1):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBDeleteRowsCompressedEventV1):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBUpdateRowsCompressedEvent):
-    case static_cast<uint8_t>(BinlogEventType::kMariaDBDeleteRowsCompressedEvent):
-      last_error_ = MES_ERR_PARSE;
-      StructuredLog()
-          .Event("unsupported_binlog_event")
-          .Field("type_code", static_cast<uint64_t>(header.type_code))
-          .Error();
-      break;
-
-    default:
-      // Do not silently skip a newly introduced event type: doing so advances
-      // the caller's checkpoint while dropping an unknown change.
-      last_error_ = MES_ERR_PARSE;
-      StructuredLog()
-          .Event("unknown_binlog_event")
-          .Field("type_code", static_cast<uint64_t>(header.type_code))
-          .Error();
+    case mybinlog::Disposition::kCompressed:
+    case mybinlog::Disposition::kFailClosed:
+      RefuseEvent(header,
+                  IsObsoleteOrUnknownType(header.type_code) ? "unknown_binlog_event"
+                                                            : "unsupported_binlog_event",
+                  disposition.reason);
       break;
   }
 
@@ -640,6 +657,16 @@ void CdcEngine::ProcessEvent(const EventHeader& header, const uint8_t* body, siz
   if (last_error_ != MES_OK) {
     position_.offset = saved_offset;
   }
+}
+
+void CdcEngine::RefuseEvent(const mybinlog::EventHeader& header, const char* event,
+                            const char* reason) {
+  last_error_ = MES_ERR_PARSE;
+  StructuredLog()
+      .Event(event)
+      .Field("type_code", static_cast<uint64_t>(header.type_code))
+      .Field("reason", reason)
+      .Error();
 }
 
 void CdcEngine::SetResumeBinlogFile(std::string binlog_file) {
@@ -651,8 +678,11 @@ EventPosition CdcEngine::CurrentEventPosition() const {
   return EventPosition{position_binlog_file_, position_.offset};
 }
 
-void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len) {
-  if (body == nullptr || body_len < 6) {
+void CdcEngine::ProcessRowEvent(const mybinlog::EventHeader& header, const uint8_t* body,
+                                size_t body_len) {
+  mybinlog::RowsEventHeader rows_header;
+  if (mybinlog::ParseRowsEventHeader(header, body, body_len, &rows_header) !=
+      mybinlog::Status::kOk) {
     last_error_ = MES_ERR_DECODE_ROW;
     StructuredLog()
         .Event("row_decode_failed")
@@ -662,8 +692,7 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
     return;
   }
 
-  // Extract table_id from the first 6 bytes of the body
-  uint64_t table_id = binary::ReadU48Le(body);
+  const uint64_t table_id = rows_header.table_id;
   if (blocked_table_ids_.find(table_id) != blocked_table_ids_.end()) return;
   const auto meta = table_registry_.SharedLookup(table_id);
   if (!meta) {
@@ -675,96 +704,94 @@ void CdcEngine::ProcessRowEvent(const EventHeader& header, const uint8_t* body, 
     return;
   }
 
-  uint8_t type_code = header.type_code;
-  bool is_v2 = (type_code == static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent) ||
-                type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent) ||
-                type_code == static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent));
-
-  bool is_write = (type_code == static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent) ||
-                   type_code == static_cast<uint8_t>(BinlogEventType::kWriteRowsEventV1));
-  bool is_update = (type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent) ||
-                    type_code == static_cast<uint8_t>(BinlogEventType::kUpdateRowsEventV1));
+  const uint8_t type_code = header.type_code;
+  const bool is_write = (type_code == static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent) ||
+                         type_code == static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEventV1));
+  const bool is_update =
+      (type_code == static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEvent) ||
+       type_code == static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEventV1));
+  const char* kind = is_write ? "write_rows" : (is_update ? "update_rows" : "delete_rows");
 
   // Cap what one event may materialize at the queue's own byte budget rather
   // than at the decoder's standalone default, so the bytes a single event can
   // add to the queue stay a function of the engine's configured limits. The cap
   // is the whole budget, not what is left of it: a decode must not start failing
-  // because the consumer happens to be behind.
-  DecodeBudget budget =
-      DecodeBudget::ForEventBody(body_len, std::max(max_queue_bytes_, kMinEventDecodeBudget));
+  // because the consumer happens to be behind. Every ColumnValue slot and every
+  // queued entry is charged, so a NULL or a compressed value cannot buy more
+  // than the budget either.
+  mybinlog::DecodeBudget budget = mybinlog::DecodeBudget::ForEventBody(
+      body_len, std::max(max_queue_bytes_, kMinEventDecodeBudget));
+  mybinlog::DecodeOptions options;
+  options.max_value_bytes = 0;
+  options.max_decompressed_bytes = mybinlog::kMaxDecompressedColumnBytes;
+  options.budget = &budget;
+  options.per_value_overhead = sizeof(ColumnValue);
+  options.per_row_overhead = sizeof(ChangeEvent);
 
-  if (is_write) {
-    row_buf_.clear();
-    if (DecodeWriteRows(body, body_len, *meta, is_v2, &row_buf_, &budget)) {
-      for (auto& row : row_buf_) {
-        ChangeEvent event;
-        event.type = EventType::kInsert;
-        event.database = meta->database_name;
-        event.table = meta->table_name;
-        event.after = std::move(row);
-        AttachColumnNames(event.after, *meta);
-        event.table_metadata = meta;
-        event.timestamp = header.timestamp;
-        event.position = CurrentEventPosition();
-        event.source_sql = pending_source_sql_;
-        event.names_resolved = meta->names_resolved;
-        EnqueueEvent(std::move(event));
-      }
-    } else {
-      LogRowDecodeFailure("write_rows", *meta);
-    }
-  } else if (is_update) {
-    update_buf_.clear();
-    if (DecodeUpdateRows(body, body_len, *meta, is_v2, &update_buf_, &budget)) {
-      for (auto& pair : update_buf_) {
-        ChangeEvent event;
-        event.type = EventType::kUpdate;
-        event.database = meta->database_name;
-        event.table = meta->table_name;
-        event.before = std::move(pair.before);
-        event.after = std::move(pair.after);
-        AttachColumnNames(event.before, *meta);
-        AttachColumnNames(event.after, *meta);
-        event.table_metadata = meta;
-        event.timestamp = header.timestamp;
-        event.position = CurrentEventPosition();
-        event.source_sql = pending_source_sql_;
-        event.names_resolved = meta->names_resolved;
-        EnqueueEvent(std::move(event));
-      }
-    } else {
-      LogRowDecodeFailure("update_rows", *meta);
+  mybinlog::RowsEvent decoded;
+  const mybinlog::Status status =
+      mybinlog::DecodeRowsEvent(header, body, body_len, *meta, options, &decoded);
+  if (status != mybinlog::Status::kOk) {
+    LogRowDecodeFailure(kind, *meta, mybinlog::StatusName(status));
+    return;
+  }
+
+  // Every row renders before any is queued, so a failure queues nothing.
+  row_buf_.clear();
+  before_buf_.clear();
+  bool rendered = true;
+  if (is_update) {
+    row_buf_.resize(decoded.updates.size());
+    before_buf_.resize(decoded.updates.size());
+    for (size_t i = 0; rendered && i < decoded.updates.size(); ++i) {
+      rendered = RenderRow(std::move(decoded.updates[i].first), &before_buf_[i], &budget) &&
+                 RenderRow(std::move(decoded.updates[i].second), &row_buf_[i], &budget);
     }
   } else {
-    // DELETE
-    row_buf_.clear();
-    if (DecodeDeleteRows(body, body_len, *meta, is_v2, &row_buf_, &budget)) {
-      for (auto& row : row_buf_) {
-        ChangeEvent event;
-        event.type = EventType::kDelete;
-        event.database = meta->database_name;
-        event.table = meta->table_name;
-        event.before = std::move(row);
-        AttachColumnNames(event.before, *meta);
-        event.table_metadata = meta;
-        event.timestamp = header.timestamp;
-        event.position = CurrentEventPosition();
-        event.source_sql = pending_source_sql_;
-        event.names_resolved = meta->names_resolved;
-        EnqueueEvent(std::move(event));
-      }
-    } else {
-      LogRowDecodeFailure("delete_rows", *meta);
+    row_buf_.resize(decoded.rows.size());
+    for (size_t i = 0; rendered && i < decoded.rows.size(); ++i) {
+      rendered = RenderRow(std::move(decoded.rows[i]), &row_buf_[i], &budget);
     }
   }
 
+  if (rendered) {
+    const EventType event_type =
+        is_write ? EventType::kInsert : (is_update ? EventType::kUpdate : EventType::kDelete);
+    for (size_t i = 0; i < row_buf_.size(); ++i) {
+      ChangeEvent event;
+      event.type = event_type;
+      event.database = meta->schema;
+      event.table = meta->table;
+      if (is_update) {
+        event.before = std::move(before_buf_[i]);
+        AttachColumnNames(event.before, *meta);
+      }
+      if (event_type == EventType::kDelete) {
+        event.before = std::move(row_buf_[i]);
+        AttachColumnNames(event.before, *meta);
+      } else {
+        event.after = std::move(row_buf_[i]);
+        AttachColumnNames(event.after, *meta);
+      }
+      event.table_metadata = meta;
+      event.timestamp = header.timestamp;
+      event.position = CurrentEventPosition();
+      event.source_sql = pending_source_sql_;
+      event.names_resolved = meta->names_resolved;
+      EnqueueEvent(std::move(event));
+    }
+  } else {
+    LogRowDecodeFailure(kind, *meta, "unrepresentable_value");
+  }
+
   row_buf_.clear();
-  update_buf_.clear();
+  before_buf_.clear();
   if (row_buf_.capacity() > kRetainedScratchRows) std::vector<RowData>().swap(row_buf_);
-  if (update_buf_.capacity() > kRetainedScratchRows) std::vector<UpdatePair>().swap(update_buf_);
+  if (before_buf_.capacity() > kRetainedScratchRows) std::vector<RowData>().swap(before_buf_);
 }
 
-void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta) {
+void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta,
+                                    const char* reason) {
   // Record a decode-specific error so ErrorCode() can distinguish from
   // pure parser errors. Row-event decode failures indicate per-row column
   // corruption, not a stream-level framing issue.
@@ -772,9 +799,10 @@ void CdcEngine::LogRowDecodeFailure(const char* kind, const TableMetadata& meta)
   StructuredLog()
       .Event("row_decode_failed")
       .Field("kind", kind)
-      .Field("db", meta.database_name)
-      .Field("table", meta.table_name)
+      .Field("db", meta.schema)
+      .Field("table", meta.table)
       .Field("binlog_offset", static_cast<uint64_t>(position_.offset))
+      .Field("reason", reason)
       .Warn();
 }
 

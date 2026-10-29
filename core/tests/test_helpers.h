@@ -17,8 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "crc32.h"
-#include "event_header.h"
+#include "mybinlog/crc32.h"
+#include "mybinlog/event_header.h"
 
 namespace mes {
 namespace test {
@@ -93,7 +93,8 @@ class EventBuilder {
 inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
                                        uint32_t next_position, const std::vector<uint8_t>& body) {
   EventBuilder b;
-  uint32_t event_length = static_cast<uint32_t>(kEventHeaderSize + body.size() + kChecksumSize);
+  uint32_t event_length =
+      static_cast<uint32_t>(mybinlog::kEventHeaderSize + body.size() + mybinlog::kChecksumSize);
 
   // 19-byte header
   b.WriteU32Le(timestamp);
@@ -107,7 +108,7 @@ inline std::vector<uint8_t> BuildEvent(uint8_t type_code, uint32_t timestamp,
   b.WriteBytes(body);
 
   // Valid CRC32 checksum over header + body.
-  b.WriteU32Le(ComputeCRC32(b.Data().data(), b.Data().size()));
+  b.WriteU32Le(mybinlog::ComputeCrc32(b.Data().data(), b.Data().size()));
 
   return b.Data();
 }
@@ -117,7 +118,7 @@ inline std::vector<uint8_t> BuildEventNoChecksum(uint8_t type_code, uint32_t tim
                                                  uint32_t next_position,
                                                  const std::vector<uint8_t>& body) {
   EventBuilder b;
-  uint32_t event_length = static_cast<uint32_t>(kEventHeaderSize + body.size());
+  uint32_t event_length = static_cast<uint32_t>(mybinlog::kEventHeaderSize + body.size());
   b.WriteU32Le(timestamp);
   b.WriteU8(type_code);
   b.WriteU32Le(1);  // server_id
@@ -261,11 +262,11 @@ inline std::vector<uint8_t> BuildRotateBody(uint64_t position, const std::string
 /// @brief Compute CRC32 over all bytes except the trailing 4-byte checksum
 ///        and write the result into the last 4 bytes (little-endian).
 inline void FixChecksum(std::vector<uint8_t>& buf) {
-  if (buf.size() < kChecksumSize) {
+  if (buf.size() < mybinlog::kChecksumSize) {
     return;
   }
-  size_t data_len = buf.size() - kChecksumSize;
-  uint32_t crc = ComputeCRC32(buf.data(), data_len);
+  size_t data_len = buf.size() - mybinlog::kChecksumSize;
+  uint32_t crc = mybinlog::ComputeCrc32(buf.data(), data_len);
   std::memcpy(buf.data() + data_len, &crc, sizeof(crc));
 }
 

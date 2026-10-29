@@ -9,7 +9,7 @@
 #endif
 
 #include "cdc_engine.h"
-#include "event_header.h"
+#include "mybinlog/event_types.h"
 #include "test_helpers.h"
 
 namespace {
@@ -31,14 +31,14 @@ size_t MaxRssBytes() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const size_t iterations = argc > 1 ? static_cast<size_t>(std::strtoull(argv[1], nullptr, 10))
-                                     : 100000;
+  const size_t iterations =
+      argc > 1 ? static_cast<size_t>(std::strtoull(argv[1], nullptr, 10)) : 100000;
   if (iterations == 0) return 1;
 
-  const auto table_map = mes::test::BuildEvent(
-      static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent), 0, 0,
-      mes::test::BuildTableMapBody(1, "bench", "events"));
-  const auto row = mes::test::BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent),
+  const auto table_map =
+      mes::test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 0, 0,
+                            mes::test::BuildTableMapBody(1, "bench", "events"));
+  const auto row = mes::test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
                                          0, 0, mes::test::BuildWriteRowsBody(1, 42));
 
   mes::CdcEngine engine;
@@ -54,9 +54,8 @@ int main(int argc, char** argv) {
   const double events_per_second = static_cast<double>(iterations) / seconds;
   const double feed_latency_us = seconds * 1'000'000.0 / (iterations * 2);
 
-  std::cout << std::fixed << std::setprecision(2)
-            << "events=" << iterations << " decode_events_per_second=" << events_per_second
-            << " feed_latency_us=" << feed_latency_us << " max_rss_bytes=" << MaxRssBytes()
-            << '\n';
+  std::cout << std::fixed << std::setprecision(2) << "events=" << iterations
+            << " decode_events_per_second=" << events_per_second
+            << " feed_latency_us=" << feed_latency_us << " max_rss_bytes=" << MaxRssBytes() << '\n';
   return 0;
 }

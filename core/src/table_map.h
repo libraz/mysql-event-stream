@@ -3,10 +3,11 @@
 
 /**
  * @file table_map.h
- * @brief TABLE_MAP_EVENT parsing and table metadata registry
+ * @brief Registry of parsed TABLE_MAP events keyed by table_id
  *
- * Parses MySQL TABLE_MAP binlog events and maintains a registry of
- * table metadata keyed by table_id for use when decoding row events.
+ * TABLE_MAP bodies are parsed by libmybinlog; this registry keeps the result,
+ * bounded and shared with the events decoded against it, for the ROWS events
+ * that follow.
  */
 
 #ifndef MES_TABLE_MAP_H_
@@ -21,30 +22,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mybinlog/server_flavor.h"
 #include "types.h"
 
 namespace mes {
-
-/**
- * @brief Whether a column receives a bit in the TABLE_MAP SIGNEDNESS bitmap.
- *
- * Mirrors MySQL's Field::has_signedness_information_type(), which decides this
- * from the binlog column type: TYPED_ARRAY itself has no bit, even when its
- * element type is numeric.
- *
- * @param column Column metadata parsed from a TABLE_MAP event.
- * @return true when the column's declared type carries signedness.
- */
-bool IsNumericColumnType(const ColumnMetadata& column);
-
-/**
- * @brief Parse a TABLE_MAP_EVENT body into a TableMetadata structure.
- * @param data Pointer to the event body (after the 19-byte header).
- * @param len Length of the event body (excluding checksum).
- * @param[out] metadata Parsed table metadata output.
- * @return true if parsing succeeded, false on malformed data.
- */
-bool ParseTableMapEvent(const uint8_t* data, size_t len, TableMetadata* metadata);
 
 /**
  * @brief Registry that caches TABLE_MAP_EVENT metadata by table_id.
@@ -92,13 +73,15 @@ class TableMapRegistry {
    *
    * @param data Pointer to the event body (after header).
    * @param len Length of the event body (excluding checksum).
+   * @param flavor Server flavor the body was written by; it decides which
+   *        columns the charset metadata indexes.
    * @param[out] evicted_table_ids Appended with the table_id of every entry
    *        eviction removed, in the order they were removed.
-   * @param[out] unchanged Set when the body was byte-identical to the one the
-   *        table_id is already registered from.
+   * @param[out] unchanged Set when the body and flavor were identical to the
+   *        ones the table_id is already registered from.
    * @return true if successfully parsed and registered.
    */
-  bool ProcessTableMapEvent(const uint8_t* data, size_t len,
+  bool ProcessTableMapEvent(const uint8_t* data, size_t len, mybinlog::ServerFlavor flavor,
                             std::vector<uint64_t>* evicted_table_ids = nullptr,
                             bool* unchanged = nullptr);
 
@@ -146,8 +129,8 @@ class TableMapRegistry {
    * @brief Bytes of variable-length metadata the registered entries retain.
    *
    * Counts what a schema's own content sizes: each entry's raw TABLE_MAP body,
-   * its database and table names, its column array and every column name in
-   * it. Fixed per-entry structure is not counted, following the same split as
+   * its database and table names, its column array and every column name and
+   * ENUM/SET label in it. Fixed per-entry structure is not counted, following the same split as
    * QueuedEventCharge(): it is proportional to the entry count, which
    * kMaxEntries bounds on its own.
    */
@@ -160,6 +143,7 @@ class TableMapRegistry {
   struct Entry {
     std::shared_ptr<TableMetadata> metadata;
     std::vector<uint8_t> raw_body;
+    mybinlog::ServerFlavor flavor = mybinlog::ServerFlavor::kMySQL;
     std::list<uint64_t>::iterator lru_position;
   };
 

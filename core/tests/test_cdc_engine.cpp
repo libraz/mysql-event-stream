@@ -14,14 +14,17 @@
 #include <utility>
 #include <vector>
 
-#include "binary_util.h"
 #include "cdc_engine.h"
 #include "client/column_name_source.h"
 #include "client/metadata_fetcher.h"
-#include "crc32.h"
-#include "event_header.h"
 #include "logger.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/crc32.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/row_decoder.h"
 #include "test_helpers.h"
+#include "wire_util.h"
 
 namespace mes {
 
@@ -202,10 +205,11 @@ d077b03166a5696a1e02000000a40000003e0600000000a000000000000100020016ffffff000000
 TEST(CdcEngineGoldenFixtureTest, MySql84TemporalFspAndNegativeTime2) {
   const std::vector<uint8_t> fixture = DecodeHexFixture(kMySql84TemporalGolden);
   ASSERT_EQ(fixture.size(), 279u);
-  ASSERT_EQ(binary::ReadU32Le(fixture.data() + 9), 115u);
-  ASSERT_EQ(binary::ReadU32Le(fixture.data() + 115 + 9), 164u);
-  ASSERT_EQ(ComputeCRC32(fixture.data(), 111), binary::ReadU32Le(fixture.data() + 111));
-  ASSERT_EQ(ComputeCRC32(fixture.data() + 115, 160), binary::ReadU32Le(fixture.data() + 115 + 160));
+  ASSERT_EQ(wire::ReadU32Le(fixture.data() + 9), 115u);
+  ASSERT_EQ(wire::ReadU32Le(fixture.data() + 115 + 9), 164u);
+  ASSERT_EQ(mybinlog::ComputeCrc32(fixture.data(), 111), wire::ReadU32Le(fixture.data() + 111));
+  ASSERT_EQ(mybinlog::ComputeCrc32(fixture.data() + 115, 160),
+            wire::ReadU32Le(fixture.data() + 115 + 160));
 
   CdcEngine engine;
   ASSERT_EQ(engine.Feed(fixture.data(), fixture.size()), fixture.size());
@@ -247,10 +251,10 @@ TEST(CdcEngineChecksumTest, DecodesStreamWithoutChecksum) {
   CdcEngine engine;
   engine.SetChecksumEnabled(false);
 
-  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                        100, BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                    150, BuildWriteRowsBody(42, 7777));
+  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                        1000, 100, BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1000, 150, BuildWriteRowsBody(42, 7777));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
 
@@ -265,9 +269,9 @@ TEST(CdcEngineChecksumTest, DecodesStreamWithoutChecksum) {
 TEST(CdcEngineChecksumTest, DefaultStripsChecksum) {
   // Default path: events include a 4-byte checksum (BuildEvent appends one).
   CdcEngine engine;  // checksum enabled by default
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 4242));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
@@ -282,11 +286,11 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
   CdcEngine engine;
   const std::string sql = "INSERT INTO users VALUES (42)";
   std::vector<uint8_t> annotation(sql.begin(), sql.end());
-  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
-                             50, annotation);
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto annotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
+                             1000, 50, annotation);
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 42));
   ASSERT_EQ(engine.Feed(annotate.data(), annotate.size()), annotate.size());
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
@@ -296,9 +300,9 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
   ASSERT_TRUE(engine.NextEvent(&event));
   EXPECT_EQ(event.SourceSql(), sql);
 
-  auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 175, {});
-  auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                               BuildWriteRowsBody(42, 43));
+  auto xid = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kXidEvent), 1000, 175, {});
+  auto next_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                               200, BuildWriteRowsBody(42, 43));
   ASSERT_EQ(engine.Feed(xid.data(), xid.size()), xid.size());
   ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
   ASSERT_TRUE(engine.NextEvent(&event));
@@ -312,9 +316,9 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsAttachedUntilTransactionEnd) {
 TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsSharedAcrossTheRowsOfOneEvent) {
   CdcEngine engine;
   const std::string sql(4096, 'x');
-  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
-                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto annotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
+                             1000, 50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
   // Two INT rows in one WRITE_ROWS event: the single-row body plus a second
   // (null bitmap, value) pair in the same layout.
@@ -322,7 +326,7 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlIsSharedAcrossTheRowsOfOneEvent) {
   const std::vector<uint8_t> second_row = {0x00, 0x02, 0x00, 0x00, 0x00};
   two_rows.insert(two_rows.end(), second_row.begin(), second_row.end());
   auto write =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150, two_rows);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150, two_rows);
   ASSERT_EQ(engine.Feed(annotate.data(), annotate.size()), annotate.size());
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
@@ -349,14 +353,14 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlCoversEveryRowsEventOfOneStatement) {
   CdcEngine engine;
   const std::string split_stmt = "INSERT INTO users VALUES (1),(2)";
   const std::string next_stmt = "UPDATE users SET id = 3";
-  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
-                             50, std::vector<uint8_t>(split_stmt.begin(), split_stmt.end()));
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto annotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
+                             1000, 50, std::vector<uint8_t>(split_stmt.begin(), split_stmt.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto first_chunk = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
-                                BuildWriteRowsBody(42, 1));
-  auto second_chunk = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
-                                 BuildWriteRowsBody(42, 2));
+  auto first_chunk = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                150, BuildWriteRowsBody(42, 1));
+  auto second_chunk = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                 200, BuildWriteRowsBody(42, 2));
   ASSERT_EQ(engine.Feed(annotate.data(), annotate.size()), annotate.size());
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(first_chunk.data(), first_chunk.size()), first_chunk.size());
@@ -380,10 +384,10 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlCoversEveryRowsEventOfOneStatement) {
   // keeps the retention from attributing rows to a statement they did not
   // come from.
   auto next_annotate =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000, 250,
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent), 1000, 250,
                  std::vector<uint8_t>(next_stmt.begin(), next_stmt.end()));
-  auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 300,
-                               BuildWriteRowsBody(42, 3));
+  auto next_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                               300, BuildWriteRowsBody(42, 3));
   ASSERT_EQ(engine.Feed(next_annotate.data(), next_annotate.size()), next_annotate.size());
   ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
 
@@ -399,19 +403,20 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlCoversEveryRowsEventOfOneStatement) {
 TEST(CdcEngineMariaDBTest, AnnotateRowsSqlEndsWithTheStatementsLastRowsEvent) {
   CdcEngine engine;
   const std::string sql = "INSERT INTO users VALUES (1)";
-  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
-                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto annotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
+                             1000, 50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
   std::vector<uint8_t> last_rows = BuildWriteRowsBody(42, 1);
-  last_rows[6] = static_cast<uint8_t>(kRowsEventStmtEndFlag);  // flags follow the 6-byte table id
+  last_rows[6] =
+      static_cast<uint8_t>(mybinlog::kRowsStatementEndFlag);  // flags follow the 6-byte table id
   auto annotated_write =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150, last_rows);
-  auto next_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 200,
-                                   BuildTableMapBody(42, "testdb", "users"));
-  auto unannotated_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                      250, BuildWriteRowsBody(42, 2));
-  auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 275, {});
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150, last_rows);
+  auto next_table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                   200, BuildTableMapBody(42, "testdb", "users"));
+  auto unannotated_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1000, 250, BuildWriteRowsBody(42, 2));
+  auto xid = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kXidEvent), 1000, 275, {});
   for (const auto* event :
        {&annotate, &table_map, &annotated_write, &next_table_map, &unannotated_write, &xid}) {
     ASSERT_EQ(engine.Feed(event->data(), event->size()), event->size());
@@ -430,9 +435,9 @@ TEST(CdcEngineMariaDBTest, AnnotateRowsSqlEndsWithTheStatementsLastRowsEvent) {
 // An event with no annotation must not hold an allocation for the empty case.
 TEST(CdcEngineMariaDBTest, EventsWithoutAnnotateRowsHoldNoStatement) {
   CdcEngine engine;
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 7));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
@@ -445,15 +450,15 @@ TEST(CdcEngineMariaDBTest, EventsWithoutAnnotateRowsHoldNoStatement) {
 
 TEST(CdcEngineChecksumTest, CorruptedCrcReturnsChecksumErrorWithoutAdvancingPosition) {
   CdcEngine engine;
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_FALSE(engine.IsError());
   ASSERT_EQ(engine.CurrentPosition().offset, 100u);
 
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 4242));
-  write[kEventHeaderSize + 8] ^= 0x80;
+  write[mybinlog::kEventHeaderSize + 8] ^= 0x80;
   EXPECT_EQ(engine.Feed(write.data(), write.size()), write.size());
   EXPECT_TRUE(engine.IsError());
   EXPECT_EQ(engine.ErrorCode(), MES_ERR_CHECKSUM);
@@ -468,11 +473,11 @@ TEST(CdcEngineChecksumTest, PreVerifiedTrailerIsFramedWithoutBeingRevalidated) {
   // trailer it did not check.
   CdcEngine engine;
   engine.SetTrailerPreVerified(true);
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 4242));
-  write[write.size() - kChecksumSize] ^= 0xFF;
+  write[write.size() - mybinlog::kChecksumSize] ^= 0xFF;
 
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
@@ -490,11 +495,12 @@ TEST(CdcEngineChecksumTest, PreVerifiedTrailerIsFramedWithoutBeingRevalidated) {
 TEST(CdcEngineChecksumTest, ChecksumNoneArtificialRotateDoesNotPolluteFilename) {
   CdcEngine engine;
   engine.SetChecksumEnabled(false);
-  auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0,
+  auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0,
                            BuildRotateBody(4, "mysql-bin.000010"));
-  rotate[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
-  const uint32_t crc = ComputeCRC32(rotate.data(), rotate.size() - kChecksumSize);
-  std::memcpy(rotate.data() + rotate.size() - kChecksumSize, &crc, sizeof(crc));
+  rotate[17] = static_cast<uint8_t>(mybinlog::kLogEventArtificialFlag);
+  const uint32_t crc =
+      mybinlog::ComputeCrc32(rotate.data(), rotate.size() - mybinlog::kChecksumSize);
+  std::memcpy(rotate.data() + rotate.size() - mybinlog::kChecksumSize, &crc, sizeof(crc));
 
   EXPECT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
   EXPECT_FALSE(engine.IsError());
@@ -505,17 +511,10 @@ TEST(CdcEngineChecksumTest, ChecksumNoneArtificialRotateDoesNotPolluteFilename) 
 // --- DDL detection drives metadata cache invalidation ---
 
 TEST(CdcEngineDdlTest, DetectsDdlStatements) {
-  auto alter = BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT");
-  EXPECT_TRUE(IsDdlQueryEvent(alter.data(), alter.size()));
-
-  auto rename = BuildQueryEventBody("testdb", "RENAME TABLE a TO b");
-  EXPECT_TRUE(IsDdlQueryEvent(rename.data(), rename.size()));
-
-  auto lowercase = BuildQueryEventBody("testdb", "  create table t (id int)");
-  EXPECT_TRUE(IsDdlQueryEvent(lowercase.data(), lowercase.size()));
-
-  auto with_status = BuildQueryEventBody("testdb", "DROP TABLE t", /*status_vars_len=*/7);
-  EXPECT_TRUE(IsDdlQueryEvent(with_status.data(), with_status.size()));
+  EXPECT_TRUE(IsDdlStatement("ALTER TABLE users ADD COLUMN x INT"));
+  EXPECT_TRUE(IsDdlStatement("RENAME TABLE a TO b"));
+  EXPECT_TRUE(IsDdlStatement("  create table t (id int)"));
+  EXPECT_TRUE(IsDdlStatement("DROP TABLE t"));
 }
 
 TEST(CdcEngineDdlTest, DetectsDdlAfterEveryMySqlLeadingCommentForm) {
@@ -530,8 +529,7 @@ TEST(CdcEngineDdlTest, DetectsDdlAfterEveryMySqlLeadingCommentForm) {
       "/*M!100100 RENAME TABLE a TO b */",
   };
   for (const auto& statement : statements) {
-    auto body = BuildQueryEventBody("testdb", statement);
-    EXPECT_TRUE(IsDdlQueryEvent(body.data(), body.size())) << statement;
+    EXPECT_TRUE(IsDdlStatement(statement)) << statement;
   }
 }
 
@@ -540,8 +538,7 @@ TEST(CdcEngineDdlTest, RejectsCommentOnlyMalformedAndKeywordPrefixes) {
                                                  "-- comment only", "# comment only",
                                                  "ALTERED TABLE t", "CREATE2 TABLE t"};
   for (const auto& statement : statements) {
-    auto body = BuildQueryEventBody("testdb", statement);
-    EXPECT_FALSE(IsDdlQueryEvent(body.data(), body.size())) << statement;
+    EXPECT_FALSE(IsDdlStatement(statement)) << statement;
   }
 }
 
@@ -551,9 +548,9 @@ TEST(CdcEngineNamesResolvedTest, FalseInStandaloneMode) {
   // No metadata fetcher is attached and the TABLE_MAP has no names, so
   // consumers must not mistake positional column keys for resolved names.
   CdcEngine engine;
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 1));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
@@ -571,9 +568,9 @@ TEST(CdcEngineNamesResolvedTest, FalseWhenFetcherCannotResolve) {
   MetadataFetcher fetcher;  // intentionally not Connect()ed
   engine.SetMetadataFetcher(&fetcher);
 
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 1));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
@@ -595,7 +592,7 @@ TEST(CdcEngineNamesResolvedTest, FailedResolutionIsRetriedOnAByteIdenticalTableM
   // reports it, so the number of reports is the number of attempts.
   ScopedEventLogCapture capture("event=metadata_reconnect_failed");
 
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
   engine.Feed(table_map.data(), table_map.size());
   ASSERT_EQ(capture.Count(), 1) << capture.LastMessage();
@@ -617,12 +614,12 @@ TEST(CdcEngineNamesResolvedTest, RetriedResolutionDoesNotWriteIntoMetadataQueued
   MetadataFetcher fetcher;  // intentionally not Connect()ed
   engine.SetMetadataFetcher(&fetcher);
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
-                                      200, BuildWriteRowsBody(42, 1));
-  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                       300, BuildWriteRowsBody(42, 2));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1001, 200, BuildWriteRowsBody(42, 1));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1002, 300, BuildWriteRowsBody(42, 2));
 
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
@@ -645,8 +642,8 @@ TEST(CdcEngineNamesResolvedTest, RetriedResolutionDoesNotWriteIntoMetadataQueued
   EXPECT_TRUE(events[0].table_metadata->columns[0].name.empty());
   // The first event still reads the storage of the registration it was decoded
   // against, which its own shared_ptr is what keeps alive.
-  EXPECT_EQ(events[0].database.data(), events[0].table_metadata->database_name.data());
-  EXPECT_EQ(events[0].table.data(), events[0].table_metadata->table_name.data());
+  EXPECT_EQ(events[0].database.data(), events[0].table_metadata->schema.data());
+  EXPECT_EQ(events[0].table.data(), events[0].table_metadata->table.data());
   EXPECT_EQ(events[0].database, "testdb");
   EXPECT_EQ(events[0].table, "users");
 }
@@ -660,10 +657,10 @@ TEST(CdcEngineNamesResolvedTest, ColumnNamesComeFromTheSourceWhenTheBinlogCarrie
   source.SetNames({"user_id"});
   engine.SetMetadataFetcher(&source);
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
-                                BuildWriteRowsBody(42, 1));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                150, BuildWriteRowsBody(42, 1));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
 
@@ -697,12 +694,12 @@ TEST(CdcEngineNamesResolvedTest, AResolutionSuppliedLaterLeavesAQueuedEventReadi
   FakeColumnNameSource source;  // Resolves nothing until told which names to answer with.
   engine.SetMetadataFetcher(&source);
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
-                                      200, BuildWriteRowsBody(42, 1));
-  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                       300, BuildWriteRowsBody(42, 2));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1001, 200, BuildWriteRowsBody(42, 1));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1002, 300, BuildWriteRowsBody(42, 2));
 
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
@@ -751,12 +748,12 @@ TEST(CdcEngineDdlTest, ADdlStatementDropsWhatTheColumnNameSourceResolved) {
   engine.SetMetadataFetcher(&source);
 
   const auto ddl =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 200,
                  BuildQueryEventBody("testdb", "ALTER TABLE users RENAME COLUMN a TO b"));
   engine.Feed(ddl.data(), ddl.size());
   EXPECT_EQ(source.ClearCount(), 1);
 
-  const auto dml = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 300,
+  const auto dml = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 300,
                               BuildQueryEventBody("testdb", "BEGIN"));
   engine.Feed(dml.data(), dml.size());
   EXPECT_EQ(source.ClearCount(), 1);
@@ -783,7 +780,7 @@ TEST(CdcEngineDdlTest, MariaDbSetStatementPrefixDoesNotHideTheDdlItWraps) {
     CdcEngine engine;
     FakeColumnNameSource source;
     engine.SetMetadataFetcher(&source);
-    const auto query = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+    const auto query = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 200,
                                   BuildQueryEventBody("testdb", c.sql));
     engine.Feed(query.data(), query.size());
     EXPECT_EQ(source.ClearCount(), c.expected_clears);
@@ -796,10 +793,10 @@ TEST(CdcEngineDdlTest, ARenameIssuedThroughSetStatementIsResolvedAgainForTheNext
   source.SetNames({"a"});
   engine.SetMetadataFetcher(&source);
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
-                                BuildWriteRowsBody(42, 1));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                150, BuildWriteRowsBody(42, 1));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
   ChangeEvent event;
@@ -807,7 +804,7 @@ TEST(CdcEngineDdlTest, ARenameIssuedThroughSetStatementIsResolvedAgainForTheNext
   ASSERT_EQ(event.after.columns[0].name, "a");
 
   const auto ddl = BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+      static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 200,
       BuildQueryEventBody("testdb",
                           "SET STATEMENT max_statement_time=100 FOR ALTER TABLE users RENAME "
                           "COLUMN a TO b"));
@@ -815,8 +812,8 @@ TEST(CdcEngineDdlTest, ARenameIssuedThroughSetStatementIsResolvedAgainForTheNext
   source.SetNames({"b"});
 
   // The TABLE_MAP body is byte-identical: only the invalidation forces a re-fetch.
-  const auto next_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                     300, BuildWriteRowsBody(42, 2));
+  const auto next_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                     1000, 300, BuildWriteRowsBody(42, 2));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(next_write.data(), next_write.size()), next_write.size());
   ASSERT_TRUE(engine.NextEvent(&event));
@@ -831,9 +828,9 @@ TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt)
   // server re-sends a TABLE_MAP before every ROWS event, which is what
   // repopulates the registry with the post-DDL schema.
   CdcEngine engine;
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 1));
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
@@ -842,12 +839,12 @@ TEST(CdcEngineDdlTest, TableMetadataCachedBeforeADdlStatementIsNotReusedAfterIt)
   ASSERT_TRUE(engine.NextEvent(&event));
   ASSERT_FALSE(engine.IsError());
 
-  auto ddl = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 200,
+  auto ddl = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 200,
                         BuildQueryEventBody("testdb", "ALTER TABLE users RENAME COLUMN a TO b"));
   engine.Feed(ddl.data(), ddl.size());
 
-  auto write_after = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 250,
-                                BuildWriteRowsBody(42, 2));
+  auto write_after = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                250, BuildWriteRowsBody(42, 2));
   engine.Feed(write_after.data(), write_after.size());
 
   EXPECT_FALSE(engine.NextEvent(&event));
@@ -862,9 +859,9 @@ TEST(CdcEngineSignednessTest, UnavailableSignednessIsReportedOncePerTable) {
   // it has to be reported per table rather than per row event.
   ScopedEventLogCapture capture("event=table_map_missing_signedness");
   CdcEngine engine;
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
+  auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 150,
                           BuildWriteRowsBody(42, 1));
   for (int i = 0; i < 3; ++i) {
     engine.Feed(table_map.data(), table_map.size());
@@ -883,7 +880,7 @@ TEST(CdcEngineSignednessTest, ResolvedSignednessIsNotReported) {
   ScopedEventLogCapture capture("event=table_map_missing_signedness");
   CdcEngine engine;
   auto table_map =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                  BuildTableMapBodyWithSignedness(42, "testdb", "users", /*is_unsigned=*/true));
   engine.Feed(table_map.data(), table_map.size());
   ASSERT_FALSE(engine.IsError());
@@ -898,16 +895,17 @@ TEST(CdcEngineChecksumTest, StreamWithChecksumsDisabledIsDecodedFromItsFormatDes
   // must reframe the stream as unchecksummed instead of failing the first event
   // against a checksum that is not there.
   std::vector<uint8_t> fde_body(57 + 41, 0);
-  fde_body[fde_body.size() - kChecksumSize - 1] = kBinlogChecksumAlgCrc32;
-  fde_body[fde_body.size() - 1] = kBinlogChecksumAlgOff;
+  fde_body[fde_body.size() - mybinlog::kChecksumSize - 1] =
+      static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kCrc32);
+  fde_body[fde_body.size() - 1] = static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kOff);
 
   CdcEngine engine;
-  auto fde = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent),
-                                  1000, 60, fde_body);
-  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                        100, BuildTableMapBody(42, "testdb", "users"));
-  auto write = BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                    150, BuildWriteRowsBody(42, 7));
+  auto fde = BuildEventNoChecksum(
+      static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent), 1000, 60, fde_body);
+  auto table_map = BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                        1000, 100, BuildTableMapBody(42, "testdb", "users"));
+  auto write = BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1000, 150, BuildWriteRowsBody(42, 7));
   engine.Feed(fde.data(), fde.size());
   engine.Feed(table_map.data(), table_map.size());
   engine.Feed(write.data(), write.size());
@@ -921,8 +919,8 @@ TEST(CdcEngineChecksumTest, StreamWithChecksumsDisabledIsDecodedFromItsFormatDes
 
 TEST(CdcEngineUnknownEventTest, UnsupportedEventsFailWithoutAdvancingCheckpoint) {
   const std::vector<uint8_t> unsupported_types = {
-      static_cast<uint8_t>(BinlogEventType::kPartialUpdateRowsEvent),
-      static_cast<uint8_t>(BinlogEventType::kMariaDBWriteRowsCompressedEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kPartialUpdateRowsEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kMariaDBWriteRowsCompressedEvent),
       0xFE,
   };
 
@@ -940,7 +938,7 @@ TEST(CdcEngineUnknownEventTest, UnsupportedEventsFailWithoutAdvancingCheckpoint)
 TEST(CdcEngineUnknownEventTest, TaggedGtidIsRecognizedAsControlEvent) {
   CdcEngine engine;
   auto event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kGtidTaggedLogEvent), 1000, 1234, {});
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kGtidTaggedLogEvent), 1000, 1234, {});
 
   EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
   EXPECT_FALSE(engine.IsError());
@@ -948,20 +946,27 @@ TEST(CdcEngineUnknownEventTest, TaggedGtidIsRecognizedAsControlEvent) {
 }
 
 TEST(CdcEngineDdlTest, IgnoresNonDdlStatements) {
-  auto begin = BuildQueryEventBody("testdb", "BEGIN");
-  EXPECT_FALSE(IsDdlQueryEvent(begin.data(), begin.size()));
-
-  auto commit = BuildQueryEventBody("testdb", "COMMIT");
-  EXPECT_FALSE(IsDdlQueryEvent(commit.data(), commit.size()));
-
-  auto insert = BuildQueryEventBody("testdb", "INSERT INTO t VALUES (1)");
-  EXPECT_FALSE(IsDdlQueryEvent(insert.data(), insert.size()));
+  EXPECT_FALSE(IsDdlStatement("BEGIN"));
+  EXPECT_FALSE(IsDdlStatement("COMMIT"));
+  EXPECT_FALSE(IsDdlStatement("INSERT INTO t VALUES (1)"));
+  EXPECT_FALSE(IsDdlStatement(""));
 }
 
-TEST(CdcEngineDdlTest, HandlesMalformedQueryEvent) {
-  std::vector<uint8_t> too_short = {0x01, 0x02, 0x03};
-  EXPECT_FALSE(IsDdlQueryEvent(too_short.data(), too_short.size()));
-  EXPECT_FALSE(IsDdlQueryEvent(nullptr, 0));
+TEST(CdcEngineDdlTest, MalformedQueryEventFailsWithoutAdvancingCheckpoint) {
+  // A status-variable block that overruns its declared length cannot locate
+  // the statement, so the engine refuses it instead of guessing.
+  const std::vector<uint8_t> bodies[] = {
+      {0x01, 0x02, 0x03},
+      BuildQueryEventBody("testdb", "DROP TABLE t", /*status_vars_len=*/7),
+  };
+  for (const auto& body : bodies) {
+    CdcEngine engine;
+    auto event =
+        BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 1234, body);
+    EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
+    EXPECT_EQ(engine.ErrorCode(), MES_ERR_PARSE);
+    EXPECT_EQ(engine.CurrentPosition().offset, 0u);
+  }
 }
 
 TEST(CdcEngineDdlTest, QueryEventFedThroughEngineIsSafe) {
@@ -970,17 +975,17 @@ TEST(CdcEngineDdlTest, QueryEventFedThroughEngineIsSafe) {
   CdcEngine engine;
   auto ddl_body = BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT");
   auto ddl_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 50, ddl_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 50, ddl_body);
   size_t consumed = engine.Feed(ddl_event.data(), ddl_event.size());
   EXPECT_EQ(consumed, ddl_event.size());
   EXPECT_FALSE(engine.IsError());
 
   auto table_map_body = BuildTableMapBody(42, "testdb", "users");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
   engine.Feed(table_map_event.data(), table_map_event.size());
-  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 150,
-                                BuildWriteRowsBody(42, 123));
+  auto write_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                150, BuildWriteRowsBody(42, 123));
   engine.Feed(write_event.data(), write_event.size());
   EXPECT_TRUE(engine.HasEvents());
   EXPECT_FALSE(engine.IsError());
@@ -990,12 +995,12 @@ TEST(CdcEngineTest, InsertEvent) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(42, "testdb", "users");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto write_body = BuildWriteRowsBody(42, 123);
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   // Feed table map
   size_t consumed = engine.Feed(table_map_event.data(), table_map_event.size());
@@ -1025,11 +1030,11 @@ TEST(CdcEngineTest, QueuedEventRetainsSharedTableMetadataAcrossRotate) {
   auto table_map_body = BuildTableMapBody(43, "db", "named_table");
   // COLUMN_NAME optional metadata: one length-encoded name, "id".
   table_map_body.insert(table_map_body.end(), {0x04, 0x03, 0x02, 'i', 'd'});
-  const auto table_map =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBody(43, 7));
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1002, 300,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBody(43, 7));
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1002, 300,
                                  BuildRotateBody(4, "mysql-bin.000002"));
 
   engine.Feed(table_map.data(), table_map.size());
@@ -1052,10 +1057,10 @@ TEST(CdcEngineTest, QueuedEventRetainsSharedTableMetadataAcrossRotate) {
 // NUL-terminated pointer.
 TEST(CdcEngineTest, EventNamesBorrowTheTableMetadataStorageForEveryRow) {
   CdcEngine engine;
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBodyMultiRow(42, {1, 2, 3}));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBodyMultiRow(42, {1, 2, 3}));
 
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
@@ -1071,12 +1076,12 @@ TEST(CdcEngineTest, EventNamesBorrowTheTableMetadataStorageForEveryRow) {
     EXPECT_EQ(row_event.database, "testdb");
     EXPECT_EQ(row_event.table, "users");
     // The metadata the event itself holds owns the bytes the views read.
-    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->database_name.data());
-    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table_name.data());
+    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->schema.data());
+    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table.data());
     // A whole-string view, so the byte one past its end is the owner's
     // terminator and data() is a valid const char*.
-    ASSERT_EQ(row_event.database.size(), row_event.table_metadata->database_name.size());
-    ASSERT_EQ(row_event.table.size(), row_event.table_metadata->table_name.size());
+    ASSERT_EQ(row_event.database.size(), row_event.table_metadata->schema.size());
+    ASSERT_EQ(row_event.table.size(), row_event.table_metadata->table.size());
     EXPECT_EQ(row_event.database.data()[row_event.database.size()], '\0');
     EXPECT_EQ(row_event.table.data()[row_event.table.size()], '\0');
     // One registration behind every row of the event, not one per row.
@@ -1092,17 +1097,17 @@ TEST(CdcEngineTest, EventNamesBorrowTheTableMetadataStorageForEveryRow) {
 // when it is finally drained.
 TEST(CdcEngineTest, QueuedEventNamesOutliveTheRegistryEntryTheyBorrow) {
   CdcEngine engine;
-  const auto first_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto first_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
-  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
-                                      200, BuildWriteRowsBody(42, 1));
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1002, 300,
+  const auto first_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1001, 200, BuildWriteRowsBody(42, 1));
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1002, 300,
                                  BuildRotateBody(4, "mysql-bin.000002"));
   // The same table_id after the rotation, naming a different table.
-  const auto second_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1003,
-                                     400, BuildTableMapBody(42, "otherdb", "other_table"));
-  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1004,
-                                       500, BuildWriteRowsBody(42, 2));
+  const auto second_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                     1003, 400, BuildTableMapBody(42, "otherdb", "other_table"));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1004, 500, BuildWriteRowsBody(42, 2));
 
   std::vector<uint8_t> stream;
   for (const std::vector<uint8_t>* part :
@@ -1125,8 +1130,8 @@ TEST(CdcEngineTest, QueuedEventNamesOutliveTheRegistryEntryTheyBorrow) {
   EXPECT_NE(events[0].database.data(), events[1].database.data());
   for (const ChangeEvent& row_event : events) {
     ASSERT_TRUE(row_event.table_metadata);
-    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->database_name.data());
-    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table_name.data());
+    EXPECT_EQ(row_event.database.data(), row_event.table_metadata->schema.data());
+    EXPECT_EQ(row_event.table.data(), row_event.table_metadata->table.data());
     EXPECT_EQ(row_event.database.data()[row_event.database.size()], '\0');
     EXPECT_EQ(row_event.table.data()[row_event.table.size()], '\0');
   }
@@ -1136,12 +1141,12 @@ TEST(CdcEngineTest, UpdateEvent) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(10, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto update_body = BuildUpdateRowsBody(10, 100, 200);
-  auto update_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent), 1002, 200, update_body);
+  auto update_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEvent), 1002,
+                                 200, update_body);
 
   engine.Feed(table_map_event.data(), table_map_event.size());
   engine.Feed(update_event.data(), update_event.size());
@@ -1164,12 +1169,12 @@ TEST(CdcEngineTest, DeleteEvent) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(10, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto delete_body = BuildDeleteRowsBody(10, 999);
-  auto delete_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent), 1003, 200, delete_body);
+  auto delete_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kDeleteRowsEvent), 1003,
+                                 200, delete_body);
 
   engine.Feed(table_map_event.data(), table_map_event.size());
   engine.Feed(delete_event.data(), delete_event.size());
@@ -1188,7 +1193,7 @@ TEST(CdcEngineTest, RotateEvent) {
 
   auto rotate_body = BuildRotateBody(4, "binlog.000002");
   auto rotate_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, rotate_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0, rotate_body);
 
   engine.Feed(rotate_event.data(), rotate_event.size());
   EXPECT_FALSE(engine.HasEvents());
@@ -1200,13 +1205,13 @@ TEST(CdcEngineTest, RotateClearsTableMapRegistry) {
   CdcEngine engine;
 
   // Register table_id 1, then rotate to a new binlog file.
-  auto table_map_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "db", "t"));
-  auto rotate_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0,
+  auto rotate_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0,
                                  BuildRotateBody(4, "binlog.000002"));
   // A row event for table_id 1 *after* the rotate, without a fresh TABLE_MAP.
-  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBody(1, 42));
+  auto write_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBody(1, 42));
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
@@ -1229,13 +1234,13 @@ TEST(CdcEngineTest, DecodeFailureDoesNotAdvancePosition) {
   CdcEngine engine;
 
   // TABLE_MAP advances the position to its next_position (100).
-  auto table_map_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "db", "t"));
   // Truncated row event with next_position 200; its decode will fail.
   auto write_body = BuildWriteRowsBody(1, 42);
   write_body.pop_back();
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
@@ -1269,14 +1274,15 @@ TEST(CdcEngineTest, UnknownEventTypeIsParseErrorWithoutAdvancingCheckpoint) {
 TEST(CdcEngineTest, StopEventDoesNotInterruptSurroundingEvents) {
   CdcEngine engine;
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBody(1, 4242));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBody(1, 4242));
   // Every clean mysqld/mariadbd shutdown writes a STOP_EVENT, and the stream
   // resumes with the ROTATE that opens the next binlog file.
-  const auto stop = BuildEvent(static_cast<uint8_t>(BinlogEventType::kStopEvent), 1002, 300, {});
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1003, 400,
+  const auto stop =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kStopEvent), 1002, 300, {});
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1003, 400,
                                  BuildRotateBody(4, "mysql-bin.000002"));
 
   std::vector<uint8_t> stream;
@@ -1303,7 +1309,8 @@ TEST(CdcEngineTest, StopEventDoesNotInterruptSurroundingEvents) {
 
 TEST(CdcEngineTest, StopEventAdvancesPositionWithoutError) {
   CdcEngine engine;
-  const auto stop = BuildEvent(static_cast<uint8_t>(BinlogEventType::kStopEvent), 1000, 512, {});
+  const auto stop =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kStopEvent), 1000, 512, {});
 
   EXPECT_EQ(engine.Feed(stop.data(), stop.size()), stop.size());
   EXPECT_FALSE(engine.IsError());
@@ -1313,14 +1320,12 @@ TEST(CdcEngineTest, StopEventAdvancesPositionWithoutError) {
 
 TEST(CdcEngineTest, StandardControlEventsAdvancePositionWithoutError) {
   const uint8_t control_types[] = {
-      static_cast<uint8_t>(BinlogEventType::kIntvarEvent),
-      static_cast<uint8_t>(BinlogEventType::kRandEvent),
-      static_cast<uint8_t>(BinlogEventType::kUserVarEvent),
-      static_cast<uint8_t>(BinlogEventType::kAppendBlockEvent),
-      static_cast<uint8_t>(BinlogEventType::kDeleteFileEvent),
-      static_cast<uint8_t>(BinlogEventType::kBeginLoadQueryEvent),
-      static_cast<uint8_t>(BinlogEventType::kExecuteLoadQueryEvent),
-      static_cast<uint8_t>(BinlogEventType::kXaPrepareLogEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kIntvarEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kRandEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kUserVarEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kAppendBlockEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kDeleteFileEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kBeginLoadQueryEvent),
   };
 
   for (uint8_t type_code : control_types) {
@@ -1337,11 +1342,17 @@ TEST(CdcEngineTest, StandardControlEventsAdvancePositionWithoutError) {
 
 TEST(CdcEngineTest, UnsupportedEventTypesFailDistinctlyFromUnknownOnes) {
   // INCIDENT reports that the server lost events; TRANSACTION_PAYLOAD carries
-  // a compressed transaction. Both are documented types this engine cannot
-  // represent, so they must fail as unsupported rather than as unknown.
+  // a compressed transaction. XA_PREPARE carries rows an XA ROLLBACK may still
+  // discard, EXECUTE_LOAD_QUERY applies rows that are never materialized, and an
+  // ANONYMOUS_GTID transaction has no position to record. All are documented
+  // types this engine cannot represent, so they must fail as unsupported rather
+  // than as unknown.
   const uint8_t unsupported_types[] = {
-      static_cast<uint8_t>(BinlogEventType::kIncidentEvent),
-      static_cast<uint8_t>(BinlogEventType::kTransactionPayloadEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kIncidentEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kTransactionPayloadEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kXaPrepareLogEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kExecuteLoadQueryEvent),
+      static_cast<uint8_t>(mybinlog::EventType::kAnonymousGtidLogEvent),
   };
 
   for (uint8_t type_code : unsupported_types) {
@@ -1358,11 +1369,37 @@ TEST(CdcEngineTest, UnsupportedEventTypesFailDistinctlyFromUnknownOnes) {
   }
 }
 
+// A type outside every server's enumeration is skipped when the source marked
+// it LOG_EVENT_IGNORABLE_F, as a replica does, and refused when it did not.
+TEST(CdcEngineTest, AnUnknownTypeIsSkippedOnlyWhenMarkedIgnorable) {
+  constexpr uint8_t kUnknownType = 0xC8;
+  for (const bool ignorable : {true, false}) {
+    SCOPED_TRACE(ignorable);
+    CdcEngine engine;
+    auto event = BuildEvent(kUnknownType, 1000, 700, {0x01, 0x02, 0x03, 0x04});
+    if (ignorable) {
+      event[17] = static_cast<uint8_t>(mybinlog::kLogEventIgnorableFlag);
+      test::FixChecksum(event);
+    }
+
+    ScopedErrorLogCapture capture;
+    EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
+    EXPECT_EQ(engine.IsError(), !ignorable);
+    EXPECT_FALSE(engine.HasEvents());
+    EXPECT_EQ(engine.CurrentPosition().offset, ignorable ? 700u : 0u);
+    if (!ignorable) {
+      EXPECT_NE(g_last_error_log.find("event=unknown_binlog_event type_code=200"),
+                std::string::npos)
+          << g_last_error_log;
+    }
+  }
+}
+
 /**
  * @brief Every type code 0-255 lands in the class the engine's table assigns it.
  *
- * The table in CdcEngine::ProcessEvent sorts every code into decoded, skipped,
- * refused or default. A code that drifts from skipped to default stalls a
+ * The classification CdcEngine::ProcessEvent applies sorts every code into
+ * decoded, skipped, refused or default. A code that drifts from skipped to default stalls a
  * stream; one that drifts the other way advances a checkpoint past a change.
  * Decoded codes need well-formed bodies and are covered by their own tests.
  */
@@ -1390,16 +1427,13 @@ TEST(CdcEngineTest, EveryTypeCodeIsClassifiedAsItsTableSays) {
       case 15:
       case 16:
       case 17:
-      case 18:
       case 27:
       case 28:
       case 29:
       case 33:
-      case 34:
       case 35:
       case 36:
       case 37:
-      case 38:
       case 41:
       case 42:
       case 161:
@@ -1407,7 +1441,10 @@ TEST(CdcEngineTest, EveryTypeCodeIsClassifiedAsItsTableSays) {
       case 163:
       case 164:
         return Class::kSkipped;
+      case 18:
       case 26:
+      case 34:
+      case 38:
       case 39:
       case 40:
       case 165:
@@ -1432,12 +1469,12 @@ TEST(CdcEngineTest, EveryTypeCodeIsClassifiedAsItsTableSays) {
     // An FDE sets the framing of everything after it, so a body it cannot
     // parse is refused; give it a well-formed CRC32 one.
     std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04};
-    if (code == static_cast<int>(BinlogEventType::kFormatDescriptionEvent)) {
+    if (code == static_cast<int>(mybinlog::EventType::kFormatDescriptionEvent)) {
       body.assign(57, 0);
       body[0] = 4;  // binlog_version
       std::memcpy(body.data() + 2, "8.4.0", 5);
       body[56] = 19;  // event_header_length
-      body.push_back(kBinlogChecksumAlgCrc32);
+      body.push_back(static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kCrc32));
     }
     const auto event = BuildEvent(static_cast<uint8_t>(code), 1000, 640, body);
 
@@ -1471,10 +1508,10 @@ TEST(CdcEngineTest, AnUnknownColumnTypeFailsItsRowsEventWithoutEmitting) {
   const size_t type_index = 6 + 2 + (1 + db.size() + 1) + (1 + table.size() + 1) + 1;
   ASSERT_EQ(table_map_body[type_index], 0x03) << "the builder's INT column moved";
   table_map_body[type_index] = 0x0E;
-  const auto table_map =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
-                                BuildWriteRowsBody(42, 7));
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
+                                200, BuildWriteRowsBody(42, 7));
 
   CdcEngine engine;
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
@@ -1490,12 +1527,12 @@ TEST(CdcEngineTest, MultipleEvents) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
-  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto write1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                            BuildWriteRowsBody(1, 10));
-  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto write2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                            BuildWriteRowsBody(1, 20));
 
   // Feed all events in one buffer
@@ -1519,12 +1556,12 @@ TEST(CdcEngineTest, ByteByByteFeeding) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto write_body = BuildWriteRowsBody(1, 42);
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   // Combine and feed byte by byte
   std::vector<uint8_t> combined;
@@ -1546,12 +1583,12 @@ TEST(CdcEngineTest, Reset) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto write_body = BuildWriteRowsBody(1, 42);
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   engine.Feed(table_map_event.data(), table_map_event.size());
   engine.Feed(write_event.data(), write_event.size());
@@ -1575,13 +1612,13 @@ TEST(CdcEngineTest, Reset) {
 
 TEST(CdcEngineTest, EmptyRotateFilenamePreservesResumeFilename) {
   CdcEngine engine;
-  const auto named = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 100,
+  const auto named = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 100,
                                 BuildRotateBody(4, "mysql-bin.000007"));
   engine.Feed(named.data(), named.size());
   ASSERT_FALSE(engine.IsError());
   EXPECT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000007");
 
-  const auto empty = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 200,
+  const auto empty = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 200,
                                 BuildRotateBody(123, ""));
   engine.Feed(empty.data(), empty.size());
   ASSERT_FALSE(engine.IsError());
@@ -1614,11 +1651,11 @@ TEST(CdcEngineTest, NextEventEmptyQueue) {
 // leaves the address unchanged.
 TEST(CdcEngineTest, NextEventHandsOverQueuedRowBuffer) {
   CdcEngine engine;
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(42, "testdb", "users"));
   engine.Feed(table_map.data(), table_map.size());
   for (int i = 0; i < 2; i++) {
-    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
+    const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000,
                                   150 + 50 * i, BuildWriteRowsBody(42, 7000 + i));
     engine.Feed(write.data(), write.size());
   }
@@ -1644,7 +1681,7 @@ TEST(CdcEngineTest, RowEventWithoutTableMap) {
   // Feed a WRITE_ROWS_EVENT without a preceding TABLE_MAP_EVENT
   auto write_body = BuildWriteRowsBody(999, 42);
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   // The malformed event is fully accepted by the parser before row decoding
   // fails. Feed must return at that point rather than spinning on the parser's
@@ -1660,13 +1697,13 @@ TEST(CdcEngineTest, TruncatedRowEventSetsDecodeError) {
   CdcEngine engine;
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   auto write_body = BuildWriteRowsBody(1, 42);
   write_body.pop_back();
   auto write_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, write_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, write_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), table_map_event.begin(), table_map_event.end());
@@ -1690,15 +1727,15 @@ TEST(CdcEngineTest, BackpressureStopsFeedingWhenQueueFull) {
 
   // Register table map
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   // Build 3 write events
-  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto write1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                            BuildWriteRowsBody(1, 10));
-  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto write2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                            BuildWriteRowsBody(1, 20));
-  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto write3 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                            BuildWriteRowsBody(1, 30));
 
   // Combine all events into one buffer
@@ -1748,12 +1785,12 @@ TEST(CdcEngineTest, QueueOvershootIsEveryRowOfTheEventThatCrossedTheLimit) {
   engine.SetMaxQueueSize(1);
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   const std::vector<int32_t> rows = {10, 20, 30, 40, 50};
-  auto write_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBodyMultiRow(1, rows));
+  auto write_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBodyMultiRow(1, rows));
 
   std::vector<uint8_t> combined;
   combined.insert(combined.end(), table_map_event.begin(), table_map_event.end());
@@ -1793,16 +1830,16 @@ TEST(CdcEngineTest, BackpressureLetsADrainAndRefeedLoopFinishTheBuffer) {
 
   // Register table map
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
   // Three single-row write events combined into one buffer, so that one Feed()
   // call has more than one event's worth of bytes available to it.
-  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto write1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                            BuildWriteRowsBody(1, 10));
-  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto write2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                            BuildWriteRowsBody(1, 20));
-  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto write3 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                            BuildWriteRowsBody(1, 30));
 
   std::vector<uint8_t> combined;
@@ -1846,14 +1883,14 @@ TEST(CdcEngineTest, BackpressureIsBoundedByDefault) {
   EXPECT_EQ(engine.MaxQueueSize(), MES_DEFAULT_QUEUE_SIZE);
 
   auto table_map_body = BuildTableMapBody(1, "db", "t");
-  auto table_map_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, table_map_body);
+  auto table_map_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
+                                    100, table_map_body);
 
-  auto write1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto write1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                            BuildWriteRowsBody(1, 10));
-  auto write2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto write2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                            BuildWriteRowsBody(1, 20));
-  auto write3 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto write3 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                            BuildWriteRowsBody(1, 30));
 
   std::vector<uint8_t> combined;
@@ -1875,20 +1912,20 @@ TEST(CdcEngineTest, IncludeDatabasesFilter) {
 
   // Register table in allowed database
   auto tm1 = BuildTableMapBody(1, "mydb", "users");
-  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  auto ev1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm1);
   engine.Feed(ev1.data(), ev1.size());
 
-  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto w1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
   // Register table in blocked database
   auto tm2 = BuildTableMapBody(2, "otherdb", "logs");
-  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  auto ev2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1002, 300, tm2);
   engine.Feed(ev2.data(), ev2.size());
 
-  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto w2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                        BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
@@ -1909,20 +1946,20 @@ TEST(CdcEngineTest, ExcludeTablesFilter) {
 
   // Register allowed table
   auto tm1 = BuildTableMapBody(1, "mydb", "users");
-  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  auto ev1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm1);
   engine.Feed(ev1.data(), ev1.size());
 
-  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto w1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
   // Register excluded table
   auto tm2 = BuildTableMapBody(2, "mydb", "logs");
-  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  auto ev2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1002, 300, tm2);
   engine.Feed(ev2.data(), ev2.size());
 
-  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto w2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                        BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
@@ -1942,20 +1979,20 @@ TEST(CdcEngineTest, IncludeTablesFilter) {
 
   // Register included table
   auto tm1 = BuildTableMapBody(1, "mydb", "users");
-  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  auto ev1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm1);
   engine.Feed(ev1.data(), ev1.size());
 
-  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto w1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_EQ(engine.PendingEventCount(), 1u);
 
   // Register non-included table
   auto tm2 = BuildTableMapBody(2, "mydb", "logs");
-  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  auto ev2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1002, 300, tm2);
   engine.Feed(ev2.data(), ev2.size());
 
-  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto w2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                        BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
@@ -1972,22 +2009,22 @@ TEST(CdcEngineTest, TableFilterTrailingWildcardMatchesQualifiedAndBareNames) {
   engine.SetIncludeTables({"mydb.audit_*", "users*"});
   engine.SetExcludeTables({"mydb.audit_private*"});
 
-  const auto audit_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto audit_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "audit_log"));
-  const auto private_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
-                                      200, BuildTableMapBody(2, "mydb", "audit_private_log"));
-  const auto users_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002,
+  const auto private_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1001, 200, BuildTableMapBody(2, "mydb", "audit_private_log"));
+  const auto users_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1002,
                                     300, BuildTableMapBody(3, "otherdb", "users_archive"));
   ASSERT_EQ(engine.Feed(audit_map.data(), audit_map.size()), audit_map.size());
   ASSERT_EQ(engine.Feed(private_map.data(), private_map.size()), private_map.size());
   ASSERT_EQ(engine.Feed(users_map.data(), users_map.size()), users_map.size());
 
-  const auto audit_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                    400, BuildWriteRowsBody(1, 10));
-  const auto private_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1004,
-                                      500, BuildWriteRowsBody(2, 20));
-  const auto users_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1005,
-                                    600, BuildWriteRowsBody(3, 30));
+  const auto audit_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1003, 400, BuildWriteRowsBody(1, 10));
+  const auto private_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1004, 500, BuildWriteRowsBody(2, 20));
+  const auto users_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1005, 600, BuildWriteRowsBody(3, 30));
   ASSERT_EQ(engine.Feed(audit_row.data(), audit_row.size()), audit_row.size());
   ASSERT_EQ(engine.Feed(private_row.data(), private_row.size()), private_row.size());
   ASSERT_EQ(engine.Feed(users_row.data(), users_row.size()), users_row.size());
@@ -2006,10 +2043,10 @@ TEST(CdcEngineTest, UnqualifiedExcludeWildcardIgnoresTheDatabaseName) {
   // strength of the database name alone.
   engine.SetExcludeTables({"log*"});
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "logs", "events"));
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                BuildWriteRowsBody(1, 7));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                200, BuildWriteRowsBody(1, 7));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
 
@@ -2026,17 +2063,18 @@ TEST(CdcEngineTest, UnqualifiedIncludeWildcardIgnoresTheDatabaseName) {
   // that happens to live in the users_db database.
   engine.SetIncludeTables({"user*"});
 
-  const auto sessions_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                       100, BuildTableMapBody(1, "users_db", "sessions"));
-  const auto profiles_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
-                                       200, BuildTableMapBody(2, "users_db", "user_profiles"));
+  const auto sessions_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                       1000, 100, BuildTableMapBody(1, "users_db", "sessions"));
+  const auto profiles_map =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1001, 200,
+                 BuildTableMapBody(2, "users_db", "user_profiles"));
   ASSERT_EQ(engine.Feed(sessions_map.data(), sessions_map.size()), sessions_map.size());
   ASSERT_EQ(engine.Feed(profiles_map.data(), profiles_map.size()), profiles_map.size());
 
-  const auto sessions_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                       300, BuildWriteRowsBody(1, 10));
-  const auto profiles_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                       400, BuildWriteRowsBody(2, 20));
+  const auto sessions_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1002, 300, BuildWriteRowsBody(1, 10));
+  const auto profiles_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1003, 400, BuildWriteRowsBody(2, 20));
   ASSERT_EQ(engine.Feed(sessions_row.data(), sessions_row.size()), sessions_row.size());
   ASSERT_EQ(engine.Feed(profiles_row.data(), profiles_row.size()), profiles_row.size());
 
@@ -2053,17 +2091,17 @@ TEST(CdcEngineTest, TableFilterMatchingIsCaseSensitive) {
   // admit a table actually named "users".
   engine.SetIncludeTables({"mydb.Users"});
 
-  const auto lower_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto lower_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
-  const auto upper_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
+  const auto upper_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1001,
                                     200, BuildTableMapBody(2, "mydb", "Users"));
   ASSERT_EQ(engine.Feed(lower_map.data(), lower_map.size()), lower_map.size());
   ASSERT_EQ(engine.Feed(upper_map.data(), upper_map.size()), upper_map.size());
 
-  const auto lower_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                    300, BuildWriteRowsBody(1, 10));
-  const auto upper_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                    400, BuildWriteRowsBody(2, 20));
+  const auto lower_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1002, 300, BuildWriteRowsBody(1, 10));
+  const auto upper_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1003, 400, BuildWriteRowsBody(2, 20));
   ASSERT_EQ(engine.Feed(lower_row.data(), lower_row.size()), lower_row.size());
   ASSERT_EQ(engine.Feed(upper_row.data(), upper_row.size()), upper_row.size());
 
@@ -2080,17 +2118,17 @@ TEST(CdcEngineTest, ANonTrailingAsteriskIsLiteral) {
   // name literally contains one -- not "audit" via a middle wildcard.
   engine.SetIncludeTables({"mydb.au*dit"});
 
-  const auto audit_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto audit_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "audit"));
-  const auto literal_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
-                                      200, BuildTableMapBody(2, "mydb", "au*dit"));
+  const auto literal_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1001, 200, BuildTableMapBody(2, "mydb", "au*dit"));
   ASSERT_EQ(engine.Feed(audit_map.data(), audit_map.size()), audit_map.size());
   ASSERT_EQ(engine.Feed(literal_map.data(), literal_map.size()), literal_map.size());
 
-  const auto audit_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                    300, BuildWriteRowsBody(1, 10));
-  const auto literal_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                      400, BuildWriteRowsBody(2, 20));
+  const auto audit_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1002, 300, BuildWriteRowsBody(1, 10));
+  const auto literal_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1003, 400, BuildWriteRowsBody(2, 20));
   ASSERT_EQ(engine.Feed(audit_row.data(), audit_row.size()), audit_row.size());
   ASSERT_EQ(engine.Feed(literal_row.data(), literal_row.size()), literal_row.size());
 
@@ -2106,17 +2144,17 @@ TEST(CdcEngineTest, IncludeDatabasesHasNoWildcardForm) {
   // matches a database named exactly that, not "shard_1".
   engine.SetIncludeDatabases({"shard_*"});
 
-  const auto numbered_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                       100, BuildTableMapBody(1, "shard_1", "orders"));
-  const auto literal_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1001,
-                                      200, BuildTableMapBody(2, "shard_*", "orders"));
+  const auto numbered_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                       1000, 100, BuildTableMapBody(1, "shard_1", "orders"));
+  const auto literal_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1001, 200, BuildTableMapBody(2, "shard_*", "orders"));
   ASSERT_EQ(engine.Feed(numbered_map.data(), numbered_map.size()), numbered_map.size());
   ASSERT_EQ(engine.Feed(literal_map.data(), literal_map.size()), literal_map.size());
 
-  const auto numbered_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                       300, BuildWriteRowsBody(1, 10));
-  const auto literal_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                      400, BuildWriteRowsBody(2, 20));
+  const auto numbered_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1002, 300, BuildWriteRowsBody(1, 10));
+  const auto literal_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1003, 400, BuildWriteRowsBody(2, 20));
   ASSERT_EQ(engine.Feed(numbered_row.data(), numbered_row.size()), numbered_row.size());
   ASSERT_EQ(engine.Feed(literal_row.data(), literal_row.size()), literal_row.size());
 
@@ -2133,8 +2171,8 @@ TEST(CdcEngineTest, WarnsOnceWhenIncludeFiltersMatchNoTableMaps) {
   {
     CdcEngine engine;
     engine.SetIncludeTables({"mydb.missing*"});
-    const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                      100, BuildTableMapBody(1, "mydb", "users"));
+    const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1000, 100, BuildTableMapBody(1, "mydb", "users"));
     ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
     engine.Reset();
   }
@@ -2148,7 +2186,7 @@ TEST(CdcEngineTest, WarnsOnDestructionOnlyWhenNoIncludeFilterMatches) {
   g_include_filter_warning_count = 0;
   g_include_filter_warning_message.clear();
   LogConfig::SetCallback(CaptureIncludeFilterWarning, MES_LOG_DEBUG, nullptr);
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
   {
     CdcEngine engine;
@@ -2187,7 +2225,7 @@ TEST(CdcEngineTest, StaticStorageEngineCompletesDestructionAtProcessExit) {
   EXPECT_EXIT(
       {
         g_static_engine.SetIncludeTables({"mydb.missing"});
-        const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+        const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
                                           1000, 100, BuildTableMapBody(1, "mydb", "users"));
         g_static_engine.Feed(table_map.data(), table_map.size());
         LogConfig::SetCallback(WriteMessageToStderr, MES_LOG_WARN, nullptr);
@@ -2209,10 +2247,10 @@ TEST(CdcEngineTest, StaticStorageEngineDestroysQueuedRowsAtProcessExit) {
   // deallocated into a memory resource that was still alive at that point.
   EXPECT_EXIT(
       {
-        const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+        const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
                                           1000, 100, BuildTableMapBody(42, "testdb", "users"));
-        const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                      150, BuildWriteRowsBody(42, 7777));
+        const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1000, 150, BuildWriteRowsBody(42, 7777));
         g_static_queued_rows_engine.Feed(table_map.data(), table_map.size());
         for (int i = 0; i < 8; ++i) {
           g_static_queued_rows_engine.Feed(write.data(), write.size());
@@ -2234,18 +2272,18 @@ TEST(CdcEngineTest, ExcludeTableUnqualifiedName) {
   engine.SetExcludeTables({"logs"});
 
   auto tm1 = BuildTableMapBody(1, "db1", "logs");
-  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  auto ev1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm1);
   engine.Feed(ev1.data(), ev1.size());
 
-  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto w1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
 
   auto tm2 = BuildTableMapBody(2, "db2", "logs");
-  auto ev2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002, 300, tm2);
+  auto ev2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1002, 300, tm2);
   engine.Feed(ev2.data(), ev2.size());
 
-  auto w2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003, 400,
+  auto w2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1003, 400,
                        BuildWriteRowsBody(2, 20));
   engine.Feed(w2.data(), w2.size());
 
@@ -2259,10 +2297,10 @@ TEST(CdcEngineTest, FilterResetClearsBlockedIds) {
 
   // Block a table
   auto tm1 = BuildTableMapBody(1, "otherdb", "t");
-  auto ev1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm1);
+  auto ev1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm1);
   engine.Feed(ev1.data(), ev1.size());
 
-  auto w1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto w1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 10));
   engine.Feed(w1.data(), w1.size());
   EXPECT_FALSE(engine.HasEvents());
@@ -2281,19 +2319,19 @@ TEST(CdcEngineTest, RuntimeFilterChangesReevaluateExistingTableMap) {
 
   // Register the table exactly once. Runtime filter changes must update the
   // derived table-id cache without waiting for another TABLE_MAP event.
-  auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                               BuildTableMapBody(1, "mydb", "users"));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
 
   engine.SetIncludeTables({"mydb.other"});
-  auto blocked = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto blocked = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                             BuildWriteRowsBody(1, 10));
   EXPECT_EQ(engine.Feed(blocked.data(), blocked.size()), blocked.size());
   EXPECT_FALSE(engine.HasEvents());
   EXPECT_FALSE(engine.IsError());
 
   engine.SetIncludeTables({"mydb.users"});
-  auto allowed = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto allowed = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                             BuildWriteRowsBody(1, 20));
   EXPECT_EQ(engine.Feed(allowed.data(), allowed.size()), allowed.size());
 
@@ -2314,10 +2352,10 @@ TEST(CdcEngineTest, RejectedTableNeverReachesTheColumnNameSource) {
   engine.SetMetadataFetcher(&source);
   engine.SetIncludeTables({"mydb.users"});
 
-  const auto rejected_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                       100, BuildTableMapBody(1, "mydb", "logs"));
-  const auto rejected_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
-                                       200, BuildWriteRowsBody(1, 10));
+  const auto rejected_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                       1000, 100, BuildTableMapBody(1, "mydb", "logs"));
+  const auto rejected_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1001, 200, BuildWriteRowsBody(1, 10));
   for (int i = 0; i < 3; ++i) {
     ASSERT_EQ(engine.Feed(rejected_map.data(), rejected_map.size()), rejected_map.size());
     ASSERT_EQ(engine.Feed(rejected_row.data(), rejected_row.size()), rejected_row.size());
@@ -2327,8 +2365,8 @@ TEST(CdcEngineTest, RejectedTableNeverReachesTheColumnNameSource) {
   EXPECT_FALSE(engine.IsError());
 
   // The source is wired: an allowed table does reach it.
-  const auto allowed_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002,
-                                      300, BuildTableMapBody(2, "mydb", "users"));
+  const auto allowed_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1002, 300, BuildTableMapBody(2, "mydb", "users"));
   ASSERT_EQ(engine.Feed(allowed_map.data(), allowed_map.size()), allowed_map.size());
   EXPECT_EQ(source.FetchCount(), 1);
   EXPECT_EQ(source.LastTable(), "users");
@@ -2338,14 +2376,14 @@ TEST(CdcEngineTest, FiltersSurviveReset) {
   CdcEngine engine;
   engine.SetIncludeDatabases({"mydb"});
 
-  const auto excluded_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                       100, BuildTableMapBody(1, "otherdb", "t"));
-  const auto excluded_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001,
-                                       200, BuildWriteRowsBody(1, 10));
-  const auto allowed_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1002,
-                                      300, BuildTableMapBody(2, "mydb", "users"));
-  const auto allowed_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1003,
-                                      400, BuildWriteRowsBody(2, 20));
+  const auto excluded_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                       1000, 100, BuildTableMapBody(1, "otherdb", "t"));
+  const auto excluded_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1001, 200, BuildWriteRowsBody(1, 10));
+  const auto allowed_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1002, 300, BuildTableMapBody(2, "mydb", "users"));
+  const auto allowed_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1003, 400, BuildWriteRowsBody(2, 20));
 
   engine.Reset();
 
@@ -2367,7 +2405,7 @@ class FilterClearTest : public ::testing::TestWithParam<int> {};
 
 TEST_P(FilterClearTest, EmptyListLiftsTheRestrictionOnARegisteredTable) {
   CdcEngine engine;
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
 
@@ -2387,14 +2425,14 @@ TEST_P(FilterClearTest, EmptyListLiftsTheRestrictionOnARegisteredTable) {
   const int setter = GetParam();
   apply(setter, {setter == 0 ? "otherdb" : setter == 1 ? "mydb.other" : "mydb.users"});
 
-  const auto blocked = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
-                                  BuildWriteRowsBody(1, 10));
+  const auto blocked = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                  200, BuildWriteRowsBody(1, 10));
   ASSERT_EQ(engine.Feed(blocked.data(), blocked.size()), blocked.size());
   ASSERT_FALSE(engine.HasEvents());
 
   apply(setter, {});
-  const auto delivered = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
-                                    300, BuildWriteRowsBody(1, 20));
+  const auto delivered = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1002, 300, BuildWriteRowsBody(1, 20));
   ASSERT_EQ(engine.Feed(delivered.data(), delivered.size()), delivered.size());
 
   ChangeEvent event;
@@ -2414,7 +2452,7 @@ TEST(CdcEngineTest, WideningFilterResolvesColumnNamesOfNewlyAllowedTable) {
   engine.SetMetadataFetcher(&source);
   engine.SetIncludeTables({"mydb.other"});
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(source.FetchCount(), 0);
@@ -2422,7 +2460,7 @@ TEST(CdcEngineTest, WideningFilterResolvesColumnNamesOfNewlyAllowedTable) {
   engine.SetIncludeTables({"mydb.users"});
   EXPECT_EQ(source.FetchCount(), 1);
 
-  const auto row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  const auto row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                               BuildWriteRowsBody(1, 10));
   ASSERT_EQ(engine.Feed(row.data(), row.size()), row.size());
   ChangeEvent event;
@@ -2441,7 +2479,7 @@ TEST(CdcEngineTest, WideningFilterReportsMissingSignednessOfNewlyAllowedTable) {
   CdcEngine engine;
   engine.SetExcludeTables({"users"});
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     100, BuildTableMapBody(1, "mydb", "users"));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(capture.Count(), 0);
@@ -2459,7 +2497,7 @@ TEST(CdcEngineTest, TableMapTooShortBodyIsParseError) {
   // Build a TABLE_MAP event with a body that is too short (< 8 bytes)
   std::vector<uint8_t> short_body = {0x01, 0x02, 0x03};
   auto event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, short_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, short_body);
 
   size_t consumed = engine.Feed(event.data(), event.size());
   EXPECT_EQ(consumed, event.size());
@@ -2471,7 +2509,7 @@ TEST(CdcEngineTest, TableMapTooShortBodyIsParseError) {
 
 TEST(CdcEngineTest, RowBodyShorterThanTableIdIsDecodeError) {
   CdcEngine engine;
-  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 100,
+  auto event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 100,
                           {0x01, 0x02, 0x03});
   EXPECT_EQ(engine.Feed(event.data(), event.size()), event.size());
   EXPECT_TRUE(engine.IsError());
@@ -2557,11 +2595,11 @@ TEST(CdcEngineQueueBudgetTest, CompressedColumnExpansionStaysWithinTheQueueByteB
   ASSERT_LT(value.size() * 100, kExpandedBytes) << "the column must expand by at least 100x";
 
   std::vector<uint8_t> stream =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1, 100,
                  BuildCompressedBlobTableMapBody(kTableId, "mes_test", "compressed_blob"));
   const auto rows_body = BuildCompressedBlobWriteRowsBody(kTableId, value);
   for (size_t i = 0; i < kRowEvents; ++i) {
-    const auto row_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+    const auto row_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1,
                                       static_cast<uint32_t>(200 + i), rows_body);
     stream.insert(stream.end(), row_event.begin(), row_event.end());
   }
@@ -2624,9 +2662,9 @@ TEST(CdcEngineQueueBudgetTest, RowsWhoseColumnArraysExceedTheByteBudgetFailInste
 
   CdcEngine engine;
   engine.SetMaxQueueBytes(kQueueBytes);
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
-                                    BuildTableMapBody(kTableId, "testdb", "users"));
-  const auto rows = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1, 200,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1,
+                                    100, BuildTableMapBody(kTableId, "testdb", "users"));
+  const auto rows = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1, 200,
                                BuildAllNullRowsBody(kTableId, kRows));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   engine.Feed(rows.data(), rows.size());
@@ -2642,9 +2680,9 @@ TEST(CdcEngineQueueBudgetTest, ManyNullRowsWithinTheByteBudgetStillDecode) {
   constexpr size_t kRows = 50;
 
   CdcEngine engine;
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
-                                    BuildTableMapBody(kTableId, "testdb", "users"));
-  const auto rows = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1, 200,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1,
+                                    100, BuildTableMapBody(kTableId, "testdb", "users"));
+  const auto rows = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1, 200,
                                BuildAllNullRowsBody(kTableId, kRows));
   ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
   ASSERT_EQ(engine.Feed(rows.data(), rows.size()), rows.size());
@@ -2661,10 +2699,10 @@ TEST(CdcEngineQueueBudgetTest, AFailingColumnNameSourceLeavesQueuedEventsSharing
   FakeColumnNameSource source;  // Resolves nothing.
   engine.SetMetadataFetcher(&source);
 
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
-                                    BuildTableMapBody(kTableId, "testdb", "users"));
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1,
+                                    100, BuildTableMapBody(kTableId, "testdb", "users"));
   for (int i = 0; i < kPairs; ++i) {
-    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+    const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1,
                                   200 + i, BuildWriteRowsBody(kTableId, i));
     ASSERT_EQ(engine.Feed(table_map.data(), table_map.size()), table_map.size());
     ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
@@ -2683,16 +2721,16 @@ TEST(CdcEngineQueueBudgetTest, MetadataPinnedAfterReplacementIsChargedUntilTheEv
   const std::string long_table(200, 't');
 
   CdcEngine engine;
-  const auto first_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 100,
-                                    BuildTableMapBody(kTableId, "testdb", long_table));
-  const auto first_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+  const auto first_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1,
+                                    100, BuildTableMapBody(kTableId, "testdb", long_table));
+  const auto first_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1,
                                       200, BuildWriteRowsBody(kTableId, 1));
   // A different body for the same id replaces the registered metadata, which
   // leaves the first event as the only holder of the previous instance.
-  const auto second_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1, 300,
-                                     BuildTableMapBody(kTableId, "testdb", "other"));
-  const auto second_write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
-                                       400, BuildWriteRowsBody(kTableId, 2));
+  const auto second_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1,
+                                     300, BuildTableMapBody(kTableId, "testdb", "other"));
+  const auto second_write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                       1, 400, BuildWriteRowsBody(kTableId, 2));
   ASSERT_EQ(engine.Feed(first_map.data(), first_map.size()), first_map.size());
   ASSERT_EQ(engine.Feed(first_write.data(), first_write.size()), first_write.size());
   const size_t after_first = engine.QueuedBytes();
@@ -2715,11 +2753,12 @@ TEST(CdcEngineQueueBudgetTest, QueuedEventMetadataCountsTowardTheByteBudget) {
   CdcEngine engine;
   // Above one event's column array and below two events once the metadata they
   // pin is counted.
-  engine.SetMaxQueueBytes(sizeof(TableMetadata) + sizeof(ColumnMetadata));
-  std::vector<uint8_t> stream = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1,
-                                           100, BuildTableMapBody(kTableId, "testdb", "users"));
+  engine.SetMaxQueueBytes(sizeof(TableMetadata) + sizeof(mybinlog::TableMapColumn));
+  std::vector<uint8_t> stream =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1, 100,
+                 BuildTableMapBody(kTableId, "testdb", "users"));
   for (int i = 0; i < 3; ++i) {
-    const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1,
+    const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1,
                                   200 + i, BuildWriteRowsBody(kTableId, i));
     stream.insert(stream.end(), write.begin(), write.end());
   }
@@ -2737,9 +2776,9 @@ constexpr const char* kPrimedBinlogFile = "mysql-bin.000042";
 constexpr uint32_t kPrimedOffset = 100;
 
 void PrimeResumePosition(CdcEngine* engine) {
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1000, 50,
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1000, 50,
                                  BuildRotateBody(4, kPrimedBinlogFile));
-  const auto table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
+  const auto table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000,
                                     kPrimedOffset, BuildTableMapBody(1, "db", "t"));
   ASSERT_EQ(engine->Feed(rotate.data(), rotate.size()), rotate.size());
   ASSERT_EQ(engine->Feed(table_map.data(), table_map.size()), table_map.size());
@@ -2767,37 +2806,37 @@ TEST(CdcEngineResumePositionTest, AFailedEventLeavesTheResumePositionExactlyWher
 
   const std::vector<FailingEvent> cases = {
       {"table map shorter than its table_id",
-       static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
        {0x02, 0x00, 0x00},
        MES_ERR_PARSE,
        "event=table_map_parse_failed reason=body_too_short"},
       {"table map carrying nothing but a table_id",
-       static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
        {0x02, 0x00, 0x00, 0x00, 0x00, 0x00},
        MES_ERR_PARSE,
        "event=table_map_parse_failed table_id=2 body_length=6"},
-      {"truncated row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+      {"truncated row event", static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
        truncated_rows, MES_ERR_DECODE_ROW, "event=row_decode_failed kind=write_rows"},
       {"row event for an unregistered table",
-       static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), BuildWriteRowsBody(9, 42),
+       static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), BuildWriteRowsBody(9, 42),
        MES_ERR_DECODE_ROW, "event=rows_event_no_table_map table_id=9"},
       {"row event shorter than its table_id",
-       static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
        {0x00, 0x00, 0x00},
        MES_ERR_DECODE_ROW,
        "event=row_decode_failed kind=row_event_header reason=body_too_short"},
       {"annotate rows without a statement",
-       static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
        {},
        MES_ERR_PARSE,
        "event=mariadb_annotate_rows_parse_failed"},
       {"rotate shorter than its position field",
-       static_cast<uint8_t>(BinlogEventType::kRotateEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kRotateEvent),
        {0x00, 0x00, 0x00, 0x00},
        MES_ERR_PARSE,
        "event=rotate_event_parse_failed"},
       {"unsupported event type",
-       static_cast<uint8_t>(BinlogEventType::kIncidentEvent),
+       static_cast<uint8_t>(mybinlog::EventType::kIncidentEvent),
        {0x01, 0x02, 0x03, 0x04},
        MES_ERR_PARSE,
        "event=unsupported_binlog_event type_code=26"},
@@ -2842,18 +2881,18 @@ TEST(CdcEngineResumePositionTest, ASucceedingEventAdvancesTheResumePositionToIts
   // Ordered so the events that need the table_id 1 registration run before the
   // DDL statement that drops it.
   const std::vector<SucceedingEvent> cases = {
-      {"single-row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+      {"single-row event", static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
        BuildWriteRowsBody(1, 42), 200},
-      {"annotate rows", static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+      {"annotate rows", static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
        std::vector<uint8_t>(annotated_sql.begin(), annotated_sql.end()), 300},
-      {"multi-row event", static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+      {"multi-row event", static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
        BuildWriteRowsBodyMultiRow(1, {1, 2, 3}), 400},
-      {"control event", static_cast<uint8_t>(BinlogEventType::kXidEvent), {}, 500},
-      {"non-DDL query", static_cast<uint8_t>(BinlogEventType::kQueryEvent),
+      {"control event", static_cast<uint8_t>(mybinlog::EventType::kXidEvent), {}, 500},
+      {"non-DDL query", static_cast<uint8_t>(mybinlog::EventType::kQueryEvent),
        BuildQueryEventBody("db", "BEGIN"), 600},
-      {"DDL query", static_cast<uint8_t>(BinlogEventType::kQueryEvent),
+      {"DDL query", static_cast<uint8_t>(mybinlog::EventType::kQueryEvent),
        BuildQueryEventBody("db", "ALTER TABLE t ADD c INT"), 700},
-      {"table map", static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+      {"table map", static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
        BuildTableMapBody(2, "db", "t2"), 800},
   };
 
@@ -2877,8 +2916,8 @@ TEST(CdcEngineResumePositionTest, RotateTakesTheFileAndOffsetFromItsBodyNotItsNe
   CdcEngine engine;
   PrimeResumePosition(&engine);
 
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1001, 9999,
-                                 BuildRotateBody(1234, "mysql-bin.000077"));
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1001,
+                                 9999, BuildRotateBody(1234, "mysql-bin.000077"));
   ASSERT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
   ASSERT_FALSE(engine.IsError());
   EXPECT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000077");
@@ -2893,12 +2932,12 @@ TEST(CdcEngineResumePositionTest, EveryRowOfAnEventSharesOneCopyOfItsResumePosit
   CdcEngine engine;
   PrimeResumePosition(&engine);
 
-  const auto write = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 500,
-                                BuildWriteRowsBodyMultiRow(1, {1, 2, 3}));
+  const auto write = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001,
+                                500, BuildWriteRowsBodyMultiRow(1, {1, 2, 3}));
   ASSERT_EQ(engine.Feed(write.data(), write.size()), write.size());
   ASSERT_EQ(engine.PendingEventCount(), 3u);
 
-  const auto rotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1002, 600,
+  const auto rotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1002, 600,
                                  BuildRotateBody(4, "mysql-bin.000043"));
   ASSERT_EQ(engine.Feed(rotate.data(), rotate.size()), rotate.size());
   ASSERT_EQ(engine.CurrentPosition().binlog_file, "mysql-bin.000043");

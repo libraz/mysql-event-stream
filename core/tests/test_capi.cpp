@@ -18,8 +18,9 @@
 
 #include "client/binlog_client.h"
 #include "client/metadata_fetcher.h"
-#include "event_header.h"
 #include "mes.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
 #include "source_scan.h"
 #include "test_helpers.h"
 
@@ -39,7 +40,6 @@ class MetadataFetcherTestAccess {
 
 namespace {
 
-using mes::BinlogEventType;
 using mes::test::BuildDeleteRowsBody;
 using mes::test::BuildEvent;
 using mes::test::BuildQueryEventBody;
@@ -133,7 +133,7 @@ TEST(CApi, DestroyWithMetadataFetcherKeepsFetcherAliveForTheEngine) {
   mes::CapiInstallUnconnectedMetadataFetcher(engine);
 
   // A DDL QUERY_EVENT makes the engine dereference the fetcher it does not own.
-  auto ddl = BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1000, 100,
+  auto ddl = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1000, 100,
                         BuildQueryEventBody("testdb", "ALTER TABLE users ADD COLUMN x INT"));
   size_t consumed = 0;
   ASSERT_EQ(mes_feed(engine, ddl.data(), ddl.size(), &consumed), MES_OK);
@@ -254,11 +254,11 @@ TEST(CApi, InsertEvent) {
 
   auto tm_body = BuildTableMapBody(1, "testdb", "users");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
   auto wr_body = BuildWriteRowsBody(1, 42);
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200, wr_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200, wr_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -299,9 +299,9 @@ TEST(CApi, InsertEvent) {
  * shows whether the row behind it was let go.
  */
 TEST(CApi, EveryInvalidatingCallReleasesTheDeliveredEvent) {
-  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                              BuildTableMapBody(1, "testdb", "users"));
-  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200,
                              BuildWriteRowsBody(1, 42));
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -342,11 +342,11 @@ TEST(CApi, SourceSqlIsNulTerminatedForAnnotatedAndPlainEvents) {
   auto* engine = mes_create();
 
   const std::string sql = "INSERT INTO users VALUES (42)";
-  auto annotate = BuildEvent(static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent), 1000,
-                             50, std::vector<uint8_t>(sql.begin(), sql.end()));
-  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto annotate = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
+                             1000, 50, std::vector<uint8_t>(sql.begin(), sql.end()));
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                              BuildTableMapBody(1, "testdb", "users"));
-  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 200,
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200,
                              BuildWriteRowsBody(1, 42));
 
   std::vector<uint8_t> stream;
@@ -364,8 +364,8 @@ TEST(CApi, SourceSqlIsNulTerminatedForAnnotatedAndPlainEvents) {
 
   // A XID ends the annotated statement, so the next row carries an empty
   // (but still dereferenceable) source_sql.
-  auto xid = BuildEvent(static_cast<uint8_t>(BinlogEventType::kXidEvent), 1000, 250, {});
-  auto next_wr = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 300,
+  auto xid = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kXidEvent), 1000, 250, {});
+  auto next_wr = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 300,
                             BuildWriteRowsBody(1, 43));
   std::vector<uint8_t> tail;
   tail.insert(tail.end(), xid.begin(), xid.end());
@@ -388,9 +388,9 @@ TEST(CApi, EventStringsStayNulTerminatedAfterTheStreamDropsWhatTheyName) {
   auto* engine = mes_create();
   ASSERT_NE(engine, nullptr);
 
-  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                              BuildTableMapBody(1, "testdb", "users"));
-  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                              BuildWriteRowsBody(1, 42));
 
   size_t consumed = 0;
@@ -410,9 +410,9 @@ TEST(CApi, EventStringsStayNulTerminatedAfterTheStreamDropsWhatTheyName) {
 
   // Queue a second row, then rotate: the ROTATE replaces the filename and
   // clears the registry that owns the names, both before the row is fetched.
-  auto wr2_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                               BuildWriteRowsBody(1, 43));
-  auto rotate_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1003, 400,
+  auto rotate_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1003, 400,
                                  BuildRotateBody(4, "mysql-bin.000009"));
   ASSERT_EQ(mes_feed(engine, wr2_event.data(), wr2_event.size(), &consumed), MES_OK);
   ASSERT_EQ(mes_feed(engine, rotate_event.data(), rotate_event.size(), &consumed), MES_OK);
@@ -440,11 +440,11 @@ TEST(CApi, UpdateEvent) {
 
   auto tm_body = BuildTableMapBody(10, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
   auto upd_body = BuildUpdateRowsBody(10, 100, 200);
   auto upd_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kUpdateRowsEvent), 1002, 200, upd_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEvent), 1002, 200, upd_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -478,11 +478,11 @@ TEST(CApi, DeleteEvent) {
 
   auto tm_body = BuildTableMapBody(10, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
   auto del_body = BuildDeleteRowsBody(10, 999);
   auto del_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kDeleteRowsEvent), 1003, 200, del_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kDeleteRowsEvent), 1003, 200, del_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -511,7 +511,8 @@ TEST(CApi, RotateEvent) {
   auto* engine = mes_create();
 
   auto rot_body = BuildRotateBody(4, "binlog.000002");
-  auto rot_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, rot_body);
+  auto rot_event =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0, rot_body);
 
   size_t consumed;
   mes_feed(engine, rot_event.data(), rot_event.size(), &consumed);
@@ -532,10 +533,10 @@ TEST(CApi, Reset) {
 
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
   auto wr_body = BuildWriteRowsBody(1, 42);
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, wr_body);
 
   size_t consumed;
   mes_feed(engine, tm_event.data(), tm_event.size(), &consumed);
@@ -559,11 +560,11 @@ TEST(CApi, MultipleEvents) {
 
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
-  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                         BuildWriteRowsBody(1, 10));
-  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                         BuildWriteRowsBody(1, 20));
 
   std::vector<uint8_t> stream;
@@ -648,11 +649,11 @@ TEST(CApi, RetainedEventPointerFollowsTheStreamInsteadOfKeepingItsOwnEvent) {
   const std::vector<uint8_t> first_payload(48, 0xA1);
   const std::vector<uint8_t> second_payload(48, 0xB2);
 
-  auto tm = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto tm = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                        BuildBlobTableMapBody(7, "heldb", "heldt"));
-  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                         BuildBlobWriteRowsBody(7, first_payload));
-  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                         BuildBlobWriteRowsBody(7, second_payload));
 
   size_t consumed = 0;
@@ -712,7 +713,7 @@ TEST(CapiTest, FloatColumn) {
   tb.WriteU8(4);     // float size
   tb.WriteU8(0x01);  // null bitmap
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent), 1000, 100, tb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tb.Data());
 
   // Build WRITE_ROWS with float value
   mes::test::EventBuilder rb;
@@ -727,7 +728,7 @@ TEST(CapiTest, FloatColumn) {
   memcpy(fbytes, &fval, 4);
   rb.WriteBytes(std::vector<uint8_t>(fbytes, fbytes + 4));
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent), 1000, 200, rb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200, rb.Data());
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -765,7 +766,7 @@ TEST(CapiTest, BlobColumn) {
   tb.WriteU8(1);     // pack_length = 1
   tb.WriteU8(0x01);
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent), 1000, 100, tb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tb.Data());
 
   mes::test::EventBuilder rb;
   rb.WriteU48Le(42);
@@ -777,7 +778,7 @@ TEST(CapiTest, BlobColumn) {
   rb.WriteU8(3);  // blob length
   rb.WriteBytes(std::vector<uint8_t>({0xDE, 0xAD, 0xBE}));
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent), 1000, 200, rb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200, rb.Data());
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -817,7 +818,7 @@ TEST(CapiTest, JsonColumnReturnsBytesNotString) {
   tb.WriteU8(4);     // pack_length = 4
   tb.WriteU8(0x01);  // null bitmap
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent), 1000, 100, tb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tb.Data());
 
   // Build WRITE_ROWS with a JSON value: 4-byte length prefix + payload
   mes::test::EventBuilder rb;
@@ -832,7 +833,7 @@ TEST(CapiTest, JsonColumnReturnsBytesNotString) {
   rb.WriteU32Le(static_cast<uint32_t>(json_payload.size()));
   rb.WriteBytes(json_payload);
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent), 1000, 200, rb.Data());
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 200, rb.Data());
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -879,10 +880,10 @@ TEST(CApi, FeedReturnsParseErrorOnInvalidData) {
   // Verify engine works normally after reset
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
   auto wr_body = BuildWriteRowsBody(1, 42);
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, wr_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -903,9 +904,9 @@ TEST(CApi, FeedReturnsParseErrorOnInvalidData) {
 TEST(CApi, FeedReturnsChecksumErrorOnCorruptedEvent) {
   auto* engine = mes_create();
   ASSERT_NE(engine, nullptr);
-  auto event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                           BuildTableMapBody(1, "db", "t"));
-  event[mes::kEventHeaderSize + 1] ^= 0x40;
+  event[mybinlog::kEventHeaderSize + 1] ^= 0x40;
 
   size_t consumed = 123;
   EXPECT_EQ(mes_feed(engine, event.data(), event.size(), &consumed), MES_ERR_CHECKSUM);
@@ -920,7 +921,7 @@ TEST(CApi, FeedProcessingErrorsReturnWithoutReprocessingParsedEvent) {
   // C API must return the processing error rather than repeatedly processing
   // the already-parsed invalid event and spinning forever.
   const auto normal_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kQueryEvent), 1001, 200, {});
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kQueryEvent), 1001, 200, {});
 
   struct Case {
     const char* name;
@@ -928,19 +929,21 @@ TEST(CApi, FeedProcessingErrorsReturnWithoutReprocessingParsedEvent) {
     mes_error_t expected;
   };
 
-  const auto short_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+  const auto short_table_map = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
                                           1000, 100, std::vector<uint8_t>(5, 0));
-  const auto malformed_table_map = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
-                                              1000, 100, std::vector<uint8_t>(6, 0));
+  const auto malformed_table_map =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
+                 std::vector<uint8_t>(6, 0));
   const auto malformed_rotate =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 1000, 100, {});
-  const auto short_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000,
-                                    100, std::vector<uint8_t>(5, 0));
-  const auto row_without_table_map = BuildEvent(
-      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1000, 100, BuildWriteRowsBody(1, 42));
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 1000, 100, {});
+  const auto short_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                    1000, 100, std::vector<uint8_t>(5, 0));
+  const auto row_without_table_map =
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1000, 100,
+                 BuildWriteRowsBody(1, 42));
   auto truncated_row_body = BuildWriteRowsBody(1, 42);
   truncated_row_body.pop_back();
-  const auto truncated_row = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+  const auto truncated_row = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
                                         1000, 100, truncated_row_body);
 
   const std::vector<Case> cases = {
@@ -975,10 +978,11 @@ TEST(CApi, ChecksumOverrideSupportsNoChecksumStream) {
   ASSERT_EQ(mes_set_checksum_enabled(engine, 0), MES_OK);
 
   auto table_map =
-      mes::test::BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000,
-                                      100, BuildTableMapBody(1, "db", "t"));
-  auto write = mes::test::BuildEventNoChecksum(
-      static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, BuildWriteRowsBody(1, 42));
+      mes::test::BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
+                                      1000, 100, BuildTableMapBody(1, "db", "t"));
+  auto write =
+      mes::test::BuildEventNoChecksum(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+                                      1001, 200, BuildWriteRowsBody(1, 42));
   std::vector<uint8_t> stream = table_map;
   stream.insert(stream.end(), write.begin(), write.end());
 
@@ -1013,11 +1017,11 @@ TEST(CApi, ResetAfterErrorRecovers) {
   // Feed valid data
   auto tm_body = BuildTableMapBody(1, "testdb", "users");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 2000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 2000, 100, tm_body);
 
   auto wr_body = BuildWriteRowsBody(1, 99);
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 2001, 200, wr_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 2001, 200, wr_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -1045,12 +1049,12 @@ TEST(CApi, FeedReturnsDecodeErrorForTruncatedRowEvent) {
 
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
   auto wr_body = BuildWriteRowsBody(1, 42);
   wr_body.pop_back();
   auto wr_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200, wr_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200, wr_body);
 
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -1063,7 +1067,7 @@ TEST(CApi, FeedReturnsDecodeErrorForTruncatedRowEvent) {
 
   EXPECT_EQ(mes_reset(engine), MES_OK);
 
-  auto valid_wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002,
+  auto valid_wr_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002,
                                    300, BuildWriteRowsBody(1, 99));
   stream.clear();
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());
@@ -1090,11 +1094,11 @@ TEST(CApi, SetMaxQueueSizeBackpressure) {
   // Build TABLE_MAP + 2 WRITE_ROWS events
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
-  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                         BuildWriteRowsBody(1, 10));
-  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                         BuildWriteRowsBody(1, 20));
 
   std::vector<uint8_t> stream;
@@ -1143,11 +1147,11 @@ TEST(CApi, SetMaxQueueSizeZeroRestoresBoundedDefault) {
   // Build TABLE_MAP + 2 WRITE_ROWS events
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
 
-  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                         BuildWriteRowsBody(1, 10));
-  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                         BuildWriteRowsBody(1, 20));
 
   std::vector<uint8_t> stream;
@@ -1195,10 +1199,10 @@ TEST(CApi, MaxQueueBytesStopsTheFeedWhileTheEntryCountStillAllowsMore) {
   // the byte budget alone.
   auto tm_body = BuildTableMapBody(1, "db", "t");
   auto tm_event =
-      BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100, tm_body);
-  auto wr1 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+      BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100, tm_body);
+  auto wr1 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                         BuildWriteRowsBody(1, 10));
-  auto wr2 = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1002, 300,
+  auto wr2 = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1002, 300,
                         BuildWriteRowsBody(1, 20));
 
   std::vector<uint8_t> stream;
@@ -1262,9 +1266,9 @@ TEST(CApi, TrailerPreVerifiedRoundTripsAndDefaultsToVerifying) {
 TEST(CApi, TrailerPreVerifiedAcceptsAnEventTheEngineWouldOtherwiseRefuse) {
   // The same corrupt event either way: what changes is only whether the engine
   // is told someone upstream already validated the trailer.
-  auto corrupt = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto corrupt = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                             BuildTableMapBody(1, "db", "t"));
-  corrupt[mes::kEventHeaderSize + 1] ^= 0x40;
+  corrupt[mybinlog::kEventHeaderSize + 1] ^= 0x40;
 
   auto* verifying = mes_create();
   ASSERT_NE(verifying, nullptr);
@@ -1285,9 +1289,9 @@ TEST(CApi, TrailerPreVerifiedAcceptsAnEventTheEngineWouldOtherwiseRefuse) {
 TEST(CApi, TrailerPreVerifiedLeavesFramingToTheChecksumSwitch) {
   // Skipping verification must not also strip the trailer differently: a valid
   // checksummed event decodes to the same row with the flag set as without it.
-  auto tm = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto tm = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                        BuildTableMapBody(1, "db", "t"));
-  auto wr = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                        BuildWriteRowsBody(1, 77));
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm.begin(), tm.end());
@@ -1848,9 +1852,9 @@ TEST(CApi, ClientStopIsCallableFromOtherThreadsAndIsIdempotent) {
 // the registry entry of a previous call is not reused.
 bool FeedInsertFor(mes_engine_t* engine, uint64_t table_id, const char* database,
                    const char* table) {
-  auto tm_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), 1000, 100,
+  auto tm_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 1000, 100,
                              BuildTableMapBody(table_id, database, table));
-  auto wr_event = BuildEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), 1001, 200,
+  auto wr_event = BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), 1001, 200,
                              BuildWriteRowsBody(table_id, 1));
   std::vector<uint8_t> stream;
   stream.insert(stream.end(), tm_event.begin(), tm_event.end());

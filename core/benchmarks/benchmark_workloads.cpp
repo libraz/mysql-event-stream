@@ -41,7 +41,7 @@
 #endif
 
 #include "cdc_engine.h"
-#include "event_header.h"
+#include "mybinlog/event_types.h"
 #include "workloads.h"
 
 #ifdef MES_BENCH_ALLOC_TRACKING
@@ -97,11 +97,11 @@ Workload MakeWorkload(const std::string& name, const std::vector<ColumnSpec>& sc
     const std::vector<uint8_t> body(sql.begin(), sql.end());
     Append(w.bytes,
            mes::test::BuildEvent(
-               static_cast<uint8_t>(mes::BinlogEventType::kMariaDBAnnotateRowsEvent), 0, 0, body));
+               static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent), 0, 0, body));
   }
 
   Append(w.bytes,
-         mes::test::BuildEvent(static_cast<uint8_t>(mes::BinlogEventType::kTableMapEvent), 0, 0,
+         mes::test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), 0, 0,
                                mes::bench::BuildTableMap(1, "bench", "orders", schema)));
   Append(w.bytes, mes::test::BuildEvent(rows_type_code, 0, 0, rows_body));
   return w;
@@ -110,14 +110,14 @@ Workload MakeWorkload(const std::string& name, const std::vector<ColumnSpec>& sc
 Workload WriteWorkload(const std::string& name, const std::vector<ColumnSpec>& schema, size_t rows,
                        size_t annotate_sql_bytes = 0) {
   return MakeWorkload(name, schema, mes::bench::BuildRowsBody(1, schema, rows),
-                      static_cast<uint8_t>(mes::BinlogEventType::kWriteRowsEvent), rows,
+                      static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent), rows,
                       annotate_sql_bytes);
 }
 
 Workload UpdateWorkload(const std::string& name, const std::vector<ColumnSpec>& before,
                         const std::vector<ColumnSpec>& after, size_t rows) {
   return MakeWorkload(name, before, mes::bench::BuildUpdateRowsBody(1, before, after, rows),
-                      static_cast<uint8_t>(mes::BinlogEventType::kUpdateRowsEvent), rows, 0);
+                      static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEvent), rows, 0);
 }
 
 std::vector<Workload> BuildWorkloads() {

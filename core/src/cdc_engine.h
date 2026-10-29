@@ -15,14 +15,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
-#include "event_header.h"
 #include "mes.h"
-#include "row_decoder.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/server_flavor.h"
 #include "state_machine.h"
 #include "table_map.h"
 #include "types.h"
@@ -32,20 +34,17 @@ namespace mes {
 class ColumnNameSource;
 
 /**
- * @brief Determine whether a QUERY_EVENT body carries a DDL statement.
+ * @brief Determine whether a QUERY_EVENT statement is DDL.
  *
- * Parses the QUERY_EVENT body to locate the SQL statement and checks whether it
- * begins with a schema-altering verb (ALTER/RENAME/DROP/CREATE/TRUNCATE),
- * after MySQL whitespace, line comments, block comments, or a version-comment
+ * Checks whether the statement begins with a schema-altering verb
+ * (ALTER/RENAME/DROP/CREATE/TRUNCATE) after MySQL whitespace, line comments,
+ * block comments, a version-comment prefix, or a MariaDB `SET STATEMENT ... FOR`
  * prefix.
- * Exposed for testing. Returns false for non-DDL statements (e.g. BEGIN) and
- * for malformed/too-short bodies.
  *
- * @param body QUERY_EVENT body (header already stripped).
- * @param body_len Length of the body.
+ * @param statement Statement text of a parsed QUERY_EVENT.
  * @return true if the statement is DDL.
  */
-bool IsDdlQueryEvent(const uint8_t* body, size_t body_len);
+bool IsDdlStatement(std::string_view statement);
 
 /**
  * @brief Main CDC engine that processes a binlog byte stream and produces
@@ -212,13 +211,15 @@ class CdcEngine {
   bool TrailerPreVerified() const;
 
  private:
-  void ProcessEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
-  void ProcessRowEvent(const EventHeader& header, const uint8_t* body, size_t body_len);
+  void ProcessEvent(const mybinlog::EventHeader& header, const uint8_t* body, size_t body_len);
+  void ProcessRowEvent(const mybinlog::EventHeader& header, const uint8_t* body, size_t body_len);
+  /** @brief Refuse an event this engine cannot represent, keeping the position before it. */
+  void RefuseEvent(const mybinlog::EventHeader& header, const char* event, const char* reason);
   /** @brief Queue one decoded event, charging what it keeps resident. */
   void EnqueueEvent(ChangeEvent&& event);
   /** @brief Whether the queue has reached either configured limit. */
   bool QueueAtCapacity() const;
-  void LogRowDecodeFailure(const char* kind, const TableMetadata& meta);
+  void LogRowDecodeFailure(const char* kind, const TableMetadata& meta, const char* reason);
   /**
    * @brief Set the resume filename, refreshing the copy emitted events share.
    *
@@ -259,14 +260,17 @@ class CdcEngine {
   size_t max_queue_bytes_ = MES_DEFAULT_QUEUE_BYTES;
   size_t queued_bytes_ = 0;
 
-  // Scratch buffers reused across ProcessRowEvent calls to avoid a
-  // per-event heap allocation in the hot decode path. clear() preserves
-  // the allocated capacity, so after a warm-up the row decoder runs
-  // allocation-free (apart from the per-row ColumnValue payloads
-  // themselves). Not thread-safe; reuse matches the engine's single-
-  // owner-thread contract.
+  // Rendered rows of one ROWS event, held until the whole event has rendered so
+  // a failure queues nothing. clear() preserves the allocated capacity across
+  // events. Not thread-safe; reuse matches the engine's single-owner-thread
+  // contract.
   std::vector<RowData> row_buf_;
-  std::vector<UpdatePair> update_buf_;
+  std::vector<RowData> before_buf_;
+
+  // Flavor named by the last FORMAT_DESCRIPTION_EVENT; it decides how TABLE_MAP
+  // charset metadata is indexed and which flavor's events are expected. Unset
+  // until a stream supplies one.
+  std::optional<mybinlog::ServerFlavor> flavor_;
 
   // Last specific error code set by engine-level processing, such as row
   // decode failures. Parser-only failures are represented by stream_parser_.

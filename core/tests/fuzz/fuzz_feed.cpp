@@ -19,7 +19,8 @@
 #include <iterator>
 #include <string>
 
-#include "event_header.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
 #include "state_machine.h"
 #endif
 #include <vector>
@@ -202,12 +203,13 @@ struct FramingOutcome {
 FramingOutcome WalkFraming(const uint8_t* data, size_t size, bool checksum_enabled,
                            SeedTarget target) {
   const size_t min_event_length =
-      mes::kEventHeaderSize + (checksum_enabled ? mes::kChecksumSize : 0);
+      mybinlog::kEventHeaderSize + (checksum_enabled ? mybinlog::kChecksumSize : 0);
   FramingOutcome outcome;
   size_t offset = 0;
   while (offset < size) {
-    mes::EventHeader header;
-    if (!mes::ParseEventHeader(data + offset, size - offset, &header) ||
+    mybinlog::EventHeader header;
+    if (mybinlog::ParseEventHeader(data + offset, size - offset, &header) !=
+            mybinlog::Status::kOk ||
         header.event_length < min_event_length || header.event_length > mes::kDefaultMaxEventSize ||
         size - offset < header.event_length) {
       outcome.guard_rejected = true;
@@ -215,12 +217,12 @@ FramingOutcome WalkFraming(const uint8_t* data, size_t size, bool checksum_enabl
     }
     switch (target) {
       case SeedTarget::kQueryEventBody:
-        if (header.type_code == static_cast<uint8_t>(mes::BinlogEventType::kQueryEvent)) {
+        if (header.type_code == static_cast<uint8_t>(mybinlog::EventType::kQueryEvent)) {
           outcome.target_framed = true;
         }
         break;
       case SeedTarget::kRowEventDecode:
-        if (mes::IsRowEvent(header.type_code)) outcome.target_framed = true;
+        if (mybinlog::IsRowsEvent(header.type_code)) outcome.target_framed = true;
         break;
       case SeedTarget::kEventHeaderGuard:
         break;

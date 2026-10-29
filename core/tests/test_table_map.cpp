@@ -3,22 +3,20 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <cstring>
-#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "binary_util.h"
-#include "row_decoder.h"
+#include "mybinlog/server_flavor.h"
 #include "table_map.h"
 #include "test_helpers.h"
 
 namespace mes {
 namespace {
+
+constexpr mybinlog::ServerFlavor kMySQL = mybinlog::ServerFlavor::kMySQL;
 
 // Helper to build a TABLE_MAP_EVENT body in a buffer.
 class TableMapBuilder {
@@ -102,537 +100,6 @@ class TableMapBuilder {
   std::vector<uint8_t> buf_;
 };
 
-TEST(TableMapTest, ParseBasicIntColumns) {
-  TableMapBuilder builder;
-  builder.WriteTableId(42);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("testdb");
-  builder.WriteTableName("users");
-
-  // 3 columns: INT, BIGINT, TINYINT
-  std::vector<uint8_t> col_types = {
-      static_cast<uint8_t>(ColumnType::kLong),      // INT
-      static_cast<uint8_t>(ColumnType::kLongLong),  // BIGINT
-      static_cast<uint8_t>(ColumnType::kTiny),      // TINYINT
-  };
-  builder.WriteColumnCount(3);
-  builder.WriteColumnTypes(col_types);
-
-  // No metadata for fixed types
-  builder.WriteMetadataBlock({});
-
-  // Null bitmap: all nullable (bits 0,1,2 set) = 0b00000111 = 0x07
-  builder.WriteNullBitmap({0x07});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  EXPECT_EQ(metadata.table_id, 42u);
-  EXPECT_EQ(metadata.database_name, "testdb");
-  EXPECT_EQ(metadata.table_name, "users");
-  ASSERT_EQ(metadata.columns.size(), 3u);
-
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kLong);
-  EXPECT_EQ(metadata.columns[0].metadata, 0);
-  EXPECT_TRUE(metadata.columns[0].is_nullable);
-
-  EXPECT_EQ(metadata.columns[1].type, ColumnType::kLongLong);
-  EXPECT_TRUE(metadata.columns[1].is_nullable);
-
-  EXPECT_EQ(metadata.columns[2].type, ColumnType::kTiny);
-  EXPECT_TRUE(metadata.columns[2].is_nullable);
-}
-
-TEST(TableMapTest, ParseMixedColumnTypes) {
-  TableMapBuilder builder;
-  builder.WriteTableId(100);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("mydb");
-  builder.WriteTableName("orders");
-
-  // 5 columns: INT, VARCHAR(255), BLOB, DATETIME2(3), NEWDECIMAL(10,2)
-  std::vector<uint8_t> col_types = {
-      static_cast<uint8_t>(ColumnType::kLong),        // INT
-      static_cast<uint8_t>(ColumnType::kVarchar),     // VARCHAR
-      static_cast<uint8_t>(ColumnType::kBlob),        // BLOB
-      static_cast<uint8_t>(ColumnType::kDatetime2),   // DATETIME2
-      static_cast<uint8_t>(ColumnType::kNewDecimal),  // NEWDECIMAL
-  };
-  builder.WriteColumnCount(5);
-  builder.WriteColumnTypes(col_types);
-
-  // Metadata block:
-  // INT: 0 bytes
-  // VARCHAR(255): 2 bytes LE -> 0xFF, 0x00
-  // BLOB: 1 byte (pack_length) -> 2 (for regular BLOB)
-  // DATETIME2: 1 byte (fsp) -> 3
-  // NEWDECIMAL: 2 bytes (precision, scale) -> 10, 2
-  std::vector<uint8_t> meta_bytes = {
-      0xFF, 0x00,  // VARCHAR max_length=255
-      0x02,        // BLOB pack_length=2
-      0x03,        // DATETIME2 fsp=3
-      0x0A, 0x02,  // NEWDECIMAL precision=10, scale=2
-  };
-  builder.WriteMetadataBlock(meta_bytes);
-
-  // Null bitmap: column 0 not nullable, columns 1-4 nullable
-  // bits: 0=0, 1=1, 2=1, 3=1, 4=1 -> 0b00011110 = 0x1E
-  builder.WriteNullBitmap({0x1E});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  EXPECT_EQ(metadata.table_id, 100u);
-  EXPECT_EQ(metadata.database_name, "mydb");
-  EXPECT_EQ(metadata.table_name, "orders");
-  ASSERT_EQ(metadata.columns.size(), 5u);
-
-  // INT: no metadata
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kLong);
-  EXPECT_EQ(metadata.columns[0].metadata, 0);
-  EXPECT_FALSE(metadata.columns[0].is_nullable);
-
-  // VARCHAR(255): metadata = 255
-  EXPECT_EQ(metadata.columns[1].type, ColumnType::kVarchar);
-  EXPECT_EQ(metadata.columns[1].metadata, 255);
-  EXPECT_TRUE(metadata.columns[1].is_nullable);
-
-  // BLOB: metadata = 2
-  EXPECT_EQ(metadata.columns[2].type, ColumnType::kBlob);
-  EXPECT_EQ(metadata.columns[2].metadata, 2);
-  EXPECT_TRUE(metadata.columns[2].is_nullable);
-
-  // DATETIME2: metadata = 3
-  EXPECT_EQ(metadata.columns[3].type, ColumnType::kDatetime2);
-  EXPECT_EQ(metadata.columns[3].metadata, 3);
-  EXPECT_TRUE(metadata.columns[3].is_nullable);
-
-  // NEWDECIMAL(10,2): metadata = (10 << 8) | 2 = 2562
-  EXPECT_EQ(metadata.columns[4].type, ColumnType::kNewDecimal);
-  EXPECT_EQ(metadata.columns[4].metadata, (10 << 8) | 2);
-  EXPECT_TRUE(metadata.columns[4].is_nullable);
-}
-
-TEST(TableMapTest, ParseMySqlTypedArrayMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(101);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("mvi");
-  builder.WriteColumnCount(3);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kTypedArray),
-                            static_cast<uint8_t>(ColumnType::kTypedArray),
-                            static_cast<uint8_t>(ColumnType::kLong)});
-  // VARCHAR array: element type + 3-byte LE length. NEWDECIMAL array:
-  // element type + precision + scale. INT consumes no metadata.
-  builder.WriteMetadataBlock({static_cast<uint8_t>(ColumnType::kVarchar), 0x34, 0x12, 0x00,
-                              static_cast<uint8_t>(ColumnType::kNewDecimal), 10, 2});
-  builder.WriteNullBitmap({0x07});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 3u);
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kTypedArray);
-  EXPECT_TRUE(metadata.columns[0].is_array);
-  EXPECT_EQ(metadata.columns[0].array_element_type, ColumnType::kVarchar);
-  EXPECT_EQ(metadata.columns[0].metadata, 0x1234u);
-  EXPECT_EQ(metadata.columns[1].type, ColumnType::kTypedArray);
-  EXPECT_TRUE(metadata.columns[1].is_array);
-  EXPECT_EQ(metadata.columns[1].array_element_type, ColumnType::kNewDecimal);
-  EXPECT_EQ(metadata.columns[1].metadata, (10u << 8) | 2u);
-  EXPECT_FALSE(metadata.columns[2].is_array);
-}
-
-TEST(TableMapTest, RejectsTruncatedOrUnknownTypedArrayMetadata) {
-  for (const auto& metadata_bytes :
-       std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(ColumnType::kVarchar), 0x10},
-                                         {static_cast<uint8_t>(ColumnType::kLong)}}) {
-    TableMapBuilder builder;
-    builder.WriteTableId(102);
-    builder.WriteFlags(0);
-    builder.WriteDatabaseName("db");
-    builder.WriteTableName("mvi");
-    builder.WriteColumnCount(1);
-    builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kTypedArray)});
-    builder.WriteMetadataBlock(metadata_bytes);
-    builder.WriteNullBitmap({0x01});
-
-    TableMetadata metadata;
-    EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  }
-}
-
-TEST(TableMapTest, ParseMariaDbCompressedMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(103);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("compressed");
-  builder.WriteColumnCount(2);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kBlobCompressed),
-                            static_cast<uint8_t>(ColumnType::kVarcharCompressed)});
-  builder.WriteMetadataBlock({0x03, 0x11, 0x01});
-  builder.WriteNullBitmap({0x03});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 2u);
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kBlobCompressed);
-  EXPECT_EQ(metadata.columns[0].metadata, 3u);
-  EXPECT_EQ(metadata.columns[1].type, ColumnType::kVarcharCompressed);
-  EXPECT_EQ(metadata.columns[1].metadata, 273u);
-}
-
-TEST(TableMapTest, ParseMariaDbCompressedColumnCharsetMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(104);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("compressed_charset");
-  builder.WriteColumnCount(2);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarcharCompressed),
-                            static_cast<uint8_t>(ColumnType::kBlobCompressed)});
-  builder.WriteMetadataBlock({0x90, 0x01, 0x02});
-  builder.WriteNullBitmap({0x03});
-  // COLUMN_CHARSET supplies one packed collation id for each compressed
-  // character column, in TABLE_MAP order.
-  builder.WriteRawBytes({0x03, 0x02, 0x2D, 0x3F});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 2u);
-  EXPECT_TRUE(metadata.columns[0].charset_known);
-  EXPECT_EQ(metadata.columns[0].charset_id, 45u);
-  EXPECT_TRUE(metadata.columns[1].charset_known);
-  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
-}
-
-// --- Optional metadata (SIGNEDNESS / COLUMN_NAME) ---
-
-TEST(TableMapTest, ParseSignednessOptionalMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(7);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  // 3 numeric columns: INT, BIGINT, TINYINT.
-  std::vector<uint8_t> col_types = {
-      static_cast<uint8_t>(ColumnType::kLong),
-      static_cast<uint8_t>(ColumnType::kLongLong),
-      static_cast<uint8_t>(ColumnType::kTiny),
-  };
-  builder.WriteColumnCount(3);
-  builder.WriteColumnTypes(col_types);
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x07});
-
-  // Optional metadata: SIGNEDNESS field (type=1), length=1, bitmap=0x40.
-  // Numeric columns in order: INT(0), BIGINT(1), TINY(2). MSB-first, so
-  // 0x40 = bit for numeric index 1 (BIGINT) -> BIGINT is unsigned.
-  builder.WriteRawBytes({0x01, 0x01, 0x40});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 3u);
-  EXPECT_TRUE(metadata.signedness_from_binlog);
-  EXPECT_FALSE(metadata.columns[0].is_unsigned);  // INT signed
-  EXPECT_TRUE(metadata.columns[1].is_unsigned);   // BIGINT UNSIGNED
-  EXPECT_FALSE(metadata.columns[2].is_unsigned);  // TINYINT signed
-}
-
-TEST(TableMapTest, ParseSignednessAccountsForYearAndLegacyDecimal) {
-  TableMapBuilder builder;
-  builder.WriteTableId(71);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  // YEAR and legacy DECIMAL both consume a SIGNEDNESS bit in MySQL's
-  // TABLE_MAP metadata. The BIGINT bit is the third bit here, not the second.
-  builder.WriteColumnCount(4);
-  builder.WriteColumnTypes(
-      {static_cast<uint8_t>(ColumnType::kLong), static_cast<uint8_t>(ColumnType::kYear),
-       static_cast<uint8_t>(ColumnType::kLongLong), static_cast<uint8_t>(ColumnType::kDecimal)});
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x0F});
-  builder.WriteRawBytes({0x01, 0x01, 0x30});  // BIGINT and DECIMAL unsigned.
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 4u);
-  EXPECT_TRUE(metadata.signedness_from_binlog);
-  EXPECT_FALSE(metadata.columns[0].is_unsigned);
-  EXPECT_FALSE(metadata.columns[1].is_unsigned);
-  EXPECT_TRUE(metadata.columns[2].is_unsigned);
-  EXPECT_TRUE(metadata.columns[3].is_unsigned);
-}
-
-TEST(TableMapTest, RejectsTruncatedSignednessBitmap) {
-  TableMapBuilder builder;
-  builder.WriteTableId(72);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x01});
-  builder.WriteRawBytes({0x01, 0x00});
-
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-}
-
-TEST(TableMapTest, ParseColumnNameOptionalMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(8);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  std::vector<uint8_t> col_types = {
-      static_cast<uint8_t>(ColumnType::kLong),
-      static_cast<uint8_t>(ColumnType::kLong),
-  };
-  builder.WriteColumnCount(2);
-  builder.WriteColumnTypes(col_types);
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x03});
-
-  // COLUMN_NAME field (type=4): value is per-column length-encoded strings.
-  // "id" (len 2) + "amount" (len 6) -> value length = 1+2 + 1+6 = 10.
-  builder.WriteRawBytes({0x04, 0x0A, 0x02, 'i', 'd', 0x06, 'a', 'm', 'o', 'u', 'n', 't'});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 2u);
-  EXPECT_EQ(metadata.columns[0].name, "id");
-  EXPECT_EQ(metadata.columns[1].name, "amount");
-}
-
-TEST(TableMapTest, ParseDefaultCharsetOptionalMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(81);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(2);
-  builder.WriteColumnTypes(
-      {static_cast<uint8_t>(ColumnType::kVarchar), static_cast<uint8_t>(ColumnType::kBlob)});
-  builder.WriteMetadataBlock({0xFF, 0x00, 0x01});
-  builder.WriteNullBitmap({0x03});
-  // DEFAULT_CHARSET: default collation 45 (utf8mb4), then character-column
-  // index 1 (BLOB) overridden to collation 63 (binary).
-  builder.WriteRawBytes({0x02, 0x03, 0x2D, 0x01, 0x3F});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 2u);
-  EXPECT_TRUE(metadata.columns[0].charset_known);
-  EXPECT_EQ(metadata.columns[0].charset_id, 45u);
-  EXPECT_TRUE(metadata.columns[1].charset_known);
-  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
-}
-
-TEST(TableMapTest, ParseColumnCharsetOptionalMetadata) {
-  TableMapBuilder builder;
-  builder.WriteTableId(82);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(2);
-  builder.WriteColumnTypes(
-      {static_cast<uint8_t>(ColumnType::kVarchar), static_cast<uint8_t>(ColumnType::kBlob)});
-  builder.WriteMetadataBlock({0xFF, 0x00, 0x01});
-  builder.WriteNullBitmap({0x03});
-  // COLUMN_CHARSET: one collation per character column in TABLE_MAP order.
-  builder.WriteRawBytes({0x03, 0x02, 0x3F, 0x2D});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  EXPECT_EQ(metadata.columns[0].charset_id, 63u);
-  EXPECT_EQ(metadata.columns[1].charset_id, 45u);
-}
-
-// Build a v2 WRITE_ROWS body for a fully present single-row image. `values`
-// holds the already-encoded column payloads in TABLE_MAP order.
-std::vector<uint8_t> BuildWriteRowsBody(uint64_t table_id, size_t column_count,
-                                        const std::vector<uint8_t>& values) {
-  test::EventBuilder rows;
-  rows.WriteU48Le(table_id);
-  rows.WriteU16Le(0);  // flags
-  rows.WriteU16Le(2);  // v2 extra header: length only, no payload
-  rows.WriteU8(static_cast<uint8_t>(column_count));
-  for (size_t i = 0; i < binary::BitmapBytes(column_count); i++) {
-    const size_t bits = std::min<size_t>(8, column_count - i * 8);
-    rows.WriteU8(static_cast<uint8_t>((1u << bits) - 1));  // every column present
-  }
-  for (size_t i = 0; i < binary::BitmapBytes(column_count); i++) {
-    rows.WriteU8(0x00);  // row null bitmap: no NULLs
-  }
-  rows.WriteBytes(values);
-  return rows.Data();
-}
-
-TEST(TableMapTest, DefaultCharsetSkipsEnumAndSetColumns) {
-  TableMapBuilder builder;
-  builder.WriteTableId(85);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  // (status ENUM, flags SET, name VARCHAR(200), data VARBINARY(100)).
-  // ENUM and SET are transmitted as MYSQL_TYPE_STRING with their real type in
-  // metadata byte 0; VARBINARY is transmitted as MYSQL_TYPE_VARCHAR.
-  builder.WriteColumnCount(4);
-  builder.WriteColumnTypes({
-      static_cast<uint8_t>(ColumnType::kString),
-      static_cast<uint8_t>(ColumnType::kString),
-      static_cast<uint8_t>(ColumnType::kVarchar),
-      static_cast<uint8_t>(ColumnType::kVarchar),
-  });
-  builder.WriteMetadataBlock({
-      0xF7, 0x01,  // ENUM, pack_length 1
-      0xF8, 0x01,  // SET, pack_length 1
-      0xC8, 0x00,  // VARCHAR(200)
-      0x64, 0x00,  // VARBINARY(100)
-  });
-  builder.WriteNullBitmap({0x0F});
-
-  // DEFAULT_CHARSET indexes only the two character columns, so index 1 is the
-  // VARBINARY column. ENUM_AND_SET_DEFAULT_CHARSET carries the enum/set
-  // collations in its own index space.
-  builder.WriteRawBytes({0x02, 0x03, 0x2D, 0x01, 0x3F});
-  builder.WriteRawBytes({0x0A, 0x01, 0x2D});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 4u);
-  EXPECT_FALSE(metadata.columns[0].charset_known);
-  EXPECT_FALSE(metadata.columns[1].charset_known);
-  EXPECT_TRUE(metadata.columns[2].charset_known);
-  EXPECT_EQ(metadata.columns[2].charset_id, 45u);
-  EXPECT_TRUE(metadata.columns[3].charset_known);
-  EXPECT_EQ(metadata.columns[3].charset_id, 63u);
-
-  // The collation assignment decides text vs. bytes at the C ABI, so assert
-  // the decoded row shape rather than the charset ids alone.
-  test::EventBuilder values;
-  values.WriteU8(2);  // ENUM ordinal
-  values.WriteU8(3);  // SET bitmask
-  values.WriteU8(2);  // VARCHAR length prefix
-  values.WriteString("hi");
-  values.WriteU8(2);  // VARBINARY length prefix
-  values.WriteBytes({0x00, 0xFF});
-
-  const std::vector<uint8_t> body = BuildWriteRowsBody(85, 4, values.Data());
-  std::vector<RowData> decoded;
-  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
-  ASSERT_EQ(decoded.size(), 1u);
-  ASSERT_EQ(decoded[0].columns.size(), 4u);
-  EXPECT_EQ(decoded[0].columns[0].type, ColumnType::kEnum);
-  EXPECT_EQ(decoded[0].columns[0].int_val, 2);
-  EXPECT_EQ(decoded[0].columns[1].type, ColumnType::kSet);
-  EXPECT_EQ(decoded[0].columns[1].int_val, 3);
-  EXPECT_FALSE(decoded[0].columns[2].is_binary);  // MES_COL_STRING
-  EXPECT_EQ(decoded[0].columns[2].string_val, "hi");
-  EXPECT_TRUE(decoded[0].columns[3].is_binary);  // MES_COL_BYTES
-  EXPECT_EQ(decoded[0].columns[3].string_val, std::string("\x00\xFF", 2));
-}
-
-TEST(TableMapTest, DefaultCharsetCountsVectorColumns) {
-  TableMapBuilder builder;
-  builder.WriteTableId(86);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  // (id INT, embedding VECTOR(3), name VARCHAR(50), payload BLOB).
-  // MySQL 9.x counts VECTOR as a character column when packing DEFAULT_CHARSET
-  // even though its collation is always binary, so it does occupy a slot.
-  builder.WriteColumnCount(4);
-  builder.WriteColumnTypes({
-      static_cast<uint8_t>(ColumnType::kLong),
-      static_cast<uint8_t>(ColumnType::kVector),
-      static_cast<uint8_t>(ColumnType::kVarchar),
-      static_cast<uint8_t>(ColumnType::kBlob),
-  });
-  builder.WriteMetadataBlock({
-      0x04,        // VECTOR pack_length 4
-      0x32, 0x00,  // VARCHAR(50)
-      0x02,        // BLOB pack_length 2
-  });
-  builder.WriteNullBitmap({0x0E});
-
-  builder.WriteRawBytes({0x01, 0x01, 0x00});  // SIGNEDNESS: id is signed
-  // DEFAULT_CHARSET over [VECTOR, VARCHAR, BLOB]: binary is the most used
-  // collation, and character-column index 1 (the VARCHAR) overrides to
-  // utf8mb4. Were VECTOR skipped, the VARCHAR would take binary and the BLOB
-  // would take utf8mb4 — the exact inversion this asserts against.
-  builder.WriteRawBytes({0x02, 0x03, 0x3F, 0x01, 0x2D});
-  builder.WriteRawBytes({0x0D, 0x01, 0x03});  // VECTOR_DIMENSIONALITY: 3
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 4u);
-  EXPECT_FALSE(metadata.columns[0].charset_known);
-  EXPECT_TRUE(metadata.columns[1].charset_known);
-  EXPECT_EQ(metadata.columns[1].charset_id, 63u);
-  EXPECT_TRUE(metadata.columns[2].charset_known);
-  EXPECT_EQ(metadata.columns[2].charset_id, 45u);
-  EXPECT_TRUE(metadata.columns[3].charset_known);
-  EXPECT_EQ(metadata.columns[3].charset_id, 63u);
-
-  test::EventBuilder values;
-  values.WriteU32Le(42);  // id
-  values.WriteU32Le(12);  // VECTOR 4-byte length prefix
-  values.WriteFloat(1.0f);
-  values.WriteFloat(2.0f);
-  values.WriteFloat(3.0f);
-  values.WriteU8(2);  // VARCHAR length prefix
-  values.WriteString("ok");
-  values.WriteU16Le(3);  // BLOB 2-byte length prefix
-  values.WriteBytes({0x01, 0x02, 0x03});
-
-  const std::vector<uint8_t> body = BuildWriteRowsBody(86, 4, values.Data());
-  std::vector<RowData> decoded;
-  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
-  ASSERT_EQ(decoded.size(), 1u);
-  ASSERT_EQ(decoded[0].columns.size(), 4u);
-  EXPECT_EQ(decoded[0].columns[0].int_val, 42);
-  EXPECT_TRUE(decoded[0].columns[1].is_binary);   // MES_COL_BYTES
-  EXPECT_FALSE(decoded[0].columns[2].is_binary);  // MES_COL_STRING
-  EXPECT_EQ(decoded[0].columns[2].string_val, "ok");
-  EXPECT_TRUE(decoded[0].columns[3].is_binary);  // MES_COL_BYTES
-  EXPECT_EQ(decoded[0].columns[3].string_val, std::string("\x01\x02\x03", 3));
-}
-
-TEST(TableMapTest, SkipsEveryUnhandledOptionalMetadataField) {
-  TableMapBuilder builder;
-  builder.WriteTableId(83);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
-  builder.WriteMetadataBlock({0xFF, 0x00});
-  builder.WriteNullBitmap({0x01});
-
-  // Optional metadata field types 5-13 are currently not exposed by the
-  // public event model, but each TLV must be skipped exactly so a following
-  // recognized field remains aligned.
-  for (uint8_t type = 5; type <= 13; ++type) {
-    builder.WriteRawBytes({type, 0x01, type});
-  }
-  // COLUMN_NAME after every skipped field confirms the parser did not lose
-  // synchronization in the common default switch branch.
-  builder.WriteRawBytes({0x04, 0x03, 0x02, 'i', 'd'});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 1u);
-  EXPECT_EQ(metadata.columns[0].name, "id");
-}
-
 TEST(TableMapRegistryTest, ReusesUnchangedRawTableMapBody) {
   TableMapBuilder builder;
   builder.WriteTableId(84);
@@ -646,361 +113,13 @@ TEST(TableMapRegistryTest, ReusesUnchangedRawTableMapBody) {
 
   TableMapRegistry registry;
   bool unchanged = true;
-  ASSERT_TRUE(
-      registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), nullptr, &unchanged));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL, nullptr,
+                                            &unchanged));
   EXPECT_FALSE(unchanged);
-  ASSERT_TRUE(
-      registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), nullptr, &unchanged));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL, nullptr,
+                                            &unchanged));
   EXPECT_TRUE(unchanged);
   ASSERT_NE(registry.Lookup(84), nullptr);
-}
-
-TEST(TableMapTest, OptionalMetadataAbsentIsSafe) {
-  // The default MINIMAL-less case: no optional metadata after the null bitmap.
-  TableMapBuilder builder;
-  builder.WriteTableId(9);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x01});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 1u);
-  EXPECT_FALSE(metadata.signedness_from_binlog);
-  EXPECT_FALSE(metadata.columns[0].is_unsigned);
-  EXPECT_TRUE(metadata.columns[0].name.empty());
-}
-
-/**
- * @brief A TABLE_MAP with no optional metadata section at all resolves every
- *        character-family and BLOB-family column to bytes.
- *
- * VARCHAR/VARBINARY and TEXT/BLOB each share a single binlog type byte, so the
- * declared collation is the only discriminator between the two members of a
- * pair. With no collation carried, bytes is the only lossless reading: it
- * reproduces the payload exactly, whereas surfacing a binary key or hash as
- * text would push it through a UTF-8 decoder and lose it irrecoverably. The
- * two columns declared as text are therefore expected to come back as bytes
- * alongside their binary counterparts -- the classification follows the
- * missing collation, never the payload's content.
- */
-TEST(TableMapTest, AbsentCharsetMetadataResolvesCharacterColumnsToBytes) {
-  TableMapBuilder builder;
-  builder.WriteTableId(90);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-
-  // (bin VARBINARY(100), txt VARCHAR(100), blb BLOB, txtblb TEXT). Each pair
-  // travels on one type byte: VARBINARY and VARCHAR both as MYSQL_TYPE_VARCHAR,
-  // BLOB and TEXT both as MYSQL_TYPE_BLOB.
-  builder.WriteColumnCount(4);
-  builder.WriteColumnTypes({
-      static_cast<uint8_t>(ColumnType::kVarchar),
-      static_cast<uint8_t>(ColumnType::kVarchar),
-      static_cast<uint8_t>(ColumnType::kBlob),
-      static_cast<uint8_t>(ColumnType::kBlob),
-  });
-  builder.WriteMetadataBlock({
-      0x64, 0x00,  // VARBINARY(100)
-      0x64, 0x00,  // VARCHAR(100)
-      0x02,        // BLOB pack_length 2
-      0x02,        // TEXT pack_length 2
-  });
-  builder.WriteNullBitmap({0x0F});
-  // Nothing follows the null bitmap, the shape a server emits with
-  // binlog_row_metadata=NO_LOG.
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 4u);
-  for (size_t i = 0; i < metadata.columns.size(); ++i) {
-    SCOPED_TRACE(i);
-    EXPECT_FALSE(metadata.columns[i].charset_known);
-  }
-
-  // A binary payload carrying an embedded NUL and a byte no UTF-8 decoder can
-  // represent. The classification is what is_binary pins below; at this layer
-  // the bytes are the same either way, so this payload is what makes getting
-  // the classification wrong consequential -- a column surfaced as text is one
-  // a binding hands to a UTF-8 decoder.
-  const std::string kBinaryPayload("\x00\xFF\x01", 3);
-  test::EventBuilder values;
-  values.WriteU8(static_cast<uint8_t>(kBinaryPayload.size()));
-  values.WriteString(kBinaryPayload);
-  values.WriteU8(2);  // VARCHAR 1-byte length prefix
-  values.WriteString("hi");
-  values.WriteU16Le(2);  // BLOB 2-byte length prefix
-  values.WriteBytes({0xFE, 0x00});
-  values.WriteU16Le(4);  // TEXT 2-byte length prefix
-  values.WriteString("text");
-
-  const std::vector<uint8_t> body = BuildWriteRowsBody(90, 4, values.Data());
-  std::vector<RowData> decoded;
-  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
-  ASSERT_EQ(decoded.size(), 1u);
-  ASSERT_EQ(decoded[0].columns.size(), 4u);
-
-  const std::string kExpected[] = {kBinaryPayload, "hi", std::string("\xFE\x00", 2), "text"};
-  const ColumnType kExpectedTypes[] = {ColumnType::kVarchar, ColumnType::kVarchar,
-                                       ColumnType::kBlob, ColumnType::kBlob};
-  for (size_t i = 0; i < decoded[0].columns.size(); ++i) {
-    SCOPED_TRACE(i);
-    const ColumnValue& column = decoded[0].columns[i];
-    ASSERT_FALSE(column.is_null);
-    EXPECT_EQ(column.type, kExpectedTypes[i]);
-    EXPECT_TRUE(column.is_binary);  // MES_COL_BYTES
-    EXPECT_EQ(column.string_val, kExpected[i]);
-  }
-}
-
-// (u8 TINYINT, u16 SMALLINT, u24 MEDIUMINT, u32 INT, u64 BIGINT), each declared
-// UNSIGNED in the table. All five are fixed-size, so the TABLE_MAP metadata
-// block stays empty.
-const std::vector<uint8_t> kUnsignedNumericColumnTypes = {
-    static_cast<uint8_t>(ColumnType::kTiny),     static_cast<uint8_t>(ColumnType::kShort),
-    static_cast<uint8_t>(ColumnType::kInt24),    static_cast<uint8_t>(ColumnType::kLong),
-    static_cast<uint8_t>(ColumnType::kLongLong),
-};
-
-// The unsigned values those five columns hold, each one above the signed range
-// of its width so that reading it as signed is observable. Asymmetric bit
-// patterns, so a byte-order error cannot pass as a sign error.
-constexpr uint8_t kUnsignedTinyValue = 0x80;                          // 128
-constexpr uint16_t kUnsignedShortValue = 0xFF00;                      // 65280
-constexpr uint32_t kUnsignedInt24Value = 0x800001;                    // 8388609
-constexpr uint32_t kUnsignedLongValue = 0xFFFFFF00;                   // 4294967040
-constexpr uint64_t kUnsignedLongLongValue = (uint64_t{1} << 63) | 1;  // 9223372036854775809
-
-std::vector<uint8_t> BuildUnsignedNumericRowValues() {
-  test::EventBuilder values;
-  values.WriteU8(kUnsignedTinyValue);
-  values.WriteU16Le(kUnsignedShortValue);
-  values.WriteU24Le(kUnsignedInt24Value);
-  values.WriteU32Le(kUnsignedLongValue);
-  values.WriteU64Le(kUnsignedLongLongValue);
-  return values.Data();
-}
-
-/**
- * @brief A TABLE_MAP with no SIGNEDNESS field decodes every numeric column as
- *        signed.
- *
- * Signedness reaches the decoder from the TABLE_MAP optional metadata or from
- * the metadata side-connection; with neither, every numeric column is read as
- * signed, so an UNSIGNED value above the signed range of its width reads as a
- * negative number. The BIGINT column pins the second half of that rule: the
- * exact-decimal string reserved for an unsigned value above INT64_MAX is only
- * reachable when the column is known to be unsigned, so here the value stays an
- * integer and wraps negative instead.
- */
-TEST(TableMapTest, AbsentSignednessMetadataResolvesNumericColumnsToSigned) {
-  TableMapBuilder builder;
-  builder.WriteTableId(91);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(kUnsignedNumericColumnTypes.size());
-  builder.WriteColumnTypes(kUnsignedNumericColumnTypes);
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x1F});
-  // Nothing follows the null bitmap, so no SIGNEDNESS field.
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), kUnsignedNumericColumnTypes.size());
-  EXPECT_FALSE(metadata.signedness_from_binlog);
-  for (size_t i = 0; i < metadata.columns.size(); ++i) {
-    SCOPED_TRACE(i);
-    EXPECT_FALSE(metadata.columns[i].is_unsigned);
-  }
-
-  const std::vector<uint8_t> body =
-      BuildWriteRowsBody(91, kUnsignedNumericColumnTypes.size(), BuildUnsignedNumericRowValues());
-  std::vector<RowData> decoded;
-  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
-  ASSERT_EQ(decoded.size(), 1u);
-  ASSERT_EQ(decoded[0].columns.size(), kUnsignedNumericColumnTypes.size());
-
-  // The signed reinterpretation of each wire value, at its own width.
-  const int64_t kExpected[] = {-128, -256, -8388607, -256, -9223372036854775807LL};
-  for (size_t i = 0; i < decoded[0].columns.size(); ++i) {
-    SCOPED_TRACE(i);
-    const ColumnValue& column = decoded[0].columns[i];
-    ASSERT_FALSE(column.is_null);
-    EXPECT_EQ(column.int_val, kExpected[i]);  // MES_COL_INT
-    // An empty buffer distinguishes the integer reading from the exact-decimal
-    // string an above-INT64_MAX unsigned value would have taken.
-    EXPECT_TRUE(column.string_val.empty()) << column.string_val;
-  }
-}
-
-/**
- * @brief The same row bytes behind a TABLE_MAP that does carry SIGNEDNESS
- *        resolve to their unsigned values.
- *
- * The contrast is what the fallback costs: identical wire bytes, and only the
- * presence of the optional metadata field decides whether the BIGINT reads as
- * its exact decimal value or wraps negative.
- */
-TEST(TableMapTest, PresentSignednessMetadataResolvesNumericColumnsToUnsigned) {
-  TableMapBuilder builder;
-  builder.WriteTableId(92);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(kUnsignedNumericColumnTypes.size());
-  builder.WriteColumnTypes(kUnsignedNumericColumnTypes);
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x1F});
-  // SIGNEDNESS (type 1), length 1, MSB-first bitmap over the five numeric
-  // columns: all unsigned.
-  builder.WriteRawBytes({0x01, 0x01, 0xF8});
-
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), kUnsignedNumericColumnTypes.size());
-  EXPECT_TRUE(metadata.signedness_from_binlog);
-  for (size_t i = 0; i < metadata.columns.size(); ++i) {
-    SCOPED_TRACE(i);
-    EXPECT_TRUE(metadata.columns[i].is_unsigned);
-  }
-
-  const std::vector<uint8_t> body =
-      BuildWriteRowsBody(92, kUnsignedNumericColumnTypes.size(), BuildUnsignedNumericRowValues());
-  std::vector<RowData> decoded;
-  ASSERT_TRUE(DecodeWriteRows(body.data(), body.size(), metadata, true, &decoded));
-  ASSERT_EQ(decoded.size(), 1u);
-  ASSERT_EQ(decoded[0].columns.size(), kUnsignedNumericColumnTypes.size());
-
-  EXPECT_EQ(decoded[0].columns[0].int_val, kUnsignedTinyValue);
-  EXPECT_EQ(decoded[0].columns[1].int_val, kUnsignedShortValue);
-  EXPECT_EQ(decoded[0].columns[2].int_val, kUnsignedInt24Value);
-  EXPECT_EQ(decoded[0].columns[3].int_val, kUnsignedLongValue);
-  // Above INT64_MAX, so int_val cannot hold it and the exact decimal value is
-  // carried as text instead.
-  EXPECT_EQ(decoded[0].columns[4].string_val, "9223372036854775809");  // MES_COL_STRING
-  EXPECT_FALSE(decoded[0].columns[4].is_binary);
-}
-
-TEST(TableMapTest, RejectsMetadataLengthUint64Max) {
-  TableMapBuilder builder;
-  builder.WriteTableId(10);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
-  builder.WriteRawBytes({0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
-
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-}
-
-TEST(TableMapTest, RejectsMetadataLengthSizeMax) {
-  TableMapBuilder builder;
-  builder.WriteTableId(11);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kVarchar)});
-
-  test::EventBuilder packed_length;
-  packed_length.WriteU8(0xFE);
-  packed_length.WriteU64Le(std::numeric_limits<size_t>::max());
-  builder.WriteRawBytes(packed_length.Data());
-
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-}
-
-TEST(TableMapTest, RejectsOptionalMetadataLengthUint64Max) {
-  TableMapBuilder builder;
-  builder.WriteTableId(12);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x01});
-  builder.WriteRawBytes({0x04, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
-
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-}
-
-TEST(TableMapTest, RejectsOverflowingColumnNameLength) {
-  TableMapBuilder builder;
-  builder.WriteTableId(13);
-  builder.WriteFlags(0);
-  builder.WriteDatabaseName("db");
-  builder.WriteTableName("t");
-  builder.WriteColumnCount(1);
-  builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
-  builder.WriteMetadataBlock({});
-  builder.WriteNullBitmap({0x01});
-  builder.WriteRawBytes({0x04, 0x09, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
-
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-}
-
-/**
- * @brief The metadata block must be exactly what the column types consume.
- *
- * A block one byte longer or shorter than the layout needs means the types and
- * their metadata disagree; parsing on would misattribute every later field.
- */
-TEST(TableMapTest, RejectsAMetadataBlockThatDoesNotMatchTheColumnTypes) {
-  struct Case {
-    const char* description;
-    std::vector<uint8_t> types;
-    std::vector<uint8_t> metadata;
-  };
-  const Case cases[] = {
-      // INT consumes no metadata, so the trailing byte is unaccounted for.
-      {"one byte too long", {static_cast<uint8_t>(ColumnType::kLong)}, {0x01}},
-      // VARCHAR's metadata is its 2-byte maximum length.
-      {"one byte too short", {static_cast<uint8_t>(ColumnType::kVarchar)}, {0x64}},
-  };
-  for (const Case& c : cases) {
-    SCOPED_TRACE(c.description);
-    TableMapBuilder builder;
-    builder.WriteTableId(42);
-    builder.WriteFlags(0);
-    builder.WriteDatabaseName("testdb");
-    builder.WriteTableName("users");
-    builder.WriteColumnCount(c.types.size());
-    builder.WriteColumnTypes(c.types);
-    builder.WriteMetadataBlock(c.metadata);
-    builder.WriteNullBitmap({0x01});
-
-    TableMetadata metadata;
-    EXPECT_FALSE(ParseTableMapEvent(builder.Data().data(), builder.Size(), &metadata));
-  }
-}
-
-TEST(TableMapTest, ParseTruncatedBuffer) {
-  // Only 5 bytes - way too short
-  uint8_t buf[5] = {0};
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(buf, sizeof(buf), &metadata));
-}
-
-TEST(TableMapTest, ParseNullData) {
-  TableMetadata metadata;
-  EXPECT_FALSE(ParseTableMapEvent(nullptr, 100, &metadata));
-}
-
-TEST(TableMapTest, ParseNullOutput) {
-  uint8_t buf[32] = {0};
-  EXPECT_FALSE(ParseTableMapEvent(buf, sizeof(buf), nullptr));
 }
 
 TEST(TableMapRegistryTest, ProcessAndLookup) {
@@ -1017,14 +136,14 @@ TEST(TableMapRegistryTest, ProcessAndLookup) {
   TableMapRegistry registry;
   EXPECT_EQ(registry.Size(), 0u);
 
-  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
   EXPECT_EQ(registry.Size(), 1u);
 
   const TableMetadata* meta = registry.Lookup(1);
   ASSERT_NE(meta, nullptr);
   EXPECT_EQ(meta->table_id, 1u);
-  EXPECT_EQ(meta->database_name, "db1");
-  EXPECT_EQ(meta->table_name, "t1");
+  EXPECT_EQ(meta->schema, "db1");
+  EXPECT_EQ(meta->table, "t1");
   ASSERT_EQ(meta->columns.size(), 1u);
   EXPECT_EQ(meta->columns[0].type, ColumnType::kLong);
 }
@@ -1048,7 +167,7 @@ TEST(TableMapRegistryTest, MultipleTables) {
     builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x01});
-    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
   }
 
   // Table 2
@@ -1063,14 +182,14 @@ TEST(TableMapRegistryTest, MultipleTables) {
         {static_cast<uint8_t>(ColumnType::kTiny), static_cast<uint8_t>(ColumnType::kShort)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x03});
-    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
   }
 
   EXPECT_EQ(registry.Size(), 2u);
   ASSERT_NE(registry.Lookup(10), nullptr);
-  EXPECT_EQ(registry.Lookup(10)->table_name, "table_a");
+  EXPECT_EQ(registry.Lookup(10)->table, "table_a");
   ASSERT_NE(registry.Lookup(20), nullptr);
-  EXPECT_EQ(registry.Lookup(20)->table_name, "table_b");
+  EXPECT_EQ(registry.Lookup(20)->table, "table_b");
 }
 
 TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
@@ -1085,7 +204,7 @@ TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
     builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x01});
-    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size());
+    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL);
   };
 
   for (uint64_t id = 1; id <= TableMapRegistry::kMaxEntries; ++id) {
@@ -1105,8 +224,8 @@ TEST(TableMapRegistryTest, CapacityEvictsLeastRecentlyUsedEntry) {
   replacement.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
   replacement.WriteMetadataBlock({});
   replacement.WriteNullBitmap({0x01});
-  ASSERT_TRUE(
-      registry.ProcessTableMapEvent(replacement.Data().data(), replacement.Size(), &evicted));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(replacement.Data().data(), replacement.Size(), kMySQL,
+                                            &evicted));
 
   EXPECT_EQ(evicted, std::vector<uint64_t>{3u});
   EXPECT_NE(registry.Lookup(1), nullptr);
@@ -1128,10 +247,10 @@ TEST(TableMapRegistryTest, ReplaceExistingTable) {
     builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x01});
-    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
   }
 
-  EXPECT_EQ(registry.Lookup(5)->table_name, "old_name");
+  EXPECT_EQ(registry.Lookup(5)->table, "old_name");
 
   // Replace with new metadata for same table_id
   {
@@ -1145,12 +264,12 @@ TEST(TableMapRegistryTest, ReplaceExistingTable) {
         {static_cast<uint8_t>(ColumnType::kLong), static_cast<uint8_t>(ColumnType::kTiny)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x03});
-    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
   }
 
   EXPECT_EQ(registry.Size(), 1u);
   ASSERT_NE(registry.Lookup(5), nullptr);
-  EXPECT_EQ(registry.Lookup(5)->table_name, "new_name");
+  EXPECT_EQ(registry.Lookup(5)->table, "new_name");
   EXPECT_EQ(registry.Lookup(5)->columns.size(), 2u);
 }
 
@@ -1166,7 +285,7 @@ TEST(TableMapRegistryTest, Clear) {
   builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
   builder.WriteMetadataBlock({});
   builder.WriteNullBitmap({0x01});
-  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size()));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL));
 
   EXPECT_EQ(registry.Size(), 1u);
   registry.Clear();
@@ -1177,133 +296,18 @@ TEST(TableMapRegistryTest, Clear) {
 TEST(TableMapRegistryTest, ProcessMalformedData) {
   TableMapRegistry registry;
   uint8_t buf[5] = {0};
-  EXPECT_FALSE(registry.ProcessTableMapEvent(buf, sizeof(buf)));
+  EXPECT_FALSE(registry.ProcessTableMapEvent(buf, sizeof(buf), kMySQL));
   EXPECT_EQ(registry.Size(), 0u);
-}
-
-// --- Additional column type parsing tests ---
-
-TEST(ParseTableMapTest, VarcharColumn) {
-  test::EventBuilder b;
-  b.WriteU48Le(42);  // table_id
-  b.WriteU16Le(0);   // flags
-  b.WriteU8(4);      // db name len
-  b.WriteString("test");
-  b.WriteU8(0);  // null term
-  b.WriteU8(1);  // table name len
-  b.WriteString("t");
-  b.WriteU8(0);       // null term
-  b.WriteU8(1);       // column count
-  b.WriteU8(0x0F);    // VARCHAR
-  b.WriteU8(2);       // metadata length
-  b.WriteU16Le(200);  // varchar max_length
-  b.WriteU8(0x01);    // null bitmap
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kVarchar);
-  EXPECT_EQ(metadata.columns[0].metadata, 200);
-}
-
-TEST(ParseTableMapTest, BlobColumn) {
-  test::EventBuilder b;
-  b.WriteU48Le(42);
-  b.WriteU16Le(0);
-  b.WriteU8(4);
-  b.WriteString("test");
-  b.WriteU8(0);
-  b.WriteU8(1);
-  b.WriteString("t");
-  b.WriteU8(0);
-  b.WriteU8(1);     // column count
-  b.WriteU8(0xFC);  // BLOB
-  b.WriteU8(1);     // metadata length
-  b.WriteU8(2);     // pack_length = 2
-  b.WriteU8(0x01);  // null bitmap
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kBlob);
-  EXPECT_EQ(metadata.columns[0].metadata, 2);
-}
-
-TEST(ParseTableMapTest, Datetime2Column) {
-  test::EventBuilder b;
-  b.WriteU48Le(42);
-  b.WriteU16Le(0);
-  b.WriteU8(4);
-  b.WriteString("test");
-  b.WriteU8(0);
-  b.WriteU8(1);
-  b.WriteString("t");
-  b.WriteU8(0);
-  b.WriteU8(1);     // column count
-  b.WriteU8(0x12);  // DATETIME2
-  b.WriteU8(1);     // metadata length
-  b.WriteU8(6);     // fsp = 6
-  b.WriteU8(0x01);  // null bitmap
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kDatetime2);
-  EXPECT_EQ(metadata.columns[0].metadata, 6);
-}
-
-TEST(ParseTableMapTest, NewDecimalColumn) {
-  test::EventBuilder b;
-  b.WriteU48Le(42);
-  b.WriteU16Le(0);
-  b.WriteU8(4);
-  b.WriteString("test");
-  b.WriteU8(0);
-  b.WriteU8(1);
-  b.WriteString("t");
-  b.WriteU8(0);
-  b.WriteU8(1);
-  b.WriteU8(0xF6);  // NEWDECIMAL
-  b.WriteU8(2);     // metadata length
-  b.WriteU8(10);    // precision
-  b.WriteU8(2);     // scale
-  b.WriteU8(0x01);
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kNewDecimal);
-  EXPECT_EQ(metadata.columns[0].metadata, (10 << 8) | 2);
-}
-
-TEST(ParseTableMapTest, MultipleColumnTypes) {
-  test::EventBuilder b;
-  b.WriteU48Le(42);
-  b.WriteU16Le(0);
-  b.WriteU8(2);
-  b.WriteString("db");
-  b.WriteU8(0);
-  b.WriteU8(1);
-  b.WriteString("t");
-  b.WriteU8(0);
-  b.WriteU8(3);       // 3 columns
-  b.WriteU8(0x03);    // INT
-  b.WriteU8(0x0F);    // VARCHAR
-  b.WriteU8(0x12);    // DATETIME2
-  b.WriteU8(3);       // metadata length: 0 + 2 + 1
-  b.WriteU16Le(500);  // VARCHAR metadata
-  b.WriteU8(3);       // DATETIME2 fsp
-  b.WriteU8(0x07);    // null bitmap: all nullable
-  TableMetadata metadata;
-  ASSERT_TRUE(ParseTableMapEvent(b.Data().data(), b.Size(), &metadata));
-  ASSERT_EQ(metadata.columns.size(), 3u);
-  EXPECT_EQ(metadata.columns[0].type, ColumnType::kLong);
-  EXPECT_EQ(metadata.columns[1].type, ColumnType::kVarchar);
-  EXPECT_EQ(metadata.columns[1].metadata, 500);
-  EXPECT_EQ(metadata.columns[2].type, ColumnType::kDatetime2);
-  EXPECT_EQ(metadata.columns[2].metadata, 3);
 }
 
 TEST(TableMapRegistryTest, ReplaceExisting) {
   TableMapRegistry registry;
   auto body1 = test::BuildTableMapBody(42, "db", "table1");
   auto body2 = test::BuildTableMapBody(42, "db", "table2");
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body1.data(), body1.size()));
-  EXPECT_EQ(registry.Lookup(42)->table_name, "table1");
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body2.data(), body2.size()));
-  EXPECT_EQ(registry.Lookup(42)->table_name, "table2");
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body1.data(), body1.size(), kMySQL));
+  EXPECT_EQ(registry.Lookup(42)->table, "table1");
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body2.data(), body2.size(), kMySQL));
+  EXPECT_EQ(registry.Lookup(42)->table, "table2");
   EXPECT_EQ(registry.Size(), 1u);
 }
 
@@ -1325,7 +329,7 @@ TEST(TableMapRegistryTest, ReplacedMetadataLeavesAnAlreadySharedRegistrationUnto
   auto body = test::BuildTableMapBody(42, "db", "tbl");
   // COLUMN_NAME optional metadata: one length-encoded name, "id".
   body.insert(body.end(), {0x04, 0x03, 0x02, 'i', 'd'});
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size()));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL));
 
   const auto shared = registry.SharedLookup(42);
   ASSERT_TRUE(shared);
@@ -1360,14 +364,14 @@ TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRawBody) {
   TableMapRegistry registry;
   auto body = test::BuildTableMapBody(42, "db", "tbl");
   bool unchanged = true;
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), nullptr, &unchanged));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL, nullptr, &unchanged));
   ASSERT_FALSE(unchanged);
 
   TableMetadata resolved = *registry.Lookup(42);
   resolved.names_resolved = true;
   ASSERT_TRUE(registry.ReplaceMetadata(42, std::move(resolved)));
 
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), nullptr, &unchanged));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL, nullptr, &unchanged));
   EXPECT_TRUE(unchanged);
   ASSERT_NE(registry.Lookup(42), nullptr);
   EXPECT_TRUE(registry.Lookup(42)->names_resolved);
@@ -1388,7 +392,7 @@ TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRecency) {
     builder.WriteColumnTypes({static_cast<uint8_t>(ColumnType::kLong)});
     builder.WriteMetadataBlock({});
     builder.WriteNullBitmap({0x01});
-    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), evicted);
+    return registry.ProcessTableMapEvent(builder.Data().data(), builder.Size(), kMySQL, evicted);
   };
 
   for (uint64_t id = 1; id <= TableMapRegistry::kMaxEntries; ++id) {
@@ -1398,8 +402,8 @@ TEST(TableMapRegistryTest, ReplacedMetadataKeepsTheEntrysRecency) {
   // replacement is the only thing that reaches the entry.
   TableMetadata resolved;
   resolved.table_id = 1;
-  resolved.database_name = "db";
-  resolved.table_name = "t";
+  resolved.schema = "db";
+  resolved.table = "t";
   resolved.columns.resize(1);
   resolved.names_resolved = true;
   ASSERT_TRUE(registry.ReplaceMetadata(1, std::move(resolved)));
@@ -1459,7 +463,7 @@ TEST(TableMapRegistryTest, ByteBudgetEvictsLongBeforeTheEntryCountDoes) {
   std::vector<uint64_t> evicted;
   for (uint64_t id = 1; id <= kWideRegistrations; ++id) {
     const auto body = BuildWideTableMapBody(id, kWideColumns, kWideNameLength);
-    ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), &evicted));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL, &evicted));
   }
 
   // Per-entry cost here is set by the server's schema, not by anything the
@@ -1478,12 +482,12 @@ TEST(TableMapRegistryTest, ByteBudgetEvictsLongBeforeTheEntryCountDoes) {
 TEST(TableMapRegistryTest, RetainedBytesCountsColumnNames) {
   TableMapRegistry narrow_registry;
   const auto narrow = BuildWideTableMapBody(1, 4, 4);
-  ASSERT_TRUE(narrow_registry.ProcessTableMapEvent(narrow.data(), narrow.size()));
+  ASSERT_TRUE(narrow_registry.ProcessTableMapEvent(narrow.data(), narrow.size(), kMySQL));
   EXPECT_GT(narrow_registry.RetainedBytes(), 0u);
 
   TableMapRegistry wide_registry;
   const auto wide = BuildWideTableMapBody(1, 4, kWideNameLength);
-  ASSERT_TRUE(wide_registry.ProcessTableMapEvent(wide.data(), wide.size()));
+  ASSERT_TRUE(wide_registry.ProcessTableMapEvent(wide.data(), wide.size(), kMySQL));
 
   // The two schemas differ in nothing but identifier length, so the whole
   // difference is the column names: counted once in the parsed metadata and
@@ -1498,7 +502,7 @@ TEST(TableMapRegistryTest, RetainedBytesCountsColumnNames) {
 TEST(TableMapRegistryTest, EvictionLeavesHandedOutMetadataIntact) {
   TableMapRegistry registry;
   const auto body = BuildWideTableMapBody(1, 4, kWideNameLength);
-  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size()));
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL));
   // What a queued ChangeEvent holds while it waits to be drained.
   std::shared_ptr<const TableMetadata> shared = registry.SharedLookup(1);
   ASSERT_NE(shared, nullptr);
@@ -1511,7 +515,7 @@ TEST(TableMapRegistryTest, EvictionLeavesHandedOutMetadataIntact) {
   std::vector<uint64_t> evicted;
   for (uint64_t id = 2; id <= kWideRegistrations; ++id) {
     const auto wide = BuildWideTableMapBody(id, kWideColumns, kWideNameLength);
-    ASSERT_TRUE(registry.ProcessTableMapEvent(wide.data(), wide.size(), &evicted));
+    ASSERT_TRUE(registry.ProcessTableMapEvent(wide.data(), wide.size(), kMySQL, &evicted));
   }
   ASSERT_FALSE(evicted.empty());
   EXPECT_EQ(evicted.front(), 1u);
@@ -1519,10 +523,28 @@ TEST(TableMapRegistryTest, EvictionLeavesHandedOutMetadataIntact) {
 
   // Dropping the registry's own reference left the events reading exactly what
   // they were decoded against, bytes and address.
-  EXPECT_EQ(shared->table_name, "t");
+  EXPECT_EQ(shared->table, "t");
   EXPECT_EQ(shared->columns.size(), 4u);
   EXPECT_EQ(shared->columns[0].name, expected_name);
   EXPECT_EQ(shared->columns[0].name.data(), borrowed);
+}
+
+// The same TABLE_MAP bytes index their charset metadata differently on MariaDB
+// (GEOMETRY takes a slot), so a body registered under one flavor is parsed again
+// under the other instead of being reported unchanged.
+TEST(TableMapRegistryTest, IdenticalBodyUnderAnotherFlavorIsParsedAgain) {
+  TableMapRegistry registry;
+  const auto body = test::BuildTableMapBody(42, "db", "tbl");
+  bool unchanged = true;
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(), kMySQL, nullptr, &unchanged));
+  EXPECT_FALSE(unchanged);
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(),
+                                            mybinlog::ServerFlavor::kMariaDB, nullptr, &unchanged));
+  EXPECT_FALSE(unchanged);
+  ASSERT_TRUE(registry.ProcessTableMapEvent(body.data(), body.size(),
+                                            mybinlog::ServerFlavor::kMariaDB, nullptr, &unchanged));
+  EXPECT_TRUE(unchanged);
+  EXPECT_EQ(registry.Size(), 1u);
 }
 
 }  // namespace

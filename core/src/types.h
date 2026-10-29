@@ -21,50 +21,17 @@
 #include <utility>
 #include <vector>
 
+#include "mybinlog/event_types.h"
+#include "mybinlog/table_map.h"
+
 namespace mes {
 
 /**
- * @brief MySQL column type enumeration
+ * @brief MySQL column type code, as carried in TABLE_MAP.
  *
- * Maps to MySQL MYSQL_TYPE_* values from include/field_types.h.
- * Only types relevant to MySQL 8.4 binlog row events are included.
+ * The codec's enumeration under the engine's historical name.
  */
-enum class ColumnType : uint8_t {
-  kDecimal = 0x00,            ///< MYSQL_TYPE_DECIMAL (legacy)
-  kTiny = 0x01,               ///< MYSQL_TYPE_TINY (TINYINT)
-  kShort = 0x02,              ///< MYSQL_TYPE_SHORT (SMALLINT)
-  kLong = 0x03,               ///< MYSQL_TYPE_LONG (INT)
-  kFloat = 0x04,              ///< MYSQL_TYPE_FLOAT
-  kDouble = 0x05,             ///< MYSQL_TYPE_DOUBLE
-  kTimestamp = 0x07,          ///< MYSQL_TYPE_TIMESTAMP
-  kLongLong = 0x08,           ///< MYSQL_TYPE_LONGLONG (BIGINT)
-  kInt24 = 0x09,              ///< MYSQL_TYPE_INT24 (MEDIUMINT)
-  kDate = 0x0A,               ///< MYSQL_TYPE_DATE
-  kTime = 0x0B,               ///< MYSQL_TYPE_TIME
-  kDatetime = 0x0C,           ///< MYSQL_TYPE_DATETIME
-  kYear = 0x0D,               ///< MYSQL_TYPE_YEAR
-  kNewDate = 0x0E,            ///< MYSQL_TYPE_NEWDATE (typed-array element marker)
-  kVarchar = 0x0F,            ///< MYSQL_TYPE_VARCHAR
-  kBit = 0x10,                ///< MYSQL_TYPE_BIT
-  kTimestamp2 = 0x11,         ///< MYSQL_TYPE_TIMESTAMP2 (with fractional seconds)
-  kDatetime2 = 0x12,          ///< MYSQL_TYPE_DATETIME2 (with fractional seconds)
-  kTime2 = 0x13,              ///< MYSQL_TYPE_TIME2 (with fractional seconds)
-  kTypedArray = 0x14,         ///< MYSQL_TYPE_TYPED_ARRAY (binary JSON row payload)
-  kBlobCompressed = 0x8C,     ///< MariaDB MYSQL_TYPE_BLOB_COMPRESSED
-  kVarcharCompressed = 0x8D,  ///< MariaDB MYSQL_TYPE_VARCHAR_COMPRESSED
-  kVector = 0xF2,             ///< MYSQL_TYPE_VECTOR (MySQL 9.0+)
-  kJson = 0xF5,               ///< MYSQL_TYPE_JSON
-  kNewDecimal = 0xF6,         ///< MYSQL_TYPE_NEWDECIMAL
-  kEnum = 0xF7,               ///< MYSQL_TYPE_ENUM
-  kSet = 0xF8,                ///< MYSQL_TYPE_SET
-  kTinyBlob = 0xF9,           ///< MYSQL_TYPE_TINY_BLOB
-  kMediumBlob = 0xFA,         ///< MYSQL_TYPE_MEDIUM_BLOB
-  kLongBlob = 0xFB,           ///< MYSQL_TYPE_LONG_BLOB
-  kBlob = 0xFC,               ///< MYSQL_TYPE_BLOB
-  kVarString = 0xFD,          ///< MYSQL_TYPE_VAR_STRING
-  kString = 0xFE,             ///< MYSQL_TYPE_STRING
-  kGeometry = 0xFF,           ///< MYSQL_TYPE_GEOMETRY
-};
+using ColumnType = mybinlog::ColumnType;
 
 /**
  * @brief CDC change event type
@@ -241,36 +208,14 @@ struct EventPosition {
 };
 
 /**
- * @brief Metadata for a single column from TABLE_MAP event
+ * @brief A registered TABLE_MAP and what the engine resolved for it.
+ *
+ * The parsed TABLE_MAP is the base. Column names and signedness that a metadata
+ * side-connection supplies are written into a copy that replaces the registered
+ * object (see TableMapRegistry::ReplaceMetadata()), never into one already
+ * handed out.
  */
-struct ColumnMetadata {
-  ColumnType type = ColumnType::kLong;
-  std::string name;
-  uint32_t metadata = 0;  ///< Type-specific metadata
-  /// MySQL encodes multi-valued-index backing fields as TYPED_ARRAY plus
-  /// the logical element type/metadata. Their row payload is still the
-  /// Field_json representation (4-byte length + binary JSON).
-  bool is_array = false;
-  ColumnType array_element_type = ColumnType::kLong;
-  bool is_nullable = true;
-  bool is_unsigned = false;
-  /// TABLE_MAP collation ID, when optional charset metadata was present.
-  uint32_t charset_id = 0;
-  bool charset_known = false;
-};
-
-/**
- * @brief Metadata for a table from TABLE_MAP event
- */
-struct TableMetadata {
-  uint64_t table_id = 0;
-  std::string database_name;
-  std::string table_name;
-  std::vector<ColumnMetadata> columns;
-  /// True when column signedness came from the binlog TABLE_MAP optional
-  /// metadata (authoritative). When false, signedness may be filled from a
-  /// metadata side-connection as a fallback.
-  bool signedness_from_binlog = false;
+struct TableMetadata : mybinlog::TableMap {
   /// True only when every column name is known (either carried in the binlog
   /// or resolved via the metadata side-connection). Otherwise emitted events
   /// carry empty names for the unresolved columns.
@@ -279,6 +224,23 @@ struct TableMetadata {
   /// source, so the report is made once per table instead of once per event.
   bool unknown_signedness_reported = false;
 };
+
+/**
+ * @brief Bytes of variable-length content @p metadata retains.
+ *
+ * Its names, its column array and every column name and ENUM/SET label in it.
+ * The fixed TableMetadata structure is not counted; callers that charge it add
+ * it themselves.
+ */
+inline size_t TableMetadataContentBytes(const TableMetadata& metadata) {
+  size_t bytes = metadata.schema.size() + metadata.table.size() +
+                 metadata.columns.size() * sizeof(mybinlog::TableMapColumn);
+  for (const mybinlog::TableMapColumn& column : metadata.columns) {
+    bytes += column.name.size() + column.labels.size() * sizeof(std::string);
+    for (const std::string& label : column.labels) bytes += label.size();
+  }
+  return bytes;
+}
 
 /**
  * @brief A CDC change event representing a single row change
@@ -375,12 +337,7 @@ inline size_t RowDataCharge(const RowData& row) {
 inline size_t ChangeEventCharge(const ChangeEvent& event) {
   size_t metadata_bytes = 0;
   if (event.table_metadata) {
-    const TableMetadata& metadata = *event.table_metadata;
-    metadata_bytes = sizeof(TableMetadata) + metadata.database_name.size() +
-                     metadata.table_name.size() + metadata.columns.size() * sizeof(ColumnMetadata);
-    for (const ColumnMetadata& column : metadata.columns) {
-      metadata_bytes += column.name.size();
-    }
+    metadata_bytes = sizeof(TableMetadata) + TableMetadataContentBytes(*event.table_metadata);
   }
   return QueuedEventCharge(RowDataCharge(event.before) + RowDataCharge(event.after),
                            event.database.size() + event.table.size() +

@@ -32,8 +32,9 @@
 #include "client/binlog_client.h"
 #include "client/gtid_encoder.h"
 #include "client/metadata_fetcher.h"
-#include "event_header.h"
 #include "mes.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
@@ -875,8 +876,8 @@ TEST(E2EProtocol, CurrentGtidDoesNotAdvanceWhileTransactionIsOnlyQueued) {
   for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
     mes_poll_result_t result = mes_client_poll(client);
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
-    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
-      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    if (result.data != nullptr && result.size >= mybinlog::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mybinlog::EventType::kXidEvent);
     }
   }
   ASSERT_TRUE(saw_xid);
@@ -969,8 +970,8 @@ TEST(E2EProtocol, DeliveredCheckpointPreservesCompleteMultiSidSet) {
   for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
     mes_poll_result_t result = mes_client_poll(client);
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
-    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
-      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    if (result.data != nullptr && result.size >= mybinlog::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mybinlog::EventType::kXidEvent);
     }
   }
   ASSERT_TRUE(saw_xid);
@@ -1061,8 +1062,8 @@ TEST(E2EProtocol, MariaDBDeliveredCheckpointPreservesAllDomains) {
   for (int poll_count = 0; poll_count < 100 && !saw_xid; ++poll_count) {
     mes_poll_result_t result = mes_client_poll(client);
     ASSERT_EQ(result.error, MES_OK) << mes_client_last_error(client);
-    if (result.data != nullptr && result.size >= mes::kEventHeaderSize) {
-      saw_xid = result.data[4] == static_cast<uint8_t>(mes::BinlogEventType::kXidEvent);
+    if (result.data != nullptr && result.size >= mybinlog::kEventHeaderSize) {
+      saw_xid = result.data[4] == static_cast<uint8_t>(mybinlog::EventType::kXidEvent);
     }
   }
   ASSERT_TRUE(saw_xid);

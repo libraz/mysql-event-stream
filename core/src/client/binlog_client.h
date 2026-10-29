@@ -274,7 +274,7 @@ class BinlogClient {
   std::atomic<bool> streaming_{false};
   std::atomic<bool> connected_{false};
   // Whether the server emits a CRC32 trailer on every binlog event. This is
-  // a protocol-layer flag distinct from EventStreamParser::has_checksum_:
+  // a protocol-layer flag distinct from EventStreamParser's checksum tracker:
   // BinlogClient detects it via SQL (SELECT @@global.binlog_checksum) because
   // it must (a) send "SET @source_binlog_checksum='CRC32'" before streaming
   // and (b) verify the CRC on the wire for the integrity counter, both of

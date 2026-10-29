@@ -29,7 +29,7 @@ set(CORE_SOURCES
   ${MES_ROOT}/core/src/table_map.cpp
   ${MES_ROOT}/core/src/rotate_event.cpp
   ${MES_ROOT}/core/src/state_machine.cpp
-  ${MES_ROOT}/core/src/row_decoder.cpp
+  ${MES_ROOT}/core/src/value_render.cpp
   ${MES_ROOT}/core/src/cdc_engine.cpp
   ${MES_ROOT}/core/src/capi.cpp
   ${MES_ROOT}/core/src/logger.cpp

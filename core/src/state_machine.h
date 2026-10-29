@@ -14,10 +14,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
-#include "event_header.h"
 #include "mes.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/event_header.h"
 
 namespace mes {
 
@@ -35,7 +37,8 @@ constexpr uint32_t kAbsoluteMaxEventSize = 1024u * 1024u * 1024u;
 
 /** Normalize a public max-event-size value to the parser/client contract. */
 constexpr uint32_t NormalizeMaxEventSize(uint32_t max_event_size) {
-  constexpr uint32_t kMinValid = static_cast<uint32_t>(kEventHeaderSize + kChecksumSize);
+  constexpr uint32_t kMinValid =
+      static_cast<uint32_t>(mybinlog::kEventHeaderSize + mybinlog::kChecksumSize);
   if (max_event_size == 0 || max_event_size > kAbsoluteMaxEventSize) {
     return kAbsoluteMaxEventSize;
   }
@@ -71,7 +74,7 @@ class EventStreamParser {
   /**
    * @brief Get the current event header (valid only when HasEvent() is true).
    */
-  const EventHeader& CurrentHeader() const;
+  const mybinlog::EventHeader& CurrentHeader() const;
 
   /**
    * @brief Get the current event body data (after header, before checksum).
@@ -186,25 +189,25 @@ class EventStreamParser {
   // amortized O(1) without trusting the declared length.
   static constexpr size_t kMaxEagerReserve = 1u * 1024u * 1024u;
 
-  /// Auto-detect the checksum algorithm from a buffered FORMAT_DESCRIPTION
-  /// event and update has_checksum_ accordingly.
-  void DetectChecksumFromFde();
-
-  /// Validate the trailing checksum of the complete buffered event.
+  /// Frame the complete buffered event and verify its trailer.
   bool VerifyChecksum();
 
-  /// Detect the checksummed synthetic ROTATE emitted before an FDE. Additive
-  /// only: it may turn the buffered event's checksum framing on, never off.
-  void DetectArtificialRotateChecksum();
+  /// Algorithm the stream is framed with, counting a setter call made mid-event.
+  mybinlog::ChecksumAlgorithm StreamAlgorithm() const;
 
   ParserState state_ = ParserState::kWaitingHeader;
   std::vector<uint8_t> buffer_;
-  EventHeader current_header_{};
-  size_t bytes_needed_ = kEventHeaderSize;
+  mybinlog::EventHeader current_header_{};
+  size_t bytes_needed_ = mybinlog::kEventHeaderSize;
   uint32_t max_event_size_ = kDefaultMaxEventSize;
-  bool has_checksum_ = true;
-  bool current_has_checksum_ = true;
-  bool trailer_pre_verified_ = false;
+  // Owns the stream's framing: the default before an FDE, then each FDE's
+  // algorithm, and whether trailers are verified.
+  mybinlog::ChecksumTracker checksum_tracker_;
+  // A SetChecksumEnabled() call made after the buffered event's header was
+  // parsed; applied once that event is consumed, so its framing stays frozen.
+  std::optional<mybinlog::ChecksumAlgorithm> pending_algorithm_;
+  // Header + body bytes of the buffered event, the trailer excluded.
+  size_t current_payload_length_ = 0;
   // Number of CRC32 passes this parser has made over event bytes. Sharing the
   // producer's verification is only worth configuring if it is observable that
   // the work is not repeated, and the count is the work itself rather than a

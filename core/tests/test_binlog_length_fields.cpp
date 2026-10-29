@@ -21,18 +21,16 @@
 
 #include <gtest/gtest.h>
 
-#include <filesystem>
-#include <fstream>
-#include <set>
 #include <string>
 #include <vector>
 
-#include "binary_util.h"
 #include "cdc_engine.h"
-#include "event_header.h"
-#include "row_decoder.h"
-#include "source_scan.h"
-#include "table_map.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/row_decoder.h"
+#include "mybinlog/server_flavor.h"
+#include "mybinlog/status.h"
+#include "mybinlog/table_map.h"
 #include "test_helpers.h"
 
 namespace mes {
@@ -42,6 +40,8 @@ namespace {
 constexpr uint8_t kNullMarkerByte = 0xFB;
 
 constexpr uint64_t kTableId = 990;
+
+size_t BitmapBytes(size_t bits) { return (bits + 7) / 8; }
 
 /// A packed-integer field read from a binlog event body.
 enum class LengthField {
@@ -108,6 +108,27 @@ const char* FieldName(LengthField field) {
 
 const char* ShapeName(SchemaShape shape) {
   return shape == SchemaShape::kMySql ? "MySql" : "MariaDb";
+}
+
+mybinlog::ServerFlavor FlavorOf(SchemaShape shape) {
+  return shape == SchemaShape::kMySql ? mybinlog::ServerFlavor::kMySQL
+                                      : mybinlog::ServerFlavor::kMariaDB;
+}
+
+// The libmybinlog parse of a TABLE_MAP body, as a direct-entry case calls it.
+bool ParseTableMap(const std::vector<uint8_t>& body, mybinlog::ServerFlavor flavor,
+                   mybinlog::TableMap* map) {
+  return mybinlog::ParseTableMapEvent(mybinlog::EventHeader{}, body.data(), body.size(), flavor,
+                                      map) == mybinlog::Status::kOk;
+}
+
+// The libmybinlog decode of a v2 WRITE_ROWS body, as a direct-entry case calls it.
+bool DecodeWriteRows(const std::vector<uint8_t>& body, const mybinlog::TableMap& map,
+                     mybinlog::RowsEvent* decoded) {
+  mybinlog::EventHeader header;
+  header.type_code = static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent);
+  return mybinlog::DecodeRowsEvent(header, body.data(), body.size(), map, mybinlog::DecodeOptions{},
+                                   decoded) == mybinlog::Status::kOk;
 }
 
 const char* EntryName(Entry entry) {
@@ -319,7 +340,7 @@ std::vector<uint8_t> BuildWideTableMapBody(uint64_t columns) {
     b.WriteU8(static_cast<uint8_t>(ColumnType::kTiny));
   }
   b.WriteU8(0);  // metadata_length: TINYINT declares no metadata
-  for (size_t i = 0; i < binary::BitmapBytes(static_cast<size_t>(columns)); ++i) {
+  for (size_t i = 0; i < BitmapBytes(static_cast<size_t>(columns)); ++i) {
     b.WriteU8(0);  // null bitmap: no nullable column
   }
   return b.Data();
@@ -334,7 +355,7 @@ std::vector<uint8_t> BuildWideWriteRowsBody(uint64_t columns, uint64_t wire_colu
   b.WriteU16Le(0);
   b.WriteU16Le(2);  // v2 variable header length
   WritePackedInt(b, wire_column_count);
-  const size_t bitmap_bytes = binary::BitmapBytes(static_cast<size_t>(columns));
+  const size_t bitmap_bytes = BitmapBytes(static_cast<size_t>(columns));
   for (size_t i = 0; i < bitmap_bytes; ++i) {
     b.WriteU8(0xFF);  // columns_present: every column
   }
@@ -379,8 +400,8 @@ TEST_P(BinlogLengthMarkerTest, MarkerFailsTheParseAndLegalValueParses) {
                                                     : BuildTableMapBody(c.field, c.shape, c.value);
 
   if (c.entry == Entry::kDirect) {
-    TableMetadata metadata;
-    const bool table_map_parsed = ParseTableMapEvent(table_map.data(), table_map.size(), &metadata);
+    mybinlog::TableMap metadata;
+    const bool table_map_parsed = ParseTableMap(table_map, FlavorOf(c.shape), &metadata);
     if (!rows_field) {
       ASSERT_EQ(table_map_parsed, expect_parsed);
       if (expect_parsed) {
@@ -390,12 +411,12 @@ TEST_P(BinlogLengthMarkerTest, MarkerFailsTheParseAndLegalValueParses) {
     }
 
     ASSERT_TRUE(table_map_parsed);
-    const std::vector<uint8_t> rows = BuildRowsBodyWithColumnCount(c.value);
-    std::vector<RowData> decoded;
-    ASSERT_EQ(DecodeWriteRows(rows.data(), rows.size(), metadata, true, &decoded), expect_parsed);
+    mybinlog::RowsEvent decoded;
+    ASSERT_EQ(DecodeWriteRows(BuildRowsBodyWithColumnCount(c.value), metadata, &decoded),
+              expect_parsed);
     if (expect_parsed) {
-      ASSERT_EQ(decoded.size(), 1u);
-      EXPECT_EQ(decoded[0].columns[0].int_val, 4242);
+      ASSERT_EQ(decoded.rows.size(), 1u);
+      EXPECT_EQ(decoded.rows[0][0].i, 4242);
     }
     return;
   }
@@ -405,7 +426,7 @@ TEST_P(BinlogLengthMarkerTest, MarkerFailsTheParseAndLegalValueParses) {
   engine.SetChecksumEnabled(checksum);
 
   const std::vector<uint8_t> table_map_event =
-      WrapEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), table_map, checksum);
+      WrapEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), table_map, checksum);
   ASSERT_EQ(engine.Feed(table_map_event.data(), table_map_event.size()), table_map_event.size());
 
   if (!rows_field) {
@@ -418,7 +439,7 @@ TEST_P(BinlogLengthMarkerTest, MarkerFailsTheParseAndLegalValueParses) {
 
   ASSERT_FALSE(engine.IsError()) << "error=" << engine.ErrorCode();
   const std::vector<uint8_t> rows_event =
-      WrapEvent(static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent),
+      WrapEvent(static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
                 BuildRowsBodyWithColumnCount(c.value), checksum);
   ASSERT_EQ(engine.Feed(rows_event.data(), rows_event.size()), rows_event.size());
 
@@ -456,8 +477,8 @@ const char* ParserName(CountParser parser) {
 }
 
 std::vector<CeilingCase> CeilingCases() {
-  const uint64_t counts[] = {binary::kMaxTableColumns - 1, binary::kMaxTableColumns,
-                             binary::kMaxTableColumns + 1, binary::kMaxTableColumns + 2};
+  const uint64_t counts[] = {mybinlog::kMaxTableColumns - 1, mybinlog::kMaxTableColumns,
+                             mybinlog::kMaxTableColumns + 1, mybinlog::kMaxTableColumns + 2};
   std::vector<CeilingCase> cases;
   for (uint64_t columns : counts) {
     for (Entry entry : {Entry::kDirect, Entry::kEngineChecksum, Entry::kEngineNoChecksum}) {
@@ -476,22 +497,22 @@ class ColumnCountCeilingTest : public ::testing::TestWithParam<CeilingCase> {};
 
 TEST_P(ColumnCountCeilingTest, AcceptsUpToTheCeilingAndRejectsAbove) {
   const CeilingCase c = GetParam();
-  const bool expect_accepted = c.columns <= binary::kMaxTableColumns;
+  const bool expect_accepted = c.columns <= mybinlog::kMaxTableColumns;
 
   if (c.parser == CountParser::kRowsEvent) {
-    TableMetadata metadata;
+    mybinlog::TableMap metadata;
     metadata.table_id = kTableId;
-    metadata.columns.assign(static_cast<size_t>(c.columns), ColumnMetadata{});
+    metadata.columns.assign(static_cast<size_t>(c.columns), mybinlog::TableMapColumn{});
     for (auto& column : metadata.columns) {
       column.type = ColumnType::kTiny;
-      column.is_nullable = false;
+      column.nullable = false;
     }
-    const std::vector<uint8_t> rows = BuildWideWriteRowsBody(c.columns, c.columns);
-    std::vector<RowData> decoded;
-    ASSERT_EQ(DecodeWriteRows(rows.data(), rows.size(), metadata, true, &decoded), expect_accepted);
+    mybinlog::RowsEvent decoded;
+    ASSERT_EQ(DecodeWriteRows(BuildWideWriteRowsBody(c.columns, c.columns), metadata, &decoded),
+              expect_accepted);
     if (expect_accepted) {
-      ASSERT_EQ(decoded.size(), 1u);
-      EXPECT_EQ(decoded[0].columns.size(), static_cast<size_t>(c.columns));
+      ASSERT_EQ(decoded.rows.size(), 1u);
+      EXPECT_EQ(decoded.rows[0].size(), static_cast<size_t>(c.columns));
     }
     return;
   }
@@ -499,8 +520,8 @@ TEST_P(ColumnCountCeilingTest, AcceptsUpToTheCeilingAndRejectsAbove) {
   const std::vector<uint8_t> body = BuildWideTableMapBody(c.columns);
 
   if (c.entry == Entry::kDirect) {
-    TableMetadata metadata;
-    ASSERT_EQ(ParseTableMapEvent(body.data(), body.size(), &metadata), expect_accepted);
+    mybinlog::TableMap metadata;
+    ASSERT_EQ(ParseTableMap(body, mybinlog::ServerFlavor::kMySQL, &metadata), expect_accepted);
     if (expect_accepted) {
       EXPECT_EQ(metadata.columns.size(), static_cast<size_t>(c.columns));
     }
@@ -511,7 +532,7 @@ TEST_P(ColumnCountCeilingTest, AcceptsUpToTheCeilingAndRejectsAbove) {
   CdcEngine engine;
   engine.SetChecksumEnabled(checksum);
   const std::vector<uint8_t> event =
-      WrapEvent(static_cast<uint8_t>(BinlogEventType::kTableMapEvent), body, checksum);
+      WrapEvent(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent), body, checksum);
   ASSERT_EQ(engine.Feed(event.data(), event.size()), event.size());
   EXPECT_EQ(engine.IsError(), !expect_accepted);
   if (!expect_accepted) {
@@ -525,86 +546,6 @@ INSTANTIATE_TEST_SUITE_P(AtTheBoundary, ColumnCountCeilingTest, ::testing::Value
                                   std::to_string(info.param.columns) + "Columns_" +
                                   EntryName(info.param.entry);
                          });
-
-// --- One definition of the ceiling ---
-
-using source_scan::CountLinesContaining;
-using source_scan::CountLinesContainingBoth;
-using source_scan::FilesUnder;
-using source_scan::RepoRoot;
-
-/**
- * @brief The binlog column-count ceiling has one definition and every parser
- *        bounding a column count reads it.
- *
- * A second constant holding the same value changes no behaviour until one of
- * the two is edited, so no test of the parsers can observe it. Scanning the
- * sources is what proves its absence, and that absence is the point: the
- * TABLE_MAP parser and the ROWS_EVENT parser must not be able to disagree on
- * the ceiling.
- *
- * Every pattern below is assembled from fragments rather than written out, so
- * that this file does not become a hit in the searches it exists to keep empty.
- */
-TEST(ColumnCeilingTest, IsDefinedOnceAndReadByEveryBoundingParser) {
-  const std::string ceiling_value = std::string("40") + "96";
-  const std::string definition_keyword = std::string("const") + "expr";
-  const std::string shared_name = std::string("kMaxTable") + "Columns";
-  const std::string private_name = std::string("kMax") + "Columns";
-
-  const std::filesystem::path root = RepoRoot();
-  const std::filesystem::path definition_file = root / "core" / "src" / "binary_util.h";
-  // A COM_QUERY result set is bounded independently of a binlog table, for the
-  // reason recorded at that constant, so its value is expected here.
-  const std::filesystem::path result_set_bound =
-      root / "core" / "src" / "protocol" / "mysql_query.cpp";
-  const std::filesystem::path bounding_parsers[] = {
-      root / "core" / "src" / "table_map.cpp",
-      root / "core" / "src" / "row_decoder.cpp",
-  };
-  const std::filesystem::path scanned_roots[] = {
-      root / "core" / "src",
-      root / "core" / "include",
-      root / "bindings" / "node" / "src",
-      root / "bindings" / "python" / "src",
-  };
-
-  std::vector<std::filesystem::path> files;
-  for (const std::filesystem::path& scanned : scanned_roots) {
-    const std::vector<std::filesystem::path> found = FilesUnder(scanned);
-    ASSERT_FALSE(found.empty()) << "no files found under " << scanned;
-    files.insert(files.end(), found.begin(), found.end());
-  }
-
-  std::set<std::string> value_files;
-  int private_name_hits = 0;
-  for (const std::filesystem::path& file : files) {
-    const int value_hits = CountLinesContaining(file, ceiling_value);
-    const int private_hits = CountLinesContaining(file, private_name);
-    ASSERT_GE(value_hits, 0) << "cannot read " << file;
-    ASSERT_GE(private_hits, 0) << "cannot read " << file;
-    if (value_hits > 0) {
-      value_files.insert(file.string());
-    }
-    private_name_hits += private_hits;
-  }
-
-  // Reading the definition through its own name is what proves the scan is
-  // looking at the sources it is meant to: without this the assertions below
-  // would pass over an empty or mislocated file list.
-  ASSERT_GT(CountLinesContaining(definition_file, shared_name), 0)
-      << "the shared constant was not found at " << definition_file;
-
-  const std::set<std::string> expected = {definition_file.string(), result_set_bound.string()};
-  EXPECT_EQ(value_files, expected);
-  EXPECT_EQ(CountLinesContainingBoth(definition_file, definition_keyword, ceiling_value), 1);
-  EXPECT_EQ(private_name_hits, 0) << "a column ceiling is defined outside " << definition_file;
-
-  for (const std::filesystem::path& parser : bounding_parsers) {
-    EXPECT_GT(CountLinesContaining(parser, shared_name), 0)
-        << parser << " bounds a column count without reading the shared constant";
-  }
-}
 
 }  // namespace
 }  // namespace mes
