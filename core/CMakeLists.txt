@@ -61,18 +61,12 @@ set(CLIENT_SOURCES
 
 # OBJECT library: compile sources once, reuse in static and shared targets
 add_library(mes-objects OBJECT
-  src/binary_util.cpp
-  src/event_header.cpp
-  src/mariadb_gtid.cpp
-  src/mariadb_event_parser.cpp
   src/table_map.cpp
-  src/rotate_event.cpp
   src/state_machine.cpp
   src/value_render.cpp
   src/cdc_engine.cpp
   src/capi.cpp
   src/logger.cpp
-  src/client/gtid_set.cpp
   src/client/gtid_encoder.cpp
   ${PROTOCOL_SOURCES}
   ${CLIENT_SOURCES}

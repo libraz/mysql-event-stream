@@ -21,20 +21,11 @@ endfunction()
 # test_types
 mes_add_gtest(test_types test_types.cpp)
 
-# test_binary_util
-mes_add_gtest(test_binary_util test_binary_util.cpp)
-
-# test_event_header
-mes_add_gtest(test_event_header test_event_header.cpp)
-
 # test_table_map
 mes_add_gtest(test_table_map test_table_map.cpp)
 
 # test_binlog_length_fields
 mes_add_gtest(test_binlog_length_fields test_binlog_length_fields.cpp)
-
-# test_rotate_event
-mes_add_gtest(test_rotate_event test_rotate_event.cpp)
 
 # test_state_machine
 mes_add_gtest(test_state_machine test_state_machine.cpp)
@@ -81,17 +72,8 @@ mes_add_gtest(test_transaction_gtid_tracker test_transaction_gtid_tracker.cpp)
 # test_connection_validator
 mes_add_gtest(test_connection_validator test_connection_validator.cpp)
 
-# test_crc32
-mes_add_gtest(test_crc32 test_crc32.cpp ZLIB::ZLIB)
-
 # test_logger
 mes_add_gtest(test_logger test_logger.cpp)
-
-# test_mariadb_gtid
-mes_add_gtest(test_mariadb_gtid test_mariadb_gtid.cpp)
-
-# test_mariadb_event_parser
-mes_add_gtest(test_mariadb_event_parser test_mariadb_event_parser.cpp)
 
 # test_secure_cleanse
 mes_add_gtest(test_secure_cleanse test_secure_cleanse.cpp OpenSSL::Crypto)

@@ -24,18 +24,12 @@ string(REPLACE "\"" "" NAPI_INCLUDE_DIR ${NAPI_INCLUDE_DIR})
 # Core library sources (build inline as static)
 set(MES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(CORE_SOURCES
-  ${MES_ROOT}/core/src/binary_util.cpp
-  ${MES_ROOT}/core/src/event_header.cpp
   ${MES_ROOT}/core/src/table_map.cpp
-  ${MES_ROOT}/core/src/rotate_event.cpp
   ${MES_ROOT}/core/src/state_machine.cpp
   ${MES_ROOT}/core/src/value_render.cpp
   ${MES_ROOT}/core/src/cdc_engine.cpp
   ${MES_ROOT}/core/src/capi.cpp
   ${MES_ROOT}/core/src/logger.cpp
-  ${MES_ROOT}/core/src/mariadb_gtid.cpp
-  ${MES_ROOT}/core/src/mariadb_event_parser.cpp
-  ${MES_ROOT}/core/src/client/gtid_set.cpp
   ${MES_ROOT}/core/src/client/gtid_encoder.cpp
   ${MES_ROOT}/core/src/client/connection_validator.cpp
   ${MES_ROOT}/core/src/client/binlog_client.cpp

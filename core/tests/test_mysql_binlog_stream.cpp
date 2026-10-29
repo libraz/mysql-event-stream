@@ -36,7 +36,7 @@ TEST(BinlogStreamConfigTest, DefaultValues) {
 }
 
 /**
- * @brief The binlog magic offset has one definition, and every structure
+ * @brief The binlog magic offset comes from libmybinlog, and every structure
  *        defaulting a start offset reads it rather than restating the value.
  *
  * A second constant holding the same offset changes no behaviour until one of
@@ -57,7 +57,6 @@ TEST(BinlogMagicOffsetTest, IsDefinedOnceAndReadByEveryStartOffset) {
   const std::string inline_value = std::string("= ") + "4";
 
   const std::filesystem::path root = source_scan::RepoRoot();
-  const std::filesystem::path definition_file = root / "core" / "src" / "event_header.h";
   // Every structure that carries a start offset, plus the one range check that
   // refuses an offset below it.
   const std::filesystem::path readers[] = {
@@ -85,12 +84,9 @@ TEST(BinlogMagicOffsetTest, IsDefinedOnceAndReadByEveryStartOffset) {
     }
   }
 
-  // The scan reaches the file that is supposed to hold the definition, so a
-  // zero count above would mean the shape is gone rather than unfound.
-  ASSERT_GT(source_scan::CountLinesContaining(definition_file, constant_name), 0)
-      << constant_name << " not found in " << definition_file;
-
-  EXPECT_EQ(definitions, 1) << "the binlog magic offset is defined more than once";
+  // libmybinlog holds the one definition; the readers below prove the scan
+  // reaches files that name the constant, so zero here is not a missed match.
+  EXPECT_EQ(definitions, 0) << "the binlog magic offset is redefined in core/src";
   EXPECT_EQ(restated, std::vector<std::string>{})
       << "a start offset is defaulted to the magic offset's value instead of the constant";
 
