@@ -11,6 +11,10 @@
 BUILD_DIR  := build
 BUILD_TYPE ?= Release
 
+# Local libmybinlog checkout used instead of the pinned fetch (empty = fetch)
+MYBINLOG_SOURCE_DIR ?=
+export MYBINLOG_SOURCE_DIR
+
 # clang-format command (can be overridden: make CLANG_FORMAT=clang-format-18 format)
 CLANG_FORMAT ?= clang-format
 
@@ -135,12 +139,12 @@ uninstall:
 
 format: node-fix py-format
 	@echo "Formatting C++ code..."
-	@find core/src core/include core/codec core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) -i
+	@find core/src core/include core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) -i
 	@echo "Format complete!"
 
 format-check:
 	@echo "Checking C++ code formatting..."
-	@find core/src core/include core/codec core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) --dry-run --Werror
+	@find core/src core/include core/tests bindings/node/src/addon -type f \( -name "*.cpp" -o -name "*.h" \) | xargs $(CLANG_FORMAT) --dry-run --Werror
 	@echo "Format check passed!"
 
 # ============================================================================

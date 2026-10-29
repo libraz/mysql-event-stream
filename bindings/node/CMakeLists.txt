@@ -23,7 +23,6 @@ string(REPLACE "\"" "" NAPI_INCLUDE_DIR ${NAPI_INCLUDE_DIR})
 
 # Core library sources (build inline as static)
 set(MES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
-include(${MES_ROOT}/core/codec/sources.cmake)
 set(CORE_SOURCES
   ${MES_ROOT}/core/src/binary_util.cpp
   ${MES_ROOT}/core/src/event_header.cpp
@@ -75,10 +74,12 @@ if(MES_BUNDLE_DEPENDENCIES)
   set(CMAKE_FIND_LIBRARY_SUFFIXES ${_MES_SAVED_LIBRARY_SUFFIXES})
 endif()
 
+# Shared binlog codec (reuses the ZLIB::ZLIB target found above)
+include(${MES_ROOT}/cmake/libmybinlog.cmake)
+
 # Build the addon
 add_library(${PROJECT_NAME} SHARED
   ${CORE_SOURCES}
-  ${MES_CODEC_SOURCES}
   ${ADDON_SOURCES}
   ${CMAKE_JS_SRC}
 )
@@ -93,8 +94,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   ${NAPI_INCLUDE_DIR}
   ${MES_ROOT}/core/include
   ${MES_ROOT}/core/src
-  ${MES_ROOT}/core/codec/include
-  ${MES_ROOT}/core/codec/src
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -116,7 +115,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
   -Wpedantic
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_JS_LIB} OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
+target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_JS_LIB} OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB mybinlog::mybinlog)
 
 if(MES_BUNDLE_DEPENDENCIES AND UNIX AND NOT APPLE)
   target_link_options(${PROJECT_NAME} PRIVATE -static-libgcc -static-libstdc++)
