@@ -19,6 +19,9 @@ namespace mes {
 /**
  * @brief Encodes MySQL GTID sets into binary format for binlog replication
  *
+ * A mes_error_t adapter over mybinlog::GtidSet, plus the resume convention that
+ * widens a bare "uuid:N" to "uuid:1-N".
+ *
  * Binary format:
  *   8 bytes: number of TSIDs (UUIDs), with MySQL's tagged-format nibble
  *            when any TSID has a tag

@@ -16,7 +16,6 @@
 #include "protocol/mysql_packet.h"
 #include "protocol/mysql_socket.h"
 #include "secure_cleanse.h"
-#include "server_flavor.h"
 
 namespace mes::protocol {
 
@@ -162,7 +161,7 @@ void MysqlConnection::Disconnect() {
   }
 
   negotiated_caps_ = 0;
-  server_flavor_ = ServerFlavor::kMySQL;
+  server_flavor_ = mybinlog::ServerFlavor::kMySQL;
   allow_public_key_retrieval_ = false;
   ssl_mode_ = MES_SSL_DISABLED;
 
@@ -186,7 +185,7 @@ bool MysqlConnection::DeprecateEofNegotiated() const {
   return (negotiated_caps_ & kClientDeprecateEOF) != 0;
 }
 
-ServerFlavor MysqlConnection::GetServerFlavor() const { return server_flavor_; }
+mybinlog::ServerFlavor MysqlConnection::GetServerFlavor() const { return server_flavor_; }
 
 namespace detail {
 
@@ -363,12 +362,12 @@ mes_error_t MysqlConnection::ParseServerHandshake(const std::vector<uint8_t>& pa
 
   // The server version normally comes from the handshake's NUL-terminated
   // server-version field parsed above. If it is empty (malformed/stripped
-  // handshake), DetectServerFlavor falls back to MySQL; record the ambiguity so
+  // handshake), DetectFlavorFromVersion falls back to MySQL; record the ambiguity so
   // the chosen flavor is traceable rather than silently assumed.
   if (server_info_.server_version.empty()) {
     StructuredLog().Event("server_flavor_version_unavailable").Field("fallback", "MySQL").Warn();
   }
-  server_flavor_ = DetectServerFlavor(server_info_.server_version);
+  server_flavor_ = mybinlog::DetectFlavorFromVersion(server_info_.server_version);
 
   return MES_OK;
 }

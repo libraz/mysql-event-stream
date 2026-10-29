@@ -7,16 +7,16 @@
 #include <cctype>
 #include <cstdio>
 
-#include "binary_util.h"
 #include "client/connection_validator.h"
 #include "client/gtid_encoder.h"
-#include "crc32.h"
-#include "event_header.h"
 #include "logger.h"
-#include "mariadb_event_parser.h"
+#include "mybinlog/crc32.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/mysql_gtid.h"
 #include "protocol/mysql_query.h"
 #include "secure_cleanse.h"
 #include "state_machine.h"
+#include "wire_util.h"
 
 namespace mes {
 
@@ -84,7 +84,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
     return MES_ERR_INVALID_ARG;
   }
   if (config.start_at_file_position &&
-      (config.binlog_file.empty() || config.binlog_position < kBinlogMagicOffset ||
+      (config.binlog_file.empty() || config.binlog_position < mybinlog::kBinlogMagicOffset ||
        config.binlog_position > UINT32_MAX)) {
     SetLastError("binlog_file and binlog_position (4 through UINT32_MAX) are required");
     return MES_ERR_INVALID_ARG;
@@ -116,7 +116,7 @@ mes_error_t BinlogClient::Connect(const BinlogClientConfig& config) {
       .Event("mysql_connected")
       .Field("host", config.host)
       .Field("port", static_cast<int>(config.port))
-      .Field("flavor", GetServerFlavorName(server_flavor_))
+      .Field("flavor", mybinlog::ServerFlavorName(server_flavor_))
       .Info();
   config_ = config;
   // Preserve the direct C++ configuration contract: a non-empty start_gtid
@@ -218,7 +218,7 @@ mes_error_t BinlogClient::StartStream() {
   // inside each flavor's setup) means a future start mode is added inside
   // SendBinlogDump*, which runs strictly after the state establishment it
   // depends on and therefore cannot skip it.
-  const bool is_mariadb = server_flavor_ == ServerFlavor::kMariaDB;
+  const bool is_mariadb = server_flavor_ == mybinlog::ServerFlavor::kMariaDB;
 
   mes_error_t rc = is_mariadb ? BeginSessionMariaDB() : BeginSessionMySQL();
   if (stopped_during_setup()) return MES_ERR_DISCONNECTED;
@@ -349,7 +349,7 @@ mes_error_t BinlogClient::DetectBinlogChecksum() {
                              conn_.DeprecateEofNegotiated()) != MES_OK ||
       qr.rows.size() != 1 || qr.rows[0].values.size() != 1 || qr.rows[0].is_null.size() != 1 ||
       qr.rows[0].is_null[0]) {
-    SetLastError(std::string("Failed to detect ") + GetServerFlavorName(server_flavor_) +
+    SetLastError(std::string("Failed to detect ") + mybinlog::ServerFlavorName(server_flavor_) +
                  " binlog checksum setting: " + err);
     return MES_ERR_STREAM;
   }
@@ -365,7 +365,7 @@ mes_error_t BinlogClient::DetectBinlogChecksum() {
     checksum_enabled_ = false;
     return MES_OK;
   }
-  SetLastError(std::string("Unsupported ") + GetServerFlavorName(server_flavor_) +
+  SetLastError(std::string("Unsupported ") + mybinlog::ServerFlavorName(server_flavor_) +
                " binlog checksum setting: " + value);
   return MES_ERR_STREAM;
 }
@@ -373,6 +373,9 @@ mes_error_t BinlogClient::DetectBinlogChecksum() {
 mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   mes_error_t rc = DetectBinlogChecksum();
   if (rc != MES_OK) return rc;
+  wire_checksum_.SetDefaultAlgorithm(checksum_enabled_.load(std::memory_order_acquire)
+                                         ? mybinlog::ChecksumAlgorithm::kCrc32
+                                         : mybinlog::ChecksumAlgorithm::kOff);
   if (ConfigureHeartbeat() != MES_OK) return MES_ERR_STREAM;
 
   // A non-empty checkpoint is a position this client instance published, so it
@@ -393,7 +396,7 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   state->gtid_set.clear();
   state->from_file_position = resume == nullptr && config_.start_at_file_position;
   if (!state->from_file_position) {
-    rc = server_flavor_ == ServerFlavor::kMariaDB
+    rc = server_flavor_ == mybinlog::ServerFlavor::kMariaDB
              ? ResolveStartGtidMariaDB(resume, &state->gtid_set)
              : ResolveStartGtidMySQL(resume, &state->gtid_set);
     if (rc != MES_OK) return rc;
@@ -407,7 +410,7 @@ mes_error_t BinlogClient::EstablishStartState(StartState* state) {
   if (state->from_file_position) {
     gtid_tracker_.ResetAwaitingBaseline(server_flavor_);
   } else if (!gtid_tracker_.Reset(state->gtid_set, server_flavor_)) {
-    SetLastError(std::string("Invalid ") + GetServerFlavorName(server_flavor_) +
+    SetLastError(std::string("Invalid ") + mybinlog::ServerFlavorName(server_flavor_) +
                  " GTID checkpoint set");
     return MES_ERR_INVALID_ARG;
   }
@@ -465,10 +468,11 @@ mes_error_t BinlogClient::ResolveStartGtidMySQL(const std::string* resume_checkp
     return MES_ERR_STREAM;
   }
   if (!purged_qr.rows[0].values[0].empty()) {
-    GtidSet requested_set;
-    GtidSet purged_set;
-    if (GtidSet::Parse(start_gtid, &requested_set) != MES_OK ||
-        GtidSet::Parse(purged_qr.rows[0].values[0], &purged_set) != MES_OK) {
+    mybinlog::GtidSet requested_set;
+    mybinlog::GtidSet purged_set;
+    if (mybinlog::GtidSet::Parse(start_gtid, &requested_set) != mybinlog::Status::kOk ||
+        mybinlog::GtidSet::Parse(purged_qr.rows[0].values[0], &purged_set) !=
+            mybinlog::Status::kOk) {
       SetLastError("Failed to parse MySQL purged GTID set");
       return MES_ERR_STREAM;
     }
@@ -553,7 +557,7 @@ mes_error_t BinlogClient::SendBinlogDumpMySQL(const StartState& state) {
   }
 
   // Start binlog stream via COM_BINLOG_DUMP_GTID
-  stream_config.binlog_position = kBinlogMagicOffset;
+  stream_config.binlog_position = mybinlog::kBinlogMagicOffset;
   stream_config.gtid_encoded = gtid_encoded_;
   if (binlog_stream_.Start(conn_.Socket(), stream_config) != MES_OK) {
     SetLastError("Failed to start binlog stream");
@@ -604,7 +608,7 @@ mes_error_t BinlogClient::SendBinlogDumpMariaDB(const StartState& state) {
   StructuredLog().Event("mariadb_gtid_state_set").Field("gtid", state.gtid_set).Debug();
 
   // Start binlog stream via COM_BINLOG_DUMP (not COM_BINLOG_DUMP_GTID)
-  stream_config.binlog_position = kBinlogMagicOffset;
+  stream_config.binlog_position = mybinlog::kBinlogMagicOffset;
   if (binlog_stream_.StartComBinlogDump(conn_.Socket(), stream_config) != MES_OK) {
     SetLastError("Failed to start MariaDB binlog stream");
     return MES_ERR_STREAM;
@@ -703,81 +707,77 @@ void BinlogClient::ReaderLoop() {
     }
 
     // Every binlog file carries its authoritative algorithm in the FDE. This
-    // can differ from the current global setting for historical files, so let
-    // the FDE update the wire verifier before checking this event.
-    EventHeader wire_header;
-    const bool has_wire_header = ParseEventHeader(event_pkt.data, event_pkt.size, &wire_header) &&
-                                 wire_header.event_length == event_pkt.size;
-    if (has_wire_header &&
-        wire_header.type_code == static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent)) {
-      switch (DetectFormatDescriptionChecksum(event_pkt.data, event_pkt.size)) {
-        case BinlogChecksumAlgorithm::kCrc32:
-          checksum_enabled_ = true;
-          break;
-        case BinlogChecksumAlgorithm::kOff:
-          checksum_enabled_ = false;
-          break;
-        case BinlogChecksumAlgorithm::kUnknown:
-          break;
-      }
-    }
-
-    bool event_has_checksum = checksum_enabled_.load(std::memory_order_acquire);
+    // can differ from the current global setting for historical files, so the
+    // tracker re-derives the framing at each FDE before checking this event.
     // MySQL sends the synthetic dump-start ROTATE with CRC32 even when the
-    // persisted binlog mode is NONE. Detect that one artificial event by its
-    // flag and a valid trailer; the following FDE remains authoritative for
-    // the rest of the file.
-    if (!event_has_checksum && has_wire_header &&
-        wire_header.type_code == static_cast<uint8_t>(BinlogEventType::kRotateEvent) &&
-        (wire_header.flags & kLogEventArtificialFlag) != 0 &&
-        event_pkt.size >= kEventHeaderSize + kChecksumSize) {
-      const size_t data_length = event_pkt.size - kChecksumSize;
-      event_has_checksum = ComputeCRC32(event_pkt.data, data_length) ==
-                           binary::ReadU32Le(event_pkt.data + data_length);
-    }
-
-    // Verify CRC32 checksum for data integrity.
-    // MySQL appends a 4-byte CRC32 to every event when @source_binlog_checksum='CRC32'.
-    // MariaDB may have binlog_checksum=NONE, in which case we skip verification.
+    // persisted binlog mode is NONE; the tracker frames that one event by its
+    // flag and a valid trailer.
     // An event queued as checksummed is treated as verified downstream, so a
     // frame too short to hold the trailer, or whose header length disagrees
     // with the packet, fails here the same way a wrong trailer does.
-    if (event_has_checksum) {
-      const bool framed = has_wire_header && event_pkt.size >= kEventHeaderSize + kChecksumSize;
+    mybinlog::EventHeader wire_header;
+    const bool has_wire_header =
+        mybinlog::ParseEventHeader(event_pkt.data, event_pkt.size, &wire_header) ==
+            mybinlog::Status::kOk &&
+        wire_header.event_length == event_pkt.size;
+    mybinlog::Status frame_status = mybinlog::Status::kOk;
+    mybinlog::FrameLayout layout;
+    if (has_wire_header) {
+      frame_status = wire_checksum_.OnEvent(wire_header, event_pkt.data, event_pkt.size, &layout);
+      if (wire_header.type_code ==
+              static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent) &&
+          frame_status == mybinlog::Status::kOk) {
+        checksum_enabled_ = wire_checksum_.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
+      }
+    } else if (wire_checksum_.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32) {
+      frame_status = mybinlog::Status::kChecksumMismatch;
+    }
+    const bool event_has_checksum =
+        has_wire_header ? layout.has_trailer
+                        : wire_checksum_.algorithm() == mybinlog::ChecksumAlgorithm::kCrc32;
+
+    if (frame_status != mybinlog::Status::kOk) {
+      const bool checksum_failure = frame_status == mybinlog::Status::kChecksumMismatch;
+      const bool framed =
+          has_wire_header && event_pkt.size >= mybinlog::kEventHeaderSize + mybinlog::kChecksumSize;
       uint32_t computed_crc = 0;
       uint32_t stored_crc = 0;
-      if (framed) {
-        const size_t data_length = event_pkt.size - kChecksumSize;
-        computed_crc = ComputeCRC32(event_pkt.data, data_length);
-        stored_crc = binary::ReadU32Le(event_pkt.data + data_length);
+      if (checksum_failure && framed) {
+        const size_t data_length = event_pkt.size - mybinlog::kChecksumSize;
+        computed_crc = mybinlog::ComputeCrc32(event_pkt.data, data_length);
+        stored_crc = wire::ReadU32Le(event_pkt.data + data_length);
       }
-      if (!framed || computed_crc != stored_crc) {
-        crc_errors_.fetch_add(1, std::memory_order_relaxed);
+      const char* type = !checksum_failure ? "format_description_malformed"
+                         : framed          ? "crc32_checksum_mismatch"
+                                           : "crc32_checksum_frame_malformed";
+      if (checksum_failure) crc_errors_.fetch_add(1, std::memory_order_relaxed);
+      StructuredLog()
+          .Event("binlog_error")
+          .Field("type", type)
+          .Field("status", mybinlog::StatusName(frame_status))
+          .Field("computed_crc", static_cast<uint64_t>(computed_crc))
+          .Field("stored_crc", static_cast<uint64_t>(stored_crc))
+          .Field("event_length", static_cast<uint64_t>(event_pkt.size))
+          .Error();
+      // Push error event so the consumer can detect the corrupted event. If
+      // the push fails (queue closed during shutdown) the code is lost from
+      // the queue, so record it for diagnostics.
+      connected_.store(false, std::memory_order_release);
+      retire_transport();
+      QueuedEvent frame_err;
+      frame_err.error = checksum_failure ? MES_ERR_CHECKSUM : MES_ERR_PARSE;
+      frame_err.error_message = !checksum_failure ? "Malformed FORMAT_DESCRIPTION_EVENT"
+                                : framed          ? "CRC32 checksum mismatch"
+                                         : "Binlog event frame cannot carry its CRC32 checksum";
+      if (!event_queue_->Push(std::move(frame_err))) {
         StructuredLog()
             .Event("binlog_error")
-            .Field("type", framed ? "crc32_checksum_mismatch" : "crc32_checksum_frame_malformed")
-            .Field("computed_crc", static_cast<uint64_t>(computed_crc))
-            .Field("stored_crc", static_cast<uint64_t>(stored_crc))
-            .Field("event_length", static_cast<uint64_t>(event_pkt.size))
-            .Error();
-        // Push error event so the consumer can detect the corrupted event. If
-        // the push fails (queue closed during shutdown) the code is lost from
-        // the queue, so record it for diagnostics.
-        connected_.store(false, std::memory_order_release);
-        retire_transport();
-        QueuedEvent crc_err;
-        crc_err.error = MES_ERR_CHECKSUM;
-        crc_err.error_message = framed ? "CRC32 checksum mismatch"
-                                       : "Binlog event frame cannot carry its CRC32 checksum";
-        if (!event_queue_->Push(std::move(crc_err))) {
-          StructuredLog()
-              .Event("binlog_error")
-              .Field("type", "error_sentinel_push_dropped")
-              .Field("error_code", static_cast<int64_t>(MES_ERR_CHECKSUM))
-              .Warn();
-        }
-        return;  // Stop reader; consistent with stream error handling above
+            .Field("type", "error_sentinel_push_dropped")
+            .Field("error_code",
+                   static_cast<int64_t>(checksum_failure ? MES_ERR_CHECKSUM : MES_ERR_PARSE))
+            .Warn();
       }
+      return;  // Stop reader; consistent with stream error handling above
     }
 
     // Keep received GTIDs on the reader thread. A checkpoint is attached only
@@ -1052,7 +1052,7 @@ bool BinlogClient::IsConnected() const {
 
 bool BinlogClient::IsStreaming() const { return streaming_.load(std::memory_order_acquire); }
 
-ServerFlavor BinlogClient::GetServerFlavor() const { return server_flavor_; }
+mybinlog::ServerFlavor BinlogClient::GetServerFlavor() const { return server_flavor_; }
 
 const char* BinlogClient::GetLastError() const {
   // Snapshot last_error_ into a separate buffer so the returned c_str() is

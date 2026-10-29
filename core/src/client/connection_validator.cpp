@@ -3,29 +3,19 @@
 
 #include "client/connection_validator.h"
 
-#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+#include "mybinlog/server_settings.h"
 #include "protocol/mysql_query.h"
 
 namespace mes {
 
 namespace {
-
-/** @brief Case-insensitive string comparison */
-bool EqualsIgnoreCase(const char* a, const char* b) {
-  while (*a && *b) {
-    if (std::tolower(static_cast<unsigned char>(*a)) !=
-        std::tolower(static_cast<unsigned char>(*b))) {
-      return false;
-    }
-    ++a;
-    ++b;
-  }
-  return *a == *b;
-}
 
 /** @brief Allow-list of variable names that may be passed to QueryVariable.
  *
@@ -98,58 +88,75 @@ VariableQueryStatus ClassifyVariableQueryResult(mes_error_t query_error,
 }
 
 ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* context,
-                                             ServerFlavor flavor) {
+                                             mybinlog::ServerFlavor flavor) {
+  // Checks run in this order and the first failure returns, so a failed check
+  // never queries the settings after it.
+  static constexpr mybinlog::RuleId kRules[] = {
+      mybinlog::RuleId::kLogBin,           mybinlog::RuleId::kGtidMode,
+      mybinlog::RuleId::kBinlogFormat,     mybinlog::RuleId::kBinlogRowImage,
+      mybinlog::RuleId::kNoLogBinCompress, mybinlog::RuleId::kNoTransactionCompression,
+      mybinlog::RuleId::kNoPartialJson,
+  };
+
+  // A lookup that could not produce an answer is not a verdict on the setting,
+  // so it is reported to the rule as absent and recorded here instead.
+  struct LookupContext {
+    VariableLookup lookup;
+    void* context;
+    VariableValue failure;
+    std::string failed_variable;
+    bool failed;
+  };
+  const mybinlog::VariableLookupFn adapter = [](void* ctx, std::string_view variable,
+                                                std::string* value) {
+    auto* self = static_cast<LookupContext*>(ctx);
+    const std::string name(variable);
+    VariableValue query = self->lookup(self->context, name.c_str());
+    if (query.status == VariableQueryStatus::kFound) {
+      *value = std::move(query.value);
+      return true;
+    }
+    if (query.status != VariableQueryStatus::kNotFound) {
+      self->failure = std::move(query);
+      self->failed_variable = name;
+      self->failed = true;
+    }
+    return false;
+  };
+
   ValidationResult result;
-  auto check_equal = [&](const char* var_name, const char* expected) {
-    const VariableValue query = lookup(context, var_name);
-    if (query.status != VariableQueryStatus::kFound) {
+  for (const mybinlog::RuleId id : kRules) {
+    LookupContext ctx{lookup, context, {}, {}, false};
+    std::vector<mybinlog::Violation> violations;
+    mybinlog::EvaluateServerSettings(adapter, &ctx, flavor, &id, 1, &violations);
+    if (ctx.failed) {
+      const VariableValue& query = ctx.failure;
       // A failed round trip is not a verdict on the setting; keep its own code.
       result.error =
           query.status == VariableQueryStatus::kQueryError ? query.query_error : MES_ERR_VALIDATION;
-      if (query.status == VariableQueryStatus::kNotFound) {
-        std::snprintf(result.message, sizeof(result.message), "Variable %s not found", var_name);
-      } else {
-        std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s", var_name,
-                      query.error_message.empty() ? "unknown error" : query.error_message.c_str());
-      }
-      return false;
-    }
-    if (!EqualsIgnoreCase(query.value.c_str(), expected)) {
-      result.error = MES_ERR_VALIDATION;
-      std::snprintf(result.message, sizeof(result.message), "%s must be %s, got %s", var_name,
-                    expected, query.value.c_str());
-      return false;
-    }
-    return true;
-  };
-  auto check_not_equal = [&](const char* var_name, const char* rejected) {
-    const VariableValue query = lookup(context, var_name);
-    if (query.status == VariableQueryStatus::kNotFound) return true;
-    if (query.status != VariableQueryStatus::kFound) {
-      result.error =
-          query.status == VariableQueryStatus::kQueryError ? query.query_error : MES_ERR_VALIDATION;
-      std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s", var_name,
+      std::snprintf(result.message, sizeof(result.message), "Failed to query %s: %s",
+                    ctx.failed_variable.c_str(),
                     query.error_message.empty() ? "unknown error" : query.error_message.c_str());
-      return false;
+      return result;
     }
-    if (EqualsIgnoreCase(query.value.c_str(), rejected)) {
-      result.error = MES_ERR_VALIDATION;
-      std::snprintf(result.message, sizeof(result.message), "%s must not be %s", var_name,
-                    rejected);
-      return false;
-    }
-    return true;
-  };
+    if (violations.empty()) continue;
 
-  if (!check_equal("log_bin", "ON")) return result;
-  if (flavor != ServerFlavor::kMariaDB && !check_equal("gtid_mode", "ON")) return result;
-  if (!check_equal("binlog_format", "ROW")) return result;
-  if (!check_equal("binlog_row_image", "FULL")) return result;
-  if (flavor == ServerFlavor::kMariaDB) {
-    if (!check_not_equal("log_bin_compress", "ON")) return result;
-  } else {
-    if (!check_not_equal("binlog_transaction_compression", "ON")) return result;
-    if (!check_not_equal("binlog_row_value_options", "PARTIAL_JSON")) return result;
+    const mybinlog::Violation& violation = violations.front();
+    const mybinlog::ServerSettingRule& rule = mybinlog::GetRule(id);
+    const char* name = violation.variable.c_str();
+    result.error = MES_ERR_VALIDATION;
+    if (violation.absent) {
+      std::snprintf(result.message, sizeof(result.message), "Variable %s not found", name);
+    } else if (rule.match == mybinlog::RuleMatch::kEquals) {
+      std::snprintf(result.message, sizeof(result.message), "%s must be %s, got %s", name,
+                    rule.value, violation.observed.c_str());
+    } else if (rule.match == mybinlog::RuleMatch::kNotContains) {
+      std::snprintf(result.message, sizeof(result.message), "%s must not contain %s", name,
+                    rule.value);
+    } else {
+      std::snprintf(result.message, sizeof(result.message), "%s must not be %s", name, rule.value);
+    }
+    return result;
   }
   return result;
 }
@@ -157,7 +164,7 @@ ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* contex
 }  // namespace detail
 
 ValidationResult ConnectionValidator::Validate(protocol::MysqlConnection* conn,
-                                               ServerFlavor flavor) {
+                                               mybinlog::ServerFlavor flavor) {
   ValidationResult result;
 
   if (conn == nullptr) {

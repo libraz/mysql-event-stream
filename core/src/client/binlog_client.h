@@ -24,9 +24,11 @@
 #include "client/event_queue.h"
 #include "client/transaction_gtid_tracker.h"
 #include "mes.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/server_flavor.h"
 #include "protocol/mysql_binlog_stream.h"
 #include "protocol/mysql_connection.h"
-#include "server_flavor.h"
 
 namespace mes {
 
@@ -45,7 +47,7 @@ struct BinlogClientConfig {
   bool start_at_current = true;
   bool start_at_file_position = false;
   std::string binlog_file;
-  uint64_t binlog_position = kBinlogMagicOffset;
+  uint64_t binlog_position = mybinlog::kBinlogMagicOffset;
   uint32_t connect_timeout_s = 10;
   uint32_t read_timeout_s = 30;
   mes_ssl_mode_t ssl_mode = MES_SSL_DISABLED;
@@ -170,7 +172,7 @@ class BinlogClient {
   bool IsStreaming() const;
 
   /** @brief Get the server flavor detected during Connect(). */
-  ServerFlavor GetServerFlavor() const;
+  mybinlog::ServerFlavor GetServerFlavor() const;
 
   /** @brief Get last error message, or an empty string if there is none.
    *
@@ -247,7 +249,7 @@ class BinlogClient {
 
   protocol::MysqlConnection conn_;
   protocol::BinlogStream binlog_stream_;
-  ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
+  mybinlog::ServerFlavor server_flavor_ = mybinlog::ServerFlavor::kMySQL;
   BinlogClientConfig config_;
   std::vector<uint8_t> gtid_encoded_;
   // last_error_ is written from both the owner thread (Connect/StartStream/
@@ -279,8 +281,12 @@ class BinlogClient {
   // which happen before any FORMAT_DESCRIPTION_EVENT is seen. The parser
   // independently auto-detects checksums from the FDE byte when it strips the
   // trailer during decode. The two layers are intentionally decoupled so each
-  // component is usable on its own; only the kChecksumSize constant is shared.
+  // component is usable on its own.
   std::atomic<bool> checksum_enabled_{true};
+  // Reader-thread framing of the wire stream. Seeded from checksum_enabled_ at
+  // stream start; each FDE then re-derives the algorithm, which the reader
+  // publishes back to checksum_enabled_.
+  mybinlog::ChecksumTracker wire_checksum_;
   std::atomic<bool> stop_requested_{false};
   // Set for the duration of StartStream(). Setup performs blocking socket round
   // trips, so it must not run under stop_mutex_; this flag excludes a second

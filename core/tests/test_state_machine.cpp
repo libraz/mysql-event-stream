@@ -8,7 +8,10 @@
 #include <string>
 #include <vector>
 
-#include "crc32.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/crc32.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
 #include "state_machine.h"
 #include "test_helpers.h"
 
@@ -154,14 +157,15 @@ TEST(StateMachineTest, FramesMariaDbTransactionGroupFedOneByteAtATime) {
     std::vector<uint8_t> body;
   };
   const std::vector<ExpectedEvent> expected = {
-      {static_cast<uint8_t>(BinlogEventType::kMariaDBGtidEvent),
+      {static_cast<uint8_t>(mybinlog::EventType::kMariaDBGtidEvent),
        BuildMariaDbGtidBody(42, 7001, 0x08)},
-      {static_cast<uint8_t>(BinlogEventType::kMariaDBAnnotateRowsEvent),
+      {static_cast<uint8_t>(mybinlog::EventType::kMariaDBAnnotateRowsEvent),
        std::vector<uint8_t>(annotation.begin(), annotation.end())},
-      {static_cast<uint8_t>(BinlogEventType::kTableMapEvent),
+      {static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent),
        test::BuildTableMapBody(42, "testdb", "users")},
-      {static_cast<uint8_t>(BinlogEventType::kWriteRowsEvent), test::BuildWriteRowsBody(42, 42)},
-      {static_cast<uint8_t>(BinlogEventType::kXidEvent), {}},
+      {static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent),
+       test::BuildWriteRowsBody(42, 42)},
+      {static_cast<uint8_t>(mybinlog::EventType::kXidEvent), {}},
   };
 
   std::vector<uint8_t> stream;
@@ -201,7 +205,7 @@ TEST(StateMachineTest, FramesMariaDbTransactionGroupFedOneByteAtATime) {
 
 TEST(StateMachineTest, ErrorOnTinyEventLength) {
   // Build a header where event_length is too small (< 23)
-  std::vector<uint8_t> header(kEventHeaderSize, 0);
+  std::vector<uint8_t> header(mybinlog::kEventHeaderSize, 0);
   header[4] = 30;  // type_code
   // event_length = 10 (too small: must be >= 23)
   header[9] = 10;
@@ -219,7 +223,7 @@ TEST(StateMachineTest, ErrorOnTinyEventLength) {
 
 TEST(StateMachineTest, ResetFromError) {
   // Trigger error
-  std::vector<uint8_t> header(kEventHeaderSize, 0);
+  std::vector<uint8_t> header(mybinlog::kEventHeaderSize, 0);
   header[4] = 30;
   header[9] = 5;  // event_length too small
 
@@ -457,11 +461,11 @@ TEST(StateMachineTest, ErrorRecoveryViaResetThenFeedValid) {
   EventStreamParser parser;
 
   // Feed invalid header to trigger kError
-  uint8_t bad_header[kEventHeaderSize];
+  uint8_t bad_header[mybinlog::kEventHeaderSize];
   memset(bad_header, 0, sizeof(bad_header));
   bad_header[4] = 30;  // type_code
   bad_header[9] = 5;   // event_length too small (< 23)
-  parser.Feed(bad_header, kEventHeaderSize);
+  parser.Feed(bad_header, mybinlog::kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
 
   // Reset should recover
@@ -490,7 +494,7 @@ TEST(StateMachineTest, PartialHeaderThenInvalidLength) {
 
   // Build a header manually where the first 10 bytes are valid-looking
   // but the full 19 bytes reveal an invalid event_length
-  uint8_t header[kEventHeaderSize];
+  uint8_t header[mybinlog::kEventHeaderSize];
   memset(header, 0, sizeof(header));
   header[0] = 0xE8;  // timestamp byte 0
   header[1] = 0x03;  // timestamp byte 1
@@ -509,15 +513,15 @@ TEST(StateMachineTest, PartialHeaderThenInvalidLength) {
   EXPECT_FALSE(parser.HasEvent());
 
   // Feed remaining 9 bytes to complete the invalid header
-  consumed = parser.Feed(header + 10, kEventHeaderSize - 10);
-  EXPECT_EQ(consumed, kEventHeaderSize - 10);
+  consumed = parser.Feed(header + 10, mybinlog::kEventHeaderSize - 10);
+  EXPECT_EQ(consumed, mybinlog::kEventHeaderSize - 10);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
   EXPECT_FALSE(parser.HasEvent());
 }
 
 TEST(StateMachineTest, ErrorOnEventTooLargeMax) {
   // Build a header where event_length = 0xFFFFFFFF (way over 64 MB limit)
-  uint8_t header[kEventHeaderSize];
+  uint8_t header[mybinlog::kEventHeaderSize];
   memset(header, 0, sizeof(header));
   header[4] = 30;  // type_code
   // event_length = 0xFFFFFFFF (LE)
@@ -527,8 +531,8 @@ TEST(StateMachineTest, ErrorOnEventTooLargeMax) {
   header[12] = 0xFF;
 
   EventStreamParser parser;
-  size_t consumed = parser.Feed(header, kEventHeaderSize);
-  EXPECT_EQ(consumed, kEventHeaderSize);
+  size_t consumed = parser.Feed(header, mybinlog::kEventHeaderSize);
+  EXPECT_EQ(consumed, mybinlog::kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
   EXPECT_FALSE(parser.HasEvent());
 }
@@ -536,7 +540,7 @@ TEST(StateMachineTest, ErrorOnEventTooLargeMax) {
 TEST(StateMachineTest, ErrorOnEventTooLargeBoundary) {
   // Build a header where event_length = 64*1024*1024 + 1 (just over 64 MB limit)
   uint32_t too_large = 64 * 1024 * 1024 + 1;
-  uint8_t header[kEventHeaderSize];
+  uint8_t header[mybinlog::kEventHeaderSize];
   memset(header, 0, sizeof(header));
   header[4] = 30;  // type_code
   header[9] = static_cast<uint8_t>(too_large);
@@ -545,8 +549,8 @@ TEST(StateMachineTest, ErrorOnEventTooLargeBoundary) {
   header[12] = static_cast<uint8_t>(too_large >> 24);
 
   EventStreamParser parser;
-  size_t consumed = parser.Feed(header, kEventHeaderSize);
-  EXPECT_EQ(consumed, kEventHeaderSize);
+  size_t consumed = parser.Feed(header, mybinlog::kEventHeaderSize);
+  EXPECT_EQ(consumed, mybinlog::kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
   EXPECT_FALSE(parser.HasEvent());
 }
@@ -557,8 +561,8 @@ TEST(StateMachineTest, ValidChecksumRoundTrip) {
   auto event = test::BuildValidEvent(30, body, 1000);
 
   // Verify the checksum is correct
-  size_t data_len = event.size() - kChecksumSize;
-  uint32_t computed = ComputeCRC32(event.data(), data_len);
+  size_t data_len = event.size() - mybinlog::kChecksumSize;
+  uint32_t computed = mybinlog::ComputeCrc32(event.data(), data_len);
   uint32_t stored = 0;
   std::memcpy(&stored, event.data() + data_len, sizeof(stored));
   EXPECT_EQ(computed, stored);
@@ -576,11 +580,11 @@ TEST(StateMachineTest, CorruptedChecksumDetected) {
   auto event = test::BuildValidEvent(30, body, 1000);
 
   // Corrupt one body byte
-  event[kEventHeaderSize + 1] ^= 0xFF;
+  event[mybinlog::kEventHeaderSize + 1] ^= 0xFF;
 
   // Verify the checksum is now invalid
-  size_t data_len = event.size() - kChecksumSize;
-  uint32_t computed = ComputeCRC32(event.data(), data_len);
+  size_t data_len = event.size() - mybinlog::kChecksumSize;
+  uint32_t computed = mybinlog::ComputeCrc32(event.data(), data_len);
   uint32_t stored = 0;
   std::memcpy(&stored, event.data() + data_len, sizeof(stored));
   EXPECT_NE(computed, stored) << "Corrupted event should have mismatched checksum";
@@ -605,7 +609,8 @@ TEST(StateMachineTest, SetMaxEventSizeClampsToMinimum) {
   // The smallest non-zero value clamps up to header + checksum so the parser
   // can always accept at least an empty event.
   parser.SetMaxEventSize(1);
-  EXPECT_EQ(parser.MaxEventSize(), static_cast<uint32_t>(kEventHeaderSize + kChecksumSize));
+  EXPECT_EQ(parser.MaxEventSize(),
+            static_cast<uint32_t>(mybinlog::kEventHeaderSize + mybinlog::kChecksumSize));
 }
 
 TEST(StateMachineTest, SetMaxEventSizeZeroMeansNoLimit) {
@@ -642,7 +647,7 @@ TEST(StateMachineTest, SetMaxEventSizeRejectsOversizedEvent) {
 
   // Craft a header claiming event_length = cap + 1; body content doesn't
   // matter because the parser should reject based on event_length alone.
-  std::vector<uint8_t> body(cap + 1 - kEventHeaderSize - kChecksumSize, 0);
+  std::vector<uint8_t> body(cap + 1 - mybinlog::kEventHeaderSize - mybinlog::kChecksumSize, 0);
   auto event = test::BuildEvent(30, 1000, 0, body);
   // BuildEvent fills event_length correctly, so size == cap + 1.
   ASSERT_EQ(event.size(), cap + 1);
@@ -650,13 +655,13 @@ TEST(StateMachineTest, SetMaxEventSizeRejectsOversizedEvent) {
   size_t consumed = parser.Feed(event.data(), event.size());
   // Parser stops at header-size bytes because the size check fires
   // immediately after the header is parsed.
-  EXPECT_EQ(consumed, kEventHeaderSize);
+  EXPECT_EQ(consumed, mybinlog::kEventHeaderSize);
   EXPECT_EQ(parser.GetState(), ParserState::kError);
 }
 
 TEST(StateMachineTest, SetMaxEventSizeAcceptsEventAtLimit) {
   EventStreamParser parser;
-  const uint32_t cap = kEventHeaderSize + kChecksumSize + 32;
+  const uint32_t cap = mybinlog::kEventHeaderSize + mybinlog::kChecksumSize + 32;
   parser.SetMaxEventSize(cap);
 
   std::vector<uint8_t> body(32, 0xAB);
@@ -671,12 +676,14 @@ TEST(StateMachineTest, SetMaxEventSizeAcceptsEventAtLimit) {
 // --- Checksum handling and FDE auto-detection ---
 
 // Build a minimal FORMAT_DESCRIPTION_EVENT body whose final byte is the given
-// checksum algorithm descriptor.
+// checksum algorithm descriptor. The server version must be checksum-aware:
+// an older one writes no algorithm byte at all.
 std::vector<uint8_t> BuildFdeBody(uint8_t checksum_alg) {
   test::EventBuilder fde;
   fde.WriteU16Le(4);  // binlog_version
-  for (int i = 0; i < 50; ++i) {
-    fde.WriteU8(0);  // server_version (50 bytes)
+  const std::string version = "8.4.0";
+  for (size_t i = 0; i < 50; ++i) {
+    fde.WriteU8(i < version.size() ? static_cast<uint8_t>(version[i]) : 0);  // server_version
   }
   fde.WriteU32Le(0);  // create_timestamp
   fde.WriteU8(19);    // event_header_length
@@ -688,18 +695,20 @@ std::vector<uint8_t> BuildFdeBody(uint8_t checksum_alg) {
 TEST(StateMachineChecksumTest, DetectsCrc32Fde) {
   EventStreamParser parser;
   // BuildEvent appends a 4-byte checksum, placing the alg byte at size-5.
-  auto fde = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent), 1000,
-                              0, BuildFdeBody(kBinlogChecksumAlgCrc32));
+  auto fde =
+      test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent), 1000, 0,
+                       BuildFdeBody(static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kCrc32)));
   parser.Feed(fde.data(), fde.size());
   EXPECT_TRUE(parser.ChecksumEnabled());
 }
 
 TEST(StateMachineChecksumTest, DetectsOffFde) {
   EventStreamParser parser;
-  // No trailing checksum; the OFF alg byte is the final byte.
+  // The FDE of a checksum-aware server carries its own trailer even when it
+  // declares OFF, so the alg byte again sits at size-5.
   auto fde =
-      test::BuildEventNoChecksum(static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent),
-                                 1000, 0, BuildFdeBody(kBinlogChecksumAlgOff));
+      test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent), 1000, 0,
+                       BuildFdeBody(static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kOff)));
   parser.Feed(fde.data(), fde.size());
   EXPECT_FALSE(parser.ChecksumEnabled());
 }
@@ -721,10 +730,11 @@ TEST(StateMachineChecksumTest, ChecksumNoneStillStripsChecksummedArtificialRotat
   EventStreamParser parser;
   parser.SetChecksumEnabled(false);
   const auto body = test::BuildRotateBody(4, "mysql-bin.000010");
-  auto event = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, body);
-  event[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
-  const uint32_t crc = ComputeCRC32(event.data(), event.size() - kChecksumSize);
-  std::memcpy(event.data() + event.size() - kChecksumSize, &crc, sizeof(crc));
+  auto event =
+      test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0, body);
+  event[17] = static_cast<uint8_t>(mybinlog::kLogEventArtificialFlag);
+  const uint32_t crc = mybinlog::ComputeCrc32(event.data(), event.size() - mybinlog::kChecksumSize);
+  std::memcpy(event.data() + event.size() - mybinlog::kChecksumSize, &crc, sizeof(crc));
 
   ASSERT_EQ(parser.Feed(event.data(), event.size()), event.size());
   ASSERT_TRUE(parser.HasEvent());
@@ -742,7 +752,7 @@ TEST(StateMachineChecksumTest, ChecksumSetterDoesNotReframeTheEventBeingParsed) 
   auto event = test::BuildEvent(30, 1000, 0, body);
 
   // Fix the framing by parsing the header, then flip the setter mid-event.
-  const size_t prefix = kEventHeaderSize + 1;
+  const size_t prefix = mybinlog::kEventHeaderSize + 1;
   ASSERT_EQ(parser.Feed(event.data(), prefix), prefix);
   ASSERT_FALSE(parser.HasEvent());
   parser.SetChecksumEnabled(false);
@@ -767,12 +777,13 @@ TEST(StateMachineChecksumTest, ChecksumSetterDoesNotReframeTheEventBeingParsed) 
 TEST(StateMachineChecksumTest, ArtificialRotateDetectionDoesNotReframeTheEventBeingParsed) {
   EventStreamParser parser;  // defaults to checksummed framing
   const auto body = test::BuildRotateBody(4, "mysql-bin.000010");
-  auto event = test::BuildEvent(static_cast<uint8_t>(BinlogEventType::kRotateEvent), 0, 0, body);
-  event[17] = static_cast<uint8_t>(kLogEventArtificialFlag);
-  const uint32_t crc = ComputeCRC32(event.data(), event.size() - kChecksumSize);
-  std::memcpy(event.data() + event.size() - kChecksumSize, &crc, sizeof(crc));
+  auto event =
+      test::BuildEvent(static_cast<uint8_t>(mybinlog::EventType::kRotateEvent), 0, 0, body);
+  event[17] = static_cast<uint8_t>(mybinlog::kLogEventArtificialFlag);
+  const uint32_t crc = mybinlog::ComputeCrc32(event.data(), event.size() - mybinlog::kChecksumSize);
+  std::memcpy(event.data() + event.size() - mybinlog::kChecksumSize, &crc, sizeof(crc));
 
-  const size_t prefix = kEventHeaderSize + 1;
+  const size_t prefix = mybinlog::kEventHeaderSize + 1;
   ASSERT_EQ(parser.Feed(event.data(), prefix), prefix);
   parser.SetChecksumEnabled(false);
   ASSERT_EQ(parser.Feed(event.data() + prefix, event.size() - prefix), event.size() - prefix);
@@ -793,7 +804,7 @@ TEST(StateMachineChecksumTest, ArtificialRotateDetectionDoesNotReframeTheEventBe
 std::vector<uint8_t> BuildEventWithBrokenTrailer(uint8_t type_code,
                                                  const std::vector<uint8_t>& body) {
   auto event = test::BuildEvent(type_code, 1000, 0, body);
-  event[event.size() - kChecksumSize] ^= 0xFF;
+  event[event.size() - mybinlog::kChecksumSize] ^= 0xFF;
   return event;
 }
 
@@ -855,8 +866,8 @@ TEST(StateMachineChecksumTest, FramingAndVerificationAreSeparateSwitches) {
   const std::vector<Combination> combinations = {
       {true, false, body.size(), true},
       {true, true, body.size(), false},
-      {false, false, body.size() + kChecksumSize, false},
-      {false, true, body.size() + kChecksumSize, false},
+      {false, false, body.size() + mybinlog::kChecksumSize, false},
+      {false, true, body.size() + mybinlog::kChecksumSize, false},
   };
 
   for (const auto& c : combinations) {

@@ -208,8 +208,8 @@ MES_API int mes_client_is_streaming(mes_client_t* c) {
 
 MES_API mes_server_flavor_t mes_client_flavor(mes_client_t* c) {
   if (c == nullptr) return MES_SERVER_FLAVOR_MYSQL;
-  return c->client.GetServerFlavor() == mes::ServerFlavor::kMariaDB ? MES_SERVER_FLAVOR_MARIADB
-                                                                    : MES_SERVER_FLAVOR_MYSQL;
+  return c->client.GetServerFlavor() == mybinlog::ServerFlavor::kMariaDB ? MES_SERVER_FLAVOR_MARIADB
+                                                                         : MES_SERVER_FLAVOR_MYSQL;
 }
 
 MES_API const char* mes_client_last_error(mes_client_t* c) {

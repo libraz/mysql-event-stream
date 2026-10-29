@@ -46,8 +46,8 @@ TEST(ConnectionValidatorTest, RejectsEveryRequiredMySqlSetting) {
   for (const auto& [name, value] : rejected) {
     FakeVariables variables;
     variables.values[name] = value;
-    const ValidationResult result =
-        ValidateServerConfiguration(FakeVariables::Lookup, &variables, ServerFlavor::kMySQL);
+    const ValidationResult result = ValidateServerConfiguration(FakeVariables::Lookup, &variables,
+                                                                mybinlog::ServerFlavor::kMySQL);
     EXPECT_EQ(result.error, MES_ERR_VALIDATION) << name;
     EXPECT_NE(std::string(result.message).find(name), std::string::npos);
   }
@@ -58,13 +58,14 @@ TEST(ConnectionValidatorTest, AppliesMariaDbFlavorGates) {
   variables.values["gtid_mode"] = "OFF";
   variables.values.erase("binlog_transaction_compression");
   variables.values.erase("binlog_row_value_options");
-  EXPECT_EQ(
-      ValidateServerConfiguration(FakeVariables::Lookup, &variables, ServerFlavor::kMariaDB).error,
-      MES_OK);
+  EXPECT_EQ(ValidateServerConfiguration(FakeVariables::Lookup, &variables,
+                                        mybinlog::ServerFlavor::kMariaDB)
+                .error,
+            MES_OK);
 
   variables.values["log_bin_compress"] = "ON";
-  const ValidationResult result =
-      ValidateServerConfiguration(FakeVariables::Lookup, &variables, ServerFlavor::kMariaDB);
+  const ValidationResult result = ValidateServerConfiguration(FakeVariables::Lookup, &variables,
+                                                              mybinlog::ServerFlavor::kMariaDB);
   EXPECT_EQ(result.error, MES_ERR_VALIDATION);
   EXPECT_NE(std::string(result.message).find("log_bin_compress"), std::string::npos);
 }
@@ -98,8 +99,8 @@ TEST(ConnectionValidatorTest, AFailedQueryKeepsItsOwnCodeOnBothCheckKinds) {
       FailingVariables variables;
       variables.failing_name = name;
       variables.query_error = code;
-      const ValidationResult result =
-          ValidateServerConfiguration(FailingVariables::Lookup, &variables, ServerFlavor::kMySQL);
+      const ValidationResult result = ValidateServerConfiguration(
+          FailingVariables::Lookup, &variables, mybinlog::ServerFlavor::kMySQL);
       EXPECT_EQ(result.error, code);
       EXPECT_NE(std::string(result.message).find(name), std::string::npos);
     }
@@ -115,10 +116,10 @@ TEST(ConnectionValidatorTest, AnAnswerThatCannotBeReadIsStillAValidationFailure)
     variables.failing_name = name;
     variables.status = VariableQueryStatus::kMalformed;
     variables.query_error = MES_OK;
-    EXPECT_EQ(
-        ValidateServerConfiguration(FailingVariables::Lookup, &variables, ServerFlavor::kMySQL)
-            .error,
-        MES_ERR_VALIDATION);
+    EXPECT_EQ(ValidateServerConfiguration(FailingVariables::Lookup, &variables,
+                                          mybinlog::ServerFlavor::kMySQL)
+                  .error,
+              MES_ERR_VALIDATION);
   }
 }
 
@@ -207,7 +208,8 @@ TEST(ConnectionValidatorTest, QueriesExactlyTheSettingsItsHeaderLists) {
   EXPECT_EQ(CountLinesContaining(header, "uuid"), 0);
 
   std::set<int> claimed;
-  for (const ServerFlavor flavor : {ServerFlavor::kMySQL, ServerFlavor::kMariaDB}) {
+  for (const mybinlog::ServerFlavor flavor :
+       {mybinlog::ServerFlavor::kMySQL, mybinlog::ServerFlavor::kMariaDB}) {
     RecordingVariables recording;
     // Every value passes, so no check short-circuits the ones after it.
     ASSERT_EQ(ValidateServerConfiguration(RecordingVariables::Lookup, &recording, flavor).error,

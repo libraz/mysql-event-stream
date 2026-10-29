@@ -115,7 +115,7 @@ constexpr bool PacketPayloadAppendFits(size_t current_size, size_t append_size,
 /**
  * @brief Read a MySQL length-encoded integer from a buffer
  *
- * Positional adapter over binary::ReadLenEncInt. An empty remainder, a
+ * Positional adapter over wire::ReadLenEncInt. An empty remainder, a
  * truncated field, the 0xFB NULL marker and the 0xFF prefix are failures; a
  * caller that accepts NULL checks for 0xFB before calling.
  *

@@ -5,11 +5,13 @@
 #include <iterator>
 #endif
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "client/gtid_set.h"
 #include "client/transaction_gtid_tracker.h"
-#include "mariadb_event_parser.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
 #include "protocol/mysql_auth.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_packet.h"
@@ -48,21 +50,26 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   mes::protocol::detail::ParseServerHandshakePayload(data, size, &handshake, &handshake_error);
   mes::protocol::detail::ParseServerHandshakePayload(data, size, &handshake, nullptr);
 
-  std::string gtid;
-  bool standalone = false;
-  mes::MariaDBEventParser::ExtractGtid(data, size, &gtid, &standalone);
-  std::vector<mes::MariaDBGtid> gtid_list;
-  mes::MariaDBEventParser::ParseGtidList(data, size, &gtid_list);
-  std::string annotation;
-  mes::MariaDBEventParser::ExtractAnnotateRows(data, size, false, &annotation);
-  mes::MariaDBEventParser::ExtractAnnotateRows(data, size, true, &annotation);
+  // The MariaDB event bodies, parsed from a whole event.
+  mybinlog::EventHeader header;
+  if (mybinlog::ParseEventHeader(data, size, &header) == mybinlog::Status::kOk) {
+    const uint8_t* body = data + mybinlog::kEventHeaderSize;
+    const size_t body_size = size - mybinlog::kEventHeaderSize;
+    mybinlog::MariaDbGtidEvent gtid;
+    (void)mybinlog::ParseMariaDbGtidEvent(header, body, body_size, &gtid);
+    mybinlog::MariaDbGtidListEvent gtid_list;
+    (void)mybinlog::ParseMariaDbGtidListEvent(header, body, body_size, &gtid_list);
+    mybinlog::MariaDbAnnotateRowsEvent annotation;
+    (void)mybinlog::ParseMariaDbAnnotateRowsEvent(header, body, body_size, &annotation);
+  }
 
   // The rest of the GTID family: the binary set a PREVIOUS_GTIDS event carries,
   // its text form, and the tracker that drives both from whole events. A fresh
   // tracker per input keeps the run reproducible from a single corpus file.
-  mes::GtidSet gtid_set;
-  mes::GtidSet::DecodeBinary(data, size, &gtid_set);
-  mes::GtidSet::Parse(std::string(reinterpret_cast<const char*>(data), size), &gtid_set);
+  mybinlog::GtidSet gtid_set;
+  (void)mybinlog::GtidSet::DecodeBinary(data, size, &gtid_set);
+  (void)mybinlog::GtidSet::Parse(std::string_view(reinterpret_cast<const char*>(data), size),
+                                 &gtid_set);
   mes::TransactionGtidTracker tracker;
   tracker.Observe(data, size, false);
   tracker.Observe(data, size, true);

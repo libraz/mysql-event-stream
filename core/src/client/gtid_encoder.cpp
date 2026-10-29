@@ -1,7 +1,7 @@
 #include "client/gtid_encoder.h"
 
-#include "client/gtid_set.h"
-#include "mariadb_gtid.h"
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
 
 namespace mes {
 namespace {
@@ -18,9 +18,12 @@ std::string Trim(const std::string& text) {
 
 mes_error_t GtidEncoder::Encode(const char* gtid_set, std::vector<uint8_t>* out) {
   if (gtid_set == nullptr || out == nullptr) return MES_ERR_NULL_ARG;
-  GtidSet set;
-  const mes_error_t rc = GtidSet::Parse(gtid_set, &set);
-  return rc == MES_OK ? set.EncodeBinary(out) : rc;
+  mybinlog::GtidSet set;
+  if (mybinlog::GtidSet::Parse(gtid_set, &set) != mybinlog::Status::kOk) {
+    return MES_ERR_INVALID_ARG;
+  }
+  set.EncodeBinary(out);
+  return MES_OK;
 }
 
 std::string GtidEncoder::NormalizeSingleSid(const std::string& gtid) {
@@ -29,7 +32,7 @@ std::string GtidEncoder::NormalizeSingleSid(const std::string& gtid) {
   // and is handed back untouched for the parser to reject.
   const std::string text = Trim(gtid);
   if (text.empty()) return gtid;
-  if (MariaDBGtid::IsMariaDBGtidFormat(text)) return text;
+  if (mybinlog::MariaDbGtid::IsMariaDbGtidFormat(text)) return text;
   const size_t colon_pos = text.find(':');
   if (colon_pos == std::string::npos) return text;
 
@@ -40,7 +43,8 @@ std::string GtidEncoder::NormalizeSingleSid(const std::string& gtid) {
   const size_t tag_separator = text.find(':', intervals_pos);
   if (tag_separator != std::string::npos) {
     std::string tag;
-    if (!GtidSet::NormalizeTag(text.substr(intervals_pos, tag_separator - intervals_pos), &tag)) {
+    if (mybinlog::NormalizeGtidTag(text.substr(intervals_pos, tag_separator - intervals_pos),
+                                   &tag) != mybinlog::Status::kOk) {
       return text;
     }
     intervals_pos = tag_separator + 1;

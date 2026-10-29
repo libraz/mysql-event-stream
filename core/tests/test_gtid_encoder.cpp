@@ -3,12 +3,11 @@
 
 #include <gtest/gtest.h>
 
-#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "client/gtid_encoder.h"
-#include "client/gtid_set.h"
+#include "mybinlog/mysql_gtid.h"
 
 namespace {
 
@@ -17,149 +16,29 @@ using mes::GtidEncoder;
 constexpr char kSid[] = "00000000-0000-0000-0000-000000000001";
 constexpr char kSid2[] = "00000000-0000-0000-0000-000000000002";
 
-uint64_t ReadInt64Le(const std::vector<uint8_t>& data, size_t offset) {
-  uint64_t val = 0;
-  for (int i = 7; i >= 0; --i) {
-    val = (val << 8) | data[offset + i];
-  }
-  return val;
-}
-
-std::vector<uint8_t> ExtractUuid(const std::vector<uint8_t>& data, size_t offset) {
-  return std::vector<uint8_t>(data.begin() + offset, data.begin() + offset + 16);
-}
-
-// --- Empty GTID set ---
+// --- Encode: mes_error_t adapter over mybinlog::GtidSet ---
 
 TEST(GtidEncoderTest, EmptyGtidSetReturnsZeroSids) {
   std::vector<uint8_t> out;
   ASSERT_EQ(GtidEncoder::Encode("", &out), MES_OK);
   ASSERT_EQ(out.size(), 8u);
-  EXPECT_EQ(ReadInt64Le(out, 0), 0u);
+  EXPECT_EQ(out, std::vector<uint8_t>(8, 0));
 }
 
-// --- Single UUID with single interval ---
+TEST(GtidEncoderTest, EncodeMatchesTheCodecEncoding) {
+  const std::string sid(kSid);
+  for (const std::string& text :
+       {sid + ":1-3:7", sid + ":1-2," + kSid2 + ":tag:7", sid + ":MyTag:1-5"}) {
+    mybinlog::GtidSet set;
+    ASSERT_EQ(mybinlog::GtidSet::Parse(text, &set), mybinlog::Status::kOk) << text;
+    std::vector<uint8_t> expected;
+    set.EncodeBinary(&expected);
 
-TEST(GtidEncoderTest, SingleGtidSingleTransaction) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:5", &out), MES_OK);
-  ASSERT_EQ(out.size(), 48u);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // n_sids
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 5u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 6u);  // end (exclusive)
+    std::vector<uint8_t> out;
+    ASSERT_EQ(GtidEncoder::Encode(text.c_str(), &out), MES_OK) << text;
+    EXPECT_EQ(out, expected) << text;
+  }
 }
-
-TEST(GtidEncoderTest, SingleRange) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3", &out), MES_OK);
-  ASSERT_EQ(out.size(), 48u);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // n_sids
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 4u);  // end (exclusive)
-}
-
-// --- Multiple intervals ---
-
-TEST(GtidEncoderTest, MultipleIntervals) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3:5-7", &out), MES_OK);
-  ASSERT_EQ(out.size(), 64u);           // 8 + 16 + 8 + 16*2
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // n_sids
-  EXPECT_EQ(ReadInt64Le(out, 24), 2u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // interval 1 start
-  EXPECT_EQ(ReadInt64Le(out, 40), 4u);  // interval 1 end
-  EXPECT_EQ(ReadInt64Le(out, 48), 5u);  // interval 2 start
-  EXPECT_EQ(ReadInt64Le(out, 56), 8u);  // interval 2 end
-}
-
-// --- Multiple UUIDs ---
-
-TEST(GtidEncoderTest, MultipleUuids) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3,"
-                                "00000000-0000-0000-0000-000000000002:5-7",
-                                &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 2u);  // n_sids
-
-  // First SID
-  auto uuid1 = ExtractUuid(out, 8);
-  std::vector<uint8_t> expected_uuid1 = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
-  EXPECT_EQ(uuid1, expected_uuid1);
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 4u);  // end
-
-  // Second SID
-  auto uuid2 = ExtractUuid(out, 48);
-  std::vector<uint8_t> expected_uuid2 = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02};
-  EXPECT_EQ(uuid2, expected_uuid2);
-  EXPECT_EQ(ReadInt64Le(out, 64), 1u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 72), 5u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 80), 8u);  // end
-}
-
-// --- Overlapping intervals merged ---
-
-TEST(GtidEncoderTest, OverlappingIntervalsMerged) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-5:3-8", &out), MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // merged to 1 interval
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 9u);  // end (8+1)
-}
-
-// --- Adjacent intervals merged ---
-
-TEST(GtidEncoderTest, AdjacentIntervalsMerged) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3:4-6", &out), MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // merged to 1 interval
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 7u);  // end (6+1)
-}
-
-// --- Duplicate UUIDs merged ---
-
-TEST(GtidEncoderTest, DuplicateUuidsMerged) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3, "
-                                "00000000-0000-0000-0000-000000000001:5-7",
-                                &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // 1 SID (merged)
-  EXPECT_EQ(ReadInt64Le(out, 24), 2u);  // 2 intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // interval 1 start
-  EXPECT_EQ(ReadInt64Le(out, 40), 4u);  // interval 1 end
-  EXPECT_EQ(ReadInt64Le(out, 48), 5u);  // interval 2 start
-  EXPECT_EQ(ReadInt64Le(out, 56), 8u);  // interval 2 end
-}
-
-// --- UUID encoding ---
-
-TEST(GtidEncoderTest, UuidBytesCorrect) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-10", &out), MES_OK);
-  auto uuid = ExtractUuid(out, 8);
-  std::vector<uint8_t> expected = {0x61, 0xd5, 0xb2, 0x89, 0xbc, 0xcc, 0x11, 0xf0,
-                                   0xb9, 0x21, 0xca, 0xbb, 0xb4, 0xee, 0x51, 0xf6};
-  EXPECT_EQ(uuid, expected);
-}
-
-TEST(GtidEncoderTest, MixedCaseUuid) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("AbCdEf01-2345-6789-aBcD-ef0123456789:1-3", &out), MES_OK);
-  auto uuid = ExtractUuid(out, 8);
-  std::vector<uint8_t> expected = {0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89,
-                                   0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89};
-  EXPECT_EQ(uuid, expected);
-}
-
-// --- Error: missing colon ---
 
 TEST(GtidEncoderTest, ErrorMissingColon) {
   std::vector<uint8_t> out;
@@ -167,97 +46,10 @@ TEST(GtidEncoderTest, ErrorMissingColon) {
             MES_ERR_INVALID_ARG);
 }
 
-// --- Error: bad UUID length ---
-
-TEST(GtidEncoderTest, ErrorBadUuidLength) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-00000001:1-3", &out), MES_ERR_INVALID_ARG);
-}
-
-// --- Error: bad interval number ---
-
-TEST(GtidEncoderTest, ErrorBadIntervalNumber) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:abc", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Error: negative interval ---
-
-TEST(GtidEncoderTest, ErrorNegativeInterval) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:-1-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Error: zero interval start ---
-
-TEST(GtidEncoderTest, ErrorZeroIntervalStart) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:0-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Error: end before start ---
-
-TEST(GtidEncoderTest, ErrorEndBeforeStart) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:5-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Error: empty interval after colon ---
-
-TEST(GtidEncoderTest, ErrorEmptyInterval) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Error: overflow ---
-
 TEST(GtidEncoderTest, ErrorOverflowSingleTransaction) {
   std::vector<uint8_t> out;
   EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:9223372036854775807", &out),
             MES_ERR_INVALID_ARG);
-}
-
-TEST(GtidEncoderTest, ErrorOverflowRangeEnd) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-9223372036854775807", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Tagged GTIDs use the MySQL 8.4 tagged GTID-set wire format ---
-
-TEST(GtidEncoderTest, TaggedGtidUsesTaggedFormatAndCanonicalizesTag) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:MyTag:1-5", &out), MES_OK);
-  ASSERT_EQ(out.size(), 54u);
-  EXPECT_EQ(ReadInt64Le(out, 0), (uint64_t{1} << 56) | (uint64_t{1} << 8) | 1);
-  EXPECT_EQ(out[24], 10u);
-  EXPECT_EQ(std::string(out.begin() + 25, out.begin() + 30), "mytag");
-  EXPECT_EQ(ReadInt64Le(out, 30), 1u);
-  EXPECT_EQ(ReadInt64Le(out, 38), 1u);
-  EXPECT_EQ(ReadInt64Le(out, 46), 6u);
-}
-
-TEST(GtidEncoderTest, TaggedGtidSetEncodesUntaggedTsidWithEmptyTag) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-2,"
-                                "00000000-0000-0000-0000-000000000002:tag:7",
-                                &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), (uint64_t{1} << 56) | (uint64_t{2} << 8) | 1);
-  EXPECT_EQ(out[24], 0u);
-  EXPECT_EQ(ReadInt64Le(out, 25), 1u);
-  EXPECT_EQ(ReadInt64Le(out, 33), 1u);
-  EXPECT_EQ(ReadInt64Le(out, 41), 3u);
-}
-
-TEST(GtidEncoderTest, TaggedGtidSupportsUnderscoreAndDigits) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:_tag_2:7", &out), MES_OK);
 }
 
 TEST(GtidEncoderTest, TaggedGtidRejectsInvalidTag) {
@@ -266,249 +58,14 @@ TEST(GtidEncoderTest, TaggedGtidRejectsInvalidTag) {
             MES_ERR_INVALID_ARG);
 }
 
-TEST(GtidSetTest, TaggedBinaryAndTextRoundTripPreserveEveryTsid) {
-  mes::GtidSet original;
-  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:Analytics:1-3,"
-                                "00000000-0000-0000-0000-000000000002:7-9",
-                                &original),
-            MES_OK);
-  std::vector<uint8_t> encoded;
-  ASSERT_EQ(original.EncodeBinary(&encoded), MES_OK);
-
-  mes::GtidSet decoded;
-  ASSERT_TRUE(mes::GtidSet::DecodeBinary(encoded.data(), encoded.size(), &decoded));
-  EXPECT_EQ(decoded.ToString(),
-            "00000000-0000-0000-0000-000000000001:analytics:1-3,"
-            "00000000-0000-0000-0000-000000000002:7-9");
-
-  mes::GtidSet reparsed;
-  ASSERT_EQ(mes::GtidSet::Parse(decoded.ToString(), &reparsed), MES_OK);
-  EXPECT_EQ(reparsed.ToString(), decoded.ToString());
-}
-
-TEST(GtidSetTest, SubsetRequiresEveryTsidAndIntervalToBeCovered) {
-  mes::GtidSet subset;
-  mes::GtidSet superset;
-  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:2-4,"
-                                "00000000-0000-0000-0000-000000000002:tag:7-9",
-                                &subset),
-            MES_OK);
-  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000001:1-6,"
-                                "00000000-0000-0000-0000-000000000002:tag:1-10",
-                                &superset),
-            MES_OK);
-  EXPECT_TRUE(subset.IsSubsetOf(superset));
-  EXPECT_FALSE(superset.IsSubsetOf(subset));
-
-  mes::GtidSet wrong_tag;
-  ASSERT_EQ(mes::GtidSet::Parse("00000000-0000-0000-0000-000000000002:other:7-9", &wrong_tag),
-            MES_OK);
-  EXPECT_FALSE(subset.IsSubsetOf(wrong_tag));
-}
-
-// --- Wire layout against a fixed known answer ---
-
-TEST(GtidSetTest, UntaggedWireLayoutMatchesTheServerGtidSetEncoding) {
-  // The GTID set a replica sends in COM_BINLOG_DUMP_GTID, and that a
-  // PREVIOUS_GTIDS_EVENT carries, is: n_sids as 8 little-endian bytes, then per
-  // SID the 16 raw UUID bytes, n_intervals as 8 little-endian bytes, and one
-  // (start, end) pair of 8 little-endian bytes per interval with end exclusive.
-  // These bytes are written from that layout, not from this project's encoder,
-  // so both directions are checked against an answer neither side produced.
-  const std::vector<uint8_t> wire = {
-      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_sids = 2
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // SID 1
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_intervals = 1
-      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 1
-      0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 4 (exclusive)
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // SID 2
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-      0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // n_intervals = 2
-      0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 5
-      0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 8 (exclusive)
-      0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // start = 9
-      0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // end = 10 (exclusive)
-  };
-  const std::string text = std::string(kSid) + ":1-3," + kSid2 + ":5-7:9-9";
-
-  mes::GtidSet decoded;
-  ASSERT_TRUE(mes::GtidSet::DecodeBinary(wire.data(), wire.size(), &decoded));
-  EXPECT_EQ(decoded.ToString(), text);
-
-  mes::GtidSet parsed;
-  ASSERT_EQ(mes::GtidSet::Parse(text, &parsed), MES_OK);
-  std::vector<uint8_t> encoded;
-  ASSERT_EQ(parsed.EncodeBinary(&encoded), MES_OK);
-  EXPECT_EQ(encoded, wire);
-}
-
-// --- Parse input validation ---
-
-TEST(GtidSetTest, ParseTreatsOnlyAnEmptyStringAsTheEmptySet) {
-  // An empty set forwarded to the server requests every binlog it still
-  // retains, so only a genuinely empty position may produce one. Text holding
-  // nothing but separators or whitespace is a malformed position.
-  mes::GtidSet empty;
-  ASSERT_EQ(mes::GtidSet::Parse("", &empty), MES_OK);
-  EXPECT_EQ(empty.ToString(), "");
-
-  for (const char* text : {",", ",,", " ", "  ", "\t", "\n", "\r", " , ", ",\n,"}) {
-    mes::GtidSet set;
-    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
-  }
-}
-
-TEST(GtidSetTest, ParseRejectsEveryIntervalTokenThatIsNotABareDecimal) {
-  // strtoull would accept a sign or leading whitespace here and reinterpret a
-  // negative value modulo 2^64, so a malformed token must be rejected outright
-  // rather than turned into a plausible transaction number.
-  const char* const rejected_intervals[] = {
-      "+5",
-      "-5",
-      "5+",
-      "1-+9",
-      "1--9",
-      "1- 9",
-      "1 -9",
-      "5 6",
-      "0x5",
-      "5abc",
-      "abc",
-      " ",
-      "",
-      "9223372036854775807",            // INT64_MAX is out of range for a GNO.
-      "18446744073709551615",           // UINT64_MAX.
-      "18446744073709551616",           // One past UINT64_MAX.
-      "-18446744073709551615",          // Wraps to 1 under strtoull.
-      "1-18446744073709551615",         // UINT64_MAX as an interval end.
-      "1-18446744073709551616",         // One past UINT64_MAX.
-      "1--18446744073709551615",        // Wraps to 1 under strtoull.
-      "99999999999999999999999999999",  // Far past UINT64_MAX.
-  };
-  for (const char* intervals : rejected_intervals) {
-    const std::string text = std::string(kSid) + ":" + intervals;
-    mes::GtidSet set;
-    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
-  }
-}
-
-TEST(GtidSetTest, ParseKeepsEveryWellFormedFormAccepted) {
-  struct Case {
-    std::string text;
-    std::string canonical;
-  };
-  const std::string sid(kSid);
-  const std::string sid2(kSid2);
-  const Case cases[] = {
-      {sid + ":5", sid + ":5-5"},
-      {sid + ":1-3", sid + ":1-3"},
-      {sid + ":1-3:5-7", sid + ":1-3:5-7"},
-      {sid + ":MyTag:1-5", sid + ":mytag:1-5"},
-      {sid + ":_tag_2:7", sid + ":_tag_2:7-7"},
-      // MySQL reports gtid_executed with the separator followed by a newline.
-      {sid + ":1-3,\n" + sid2 + ":5-7", sid + ":1-3," + sid2 + ":5-7"},
-      {sid + ":1-3, " + sid2 + ":tag:5-7", sid + ":1-3," + sid2 + ":tag:5-7"},
-      {"  " + sid + ":1-3  ", sid + ":1-3"},
-      {sid + ":1-3,", sid + ":1-3"},
-      // The largest GNO the encoder accepts, as a single value and as a range.
-      {sid + ":9223372036854775805", sid + ":9223372036854775805-9223372036854775805"},
-      {sid + ":1-9223372036854775805", sid + ":1-9223372036854775805"},
-  };
-  for (const Case& test_case : cases) {
-    mes::GtidSet set;
-    ASSERT_EQ(mes::GtidSet::Parse(test_case.text, &set), MES_OK)
-        << "input: '" << test_case.text << "'";
-    EXPECT_EQ(set.ToString(), test_case.canonical) << "input: '" << test_case.text << "'";
-  }
-}
-
-TEST(GtidSetTest, ParseAcceptsEveryTagRunTheServerPrintsUnderOneUuid) {
-  // MySQL prints one entry per UUID: its untagged intervals, then each tag
-  // followed by that tag's intervals.
-  struct Case {
-    std::string text;
-    std::string canonical;
-  };
-  const std::string sid(kSid);
-  const Case cases[] = {
-      {sid + ":5:mytag:1:other:3", sid + ":5-5," + sid + ":mytag:1-1," + sid + ":other:3-3"},
-      {sid + ":a:1:b:2", sid + ":a:1-1," + sid + ":b:2-2"},
-      {sid + ":1-3:7:Analytics:1-4:9,\n" + kSid2 + ":tag:2",
-       sid + ":1-3:7-7," + sid + ":analytics:1-4:9-9," + kSid2 + ":tag:2-2"},
-      {sid + ":a:1:b:2:a:5", sid + ":a:1-1:5-5," + sid + ":b:2-2"},
-  };
-  for (const Case& test_case : cases) {
-    mes::GtidSet set;
-    ASSERT_EQ(mes::GtidSet::Parse(test_case.text, &set), MES_OK)
-        << "input: '" << test_case.text << "'";
-    EXPECT_EQ(set.ToString(), test_case.canonical) << "input: '" << test_case.text << "'";
-
-    // The server text and its canonical form denote one set on the wire too.
-    std::vector<uint8_t> from_server;
-    std::vector<uint8_t> from_canonical;
-    ASSERT_EQ(GtidEncoder::Encode(test_case.text.c_str(), &from_server), MES_OK)
-        << "input: '" << test_case.text << "'";
-    ASSERT_EQ(GtidEncoder::Encode(test_case.canonical.c_str(), &from_canonical), MES_OK);
-    EXPECT_EQ(from_server, from_canonical) << "input: '" << test_case.text << "'";
-  }
-
-  // An entry with several runs names no single transaction, so it is not widened.
-  for (const std::string& text : {sid + ":5:mytag:1:other:3", sid + ":a:1:b:2"}) {
-    EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(text), text);
-  }
-}
-
-TEST(GtidSetTest, PurgedPreflightComparesTagRunsTsidByTsid) {
-  const std::string sid(kSid);
-  mes::GtidSet purged;
-  ASSERT_EQ(mes::GtidSet::Parse(sid + ":5:mytag:1:other:3", &purged), MES_OK);
-
-  mes::GtidSet covering;
-  ASSERT_EQ(mes::GtidSet::Parse(sid + ":1-5:mytag:1-2:other:1-3", &covering), MES_OK);
-  EXPECT_TRUE(purged.IsSubsetOf(covering));
-
-  mes::GtidSet missing_one_tag;
-  ASSERT_EQ(mes::GtidSet::Parse(sid + ":1-5:mytag:1-2", &missing_one_tag), MES_OK);
-  EXPECT_FALSE(purged.IsSubsetOf(missing_one_tag));
-}
-
-TEST(GtidSetTest, ParseRejectsEveryEmptyOrDanglingColonPiece) {
-  // The server never prints an empty piece, and skipping one would turn a
-  // malformed position into a plausible one.
-  const std::string sid(kSid);
-  for (const std::string& text :
-       {sid + ":1::2", sid + "::5", sid + ":1:", sid + ":tag:1:", sid + ":", sid + ":tag:",
-        sid + ":tag", sid + ":a:b:1", sid + ":1:tag", sid + ":1: :2", sid + ":5:mytag:1:other:"}) {
-    mes::GtidSet set;
-    EXPECT_EQ(mes::GtidSet::Parse(text, &set), MES_ERR_INVALID_ARG) << "input: '" << text << "'";
-    std::vector<uint8_t> encoded;
-    EXPECT_EQ(GtidEncoder::Encode(GtidEncoder::ConvertSingleGtidToRange(text).c_str(), &encoded),
-              MES_ERR_INVALID_ARG)
-        << "input: '" << text << "'";
-  }
-}
-
-// --- Error: null output pointer ---
-
 TEST(GtidEncoderTest, ErrorNullOutput) {
   EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-3", nullptr),
             MES_ERR_NULL_ARG);
 }
 
-// --- Error: null input ---
-
 TEST(GtidEncoderTest, ErrorNullInput) {
   std::vector<uint8_t> out;
   EXPECT_EQ(GtidEncoder::Encode(nullptr, &out), MES_ERR_NULL_ARG);
-}
-
-// --- Error: non-hex UUID character ---
-
-TEST(GtidEncoderTest, ErrorNonHexUuid) {
-  std::vector<uint8_t> out;
-  EXPECT_EQ(GtidEncoder::Encode("0000000g-0000-0000-0000-000000000001:1-3", &out),
-            MES_ERR_INVALID_ARG);
 }
 
 // --- ConvertSingleGtidToRange ---
@@ -638,102 +195,26 @@ TEST(GtidEncoderTest, SeparatorsOnlyStartPositionIsRejectedNotReadAsTheEmptySet)
   EXPECT_EQ(encoded.size(), 8u);
 }
 
-// --- Whitespace handling ---
-
-TEST(GtidEncoderTest, WhitespaceAroundGtid) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("  00000000-0000-0000-0000-000000000001:1-3  ", &out), MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);
+TEST(GtidEncoderTest, ConvertLeavesAnEntryWithSeveralRunsUntouched) {
+  // An entry with several runs names no single transaction, so it is not widened.
+  const std::string sid(kSid);
+  for (const std::string& text : {sid + ":5:mytag:1:other:3", sid + ":a:1:b:2"}) {
+    EXPECT_EQ(GtidEncoder::ConvertSingleGtidToRange(text), text);
+  }
 }
 
-TEST(GtidEncoderTest, WhitespaceAroundComma) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1 , "
-                                "00000000-0000-0000-0000-000000000002:2",
-                                &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 2u);
-}
-
-// --- Valid edge case: same start and end in range ---
-
-TEST(GtidEncoderTest, RangeStartEqualsEnd) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:3-3", &out), MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 32), 3u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 4u);  // end (exclusive)
-}
-
-// --- Duplicate UUIDs with overlapping intervals ---
-
-TEST(GtidEncoderTest, DuplicateUuidsOverlappingMerged) {
-  std::vector<uint8_t> out;
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-100,"
-                                "00000000-0000-0000-0000-000000000001:50-150",
-                                &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);     // 1 SID
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);    // 1 merged interval
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);    // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 151u);  // end
-}
-
-// --- Malformed UUID tests ---
-
-TEST(GtidEncoderTest, ErrorWrongLengthUuid) {
-  std::vector<uint8_t> out;
-  // UUID too short (missing characters)
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-0000000001:1-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-TEST(GtidEncoderTest, ErrorWrongLengthUuidTooLong) {
-  std::vector<uint8_t> out;
-  // UUID too long (extra characters)
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-00000000000001:1-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-TEST(GtidEncoderTest, ErrorNonHexCharInUuid) {
-  std::vector<uint8_t> out;
-  // 'Z' is not a valid hex character
-  EXPECT_EQ(GtidEncoder::Encode("Z0000000-0000-0000-0000-000000000001:1-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-TEST(GtidEncoderTest, ErrorNonHexCharMiddleOfUuid) {
-  std::vector<uint8_t> out;
-  // 'x' in the middle of the UUID
-  EXPECT_EQ(GtidEncoder::Encode("00000000-0000-x000-0000-000000000001:1-3", &out),
-            MES_ERR_INVALID_ARG);
-}
-
-// --- Large GNO values ---
-
-TEST(GtidEncoderTest, LargeGnoNearMax) {
-  std::vector<uint8_t> out;
-  // GNO = INT64_MAX - 1 = 9223372036854775806
-  // This should succeed as a single transaction (end = gno + 1 = INT64_MAX)
-  // But the existing code rejects INT64_MAX as overflow for end.
-  // So INT64_MAX - 1 as a single value means end = INT64_MAX which is rejected.
-  // Use a range: 1 to (INT64_MAX - 2) which means end = INT64_MAX - 1 (valid).
-  ASSERT_EQ(GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1-9223372036854775805", &out),
-            MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 0), 1u);   // n_sids
-  EXPECT_EQ(ReadInt64Le(out, 24), 1u);  // n_intervals
-  EXPECT_EQ(ReadInt64Le(out, 32), 1u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40),
-            static_cast<uint64_t>(9223372036854775806LL));  // end (exclusive)
-}
-
-TEST(GtidEncoderTest, LargeGnoRange) {
-  std::vector<uint8_t> out;
-  // A large range that doesn't overflow
-  ASSERT_EQ(
-      GtidEncoder::Encode("00000000-0000-0000-0000-000000000001:1000000000000-2000000000000", &out),
-      MES_OK);
-  EXPECT_EQ(ReadInt64Le(out, 32), 1000000000000u);  // start
-  EXPECT_EQ(ReadInt64Le(out, 40), 2000000000001u);  // end (exclusive)
+TEST(GtidEncoderTest, ConvertThenEncodeRejectsEveryEmptyOrDanglingColonPiece) {
+  // The server never prints an empty piece, and skipping one would turn a
+  // malformed position into a plausible one.
+  const std::string sid(kSid);
+  for (const std::string& text :
+       {sid + ":1::2", sid + "::5", sid + ":1:", sid + ":tag:1:", sid + ":", sid + ":tag:",
+        sid + ":tag", sid + ":a:b:1", sid + ":1:tag", sid + ":1: :2", sid + ":5:mytag:1:other:"}) {
+    std::vector<uint8_t> encoded;
+    EXPECT_EQ(GtidEncoder::Encode(GtidEncoder::ConvertSingleGtidToRange(text).c_str(), &encoded),
+              MES_ERR_INVALID_ARG)
+        << "input: '" << text << "'";
+  }
 }
 
 }  // namespace

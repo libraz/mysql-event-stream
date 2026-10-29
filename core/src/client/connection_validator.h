@@ -12,9 +12,9 @@
 #include <string>
 
 #include "mes.h"
+#include "mybinlog/server_flavor.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
-#include "server_flavor.h"
 
 namespace mes {
 
@@ -50,7 +50,7 @@ using VariableLookup = VariableValue (*)(void* context, const char* variable_nam
 
 /** Validate required binlog variables using a caller-provided lookup function. */
 ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* context,
-                                             ServerFlavor flavor);
+                                             mybinlog::ServerFlavor flavor);
 
 }  // namespace detail
 
@@ -65,7 +65,7 @@ ValidationResult ValidateServerConfiguration(VariableLookup lookup, void* contex
  * 4. binlog_row_image must be FULL
  * 5. log_bin_compress must not be ON (MariaDB only)
  * 6. binlog_transaction_compression must not be ON (MySQL only)
- * 7. binlog_row_value_options must not be PARTIAL_JSON (MySQL only)
+ * 7. binlog_row_value_options must not contain PARTIAL_JSON (MySQL only)
  *
  * The two phrasings differ in how they treat a server that does not define the
  * variable at all. A must-be check fails, because the stream cannot proceed
@@ -83,7 +83,7 @@ class ConnectionValidator {
    *         failed, the code ExecuteQuery() returned (e.g. MES_ERR_STREAM)
    */
   static ValidationResult Validate(protocol::MysqlConnection* conn,
-                                   ServerFlavor flavor = ServerFlavor::kMySQL);
+                                   mybinlog::ServerFlavor flavor = mybinlog::ServerFlavor::kMySQL);
 };
 
 }  // namespace mes

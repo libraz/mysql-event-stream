@@ -5,9 +5,9 @@
 
 #include <cstring>
 
-#include "binary_util.h"
 #include "protocol/mysql_socket.h"
 #include "secure_cleanse.h"
+#include "wire_util.h"
 
 namespace mes::protocol {
 
@@ -124,7 +124,7 @@ mes_error_t ReadPacket(SocketHandle* sock, std::vector<uint8_t>* payload, uint8_
 bool ReadLenEncInt(const uint8_t* data, size_t len, size_t* pos, uint64_t* value) {
   if (*pos > len) return false;
   size_t consumed = 0;
-  if (!binary::ReadLenEncInt(data + *pos, len - *pos, value, &consumed)) return false;
+  if (!wire::ReadLenEncInt(data + *pos, len - *pos, value, &consumed)) return false;
   *pos += consumed;
   return true;
 }

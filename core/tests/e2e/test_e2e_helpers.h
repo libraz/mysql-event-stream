@@ -23,21 +23,26 @@
 #include <vector>
 
 #include "mes.h"
+#include "mybinlog/server_flavor.h"
 #include "protocol/mysql_connection.h"
 #include "protocol/mysql_query.h"
-#include "server_flavor.h"
 
 namespace e2e {
 
 // Each E2E test uses a unique server_id to avoid binlog session conflicts.
 // Ranges: Protocol 100-199, SSL 200-299, Auth 300-399,
-//         DML 500-599, Engine 600-699, Buffer 700-799, Start modes 800-899
+//         DML 500-599, Engine 600-699, Buffer 700-799, Start modes 800-899,
+//         Tagged GTIDs 900-999
 namespace server_ids {
 // test_e2e_start_mode.cpp
 constexpr uint32_t kStartModeCurrent = 800;
 constexpr uint32_t kStartModeExplicitGtid = 801;
 constexpr uint32_t kStartModeFilePosition = 802;
 constexpr uint32_t kStartModeFilePositionCheckpoint = 803;
+
+// test_e2e_tagged_gtid.cpp
+constexpr uint32_t kTaggedGtidFirstStream = 900;
+constexpr uint32_t kTaggedGtidResumedStream = 901;
 
 // test_e2e_binlog_dml.cpp
 constexpr uint32_t kDmlInsertAllColumns = 500;
@@ -83,15 +88,15 @@ constexpr const char* kReplPass = "test_password";
 constexpr uint32_t kTimeout = 5;
 
 // Detect DB flavor from environment (set by run-matrix.sh)
-inline mes::ServerFlavor GetDbFlavor() {
+inline mybinlog::ServerFlavor GetDbFlavor() {
   const char* env = std::getenv("DB_FLAVOR");
   if (env && std::string(env) == "mariadb") {
-    return mes::ServerFlavor::kMariaDB;
+    return mybinlog::ServerFlavor::kMariaDB;
   }
-  return mes::ServerFlavor::kMySQL;
+  return mybinlog::ServerFlavor::kMySQL;
 }
 
-inline bool IsMariaDB() { return GetDbFlavor() == mes::ServerFlavor::kMariaDB; }
+inline bool IsMariaDB() { return GetDbFlavor() == mybinlog::ServerFlavor::kMariaDB; }
 
 // MariaDB uses mysql_native_password (no TLS required for auth).
 // MySQL 8.4+ uses caching_sha2_password (certificate-verified TLS is needed for full auth).

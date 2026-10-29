@@ -24,8 +24,8 @@
 #include <string>
 #include <thread>
 
-#include "client/gtid_set.h"
 #include "mes.h"
+#include "mybinlog/mysql_gtid.h"
 #include "test_e2e_helpers.h"
 
 using namespace e2e;
@@ -78,7 +78,7 @@ TEST(E2EStartMode, EveryStartModeEstablishesChecksumAndCheckpointState) {
   };
 
   for (const StartModeCase& start_mode : cases) {
-    SCOPED_TRACE(std::string(GetServerFlavorName(GetDbFlavor())) + " / " + start_mode.name);
+    SCOPED_TRACE(std::string(mybinlog::ServerFlavorName(GetDbFlavor())) + " / " + start_mode.name);
 
     ClientFixture fixture;
     fixture.client = mes_client_create();
@@ -190,8 +190,8 @@ TEST(E2EStartMode, FilePositionStartWithholdsTheCheckpointUntilThePreviousGtidsO
   // prints N-N, so MySQL sets are compared parsed; MariaDB positions are not
   // sets and compare as text without whitespace.
   const auto canonical = [](std::string text) {
-    mes::GtidSet set;
-    if (mes::GtidSet::Parse(text, &set) == MES_OK) return set.ToString();
+    mybinlog::GtidSet set;
+    if (mybinlog::GtidSet::Parse(text, &set) == mybinlog::Status::kOk) return set.ToString();
     text.erase(std::remove_if(text.begin(), text.end(),
                               [](unsigned char c) { return std::isspace(c) != 0; }),
                text.end());

@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "mes.h"
+#include "mybinlog/server_flavor.h"
 #include "protocol/mysql_socket.h"
-#include "server_flavor.h"
 
 namespace mes::protocol {
 
@@ -156,7 +156,7 @@ class MysqlConnection {
   bool DeprecateEofNegotiated() const;
 
   /** @brief Get the detected server flavor (MySQL or MariaDB) */
-  ServerFlavor GetServerFlavor() const;
+  mybinlog::ServerFlavor GetServerFlavor() const;
 
  private:
   SocketHandle socket_;
@@ -167,7 +167,7 @@ class MysqlConnection {
   std::atomic<bool> connected_{false};
   uint8_t sequence_id_ = 0;
   uint32_t negotiated_caps_ = 0;
-  ServerFlavor server_flavor_ = ServerFlavor::kMySQL;
+  mybinlog::ServerFlavor server_flavor_ = mybinlog::ServerFlavor::kMySQL;
   int auth_switch_count_ = 0;
   bool allow_public_key_retrieval_ = false;
   uint32_t ssl_mode_ = MES_SSL_DISABLED;

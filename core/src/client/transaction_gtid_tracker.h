@@ -9,9 +9,9 @@
 #include <map>
 #include <string>
 
-#include "client/gtid_set.h"
-#include "mariadb_gtid.h"
-#include "server_flavor.h"
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
+#include "mybinlog/server_flavor.h"
 
 namespace mes {
 
@@ -25,7 +25,7 @@ class TransactionGtidTracker {
   void Reset();
 
   /** Reset and seed the complete set advertised as the stream start position. */
-  bool Reset(const std::string& initial_gtid_set, ServerFlavor flavor);
+  bool Reset(const std::string& initial_gtid_set, mybinlog::ServerFlavor flavor);
 
   /**
    * Reset for a stream that starts at a binlog file offset with no known set.
@@ -34,7 +34,7 @@ class TransactionGtidTracker {
    * PREVIOUS_GTIDS/GTID_LIST event supplies the baseline: the GTIDs observed
    * from the offset alone are not a complete executed set.
    */
-  void ResetAwaitingBaseline(ServerFlavor flavor);
+  void ResetAwaitingBaseline(mybinlog::ServerFlavor flavor);
 
   /**
    * Observe one complete event and return a safe complete-set checkpoint.
@@ -61,29 +61,29 @@ class TransactionGtidTracker {
   bool has_pending_gtid() const { return pending_gtid_.present; }
 
  private:
-  using Sid = GtidSet::Sid;
-  using MySQLSet = GtidSet;
-  using MariaDBSet = std::map<uint32_t, MariaDBGtid>;
+  using Sid = mybinlog::Uuid;
+  using MySQLSet = mybinlog::GtidSet;
+  using MariaDBSet = std::map<uint32_t, mybinlog::MariaDbGtid>;
 
   struct PendingGtid {
     bool present = false;
-    ServerFlavor flavor = ServerFlavor::kMySQL;
+    mybinlog::ServerFlavor flavor = mybinlog::ServerFlavor::kMySQL;
     Sid sid{};
     std::string tag;
     uint64_t sequence_no = 0;
-    MariaDBGtid mariadb;
+    mybinlog::MariaDbGtid mariadb;
     /// MariaDB FL_STANDALONE: the group ends without a COMMIT/XID event.
     bool standalone = false;
   };
 
-  static void MergeMariaDBGtid(MariaDBSet* set, const MariaDBGtid& gtid);
+  static void MergeMariaDBGtid(MariaDBSet* set, const mybinlog::MariaDbGtid& gtid);
   static std::string FormatMySQLSet(const MySQLSet& set);
   static std::string FormatMariaDBSet(const MariaDBSet& set);
 
   std::string CommitPending();
   std::string FormatCurrentSet() const;
 
-  ServerFlavor flavor_ = ServerFlavor::kMySQL;
+  mybinlog::ServerFlavor flavor_ = mybinlog::ServerFlavor::kMySQL;
   MySQLSet mysql_set_;
   MariaDBSet mariadb_set_;
   std::string received_gtid_;

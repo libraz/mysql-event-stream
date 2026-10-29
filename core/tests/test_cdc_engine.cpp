@@ -1429,7 +1429,17 @@ TEST(CdcEngineTest, EveryTypeCodeIsClassifiedAsItsTableSays) {
     if (klass == Class::kDecoded) continue;
     SCOPED_TRACE(code);
     CdcEngine engine;
-    const auto event = BuildEvent(static_cast<uint8_t>(code), 1000, 640, {0x01, 0x02, 0x03, 0x04});
+    // An FDE sets the framing of everything after it, so a body it cannot
+    // parse is refused; give it a well-formed CRC32 one.
+    std::vector<uint8_t> body = {0x01, 0x02, 0x03, 0x04};
+    if (code == static_cast<int>(BinlogEventType::kFormatDescriptionEvent)) {
+      body.assign(57, 0);
+      body[0] = 4;  // binlog_version
+      std::memcpy(body.data() + 2, "8.4.0", 5);
+      body[56] = 19;  // event_header_length
+      body.push_back(kBinlogChecksumAlgCrc32);
+    }
+    const auto event = BuildEvent(static_cast<uint8_t>(code), 1000, 640, body);
 
     ScopedErrorLogCapture capture;
     engine.Feed(event.data(), event.size());

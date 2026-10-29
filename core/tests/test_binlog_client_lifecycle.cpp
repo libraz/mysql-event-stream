@@ -24,16 +24,18 @@
 #include <thread>
 #include <vector>
 
-#include "binary_util.h"
 #include "cdc_engine.h"
 #include "client/binlog_client.h"
 #include "client/event_queue.h"
 #include "client/gtid_encoder.h"
-#include "crc32.h"
-#include "event_header.h"
 #include "logger.h"
-#include "mariadb_gtid.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/crc32.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/mariadb_gtid.h"
 #include "protocol/mysql_binlog_stream.h"
+#include "wire_util.h"
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -83,7 +85,7 @@ constexpr uint8_t kComQuery = 0x03;
 constexpr uint8_t kComBinlogDump = 0x12;
 constexpr uint8_t kComBinlogDumpGtid = 0x1E;
 
-/// Handshake server-version strings, one per flavour DetectServerFlavor()
+/// Handshake server-version strings, one per flavour DetectFlavorFromVersion()
 /// recognizes. This field is the only input that selects the flavour, and with
 /// it the whole stream-setup branch, so the peer advertises it verbatim.
 constexpr char kMySQLVersion[] = "8.4.0";
@@ -299,9 +301,9 @@ class ScriptedMysqlPeer {
             do {
               // Each event's own header length marks where the next one begins.
               size_t length = stream_event.size() - offset;
-              if (length >= kEventHeaderSize) {
-                const uint32_t declared = binary::ReadU32Le(stream_event.data() + offset + 9);
-                if (declared >= kEventHeaderSize && declared <= length) length = declared;
+              if (length >= mybinlog::kEventHeaderSize) {
+                const uint32_t declared = wire::ReadU32Le(stream_event.data() + offset + 9);
+                if (declared >= mybinlog::kEventHeaderSize && declared <= length) length = declared;
               }
               std::vector<uint8_t> packet{0x00};  // replication OK marker
               packet.insert(packet.end(), stream_event.begin() + offset,
@@ -603,15 +605,22 @@ std::vector<uint8_t> MakeWireEvent(uint32_t event_length) {
 
 std::vector<uint8_t> MakeCrc32FormatDescriptionEvent() {
   // Fixed FDE prefix after the common header, then the checksum algorithm byte
-  // the detector reads, then the trailer that byte announces.
+  // the detector reads, then the trailer that byte announces. The server
+  // version (after the 2-byte binlog version) must be checksum-aware: an older
+  // one writes no algorithm byte at all.
   constexpr size_t kFdePrefix = 57;
-  std::vector<uint8_t> event(kEventHeaderSize + kFdePrefix + 1 + kChecksumSize, 0);
-  event[4] = static_cast<uint8_t>(BinlogEventType::kFormatDescriptionEvent);
-  event[kEventHeaderSize + kFdePrefix] = kBinlogChecksumAlgCrc32;
+  constexpr char kFdeServerVersion[] = "8.4.0";
+  std::vector<uint8_t> event(mybinlog::kEventHeaderSize + kFdePrefix + 1 + mybinlog::kChecksumSize,
+                             0);
+  event[4] = static_cast<uint8_t>(mybinlog::EventType::kFormatDescriptionEvent);
+  std::copy(std::begin(kFdeServerVersion), std::end(kFdeServerVersion) - 1,
+            event.begin() + mybinlog::kEventHeaderSize + 2);
+  event[mybinlog::kEventHeaderSize + kFdePrefix] =
+      static_cast<uint8_t>(mybinlog::ChecksumAlgorithm::kCrc32);
   SetEventLength(&event);
-  const size_t data_length = event.size() - kChecksumSize;
-  const uint32_t crc = ComputeCRC32(event.data(), data_length);
-  for (size_t byte = 0; byte < kChecksumSize; ++byte) {
+  const size_t data_length = event.size() - mybinlog::kChecksumSize;
+  const uint32_t crc = mybinlog::ComputeCrc32(event.data(), data_length);
+  for (size_t byte = 0; byte < mybinlog::kChecksumSize; ++byte) {
     event[data_length + byte] = static_cast<uint8_t>(crc >> (8 * byte));
   }
   return event;
@@ -627,10 +636,10 @@ std::vector<uint8_t> MakeCrc32FormatDescriptionEvent() {
 std::vector<uint8_t> MakePreviousGtidsEvent(const std::string& gtid_set) {
   std::vector<uint8_t> encoded;
   EXPECT_EQ(GtidEncoder::Encode(gtid_set.c_str(), &encoded), MES_OK);
-  std::vector<uint8_t> event(kEventHeaderSize + encoded.size(), 0);
-  event[4] = static_cast<uint8_t>(BinlogEventType::kPreviousGtidsEvent);
+  std::vector<uint8_t> event(mybinlog::kEventHeaderSize + encoded.size(), 0);
+  event[4] = static_cast<uint8_t>(mybinlog::EventType::kPreviousGtidsEvent);
   SetEventLength(&event);
-  std::copy(encoded.begin(), encoded.end(), event.begin() + kEventHeaderSize);
+  std::copy(encoded.begin(), encoded.end(), event.begin() + mybinlog::kEventHeaderSize);
   return event;
 }
 
@@ -641,21 +650,21 @@ constexpr uint8_t kConfiguredSid[16] = {0x3e, 0x11, 0xfa, 0x47, 0x71, 0xca, 0x11
 /** @brief A GTID_LOG_EVENT for transaction @p gno of kConfiguredSid. */
 std::vector<uint8_t> MakeGtidEvent(uint64_t gno) {
   // Body: one flags byte, the 16-byte SID, then the 8-byte GNO.
-  std::vector<uint8_t> event(kEventHeaderSize + 1 + 16 + 8, 0);
-  event[4] = static_cast<uint8_t>(BinlogEventType::kGtidLogEvent);
+  std::vector<uint8_t> event(mybinlog::kEventHeaderSize + 1 + 16 + 8, 0);
+  event[4] = static_cast<uint8_t>(mybinlog::EventType::kGtidLogEvent);
   SetEventLength(&event);
   std::copy(std::begin(kConfiguredSid), std::end(kConfiguredSid),
-            event.begin() + kEventHeaderSize + 1);
+            event.begin() + mybinlog::kEventHeaderSize + 1);
   for (int byte = 0; byte < 8; ++byte) {
-    event[kEventHeaderSize + 17 + byte] = static_cast<uint8_t>(gno >> (8 * byte));
+    event[mybinlog::kEventHeaderSize + 17 + byte] = static_cast<uint8_t>(gno >> (8 * byte));
   }
   return event;
 }
 
 /** @brief An XID_EVENT: the commit boundary of a transactional group. */
 std::vector<uint8_t> MakeXidEvent() {
-  std::vector<uint8_t> event(kEventHeaderSize + 8, 0);
-  event[4] = static_cast<uint8_t>(BinlogEventType::kXidEvent);
+  std::vector<uint8_t> event(mybinlog::kEventHeaderSize + 8, 0);
+  event[4] = static_cast<uint8_t>(mybinlog::EventType::kXidEvent);
   SetEventLength(&event);
   return event;
 }
@@ -681,23 +690,24 @@ constexpr size_t kGtidListEntrySize = 16;
  * event that closes its group.
  */
 std::vector<uint8_t> MakeMariaDBGtidListEvent(const std::string& gtid_set) {
-  std::vector<MariaDBGtid> gtids;
-  EXPECT_EQ(MariaDBGtid::ParseSet(gtid_set, &gtids), MES_OK);
+  mybinlog::MariaDbGtidPosition position;
+  EXPECT_EQ(mybinlog::MariaDbGtidPosition::Parse(gtid_set, &position), mybinlog::Status::kOk);
+  const std::vector<mybinlog::MariaDbGtid>& gtids = position.gtids;
   std::vector<uint8_t> event(
-      kEventHeaderSize + kGtidListCountSize + gtids.size() * kGtidListEntrySize, 0);
-  event[4] = static_cast<uint8_t>(BinlogEventType::kMariaDBGtidListEvent);
+      mybinlog::kEventHeaderSize + kGtidListCountSize + gtids.size() * kGtidListEntrySize, 0);
+  event[4] = static_cast<uint8_t>(mybinlog::EventType::kMariaDBGtidListEvent);
   SetEventLength(&event);
 
   // The flags occupy the top four bits of the count word and none of them
   // change how the list is read, so the count alone is written.
-  size_t offset = kEventHeaderSize;
+  size_t offset = mybinlog::kEventHeaderSize;
   const auto put_u32 = [&event, &offset](uint32_t value) {
     for (int byte = 0; byte < 4; ++byte) {
       event[offset++] = static_cast<uint8_t>(value >> (8 * byte));
     }
   };
   put_u32(static_cast<uint32_t>(gtids.size()));
-  for (const MariaDBGtid& gtid : gtids) {
+  for (const mybinlog::MariaDbGtid& gtid : gtids) {
     put_u32(gtid.domain_id);
     put_u32(gtid.server_id);
     for (int byte = 0; byte < 8; ++byte) {
@@ -713,10 +723,10 @@ std::vector<uint8_t> DumpRequestGtidData(const std::vector<uint8_t>& request) {
   // position, GTID data length, GTID data.
   size_t offset = 1 + 2 + 4;
   if (request.size() < offset + 4) return {};
-  const uint32_t filename_length = binary::ReadU32Le(request.data() + offset);
+  const uint32_t filename_length = wire::ReadU32Le(request.data() + offset);
   offset += 4 + filename_length + 8;
   if (request.size() < offset + 4) return {};
-  const uint32_t gtid_length = binary::ReadU32Le(request.data() + offset);
+  const uint32_t gtid_length = wire::ReadU32Le(request.data() + offset);
   offset += 4;
   if (request.size() < offset + gtid_length) return {};
   return std::vector<uint8_t>(request.data() + offset, request.data() + offset + gtid_length);
@@ -1247,7 +1257,7 @@ TEST(BinlogClientLifecycle, FatalDumpErrorIsUnrecoverableOnlyForAGtidStart) {
       config.start_gtid.clear();
       config.start_at_file_position = true;
       config.binlog_file = "binlog.000001";
-      config.binlog_position = kBinlogMagicOffset;
+      config.binlog_position = mybinlog::kBinlogMagicOffset;
     }
     ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
     ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
@@ -1335,7 +1345,7 @@ TEST(BinlogClientLifecycle, MariaDBStreamSetupNegotiatesTheSessionBeforeRequesti
   const std::vector<uint8_t>& request = commands[dump].payload;
   ASSERT_GE(request.size(), kComBinlogDumpFlagsOffset + 2);
   EXPECT_EQ(request[0], kComBinlogDump);
-  EXPECT_EQ(binary::ReadU16Le(request.data() + kComBinlogDumpFlagsOffset),
+  EXPECT_EQ(wire::ReadU16Le(request.data() + kComBinlogDumpFlagsOffset),
             protocol::kBinlogSendAnnotateRows);
 
   client.Stop();
@@ -1373,7 +1383,7 @@ TEST(BinlogClientLifecycle, TheMariaDBCapabilityAndDumpFlagAreSentToMariaDBOnly)
     config.start_gtid.clear();
     config.start_at_file_position = true;
     config.binlog_file = "binlog.000001";
-    config.binlog_position = kBinlogMagicOffset;
+    config.binlog_position = mybinlog::kBinlogMagicOffset;
     ASSERT_EQ(client.Connect(config), MES_OK) << client.GetLastError();
     ASSERT_EQ(client.StartStream(), MES_OK) << client.GetLastError();
     ASSERT_TRUE(peer.WaitForDumpRequests(1, seconds(3)));
@@ -1387,7 +1397,7 @@ TEST(BinlogClientLifecycle, TheMariaDBCapabilityAndDumpFlagAreSentToMariaDBOnly)
     const std::vector<uint8_t>& request = commands[dump].payload;
     ASSERT_EQ(request.size(), 1u + 4u + 2u + 4u + config.binlog_file.size());
     EXPECT_EQ(request[0], kComBinlogDump);
-    EXPECT_EQ(binary::ReadU16Le(request.data() + kComBinlogDumpFlagsOffset),
+    EXPECT_EQ(wire::ReadU16Le(request.data() + kComBinlogDumpFlagsOffset),
               flavour.expected_dump_flags);
 
     client.Stop();
@@ -1655,13 +1665,13 @@ TEST(BinlogClientLifecycle, AReaderThatAbandonsALiveDumpRefusesTheNextStart) {
  */
 TEST(BinlogClientLifecycle, AChecksummedFrameThatCannotCarryItsTrailerFailsClosed) {
   // Header only: with the OK marker, a 20-byte packet.
-  std::vector<uint8_t> header_only = MakeWireEvent(kEventHeaderSize);
+  std::vector<uint8_t> header_only = MakeWireEvent(mybinlog::kEventHeaderSize);
   // A valid trailer over the bytes, but a header length one byte short.
   std::vector<uint8_t> misframed = MakeWireEvent(256);
   misframed[9] = static_cast<uint8_t>(misframed.size() - 1);
-  const size_t data_length = misframed.size() - kChecksumSize;
-  const uint32_t crc = ComputeCRC32(misframed.data(), data_length);
-  for (size_t byte = 0; byte < kChecksumSize; ++byte) {
+  const size_t data_length = misframed.size() - mybinlog::kChecksumSize;
+  const uint32_t crc = mybinlog::ComputeCrc32(misframed.data(), data_length);
+  for (size_t byte = 0; byte < mybinlog::kChecksumSize; ++byte) {
     misframed[data_length + byte] = static_cast<uint8_t>(crc >> (8 * byte));
   }
 
