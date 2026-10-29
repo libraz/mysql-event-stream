@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "mes.h"
@@ -253,6 +254,8 @@ class CdcEngine {
   std::shared_ptr<const std::string> pending_source_sql_;
   // Each event with the charge EnqueueEvent() applied, which NextEvent() releases.
   struct QueuedEvent {
+    QueuedEvent(ChangeEvent&& queued, size_t queued_charge)
+        : event(std::move(queued)), charge(queued_charge) {}
     ChangeEvent event;
     size_t charge = 0;
   };

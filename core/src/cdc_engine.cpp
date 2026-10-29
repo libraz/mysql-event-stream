@@ -264,7 +264,8 @@ void CdcEngine::EnqueueEvent(ChangeEvent&& event, size_t bookkeeping_charge) {
   // with the entry so NextEvent() releases exactly what was charged.
   const size_t charge = ChangeEventCharge(event, bookkeeping_charge);
   queued_bytes_ += charge;
-  event_queue_.push(QueuedEvent{std::move(event), charge});
+  // Built in place: a temporary entry would cost a second move and destructor.
+  event_queue_.emplace(std::move(event), charge);
 }
 
 bool CdcEngine::NextEvent(ChangeEvent* event) {

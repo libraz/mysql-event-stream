@@ -67,16 +67,51 @@ void SetUnsigned(ColumnType type, uint64_t value, ColumnValue* out) {
 
 void SetText(ColumnType type, const char* begin, const char* end, ColumnValue* out) {
   SetNonNull(type, out);
-  out->string_val.assign(begin, static_cast<size_t>(end - begin));
+  // Constructed, not assign()ed: assign() is an out-of-line libc++ call.
+  out->string_val = std::string(begin, static_cast<size_t>(end - begin));
 }
 
-}  // namespace
-
-bool RenderValue(mybinlog::Value&& value, ColumnValue* out) {
+// Kinds that need formatting, out of line: their text buffer would otherwise
+// give every column's render the frame of the widest case.
+[[gnu::noinline]] bool RenderFormatted(const mybinlog::Value& value, ColumnValue* out) {
   using Kind = mybinlog::Value::Kind;
   const ColumnType type = value.type;
   char buf[kTemporalBufferSize];
   char* end = buf;
+  switch (value.kind) {
+    case Kind::kDate:
+      end = WriteCalendarDate(buf, value.t.year, value.t.month, value.t.day);
+      SetText(type, buf, end, out);
+      return true;
+    case Kind::kDateTime:
+      if (value.t.negative) *end++ = '-';
+      end = WriteCalendarDate(end, value.t.year, value.t.month, value.t.day);
+      *end++ = ' ';
+      end = WriteClockTime(end, value.t.hour, value.t.minute, value.t.second);
+      end = WriteFractional(end, value.t.microsecond, value.t.fsp);
+      SetText(type, buf, end, out);
+      return true;
+    case Kind::kTime:
+      if (value.t.negative) *end++ = '-';
+      end = WriteClockTime(end, value.t.hour, value.t.minute, value.t.second);
+      end = WriteFractional(end, value.t.microsecond, value.t.fsp);
+      SetText(type, buf, end, out);
+      return true;
+    case Kind::kTimestamp:
+      SetNonNull(type, out);
+      out->string_val = std::to_string(value.epoch_seconds);
+      end = WriteFractional(buf, value.microsecond, value.fsp);
+      out->string_val.append(buf, static_cast<size_t>(end - buf));
+      return true;
+    default:
+      return false;
+  }
+}
+
+// RenderValue(), inlined into RenderRow()'s column loop.
+[[gnu::always_inline]] inline bool RenderOne(mybinlog::Value&& value, ColumnValue* out) {
+  using Kind = mybinlog::Value::Kind;
+  const ColumnType type = value.type;
   switch (value.kind) {
     case Kind::kNull:
       *out = ColumnValue::Null(type);
@@ -108,34 +143,21 @@ bool RenderValue(mybinlog::Value&& value, ColumnValue* out) {
       out->string_val = std::move(value.bytes);
       return true;
     case Kind::kDate:
-      end = WriteCalendarDate(buf, value.t.year, value.t.month, value.t.day);
-      SetText(type, buf, end, out);
-      return true;
     case Kind::kDateTime:
-      if (value.t.negative) *end++ = '-';
-      end = WriteCalendarDate(end, value.t.year, value.t.month, value.t.day);
-      *end++ = ' ';
-      end = WriteClockTime(end, value.t.hour, value.t.minute, value.t.second);
-      end = WriteFractional(end, value.t.microsecond, value.t.fsp);
-      SetText(type, buf, end, out);
-      return true;
     case Kind::kTime:
-      if (value.t.negative) *end++ = '-';
-      end = WriteClockTime(end, value.t.hour, value.t.minute, value.t.second);
-      end = WriteFractional(end, value.t.microsecond, value.t.fsp);
-      SetText(type, buf, end, out);
-      return true;
     case Kind::kTimestamp:
-      SetNonNull(type, out);
-      out->string_val = std::to_string(value.epoch_seconds);
-      end = WriteFractional(buf, value.microsecond, value.fsp);
-      out->string_val.append(buf, static_cast<size_t>(end - buf));
-      return true;
+      return RenderFormatted(value, out);
     case Kind::kJsonDiff:
     case Kind::kAbsent:
       return false;
   }
   return false;
+}
+
+}  // namespace
+
+bool RenderValue(mybinlog::Value&& value, ColumnValue* out) {
+  return RenderOne(std::move(value), out);
 }
 
 bool RenderRow(mybinlog::Row&& row, RowData* out, mybinlog::DecodeBudget* budget) {
@@ -146,7 +168,7 @@ bool RenderRow(mybinlog::Row&& row, RowData* out, mybinlog::DecodeBudget* budget
     // here from fields is new.
     const size_t charged = value.bytes.size();
     ColumnValue& column = out->columns[i];
-    if (!RenderValue(std::move(value), &column)) return false;
+    if (!RenderOne(std::move(value), &column)) return false;
     if (budget != nullptr && column.string_val.size() > charged &&
         !budget->Charge(column.string_val.size() - charged)) {
       return false;
