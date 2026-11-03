@@ -51,14 +51,14 @@
   },
   "packageManager": "yarn@4.18.1",
   "devDependencies": {
-    "@biomejs/biome": "^2.5.15",
-    "@types/node": "^26.6.5",
-    "@vitest/coverage-v8": "5.0.5",
+    "@biomejs/biome": "^2.6.4",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "5.1.0",
     "cmake-js": "^8.0.0",
     "mysql2": "^3.24.6",
     "node-addon-api": "^8.9.2",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4",
-    "vitest": "5.0.5"
+    "vite": "^8.3.5",
+    "vitest": "5.1.0"
   }
 }
