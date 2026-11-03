@@ -15,7 +15,7 @@ An embeddable CDC engine for MySQL and MariaDB. It reads the binary log as a rep
 
 ![From a binlog stream to row-level change events](docs/images/pipeline.svg)
 
-A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, `caching_sha2_password`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it. A C ABI publishes that core, and a Node.js N-API addon and a Python `ctypes` package sit on it. Published artifacts link OpenSSL and zlib statically; [Architecture](docs/en/architecture.md#no-client-library) lists what each one depends on.
+A C++17 core implements the MySQL wire protocol directly on OpenSSL — handshake, `caching_sha2_password`, `COM_BINLOG_DUMP_GTID` — and the binlog parser and row decoder above it, which read the wire format through [libmybinlog](https://github.com/libraz/libmybinlog). A C ABI publishes that core, and a Node.js N-API addon and a Python `ctypes` package sit on it. Published artifacts link OpenSSL and zlib statically; [Architecture](docs/en/architecture.md#no-client-library) lists what each one depends on.
 
 ## What it does
 

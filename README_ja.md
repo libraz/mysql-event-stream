@@ -15,7 +15,7 @@ MySQL / MariaDB 向けの、組み込み可能な CDC エンジンです。レ�
 
 ![binlog ストリームから行単位の変更イベントへ](docs/images/pipeline-ja.svg)
 
-C++17 のコアが、MySQL のワイヤプロトコル（ハンドシェイク、`caching_sha2_password`、`COM_BINLOG_DUMP_GTID`）を OpenSSL 上に直接実装し、その上に binlog パーサーと行デコーダーを載せています。コアは C ABI として公開され、その上に Node.js の N-API アドオンと Python の `ctypes` パッケージが乗ります。公開する成果物は OpenSSL と zlib を静的にリンクしています。それぞれが何に依存するかは[アーキテクチャ](docs/ja/architecture.md#クライアントライブラリを使わない)にあります。
+C++17 のコアが、MySQL のワイヤプロトコル（ハンドシェイク、`caching_sha2_password`、`COM_BINLOG_DUMP_GTID`）を OpenSSL 上に直接実装し、その上に binlog パーサーと行デコーダーを載せています。パーサーと行デコーダーは、ワイヤフォーマットを [libmybinlog](https://github.com/libraz/libmybinlog) を通して読みます。コアは C ABI として公開され、その上に Node.js の N-API アドオンと Python の `ctypes` パッケージが乗ります。公開する成果物は OpenSSL と zlib を静的にリンクしています。それぞれが何に依存するかは[アーキテクチャ](docs/ja/architecture.md#クライアントライブラリを使わない)にあります。
 
 ## できること
 

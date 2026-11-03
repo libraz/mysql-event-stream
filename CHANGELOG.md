@@ -10,6 +10,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-11-04
+
+The binlog wire format is now decoded by libmybinlog, a separate codec fetched
+at build time, in place of the decoders that lived in this repository. The C
+ABI is unchanged and `mes_abi_version()` still reports 3, and every rendered
+column value keeps its exact text. What changed is that a few inputs the old
+decoders skipped or guessed at now stop the stream with an error.
+
+### Fixed
+
+- **Tagged GTIDs from a real server** — the MySQL 8.4+ tagged GTID event was
+  read without its leading serialization version, so tagged transactions never
+  reached `currentGtid` / `current_gtid`. They are tracked in the `uuid:tag:N`
+  form, and a checkpoint containing them resumes as written.
+- **Checksum framing follows each format description event** — the algorithm is
+  read from every FDE, so a raw `binlog_checksum=NONE` file decodes without a
+  `mes_set_checksum_enabled()` call. An FDE that cannot be parsed fails with
+  `MES_ERR_PARSE` instead of leaving the previous framing in force.
+- **Values that cannot exist fail with `MES_ERR_DECODE_ROW`** instead of being
+  rendered as a guess: temporal fields outside their range, DECIMAL metadata
+  outside precision 1–65 or scale 0–38, a zero-width length prefix, or an
+  unknown column type. Zero dates still render as written.
+- **A QUERY event whose status-variable block overruns its length** is refused.
+- **`binlog_row_value_options`** is rejected when it contains `PARTIAL_JSON`,
+  not only when it equals it.
+
+### Changed
+
+- **Events that cannot become faithful change events stop the stream** with
+  `MES_ERR_PARSE`: `XA_PREPARE`, `ANONYMOUS_GTID` and `EXECUTE_LOAD_QUERY` join
+  `INCIDENT`, compressed payloads and `PARTIAL_UPDATE_ROWS`. An unknown event
+  type the source flags with `LOG_EVENT_IGNORABLE_F` is skipped; without the
+  flag it stops the stream.
+- **Building from source fetches libmybinlog** through CMake `FetchContent`, so
+  the first configure needs network access; `MYBINLOG_SOURCE_DIR` points it at a
+  local checkout. The published npm addon and wheels are unaffected.
+- **Row decoding** reuses one scratch row across events, renders plain values
+  inline and queues changes in place.
+
+### Documentation
+
+- Server setup lists the events that stop the stream and why; checkpoints,
+  column values, errors and the glossary cover tagged GTIDs, values that cannot
+  exist and per-file checksum framing; the architecture page describes the
+  codec boundary.
+
+### Dependencies
+
+- libmybinlog 0.3.0; Node 22.23.4; Biome 2.6, Vitest 5.1 and current patch
+  releases of the Node and Python development dependencies; cibuildwheel
+  4.3.5; wheels built on `ubuntu-26.04-arm`, `macos-26-intel` and `macos-26`.
+
 ## [1.8.0] - 2026-10-21
 
 A correctness release with one change to a Python signature, which is why it is
@@ -772,7 +824,8 @@ breaking changes.
 
 Initial public release.
 
-[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/libraz/mysql-event-stream/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/libraz/mysql-event-stream/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/libraz/mysql-event-stream/compare/v1.7.1...v1.8.0
 [1.7.1]: https://github.com/libraz/mysql-event-stream/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/libraz/mysql-event-stream/compare/v1.6.1...v1.7.0

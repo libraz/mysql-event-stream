@@ -27,6 +27,8 @@ brew install cmake openssl zlib
 sudo apt install cmake build-essential libssl-dev zlib1g-dev pkg-config
 ```
 
+The first native build fetches the binlog codec, [libmybinlog](https://github.com/libraz/libmybinlog), from GitHub, so it needs network access. Set `MYBINLOG_SOURCE_DIR` to build against a local checkout.
+
 ## Build, test, lint
 
 ```bash

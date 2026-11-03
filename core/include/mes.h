@@ -50,7 +50,7 @@ extern "C" {
 
 #define MES_VERSION_MAJOR 1
 #define MES_VERSION_MINOR 8
-#define MES_VERSION_PATCH 0
+#define MES_VERSION_PATCH 1
 #define MES_ABI_VERSION 3
 
 /** @brief Human-readable library version, composed from MES_VERSION_MAJOR,
@@ -278,14 +278,14 @@ MES_API void mes_destroy(mes_engine_t* engine);
  *
  * Not every binlog event produces a change event. A standard control event
  * that has no row-level representation (STOP, ROTATE, XID, INTVAR, RAND,
- * USER_VAR, EXECUTE_LOAD_QUERY, XA_PREPARE, heartbeat, format description, the
- * GTID family, and the MariaDB equivalents) advances the stream position
- * silently. An event that would hide a change the engine cannot represent
- * fails with MES_ERR_PARSE instead of being skipped or checkpointed: INCIDENT,
- * transaction payload compression, partial JSON and partial row updates, and
- * the MariaDB compressed query/row events. So does any type code that no
- * supported server emits, so a newly introduced event type is loud rather
- * than lossy.
+ * USER_VAR, heartbeat, format description, the GTID family, and the MariaDB
+ * equivalents) advances the stream position silently. An event that would hide
+ * a change the engine cannot represent fails with MES_ERR_PARSE instead of
+ * being skipped or checkpointed: XA_PREPARE, ANONYMOUS_GTID,
+ * EXECUTE_LOAD_QUERY, INCIDENT, transaction payload compression, partial JSON
+ * and partial row updates, and the MariaDB compressed query/row events. So
+ * does an unknown type code unless the source flags it LOG_EVENT_IGNORABLE_F,
+ * so a newly introduced event type is loud rather than lossy.
  *
  * @param engine  Engine handle.
  * @param data    Pointer to binlog byte stream.

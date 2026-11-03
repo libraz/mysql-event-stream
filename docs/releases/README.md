@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of mysql-event-s
 
 ## Available Versions
 
-- [v1.8.0](v1.8.0.md) - Latest release (2026-10-21) - checkpoints wait for the server GTID state after a file/offset start, malformed input fails closed, Node Worker teardown and Python cancellation made safe, self-contained linux-x64 npm addon, Python `start_binlog_position` defaults to `None` (no ABI change)
+- [v1.8.1](v1.8.1.md) - Latest release (2026-11-04) - binlog decoding through the shared libmybinlog codec, tagged GTIDs tracked in checkpoints, checksum framing taken from each format description event, XA_PREPARE / ANONYMOUS_GTID / EXECUTE_LOAD_QUERY stop the stream, impossible column values fail (no ABI change)
+- [v1.8.0](v1.8.0.md) - 2026-10-21 - checkpoints wait for the server GTID state after a file/offset start, malformed input fails closed, Node Worker teardown and Python cancellation made safe, self-contained linux-x64 npm addon, Python `start_binlog_position` defaults to `None` (no ABI change)
 - [v1.7.1](v1.7.1.md) - 2026-09-29 - opted-in full authentication over unverified TLS works, connect and auth error codes narrowed to what happened, checkpoints stay behind delivery on both bindings, Node metadata connect off the event loop, docs tree in English and Japanese (no ABI change)
 - [v1.7.0](v1.7.0.md) - 2026-09-13 - queue byte budget and pre-verified trailers reachable from the C ABI, checksum framing carried on the poll result, independent engines no longer share an allocator lock, declared error types on both bindings (additive ABI change, version 3)
 - [v1.6.1](v1.6.1.md) - 2026-08-15 - MariaDB ANNOTATE_ROWS actually requested so `source_sql` arrives, checkpoints no longer run ahead of delivery, ENUM/SET/VECTOR charset index space corrected, stop interrupts start, shared binding contract (no ABI change)
