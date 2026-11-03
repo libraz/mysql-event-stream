@@ -46,12 +46,14 @@ jobs:
         run: bash .github/scripts/build-static-deps.sh "$RUNNER_TEMP/mes-deps"
 
       # The addon links the pinned static OpenSSL/zlib; check:linkage refuses any
-      # dynamic dependency on them or on the GNU C++ runtime.
+      # dynamic dependency on them or on the GNU C++ runtime. PKG_CONFIG_LIBDIR
+      # keeps FindOpenSSL from adding the host libcrypto's Libs.private.
       - name: Build and test Node.js binding
         working-directory: bindings/node
         env:
           OPENSSL_ROOT_DIR: ${{ runner.temp }}/mes-deps
           ZLIB_ROOT: ${{ runner.temp }}/mes-deps
+          PKG_CONFIG_LIBDIR: ${{ runner.temp }}/mes-deps/lib/pkgconfig
         run: |
           yarn install --immutable
           yarn build:release
@@ -85,10 +87,10 @@ jobs:
           - os: ubuntu-26.04-arm
             arch: aarch64
             deployment_target: ''
-          - os: macos-26-intel
+          - os: macos-15-intel
             arch: x86_64
             deployment_target: '15.0'
-          - os: macos-26
+          - os: macos-15
             arch: arm64
             deployment_target: '15.0'
     runs-on: ${{ matrix.os }}
