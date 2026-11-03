@@ -58,9 +58,9 @@ decoders skipped or guessed at now stop the stream with an error.
 
 ### Dependencies
 
-- libmybinlog 0.3.0; Node 22.23.4; Biome 2.6, Vitest 5.1 and current patch
+- libmybinlog 0.3.1; Node 22.23.4; Biome 2.6, Vitest 5.1 and current patch
   releases of the Node and Python development dependencies; cibuildwheel
-  4.3.5; wheels built on `ubuntu-26.04-arm`, `macos-26-intel` and `macos-26`.
+  4.3.5; the aarch64 Linux wheel built on `ubuntu-26.04-arm`.
 
 ## [1.8.0] - 2026-10-21
 
